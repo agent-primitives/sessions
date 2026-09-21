@@ -87,6 +87,10 @@ how a turn runs and a recording of the full lifecycle on a real cluster. Start w
 
 Every doc, indexed by goal: [`docs/README.md`](docs/README.md).
 
+For the complete client → persistent Sessions service → substrate actor → chat harness path, including
+a control-plane pod replacement and continued execution, see the
+[production-shaped kind deployment](docs/production-shaped-kind.md).
+
 ## Status
 
 Working reference implementation (Go 1.26). The Sessions API, the single-writer event-sourced

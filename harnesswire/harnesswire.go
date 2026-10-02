@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -594,7 +595,27 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 		case v1.EventKind_EVENT_APPROVAL_REQUEST, v1.EventKind_EVENT_APPROVAL_RESULT, v1.EventKind_EVENT_EXECUTION_START, v1.EventKind_EVENT_PARKED:
 			return fmt.Errorf("harnesswire: harness emitted host-owned control event %s", ev.GetKind())
 		case v1.EventKind_EVENT_END:
-			return endError(ev.GetEnd())
+			err := endError(ev.GetEnd())
+			awaitClose(stream, cancel)
+			return err
+		}
+	}
+}
+
+// closeGrace bounds how long the host waits for the harness to finish the Connect RPC after END.
+const closeGrace = 2 * time.Second
+
+// awaitClose lets the harness finish the RPC after END instead of cancelling it mid-flight. The
+// harness gets to flush its telemetry before the host can suspend it, and the RPC ends with the
+// harness's own status rather than a host-side cancellation. A harness that never closes the
+// stream costs at most closeGrace.
+func awaitClose(stream v1.Harness_ConnectClient, cancel context.CancelFunc) {
+	_ = stream.CloseSend()
+	t := time.AfterFunc(closeGrace, cancel)
+	defer t.Stop()
+	for {
+		if _, err := stream.Recv(); err != nil {
+			return
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"go.opentelemetry.io/otel"
+	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -57,6 +58,12 @@ func TestSessionOperationsChainAcrossTraces(t *testing.T) {
 			ops = append(ops, sp)
 		case "harness.run":
 			harnessTraces[sp.SpanContext().TraceID()] = true
+		case "agentsessions.v1.Harness/Connect":
+			// The host waits for the harness to close the stream after END rather than cancelling
+			// it, so a completed turn is not reported as a failed RPC.
+			if sp.Status().Code == otelcodes.Error {
+				t.Fatalf("%s (%s) ended with error status %q", sp.Name(), sp.SpanKind(), sp.Status().Description)
+			}
 		}
 	}
 	// Spans end innermost-first, but the session operations are sequential, so end order is

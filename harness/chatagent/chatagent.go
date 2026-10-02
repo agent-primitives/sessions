@@ -7,8 +7,16 @@ import (
 	"encoding/json"
 	"errors"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+
 	"github.com/aramase/agentsessions/api"
 )
+
+// tracer is the harness's own instrumentation scope. Spans started from Run's ctx join the host's
+// trace for the turn; with no SDK installed they are no-ops.
+var tracer = otel.Tracer("github.com/aramase/agentsessions/harness/chatagent")
 
 // Harness sends the full recorded conversation to a configured model on every turn.
 // It holds no durable in-memory state beyond the event log.
@@ -33,14 +41,18 @@ func (h Harness) Describe(context.Context) (api.Descriptor, error) {
 
 // Run builds one turn's context in journal order and lets the host record the model completion.
 func (h Harness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	_, span := tracer.Start(ctx, "chatagent.build_context")
 	prompt, err := parseSystemPrompt(start.Config)
 	if err != nil {
+		span.SetStatus(codes.Error, "invalid_config")
+		span.End()
 		return err
 	}
 	messages := make([]api.Message, 0, 1+len(start.History)+len(start.Inputs))
 	if prompt != "" {
 		messages = append(messages, *api.TextMessage("system", prompt))
 	}
+	historyStart := len(messages)
 	for _, event := range start.History {
 		if event.Message == nil {
 			continue
@@ -52,6 +64,12 @@ func (h Harness) Run(ctx context.Context, start *api.Start, sink api.EventSink) 
 	}
 	// History precedes this turn; current inputs belong in the request exactly once.
 	messages = append(messages, start.Inputs...)
+	span.SetAttributes(
+		attribute.Bool("chatagent.system_prompt", prompt != ""),
+		attribute.Int("chatagent.history_message_count", len(messages)-historyStart-len(start.Inputs)),
+		attribute.Int("chatagent.input_message_count", len(start.Inputs)),
+	)
+	span.End()
 	_, err = sink.Model(ctx, api.ModelRequest{
 		Model:    h.Model,
 		Messages: messages,

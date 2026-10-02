@@ -79,13 +79,14 @@ CREATE INDEX IF NOT EXISTS sessions_project_created
 
 // SchemaVersion is the schema shape this build writes, stamped into PRAGMA user_version so a
 // build can identify a database without inspecting its columns. Version 1 is what v0.1.0 through
-// v0.1.2 shipped. Version 2 adds the harness registry.
-const SchemaVersion = 2
+// v0.1.2 shipped. Version 2 adds the harness registry. Version 3 adds session_traces.
+const SchemaVersion = 3
 
 // migrations[i] moves a database from version i+1 to i+2, inside the migration transaction. The
 // array length is tied to SchemaVersion, so bumping one without the other does not compile.
 var migrations = [SchemaVersion - 1]func(*sql.Tx) error{
 	migrateV1ToV2,
+	migrateV2ToV3,
 }
 
 // v1ToV2 is the SQL half of the 1 -> 2 rung: harnesses registered through the HarnessRegistry API.
@@ -165,6 +166,20 @@ func migrateV1ToV2(tx *sql.Tx) error {
 		}
 	}
 	return nil
+}
+
+// v2ToV3 adds session_traces: the W3C traceparent of each session's most recent operation, so the
+// next one can link to it across a wait or suspension. It is telemetry only, kept in a side table
+// outside the hash chain and the sessions row so a run-specific trace id never reaches canonical
+// bytes or replay.
+const v2ToV3 = `CREATE TABLE IF NOT EXISTS session_traces (
+  session     TEXT PRIMARY KEY,
+  traceparent TEXT NOT NULL
+);`
+
+func migrateV2ToV3(tx *sql.Tx) error {
+	_, err := tx.Exec(v2ToV3)
+	return err
 }
 
 // ErrUnsupportedSchema reports a database written by a build with a newer schema.

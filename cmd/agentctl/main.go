@@ -21,7 +21,9 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
+	"go.opentelemetry.io/otel/codes"
 	"google.golang.org/grpc"
 
 	v1 "github.com/aramase/agentsessions/api/genpb"
@@ -29,6 +31,7 @@ import (
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/internal/version"
 	"github.com/aramase/agentsessions/observability"
+	"github.com/aramase/agentsessions/observability/otelsetup"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
 	"github.com/aramase/agentsessions/session"
@@ -56,10 +59,34 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	if err := run(os.Args[2:]); err != nil {
+	if err := traced(os.Args[1], func() error { return run(os.Args[2:]) }); err != nil {
 		fmt.Fprintln(os.Stderr, "agentctl:", err)
 		os.Exit(1)
 	}
+}
+
+// cmdCtx is the context every subcommand issues its RPCs under. When OTEL_EXPORTER_OTLP_ENDPOINT
+// is set it carries the command's root span, so one CLI invocation is the root of its trace.
+var cmdCtx = context.Background()
+
+// traced runs one subcommand under an "agentctl.<name>" root span and flushes spans before the
+// process exits; os.Exit in main would otherwise drop them.
+func traced(name string, run func() error) error {
+	shutdown, err := otelsetup.Init(context.Background(), "agentctl")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "agentctl: tracing disabled:", err)
+	}
+	ctx, span := observability.Tracer().Start(context.Background(), "agentctl."+name)
+	cmdCtx = ctx
+	err = run()
+	if err != nil {
+		span.SetStatus(codes.Error, "command_failed")
+	}
+	span.End()
+	flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = shutdown(flushCtx)
+	return err
 }
 
 func usage() {
@@ -124,6 +151,7 @@ func dial(cfg *config) (*client.Client, func(), error) {
 		return nil, nil, err
 	}
 	srv := grpc.NewServer(
+		observability.ServerTracing(),
 		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(logger)),
 		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(logger)),
 	)
@@ -178,7 +206,7 @@ func cmdCreate(args []string) error {
 		return err
 	}
 	defer cleanup()
-	sess, err := c.CreateSession(context.Background(), &v1.Session{
+	sess, err := c.CreateSession(cmdCtx, &v1.Session{
 		Metadata: &v1.ResourceMetadata{Project: cfg.project, Name: name},
 		Harness:  harness,
 		Model:    model,
@@ -204,7 +232,7 @@ func cmdList(args []string) error {
 	}
 	defer cleanup()
 
-	sessions, err := c.ListSessions(context.Background(), cfg.project)
+	sessions, err := c.ListSessions(cmdCtx, cfg.project)
 	if err != nil {
 		return err
 	}
@@ -231,7 +259,7 @@ func cmdGet(args []string) error {
 		return err
 	}
 	defer cleanup()
-	sess, err := c.GetSession(context.Background(), uid)
+	sess, err := c.GetSession(cmdCtx, uid)
 	if err != nil {
 		return err
 	}
@@ -262,7 +290,7 @@ func cmdExec(args []string) error {
 
 	// One call: an empty session is created by the server, and leaving ExpectedLastSeq nil appends
 	// at the head. Records print as they commit rather than after the turn.
-	_, err = c.Exec(context.Background(), client.ExecOptions{
+	_, err = c.Exec(cmdCtx, client.ExecOptions{
 		Session: sess,
 		Inputs:  []string{input},
 		Harness: harness,
@@ -297,7 +325,7 @@ func cmdReplay(args []string) error {
 		return err
 	}
 	defer cleanup()
-	records, err := c.Replay(context.Background(), sess, from, 0)
+	records, err := c.Replay(cmdCtx, sess, from, 0)
 	if err != nil {
 		return err
 	}
@@ -328,7 +356,7 @@ func cmdFork(args []string) error {
 	if names != "" {
 		childNames = strings.Split(names, ",")
 	}
-	children, err := c.Fork(context.Background(), sess, client.ForkOptions{
+	children, err := c.Fork(cmdCtx, sess, client.ForkOptions{
 		AtSeq: at, Count: int32(count), Names: childNames,
 	})
 	if err != nil {
@@ -354,7 +382,7 @@ func lifecycle(args []string, which string) error {
 		return err
 	}
 	defer cleanup()
-	ctx := context.Background()
+	ctx := cmdCtx
 	var out *v1.Session
 	if which == "suspend" {
 		out, err = c.Suspend(ctx, sess)

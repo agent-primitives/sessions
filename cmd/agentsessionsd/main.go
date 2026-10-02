@@ -37,6 +37,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/resolver"
@@ -49,6 +50,7 @@ import (
 	"github.com/aramase/agentsessions/internal/version"
 	"github.com/aramase/agentsessions/model/openai"
 	"github.com/aramase/agentsessions/observability"
+	"github.com/aramase/agentsessions/observability/otelsetup"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
 	"github.com/aramase/agentsessions/runtime/remote"
@@ -89,6 +91,16 @@ func run() error {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
+	shutdownTracing, err := otelsetup.Init(context.Background(), "agentsessionsd")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(ctx)
+	}()
+
 	store, err := sqlitelog.Open(*journal, sqlitelog.WithDefaultProject(*project))
 	if err != nil {
 		return fmt.Errorf("open journal %s: %w", *journal, err)
@@ -111,6 +123,7 @@ func run() error {
 		return err
 	}
 	srv := grpc.NewServer(
+		observability.ServerTracing(),
 		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(logger)),
 		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(logger)),
 	)

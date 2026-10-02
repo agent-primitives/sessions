@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 type requestIDKey struct{}
@@ -48,29 +50,67 @@ func validRequestID(requestID string) bool {
 	return true
 }
 
-// Logger returns logger enriched with context correlation fields.
+// Logger returns logger enriched with context correlation fields: request_id, and trace_id/span_id
+// when ctx carries a valid span, so a log line can be pivoted to its trace.
 func Logger(ctx context.Context, logger *slog.Logger) *slog.Logger {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	if requestID := RequestID(ctx); validRequestID(requestID) {
-		return logger.With("request_id", requestID)
+		logger = logger.With("request_id", requestID)
+	}
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		logger = logger.With("trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String())
 	}
 	return logger
 }
 
 // Start records an info-level operation start and returns its completion recorder.
+//
+// Deprecated: use Begin, which also returns the operation's span context so nested operations
+// become child spans. Start still emits a span, but work done under the caller's ctx is not nested
+// beneath it.
 func Start(ctx context.Context, logger *slog.Logger, component, operation string, attrs ...any) func(error, ...any) {
-	return start(ctx, logger, slog.LevelInfo, component, operation, attrs...)
+	_, finish := begin(ctx, logger, slog.LevelInfo, true, component, operation, attrs...)
+	return finish
 }
 
-// StartDebug records a debug-level operation start and returns its completion recorder. Failures
-// are promoted according to error_kind so internal faults remain visible at error level.
+// StartDebug records a debug-level operation start and returns its completion recorder.
+//
+// Deprecated: use BeginDebug.
 func StartDebug(ctx context.Context, logger *slog.Logger, component, operation string, attrs ...any) func(error, ...any) {
-	return start(ctx, logger, slog.LevelDebug, component, operation, attrs...)
+	_, finish := begin(ctx, logger, slog.LevelDebug, true, component, operation, attrs...)
+	return finish
 }
 
-func start(ctx context.Context, logger *slog.Logger, successLevel slog.Level, component, operation string, attrs ...any) func(error, ...any) {
+// Begin records an info-level operation start, opens a span named "<component>.<operation>", and
+// returns a context carrying that span plus the completion recorder that logs the finish and ends
+// the span. Pass the returned context to nested work so it is traced as a child.
+func Begin(ctx context.Context, logger *slog.Logger, component, operation string, attrs ...any) (context.Context, func(error, ...any)) {
+	return begin(ctx, logger, slog.LevelInfo, true, component, operation, attrs...)
+}
+
+// BeginDebug is Begin at debug level. Failures are promoted according to error_kind so internal
+// faults remain visible at error level. The span is recorded regardless of the log level.
+func BeginDebug(ctx context.Context, logger *slog.Logger, component, operation string, attrs ...any) (context.Context, func(error, ...any)) {
+	return begin(ctx, logger, slog.LevelDebug, true, component, operation, attrs...)
+}
+
+// begin logs the operation start and, when withSpan is set, opens its span. The gRPC interceptors
+// pass withSpan=false: otelgrpc's stats handler already owns the RPC span, and a second span per
+// request would only duplicate it.
+func begin(ctx context.Context, logger *slog.Logger, successLevel slog.Level, withSpan bool, component, operation string, attrs ...any) (context.Context, func(error, ...any)) {
+	span := trace.SpanFromContext(ctx)
+	if withSpan {
+		spanAttrs := spanAttributes(attrs)
+		if requestID := RequestID(ctx); validRequestID(requestID) {
+			spanAttrs = append(spanAttrs, attributeOf("agentsessions.request_id", requestID))
+		}
+		ctx, span = Tracer().Start(ctx, component+"."+operation, trace.WithAttributes(spanAttrs...))
+	} else if requestID := RequestID(ctx); validRequestID(requestID) {
+		span.SetAttributes(attributeOf("agentsessions.request_id", requestID))
+	}
+
 	baseAttrs := make([]any, 0, len(attrs)+4)
 	baseAttrs = append(baseAttrs,
 		"component", component,
@@ -81,7 +121,10 @@ func start(ctx context.Context, logger *slog.Logger, successLevel slog.Level, co
 	started := time.Now()
 	logger.Log(ctx, successLevel, "operation started", "phase", "start")
 
-	return func(err error, resultAttrs ...any) {
+	return ctx, func(err error, resultAttrs ...any) {
+		if withSpan {
+			defer finishSpan(span, err, resultAttrs)
+		}
 		outcome := "success"
 		if err != nil {
 			outcome = "error"

@@ -27,6 +27,13 @@ provide.
 
 ### Added
 
+- OpenTelemetry tracing. Session, placement, controller, runtime, and harness-wire operations emit
+  spans, and gRPC clients and servers propagate W3C trace context, including into substrate. Each
+  session operation is linked to the session's previous one, so a session can be followed across
+  suspensions. The reference binaries export over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+  See [docs/observability.md](docs/observability.md#tracing).
+- `observability.Begin` and `observability.BeginDebug`, which return the span's context. `Start`
+  and `StartDebug` are deprecated but unchanged.
 - The chat harness accepts a per-execution `system_prompt` in its JSON config, prepended before
   conversation history and current inputs.
 - `agentsessionsd --harness name=address` registers a harness that is already running, over TCP
@@ -139,6 +146,10 @@ provide.
   one later. Downgrade is refused: v0.1.0 through v0.1.2 fail to open a version 2 database
   with "unsupported database schema". Back up the journal before upgrading if you may need to roll
   back. A database stamped with a negative schema version is refused.
+- The SQLite journal schema then moves to version 3: a `session_traces` table holding each
+  session's latest trace context, for linking traces. It is outside the hash chain and never read
+  by replay. Version 1 and 2 databases migrate in place; builds that only understand version 2
+  refuse a version 3 database.
 - `ExecRequest.harness` cannot move a session onto or off a registered harness for one turn; that is
   `FAILED_PRECONDITION`. Overrides between static harnesses (built-in or given with `--harness`)
   are unchanged.

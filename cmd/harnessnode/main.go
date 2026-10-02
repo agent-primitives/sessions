@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/harnesswire"
 	"github.com/aramase/agentsessions/observability"
+	"github.com/aramase/agentsessions/observability/otelsetup"
 	"github.com/aramase/agentsessions/runtime/substrate"
 )
 
@@ -50,6 +52,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Inside a sandbox the collector is whatever OTEL_EXPORTER_OTLP_ENDPOINT names (typically a
+	// node-local agent). Unset, the harness still continues the host's trace context in-process
+	// but exports nothing.
+	shutdownTracing, err := otelsetup.Init(ctx, "harnessnode")
+	if err != nil {
+		log.Printf("harnessnode: tracing disabled: %v", err)
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(flushCtx)
+	}()
+
 	// harnesswire gRPC server (h2c: plain TCP, no TLS — the mesh terminates/originates HTTP/2).
 	// HARNESS_ADDR=unix:///path serves on a unix socket instead, for a host that registers this
 	// harness by address on the same machine (agentsessionsd -harness name=unix:///path).
@@ -67,6 +82,7 @@ func main() {
 		log.Fatalf("harnessnode: listen %s: %v", grpcAddr, err)
 	}
 	srv := grpc.NewServer(
+		observability.ServerTracing(),
 		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(slog.Default())),
 		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(slog.Default())),
 	)

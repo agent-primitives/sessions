@@ -367,7 +367,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		defer cancel()
 	}
 	ctx = observability.EnsureRequestID(ctx)
-	finish := observability.StartDebug(ctx, p.logger, "placement", "exec",
+	ctx, finish := observability.BeginDebug(ctx, p.logger, "placement", "exec",
 		"session_uid", sessionUID,
 		"expected_last_seq", expectedLastSeq,
 		"input_count", len(inputs),
@@ -429,10 +429,10 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		}
 		return recordedCheckpoint(recs, sessionUID), nil
 	}}
-	createFinished := observability.StartDebug(ctx, p.logger, "placement", "create_compute",
+	callCtx, createFinished := observability.BeginDebug(ctx, p.logger, "placement", "create_compute",
 		"session_uid", sessionUID)
-	inc, err = p.allocate(ctx, log, "create", func() (api.Incarnation, error) {
-		return p.backend.Create(ctx, spec)
+	inc, err = p.allocate(callCtx, log, "create", func() (api.Incarnation, error) {
+		return p.backend.Create(callCtx, spec)
 	})
 	if err != nil {
 		createFinished(err, "error_kind", "runtime_create_failed")
@@ -440,7 +440,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}
 	createFinished(nil, "incarnation_id", inc.ID, "runtime", inc.Runtime)
 
-	dialFinished := observability.StartDebug(ctx, p.logger, "placement", "dial_harness",
+	_, dialFinished := observability.BeginDebug(ctx, p.logger, "placement", "dial_harness",
 		"session_uid", sessionUID,
 		"incarnation_id", inc.ID,
 		"runtime", inc.Runtime,
@@ -468,7 +468,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		return inc, err
 	}
 
-	fenceFinished := observability.StartDebug(ctx, p.logger, "placement", "mint_fence", "session_uid", sessionUID)
+	_, fenceFinished := observability.BeginDebug(ctx, p.logger, "placement", "mint_fence", "session_uid", sessionUID)
 	fence, err := log.NewFence()
 	live.fenceMinted()
 	if err != nil {
@@ -554,7 +554,7 @@ func (p *Placer) recheck(ctx context.Context, sessionUID string, har api.Harness
 // (WithDescriptorID), and applies CanPlace, mapping a harness that cannot be described to
 // ErrHarnessUnavailable or ErrAdmissionInterrupted.
 func (p *Placer) gate(ctx context.Context, sessionUID, op string, describe func(context.Context) (api.Descriptor, error)) (desc api.Descriptor, err error) {
-	resolveFinished := observability.StartDebug(ctx, p.logger, "placement", op, "session_uid", sessionUID)
+	ctx, resolveFinished := observability.BeginDebug(ctx, p.logger, "placement", op, "session_uid", sessionUID)
 	// Bound the check on its own. A harness that accepts the connection and then never answers
 	// Describe would otherwise hold a call with no deadline forever. WithTimeout keeps an earlier
 	// caller deadline.
@@ -657,6 +657,7 @@ func DefaultDial(inc api.Incarnation) (api.Harness, func() error, error) {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
 		grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
+		observability.ClientTracing(),
 	}
 	if len(inc.CallMetadata) > 0 {
 		md := metadata.New(inc.CallMetadata)
@@ -827,7 +828,7 @@ func (p *Placer) releaseHarness(ctx context.Context, sessionUID, incarnationID s
 	}
 	p.sessions.mu.Unlock()
 	l.fenceMinted() // a turn that returns before minting never will
-	finish := observability.StartDebug(context.WithoutCancel(ctx), p.logger, "placement", "close_harness",
+	_, finish := observability.BeginDebug(context.WithoutCancel(ctx), p.logger, "placement", "close_harness",
 		"session_uid", sessionUID,
 		"incarnation_id", incarnationID,
 	)
@@ -932,7 +933,7 @@ func (p *Placer) endHarnesses(ctx context.Context, sessionUID string, open []*li
 	if len(open) == 0 {
 		return nil
 	}
-	finish := observability.StartDebug(ctx, p.logger, "placement", "end_harness_streams",
+	_, finish := observability.BeginDebug(ctx, p.logger, "placement", "end_harness_streams",
 		"session_uid", sessionUID,
 		"connections", len(open),
 	)
@@ -978,7 +979,7 @@ func (p *Placer) endHarnesses(ctx context.Context, sessionUID string, open []*li
 // from.
 func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID string) (ref api.SnapshotRef, err error) {
 	ctx = observability.EnsureRequestID(ctx)
-	finish := observability.StartDebug(ctx, p.logger, "placement", "suspend", "session_uid", sessionUID)
+	ctx, finish := observability.BeginDebug(ctx, p.logger, "placement", "suspend", "session_uid", sessionUID)
 	defer func() { finish(err, "error_kind", placementErrorKind(err)) }()
 
 	release, err := p.trySessionLock(sessionUID)
@@ -1025,7 +1026,7 @@ func (p *Placer) suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	if err != nil {
 		return api.SnapshotRef{}, err
 	}
-	appendFinished := observability.StartDebug(ctx, p.logger, "placement", "append_suspend_event", "session_uid", sessionUID)
+	_, appendFinished := observability.BeginDebug(ctx, p.logger, "placement", "append_suspend_event", "session_uid", sessionUID)
 	lc := api.Lifecycle{Kind: api.LifecycleSuspend, Snapshot: &ref}
 	if cursor == nil {
 		err = appendLifecycle(log, lc)
@@ -1155,7 +1156,7 @@ func (p *Placer) resumeFence(log eventlog.Store, sessionUID string, expected *in
 func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID string, cfg resumeConfig) (err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var inc api.Incarnation
-	finish := observability.StartDebug(ctx, p.logger, "placement", "resume", "session_uid", sessionUID)
+	ctx, finish := observability.BeginDebug(ctx, p.logger, "placement", "resume", "session_uid", sessionUID)
 	defer func() {
 		finish(err, "error_kind", placementErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
@@ -1181,7 +1182,7 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	if err := refuseStatefulOverride(desc, cfg.override); err != nil {
 		return err
 	}
-	sourceFinished := observability.StartDebug(ctx, p.logger, "placement", "resolve_resume_source", "session_uid", sessionUID)
+	_, sourceFinished := observability.BeginDebug(ctx, p.logger, "placement", "resolve_resume_source", "session_uid", sessionUID)
 	recs, err := log.Read(1)
 	if err != nil {
 		sourceFinished(err, "error_kind", placementErrorKind(err))
@@ -1219,7 +1220,7 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	if err != nil {
 		return err
 	}
-	dialFinished := observability.StartDebug(ctx, p.logger, "placement", "dial_harness",
+	_, dialFinished := observability.BeginDebug(ctx, p.logger, "placement", "dial_harness",
 		"session_uid", sessionUID,
 		"incarnation_id", inc.ID,
 		"runtime", inc.Runtime,
@@ -1248,7 +1249,7 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	}
 	// Retake the writer fence now that checkpoints can see this connection. Rechecking also
 	// catches a completed Fork during Restore, before any harness/model/tool redrive.
-	fenceFinished := observability.StartDebug(ctx, p.logger, "placement", "mint_fence", "session_uid", sessionUID)
+	_, fenceFinished := observability.BeginDebug(ctx, p.logger, "placement", "mint_fence", "session_uid", sessionUID)
 	fence, err := p.resumeFence(log, sessionUID, cfg.expectedLastSeq)
 	live.fenceMinted()
 	if err != nil {
@@ -1281,7 +1282,7 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		return err
 	}
 	// RESUME marker under the incarnation's fence (controller.Resume used the same token).
-	appendFinished := observability.StartDebug(ctx, p.logger, "placement", "append_resume_event", "session_uid", sessionUID)
+	_, appendFinished := observability.BeginDebug(ctx, p.logger, "placement", "append_resume_event", "session_uid", sessionUID)
 	record, err := log.Append(head, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleResume}})
 	appendFinished(err, "error_kind", placementErrorKind(err))
 	if err == nil && cfg.observer.OnRecord != nil {
@@ -1356,7 +1357,7 @@ func closeErrorKind(err error) string {
 // waking the parent and replacing the snapshot the remaining children clone from.
 func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID string, children []ForkChild, atSeq int64) (err error) {
 	ctx = observability.EnsureRequestID(ctx)
-	finish := observability.StartDebug(ctx, p.logger, "placement", "fork",
+	ctx, finish := observability.BeginDebug(ctx, p.logger, "placement", "fork",
 		"parent_session_uid", parentUID,
 		"children", len(children),
 		"at_seq", atSeq,
@@ -1406,7 +1407,7 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 			return abort(err)
 		}
 		created = append(created, child.UID)
-		copyFinished := observability.StartDebug(ctx, p.logger, "placement", "copy_fork_log",
+		_, copyFinished := observability.BeginDebug(ctx, p.logger, "placement", "copy_fork_log",
 			"parent_session_uid", parentUID,
 			"child_session_uid", child.UID,
 			"at_seq", atSeq,

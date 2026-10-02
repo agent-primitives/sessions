@@ -93,7 +93,7 @@ func (b *Backend) start(ctx context.Context) (addr string, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	decision := "started"
-	finish := observability.StartDebug(ctx, b.logger, "runtime.local", "resolve_harness_server", "transport", "unix")
+	_, finish := observability.BeginDebug(ctx, b.logger, "runtime.local", "resolve_harness_server", "transport", "unix")
 	defer func() { finish(err, "error_kind", localErrorKind(err), "decision", decision) }()
 
 	if b.srv != nil {
@@ -108,6 +108,7 @@ func (b *Backend) start(ctx context.Context) (addr string, err error) {
 		return "", fmt.Errorf("local: listen: %w", err)
 	}
 	srv := grpc.NewServer(
+		observability.ServerTracing(),
 		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(b.logger)),
 		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(b.logger)),
 	)
@@ -145,7 +146,7 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	if s != nil {
 		sessionUID = s.SessionUID
 	}
-	finish := observability.StartDebug(ctx, b.logger, "runtime.local", "create_compute", "session_uid", sessionUID)
+	ctx, finish := observability.BeginDebug(ctx, b.logger, "runtime.local", "create_compute", "session_uid", sessionUID)
 	defer func() {
 		finish(err, "error_kind", localErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
@@ -174,7 +175,7 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 // re-provision; Memory=false marks it as STATELESS_REPLAY. LOCAL (warm) is unsupported, mirroring
 // substrate's inverse (substrate supports memory, not warm-local).
 func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (ref api.SnapshotRef, err error) {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.local", "snapshot",
+	_, finish := observability.BeginDebug(ctx, b.logger, "runtime.local", "snapshot",
 		"incarnation_id", in.ID,
 		"snapshot_kind", kind,
 	)
@@ -190,7 +191,7 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 // by replaying the journal (STATELESS_REPLAY). The placement layer mints a new fence so the fresh
 // incarnation supersedes any zombie writer.
 func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (inc api.Incarnation, err error) {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.local", "restore_compute", "session_uid", ref.Local)
+	ctx, finish := observability.BeginDebug(ctx, b.logger, "runtime.local", "restore_compute", "session_uid", ref.Local)
 	defer func() {
 		finish(err, "error_kind", localErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
@@ -205,7 +206,7 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (inc api.Inc
 // controller.Fork. Same shape as substrate's replay-fork — a filesystem-only backend has no
 // clone-from-memory-snapshot path.
 func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOpts) (inc api.Incarnation, err error) {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.local", "fork_compute",
+	ctx, finish := observability.BeginDebug(ctx, b.logger, "runtime.local", "fork_compute",
 		"parent_session_uid", ref.Local,
 		"child_session_uid", opts.ChildSessionUID,
 		"strategy", "replay",
@@ -223,7 +224,7 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 // Stop tears the incarnation down. In-process there is no sandbox or socket to close; the worker is
 // freed by the process, so this is a no-op that keeps the SPI contract.
 func (b *Backend) Stop(ctx context.Context, in api.Incarnation) error {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.local", "stop_compute", "incarnation_id", in.ID)
+	_, finish := observability.BeginDebug(ctx, b.logger, "runtime.local", "stop_compute", "incarnation_id", in.ID)
 	finish(nil)
 	return nil
 }
@@ -242,7 +243,7 @@ var _ api.CleanupRuntime = (*Backend)(nil)
 // Status reports the compute-lifecycle state. The in-process backend keeps no separate compute state
 // machine — the log and placement layer are the lifecycle authority — so a known incarnation is LIVE.
 func (b *Backend) Status(ctx context.Context, in api.Incarnation) (api.ComputeState, error) {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.local", "get_compute_status", "incarnation_id", in.ID)
+	_, finish := observability.BeginDebug(ctx, b.logger, "runtime.local", "get_compute_status", "incarnation_id", in.ID)
 	finish(nil, "compute_state", api.ComputeLive)
 	return api.ComputeLive, nil
 }

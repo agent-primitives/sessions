@@ -1962,7 +1962,9 @@ The reference implementation protects the integrity of the record, not access to
   - The reference SQLite store versions its schema with `PRAGMA user_version` (see
     `sqlitelog.SchemaVersion`),
     migrates forward in one transaction without rewriting events or hashes, and refuses a newer or
-    negative version. Version 4 adds the deletion state; migrated sessions are
+    negative version. Open also creates a telemetry-only `session_traces` table, holding each
+    session's latest trace context, without changing the version: it is outside the hash chain,
+    never read by replay, and ignored by builds that do not know it. Version 4 adds the deletion state; migrated sessions are
     `DELETION_ACTIVE`. Version 5 adds exact caller ownership and an off-mode authorization marker.
     Legacy and RPC-created sessions remain unbound; these host-side contracts add no RPC enforcement.
     This host refuses required, unknown or missing authorization markers, even at version 5.

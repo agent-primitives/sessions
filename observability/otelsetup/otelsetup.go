@@ -75,3 +75,14 @@ func Enabled() bool {
 	}
 	return os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" || os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != ""
 }
+
+// Flush exports every span the global provider has buffered, if it is an SDK provider. A process
+// that can be frozen between requests, such as a harness that its runtime snapshots on suspend,
+// calls it at the end of each request: spans still buffered at snapshot time are only exported if
+// that snapshot is restored, and are lost if it never is.
+func Flush(ctx context.Context) error {
+	if p, ok := otel.GetTracerProvider().(interface{ ForceFlush(context.Context) error }); ok {
+		return p.ForceFlush(ctx)
+	}
+	return nil
+}

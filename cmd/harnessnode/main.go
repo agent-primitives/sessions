@@ -86,7 +86,7 @@ func main() {
 	srv := grpc.NewServer(
 		observability.ServerTracing(),
 		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(slog.Default())),
-		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(slog.Default())),
+		grpc.ChainStreamInterceptor(flushTracesAfterTurn, observability.StreamServerInterceptor(slog.Default())),
 	)
 	v1.RegisterHarnessServer(srv, harnesswire.NewServer(harness))
 
@@ -133,4 +133,16 @@ func selectHarness() (api.Harness, error) {
 	default:
 		return echoagent.Harness{}, nil
 	}
+}
+
+// flushTracesAfterTurn exports the turn's spans before Connect returns. The host waits for Connect
+// to finish and may then suspend this actor, and spans still buffered in a suspended actor are only
+// exported if that snapshot is ever restored. The flush is bounded so an unreachable collector
+// cannot hold a turn open.
+func flushTracesAfterTurn(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	err := handler(srv, ss)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = otelsetup.Flush(ctx)
+	return err
 }

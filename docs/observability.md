@@ -122,6 +122,12 @@ belong to the turn's trace. `harness.run` wraps the whole turn. `harness.sink.mo
 their own spans by starting them from the `ctx` that `Run` receives; `harness/chatagent` shows the
 pattern.
 
+A harness that its runtime can suspend must export its spans before the turn ends. Spans still
+buffered when a snapshot is taken are exported only if that snapshot is restored. `harnessnode`
+flushes at the end of every `Connect`, and the host waits briefly for `Connect` to close after `END`
+so the flush completes before the host can suspend the actor. Use `otelsetup.Flush` for the same
+effect in a custom harness server.
+
 Harness spans are reported by the harness, so treat them as untrusted, just as
 `IN_HARNESS_REPORTED` tool results are. They also need a network path from the sandbox to the
 collector. During replay or resume, harness spans sit under `controller.replay` or

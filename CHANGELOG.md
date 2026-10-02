@@ -106,6 +106,13 @@ not provide.
   Resume, Exec and Fork `FAILED_PRECONDITION` messages name the session UID, so the CLI output
   alone identifies the session, actor, and, for a refused observed checkpoint, the required and
   observed fidelity. Codes and wrapped errors are unchanged.
+- OpenTelemetry tracing. Session, placement, controller, runtime, and harness-wire operations emit
+  spans, and gRPC clients and servers propagate W3C trace context, including into substrate. Each
+  session operation is linked to the session's previous one, so a session can be followed across
+  suspensions. The reference binaries export over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+  See [docs/observability.md](docs/observability.md#tracing).
+- `observability.Begin` and `observability.BeginDebug`, which return the span's context. `Start`
+  and `StartDebug` are deprecated but unchanged.
 
 ### Compatibility
 
@@ -156,6 +163,9 @@ not provide.
   enforce caller access. Stop all older writers before the first v5 open, following the
   [rollout order](#sqlite-v4-rollout). Back up first. The default Sessions service remains
   unauthenticated and unenforced.
+- The SQLite store creates a `session_traces` table at Open, holding each session's latest trace
+  context for linking traces. It does not change `user_version`: the table is telemetry only,
+  outside the hash chain, never read by replay, and ignored by older builds.
 - The new authorization options do not activate required-mode deployment. Journals still require an
   off marker and unenforced writers can bypass embedded checks. Enforced Fork refuses before IO;
   enforced Approve clears request actor without claiming verified audit. Owned fork publication,

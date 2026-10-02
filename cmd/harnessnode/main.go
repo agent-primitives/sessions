@@ -21,7 +21,9 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/stats"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
@@ -82,7 +84,7 @@ func main() {
 		log.Fatalf("harnessnode: listen %s: %v", grpcAddr, err)
 	}
 	srv := grpc.NewServer(
-		observability.ServerTracing(),
+		grpc.StatsHandler(flushingStatsHandler{otelgrpc.NewServerHandler()}),
 		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(slog.Default())),
 		grpc.ChainStreamInterceptor(flushTracesAfterTurn, observability.StreamServerInterceptor(slog.Default())),
 	)
@@ -126,6 +128,20 @@ func selectHarness() (api.Harness, error) {
 		return &counteragent.Harness{}, nil
 	default:
 		return echoagent.Harness{}, nil
+	}
+}
+
+// flushingStatsHandler flushes again once otelgrpc has ended the RPC's own span, which happens after
+// the handler (and flushTracesAfterTurn) returns. Without it the harness-side Connect span would be
+// the one span of the turn still buffered at suspend time, orphaning harness.run in the trace.
+type flushingStatsHandler struct{ stats.Handler }
+
+func (h flushingStatsHandler) HandleRPC(ctx context.Context, s stats.RPCStats) {
+	h.Handler.HandleRPC(ctx, s)
+	if _, ok := s.(*stats.End); ok {
+		flushCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = otelsetup.Flush(flushCtx)
 	}
 }
 

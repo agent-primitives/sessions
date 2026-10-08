@@ -183,7 +183,9 @@ func TestPlacerResumeDoesNotVersionCheckConfiguredMemoryDescriptor(t *testing.T)
 	if h.runs.Load() != 1 || tools.Load() != 1 || closes.Load() != 1 {
 		t.Fatalf("restored recovery Run/tool/close=%d/%d/%d", h.runs.Load(), tools.Load(), closes.Load())
 	}
-	if !reflect.DeepEqual(ctl.calls, []string{"resume:memory-identity:boot=false"}) {
+	// ResumeActor restores the actor's own memory snapshot; a create or clone would mean a fresh
+	// actor from the configured image instead.
+	if !reflect.DeepEqual(ctl.calls, []string{"resume:memory-identity"}) {
 		t.Fatalf("memory recovery did not restore original snapshot: %v", ctl.calls)
 	}
 	if err := log.Verify(); err != nil {

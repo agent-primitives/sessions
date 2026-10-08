@@ -74,8 +74,16 @@ func WithReservedNames(names ...string) RegistryOption {
 // session.Service routes a turn by ExecRequest.harness but a Suspend or Fork by the session's
 // recorded harness, so the two can land on different Placers; sharing them is what lets Suspend
 // refuse a turn (ErrSessionBusy), and a stateful fork end and refuse one, whichever Placer runs it.
-// Call NewRegistry before any of the placers runs a turn, and give each Placer to one registry
-// only. Separate Registries do not fence each other.
+// Separate Registries do not fence each other.
+//
+// NewRegistry rejects a Placer that already belongs to a registry, and one with an operation in
+// progress: an Exec, Suspend or Resume holding the session guard, an open harness connection, or a
+// checkpoint mark. Replacing its guard and set would orphan them, so a later Suspend would not be
+// refused by that operation and a later checkpoint would neither end nor refuse its turn. A Placer
+// that has run operations and is now idle holds nothing and is accepted. The check cannot see an
+// operation that starts while NewRegistry runs, and the guard and set are replaced without
+// synchronization, so NewRegistry must not run concurrently with any method of the placers it is
+// given: build the registry before serving.
 func NewRegistry(defaultHarness string, placers map[string]*Placer, opts ...RegistryOption) (*Registry, error) {
 	if len(placers) == 0 {
 		return nil, errors.New("placement: registry needs at least one harness")
@@ -106,6 +114,9 @@ func NewRegistry(defaultHarness string, placers map[string]*Placer, opts ...Regi
 		if p.sessions.shared {
 			return nil, fmt.Errorf("placement: harness %q: placer already belongs to another registry", name)
 		}
+		if p.sessions.busy() || p.guard.busy() {
+			return nil, fmt.Errorf("placement: harness %q: placer has an operation in progress", name)
+		}
 	}
 	for name, p := range placers {
 		p.guard = r.guard
@@ -126,9 +137,11 @@ func NewRegistry(defaultHarness string, placers map[string]*Placer, opts ...Regi
 // On success p shares the Registry's session guard and its per-session connections and checkpoint
 // marks, exactly as the Placers given to NewRegistry do: an operation on a session through p and
 // one through any other Placer in this Registry refuse to overlap with ErrSessionBusy, and a
-// stateful fork through either ends and refuses a turn through the other. p must not have been
-// used; Add refuses a p that belongs to another Registry. Adding a Placer already in this Registry
-// under another name shares nothing new. A refused p is left untouched.
+// stateful fork through either ends and refuses a turn through the other. Add refuses a p that
+// belongs to another Registry or has an operation in progress, as NewRegistry does; the check
+// cannot see an operation that starts while Add runs, so p must not be in use until Add returns.
+// Adding a Placer already in this Registry under another name shares nothing new. A refused p is
+// left untouched.
 func (r *Registry) Add(name string, p *Placer) error {
 	if name == "" || p == nil {
 		return errors.New("placement: Add needs a name and a placer")
@@ -144,6 +157,9 @@ func (r *Registry) Add(name string, p *Placer) error {
 	if p.sessions != r.sessions {
 		if p.sessions.shared {
 			return fmt.Errorf("placement: harness %q: placer already belongs to another registry", name)
+		}
+		if p.sessions.busy() || p.guard.busy() {
+			return fmt.Errorf("placement: harness %q: placer has an operation in progress", name)
 		}
 		p.guard = r.guard
 		p.sessions = r.sessions

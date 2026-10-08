@@ -37,7 +37,8 @@ import (
 // option fails closed instead of running turns on whatever answers.
 //
 // The Placer must be new: not used, and not in any Registry. placement.Registry.Add wires it to the
-// registry's shared session guard, so its sessions cannot overlap calls through a static harness.
+// registry's shared session guard and checkpoint state, so its sessions cannot overlap calls
+// through a static harness, and refuses a Placer that is in use or in another Registry.
 //
 // For a RemotePlacement, runtime/remote is the backend that dials a harness already running at an
 // address; agentsessionsd's -harness flag uses it the same way.

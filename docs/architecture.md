@@ -174,9 +174,11 @@ stateDiagram-v2
   version check of its own: `spec_digest` fixes what the host dials, and the recorded version is
   the only check on what answers there.
 - **One session guard per registry.** `Registry.Add` gives a registered harness's Placer the same
-  session guard as the static ones, so overlapping `Exec`, `Suspend` and `Resume` on one session are
-  `ABORTED` whichever of its Placers each call reaches. A `PlacerFactory` returns a new Placer for
-  each call; one already used or registered elsewhere is not supported.
+  session guard and per-session checkpoint state as the static ones, so overlapping `Exec`,
+  `Suspend` and `Resume` on one session are `ABORTED` whichever of its Placers each call reaches,
+  and a stateful `Fork` through any of them ends and refuses a turn through another. A
+  `PlacerFactory` returns a new Placer for each call; `Add` refuses one that belongs to another
+  registry or has an operation in progress.
 - **How placements are served is the host's choice.** A `PlacerFactory` turns a spec into a Placer, or
   refuses a placement the host cannot serve (`FAILED_PRECONDITION`, nothing stored). It must not dial,
   so a harness that is down does not keep the host from starting. A spec with a field or enum value

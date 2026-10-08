@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"github.com/aramase/agentsessions/api"
+	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/placement"
+	"github.com/aramase/agentsessions/sqlitelog"
 )
 
 // addedPair runs the checkpoint on a static Placer and the turn on a Placer added later with
@@ -84,5 +86,47 @@ func TestRegistryAddAcceptsAPlacerAlreadyInTheRegistry(t *testing.T) {
 	}
 	if got, err := r.For("alias"); err != nil || got != p {
 		t.Fatalf("For(alias) = %p, %v; want the static placer", got, err)
+	}
+}
+
+// Add, like NewRegistry, must not replace the guard or session set under a Suspend or a stateful
+// fork's checkpoint in progress, and accepts the Placer once it has ended.
+func TestRegistryAddRejectsAPlacerWithACheckpointInProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		checkpoint func(*placement.Placer, *sqlitelog.Log, string) error
+	}{
+		{"suspend", suspendCheckpoint},
+		{"fork", forkCheckpoint},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			log := store.Session("s1")
+
+			r, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": newPlacer(t)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend := &routedBackend{desc: memDescriptor}
+			p := placement.New(backend, echoagent.Model)
+			var addErr error
+			backend.onSnapshot = func() { addErr = r.Add("registered", p) }
+			if err := tc.checkpoint(p, log, "s1"); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if addErr == nil {
+				t.Fatalf("Add accepted a placer with a %s in progress", tc.name)
+			}
+			if r.Has("registered") {
+				t.Fatal("a refused Add left the name resolvable")
+			}
+			if err := r.Add("registered", p); err != nil {
+				t.Fatalf("Add rejected a placer whose %s has ended: %v", tc.name, err)
+			}
+		})
 	}
 }

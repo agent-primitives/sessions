@@ -71,7 +71,7 @@ companion determinism contract, exercised by `conformance/`):
   recovering call that fails is itself a cut, and the next `Resume` re-drives it again. A fork at a
   `MODEL_CALL` costs one provider call when the child resumes. This applies to journals with execution IDs; a v0.1.2 journal
   without them is not re-driven and `Resume` still fails with "recorded completion missing".
-- **I4 — memory-restore is not replay.** On `ResumeActor{boot:false}` the harness already holds its state
+- **I4 — memory-restore is not replay.** When a memory snapshot is restored the harness already holds its state
   in RAM, so `Start.History` is empty and the journal is **not** replayed into it (replaying would
   double-apply). The `REQUIRES_MEMORY_SNAPSHOT` harness carries this on its side by never reconstructing
   state from `History`.
@@ -95,8 +95,12 @@ The `Placer` wires Sessions to the `Runtime` SPI and owns the incarnation lifecy
   surfaced as `ErrUnplaceable` → `FailedPrecondition`. Honest degradation, before any compute or log write.
 - **Fence** — the log is the single fence authority; the Placer mints a fence and binds it to both the
   incarnation and the controller. A `Restore` mints a fresh fence so a new incarnation supersedes a zombie.
-- **Dial** — the harness is reached by dialing `Incarnation.Address`. One dial path, two address forms:
-  a `unix://` socket for `runtime/local`; a `host:port` (the actor's `PodIP`) for `runtime/substrate`.
+- **Dial** — the harness is reached by dialing `Incarnation.Address` with `Incarnation.CallMetadata` on
+  every call. One dial path, two address forms: a `unix://` socket for `runtime/local`; the
+  `atenet-router` `host:port` for `runtime/substrate`, whose `ate-target-actor` metadata names the actor.
+  Before a stateful fork checkpoints its parent the Placer closes the parent's open harness streams,
+  because substrate waits for an actor's in-flight requests to drain before it snapshots; `Suspend`
+  instead refuses a session whose turn is still running.
 - **Lifecycle map** — session `Suspend → Runtime.Snapshot`, `Resume → Runtime.Restore`, session-end
   `→ Runtime.Stop`.
 - **Fork** — capability-driven. A `STATELESS_REPLAY` session replay-forks (the child cold-boots and

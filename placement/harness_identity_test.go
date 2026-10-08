@@ -170,7 +170,7 @@ func TestPlacerResumeDoesNotVersionCheckConfiguredMemoryDescriptor(t *testing.T)
 		ID: "configured-id", Version: "new-image-v2", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot},
 	})
 	p := placement.New(backend, echoModelForIdentity,
-		placement.WithDialer(func(string) (api.Harness, func() error, error) {
+		placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 			return h, func() error { closes.Add(1); return nil }, nil
 		}),
 		placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {

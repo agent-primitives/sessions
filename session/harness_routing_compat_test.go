@@ -97,7 +97,7 @@ func TestResumeUnservedRecordedHarnessDoesNotPlaceFallback(t *testing.T) {
 	p := placement.New(backend, func(context.Context, api.ModelRequest) (api.ModelResponse, error) {
 		models.Add(1)
 		return api.ModelResponse{}, nil
-	}, placement.WithDialer(func(string) (api.Harness, func() error, error) {
+	}, placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 		dials.Add(1)
 		return h, func() error { return nil }, nil
 	}))
@@ -318,7 +318,7 @@ func TestResumeConnectedHarnessOutageRemainsUnavailable(t *testing.T) {
 	bPlacer := placement.New(backend, func(context.Context, api.ModelRequest) (api.ModelResponse, error) {
 		models.Add(1)
 		return api.ModelResponse{}, nil
-	}, placement.WithDialer(func(string) (api.Harness, func() error, error) {
+	}, placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 		return unavailableRoutingHarness{b}, func() error { closes.Add(1); return nil }, nil
 	}), placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 		tools.Add(1)

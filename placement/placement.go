@@ -545,9 +545,10 @@ func tcpDial(address string, opts []grpc.DialOption) (api.Harness, func() error,
 }
 
 // ErrCheckpointing is returned when a turn cannot proceed because its session is being
-// checkpointed as the parent of a stateful Fork: either the turn tried to open a harness
-// connection while the checkpoint ran, or the checkpoint ended the connection the turn was using.
-// It is retryable once the checkpoint ends; session.Service maps it to codes.Aborted.
+// checkpointed as the parent of a stateful Fork, which lasts until every child is cloned from the
+// checkpoint: either the turn tried to open a harness connection meanwhile, or the checkpoint ended
+// the connection the turn was using. It is retryable once the fork returns; session.Service maps it
+// to codes.Aborted.
 var ErrCheckpointing = errors.New("placement: session is being checkpointed")
 
 // errSuperseded is the cancellation cause of a turn whose harness connection a checkpoint ended. The
@@ -942,7 +943,9 @@ func closeErrorKind(err error) string {
 // parent is checkpointed first and every child is cloned from that snapshot.
 //
 // The whole fan-out shares ONE parent checkpoint: N children cost one snapshot and N clones, and all
-// of them branch from the identical state.
+// of them branch from the identical state. The parent's checkpoint mark is held until the last child
+// is cloned, so a turn on the parent is refused (ErrCheckpointing) for the whole fan-out instead of
+// waking the parent and replacing the snapshot the remaining children clone from.
 func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID string, children []ForkChild, atSeq int64) (err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	finish := observability.StartDebug(ctx, p.logger, "placement", "fork",
@@ -952,18 +955,25 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 	)
 	defer func() { finish(err, "error_kind", placementErrorKind(err)) }()
 
-	ref, err := p.forkSource(ctx, parent, parentUID, atSeq)
+	ref, release, err := p.forkSource(ctx, parent, parentUID, atSeq)
 	if err != nil {
 		return err
 	}
+	defer release()
 	// A failed fan-out must not strand compute. The child UIDs are minted per request and returned
 	// only on success, so anything provisioned before the failure would otherwise be unreachable —
 	// unstoppable workers nobody can name.
 	created := make([]string, 0, len(children))
+	abort := func(err error) error {
+		// Release the parent first. Nothing in the teardown reads it, and holding the mark through
+		// up to MaxForkChildren × rollbackTimeout of Stops would refuse its turns for that long.
+		release()
+		p.rollbackFork(ctx, created)
+		return err
+	}
 	for _, child := range children {
 		if _, err := p.backend.Fork(ctx, ref, api.ForkOpts{ChildSessionUID: child.UID}); err != nil {
-			p.rollbackFork(ctx, created)
-			return err
+			return abort(err)
 		}
 		created = append(created, child.UID)
 		copyFinished := observability.StartDebug(ctx, p.logger, "placement", "copy_fork_log",
@@ -974,8 +984,7 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 		err := controller.Fork(parent, child.Log, atSeq)
 		copyFinished(err, "error_kind", placementErrorKind(err))
 		if err != nil {
-			p.rollbackFork(ctx, created)
-			return err
+			return abort(err)
 		}
 	}
 	return nil
@@ -1010,7 +1019,8 @@ func (p *Placer) stopOrphan(ctx context.Context, uid string) {
 // rollbackTimeout bounds the best-effort teardown of ONE child of a failed fan-out.
 const rollbackTimeout = 30 * time.Second
 
-// forkSource produces the SnapshotRef the child is forked from.
+// forkSource produces the SnapshotRef the child is forked from, and a release func the caller must
+// call once every child is cloned (it is idempotent, and a no-op for a stateless fork).
 //
 // For a stateless harness that is just the parent's handle (nothing to clone). For a memory harness
 // it is a FRESH snapshot of the parent, recorded as a SUSPEND lifecycle event so the ref stays
@@ -1022,13 +1032,16 @@ const rollbackTimeout = 30 * time.Second
 // returns, the parent is cold with a SUSPEND event on its chain whether or not the children go on to
 // provision. That is a recoverable state (Resume brings the parent back), not a leak, but it does
 // mean a retry must fork at the new head rather than the original seq.
-func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUID string, atSeq int64) (api.SnapshotRef, error) {
+//
+// For a stateful fork that returns a ref, the session's checkpoint mark is still held, so no turn
+// opens a harness stream on the parent until release is called. On error the mark is already lifted.
+func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUID string, atSeq int64) (_ api.SnapshotRef, _ func(), err error) {
 	desc, err := p.admit(ctx, parentUID)
 	if err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
 	}
 	if desc.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
-		return api.SnapshotRef{Local: parentUID}, nil
+		return api.SnapshotRef{Local: parentUID}, func() {}, nil
 	}
 	// Check the head BEFORE minting a fence. Minting is an autocommitted bump that supersedes any
 	// in-flight writer, so doing it first would let a fork that is then REFUSED as unplaceable still
@@ -1036,35 +1049,40 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	// off than before it was asked.
 	head, err := parent.Head()
 	if err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
 	}
 	// A memory snapshot captures the parent's RAM as it is NOW, so it can only realize a fork taken
 	// at the log head. Branching a stateful session at a historical seq would pair an old prefix with
 	// present-day RAM; refuse — with no side effects at all — instead of producing that mismatch.
 	if atSeq != head {
-		return api.SnapshotRef{}, fmt.Errorf("%w: harness %q requires %s, which can only fork at the log head (%d), not seq %d",
+		return api.SnapshotRef{}, nil, fmt.Errorf("%w: harness %q requires %s, which can only fork at the log head (%d), not seq %d",
 			ErrUnplaceable, desc.ID, desc.Capabilities.Resumability, head, atSeq)
 	}
 	// Past this point the fork is committing, so superseding the current writer is intended.
 	// Unlike Suspend, Fork is not covered by the session guard. Fencing before the snapshot means
 	// an in-flight turn cannot advance the head underneath a checkpoint that is not undoable. The
 	// checkpoint mark goes first, so no new turn opens a harness stream on the parent until the
-	// checkpoint is recorded.
+	// caller releases it after the last child is cloned.
 	open := p.beginCheckpoint(parentUID)
-	defer p.endCheckpoint(parentUID)
+	release := sync.OnceFunc(func() { p.endCheckpoint(parentUID) })
+	defer func() {
+		if err != nil {
+			release()
+		}
+	}()
 	if _, err := parent.NewFence(); err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
 	}
 	// A turn could still have committed in the window before that fence landed. Re-check now, while
 	// aborting is free: after the snapshot the parent is cold whether or not the fork proceeds.
 	if head, err = parent.Head(); err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
 	}
 	if atSeq != head {
-		return api.SnapshotRef{}, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
+		return api.SnapshotRef{}, nil, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
 	}
 	if err := p.endHarnesses(ctx, parentUID, open); err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
 	}
 	// A turn ended above may have minted a newer fence after ours. It wrote nothing
 	// (checkSuperseded), but its fence would leave ours stale and fail the SUSPEND append after the
@@ -1073,32 +1091,32 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	// aborting is still free.
 	fence, err := parent.NewFence()
 	if err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
 	}
 	if head, err = parent.Head(); err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
 	}
 	if atSeq != head {
-		return api.SnapshotRef{}, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
+		return api.SnapshotRef{}, nil, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
 	}
 	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID}, api.SnapshotExternal)
 	if err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
 	}
 	// Record the checkpoint before validating it: the parent is already cold, and the SUSPEND event
 	// is what keeps that fact on the chain. CAS on atSeq — the seq the head check validated — rather
 	// than a re-read head, so a writer that minted an even newer fence in the meantime aborts the
 	// fork instead of silently widening the children's prefix past the RAM they were cloned from.
 	if err := appendLifecycleAt(parent, atSeq, fence, api.Lifecycle{Kind: api.LifecycleSuspend, Snapshot: &ref}); err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
 	}
 	// Only now refuse an unusable checkpoint. A memory-capable runtime that yields no external handle
 	// cannot clone, and cold-booting the children instead is the silent divergence this whole path
 	// exists to prevent.
 	if ref.ExternalURI == "" {
-		return api.SnapshotRef{}, fmt.Errorf("%w: runtime %q produced no external snapshot handle to clone from", ErrUnplaceable, desc.ID)
+		return api.SnapshotRef{}, nil, fmt.Errorf("%w: runtime %q produced no external snapshot handle to clone from", ErrUnplaceable, desc.ID)
 	}
-	return ref, nil
+	return ref, release, nil
 }
 
 // appendLifecycle mints a fresh fence and records a lifecycle event at the head observed afterward.

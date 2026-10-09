@@ -187,14 +187,15 @@ provide.
   `placement.Dialer` now takes the `api.Incarnation` instead of its address, so custom dialers
   passed to `placement.WithDialer` must change signature; `placement.DefaultDial` is the stock one.
 - A stateful `Placer.Fork` now fences the parent's log and closes its open harness streams before
-  checkpointing it, and refuses new turns on the parent until the checkpoint is recorded, so
-  nothing holds the checkpoint up; on kind, a checkpoint under an idle stream took 5m30s. This holds
-  across every Placer of a `placement.Registry`, so a turn that `ExecRequest.harness` routed to
-  another harness is covered: `placement.NewRegistry` gives its Placers one shared per-session
-  state and session guard, and `placement.Registry.Add` gives a registered harness's Placer the
-  same, so a fork through a static harness covers a turn on a registered one and the reverse. Both
-  now fail if a Placer already belongs to another registry or has an operation in progress. Three
-  behavior changes follow:
+  checkpointing it, and refuses new turns on the parent until every child is cloned from the
+  checkpoint, so nothing holds the checkpoint up or replaces it before the last clone; on kind, a
+  checkpoint under an idle stream took 5m30s. A fan-out that fails partway releases the parent
+  before it tears the cloned children down. This holds across every Placer of a
+  `placement.Registry`, so a turn that `ExecRequest.harness` routed to another harness is covered:
+  `placement.NewRegistry` gives its Placers one shared per-session state and session guard, and
+  `placement.Registry.Add` gives a registered harness's Placer the same, so a fork through a static
+  harness covers a turn on a registered one and the reverse. Both now fail if a Placer already
+  belongs to another registry or has an operation in progress. Three behavior changes follow:
   - Before it snapshots, the fork waits until every turn whose stream it closed has minted its
     fence or returned, bounded by the caller's context. If the context ends first, the fork fails
     before snapshotting and records nothing.

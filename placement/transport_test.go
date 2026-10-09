@@ -37,6 +37,12 @@ type routedBackend struct {
 	onSnapshot func()
 	// snapshotErr, when set, fails the next Snapshot (after onSnapshot) and is then cleared.
 	snapshotErr error
+	// onFork runs inside Fork with the child's session UID, standing in for the runtime's clone.
+	onFork func(child string)
+	// forkErr fails Fork, after onFork, for the child session UIDs it names.
+	forkErr map[string]error
+	// onStop runs inside Stop, standing in for the runtime's teardown.
+	onStop func()
 }
 
 func (b *routedBackend) Describe(context.Context) (api.Descriptor, error) { return b.desc, nil }
@@ -70,10 +76,21 @@ func (b *routedBackend) Restore(ctx context.Context, ref api.SnapshotRef) (api.I
 }
 
 func (b *routedBackend) Fork(ctx context.Context, _ api.SnapshotRef, opts api.ForkOpts) (api.Incarnation, error) {
+	if b.onFork != nil {
+		b.onFork(opts.ChildSessionUID)
+	}
+	if err := b.forkErr[opts.ChildSessionUID]; err != nil {
+		return api.Incarnation{}, err
+	}
 	return b.Create(ctx, &api.SessionSpec{SessionUID: opts.ChildSessionUID})
 }
 
-func (b *routedBackend) Stop(context.Context, api.Incarnation) error { return nil }
+func (b *routedBackend) Stop(context.Context, api.Incarnation) error {
+	if b.onStop != nil {
+		b.onStop()
+	}
+	return nil
+}
 
 func (b *routedBackend) Status(context.Context, api.Incarnation) (api.ComputeState, error) {
 	return api.ComputeLive, nil

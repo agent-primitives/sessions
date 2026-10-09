@@ -85,7 +85,10 @@ How the session layer uses it:
   a divergent branch. The Placer checkpoints the parent, records the ref in a SUSPEND event on the
   chain, and clones each child from it.
 - **A fan-out shares one checkpoint.** `Fork(count: N)` snapshots the parent once and clones N
-  children from that single snapshot, so the whole fleet branches from identical state.
+  children from that single snapshot, so the whole fleet branches from identical state. A turn on
+  the parent would wake it and replace that snapshot, so the Placer refuses one with
+  `ErrCheckpointing` (ABORTED) until the last child is cloned. A fan-out that fails partway releases
+  the parent before it tears the cloned children down.
 
 Constraints inherited from substrate, enforced or surfaced rather than papered over:
 

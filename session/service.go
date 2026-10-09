@@ -710,9 +710,9 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 // forkError surfaces a refused fork as FailedPrecondition rather than Internal. A fork is refused
 // when the harness's capabilities cannot realize it — e.g. a REQUIRES_MEMORY_SNAPSHOT session forked
 // at a historical seq, which no memory snapshot can reproduce — which is a caller-visible
-// precondition, not a host fault. A concurrent writer that invalidated the fork point, or another
-// stateful fork that is checkpointing the parent, is Aborted, so the caller knows a retry is
-// meaningful.
+// precondition, not a host fault. A concurrent writer that invalidated the fork point, a parent that
+// no longer holds the snapshot the fork took (api.ErrSnapshotSuperseded), or another stateful fork
+// that is checkpointing the parent is Aborted, so the caller knows a retry is meaningful.
 func forkError(err error) error {
 	switch {
 	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch):
@@ -721,7 +721,8 @@ func forkError(err error) error {
 		return status.Error(codes.Unavailable, err.Error())
 	case errors.Is(err, placement.ErrAdmissionInterrupted):
 		return status.Error(admissionInterruptedCode(err), err.Error())
-	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing):
+	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing),
+		errors.Is(err, api.ErrSnapshotSuperseded):
 		return status.Error(codes.Aborted, err.Error())
 	default:
 		return status.Errorf(codes.Internal, "fork: %v", err)

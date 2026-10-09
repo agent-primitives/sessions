@@ -230,7 +230,9 @@ provide.
   `integrations/substrate`'s `New` and `FromClient` drop their `dnsSuffix` argument, since nothing
   dials an actor's mesh DNS name any more. A stateful fork now
   checks the parent still holds the checkpoint it took around the tag, and fails with
-  `ErrSnapshotSuperseded` if the parent was resumed and suspended in between.
+  `ErrSnapshotSuperseded` if the parent was resumed and suspended in between. It wraps the new
+  `api.ErrSnapshotSuperseded`, which a runtime returns for a fork source the parent no longer
+  holds, and `Fork` reports it as `ABORTED`, which callers retry at the parent's new head.
 
 ## v0.1.2
 

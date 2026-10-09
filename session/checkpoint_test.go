@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,10 +23,18 @@ import (
 // memoryBackend presents the local backend as memory-capable and its harness as
 // REQUIRES_MEMORY_SNAPSHOT, so a Fork of a session checkpoints the parent: the one operation that
 // supersedes a running turn. onSnapshot runs inside Snapshot, standing in for a runtime checkpoint
-// in progress.
+// in progress. forkErr, when set, fails every Fork.
 type memoryBackend struct {
 	*local.Backend
 	onSnapshot func()
+	forkErr    error
+}
+
+func (b *memoryBackend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOpts) (api.Incarnation, error) {
+	if b.forkErr != nil {
+		return api.Incarnation{}, b.forkErr
+	}
+	return b.Backend.Fork(ctx, ref, opts)
 }
 
 func (b *memoryBackend) Describe(ctx context.Context) (api.Descriptor, error) {
@@ -180,6 +189,21 @@ func TestForkDuringAnotherForksCheckpointIsAborted(t *testing.T) {
 	}
 	if status.Code(nestedErr) != codes.Aborted {
 		t.Fatalf("Fork during another fork's checkpoint: want Aborted, got %v", nestedErr)
+	}
+}
+
+// A runtime that finds the fork's source snapshot superseded (the parent moved on between the
+// checkpoint and the clone) has lost a race the caller can retry at the parent's new head. It must
+// surface as Aborted, not Internal.
+func TestForkWithASupersededSnapshotIsAborted(t *testing.T) {
+	inner := local.New(echoagent.Harness{})
+	t.Cleanup(func() { _ = inner.Close() })
+	backend := &memoryBackend{Backend: inner, forkErr: fmt.Errorf("runtime: tag parent: %w", api.ErrSnapshotSuperseded)}
+	c := checkpointClient(t, backend, &parkingModel{called: make(chan struct{})})
+	sess := mustCreate(t, c)
+
+	if err := forkParent(c, sess); status.Code(err) != codes.Aborted {
+		t.Fatalf("fork with a superseded snapshot: want Aborted, got %v", err)
 	}
 }
 

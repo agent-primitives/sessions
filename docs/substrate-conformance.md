@@ -99,7 +99,11 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   request addressed to it, so the parent can be woken and suspended again between the fork's
   checkpoint and its tag. The backend checks on both sides of the tag that the parent is still
   SUSPENDED holding the snapshot the fork took (a suspend always writes a new one), and otherwise
-  deletes the tag and fails with `ErrSnapshotSuperseded`.
+  deletes the tag and fails with `ErrSnapshotSuperseded`. That error wraps `api.ErrSnapshotSuperseded`,
+  which `Fork` reports as ABORTED; the caller retries at the parent's new head. The Placer's hold on
+  the parent stops the turns it starts after the fork begins, but not a request from another host
+  or a turn whose `Runtime.Create` or `Runtime.Restore` was already in flight when the fork began;
+  this check is what catches those.
 - The backend takes one tag per child (`fork-<child-uid>`, atespace-scoped). Each tag owns a full
   copy of the snapshot, and a child borrows its tag's copy until its own first suspend, so the tag
   lives as long as the child and `Stop` deletes it after deleting the child.

@@ -120,9 +120,9 @@ type Placer struct {
 type sessionSet struct {
 	mu   sync.Mutex
 	live map[string]map[*liveHarness]struct{} // session UID -> open harness connections
-	// checkpoints counts the stateful-fork checkpoints of each session UID in progress. While it is
-	// non-zero no harness connection can be opened for the session.
-	checkpoints map[string]int
+	// checkpoints holds the session UIDs a stateful fork is checkpointing. While a session is in it,
+	// no harness connection can be opened for the session and no other fork can checkpoint it.
+	checkpoints map[string]struct{}
 	// shared is set when a Registry owns the set, so a Placer cannot join two registries' sets.
 	shared bool
 }
@@ -632,7 +632,7 @@ func (p *Placer) openHarness(ctx context.Context, sessionUID string, inc api.Inc
 	ctx, cancel := context.WithCancelCause(ctx)
 	l := &liveHarness{harness: har, cancel: cancel, close: closeHarness, minted: make(chan struct{})}
 	p.sessions.mu.Lock()
-	if p.sessions.checkpoints[sessionUID] > 0 {
+	if _, ok := p.sessions.checkpoints[sessionUID]; ok {
 		p.sessions.mu.Unlock()
 		// Nothing was sent on the connection, so the close error carries no information.
 		_ = l.end(context.Canceled)
@@ -671,7 +671,7 @@ func (p *Placer) releaseHarness(ctx context.Context, sessionUID, incarnationID s
 func (p *Placer) refuseDuringCheckpoint(sessionUID string) error {
 	p.sessions.mu.Lock()
 	defer p.sessions.mu.Unlock()
-	if p.sessions.checkpoints[sessionUID] > 0 {
+	if _, ok := p.sessions.checkpoints[sessionUID]; ok {
 		return fmt.Errorf("%w: session %q", ErrCheckpointing, sessionUID)
 	}
 	return nil
@@ -682,29 +682,36 @@ func (p *Placer) refuseDuringCheckpoint(sessionUID string) error {
 // set under one lock is what leaves no window for a turn to slip a stream in between. The caller
 // mints its fence after this returns, so a turn that mints a newer fence still sees the superseded
 // mark (checkSuperseded) and writes nothing. A connection stays marked even if the checkpoint
-// aborts. Every call must be paired with endCheckpoint.
-func (p *Placer) beginCheckpoint(sessionUID string) []*liveHarness {
+// aborts. Every successful call must be paired with endCheckpoint.
+//
+// Checkpoints do not nest: while another fork holds the mark, from its checkpoint until its last
+// child is cloned, beginCheckpoint fails with ErrCheckpointing and changes nothing. A second fork
+// would otherwise mint a fence that fails the first one's SUSPEND record after the parent is
+// already cold, or checkpoint the parent again and replace the snapshot the first one's remaining
+// children clone from.
+func (p *Placer) beginCheckpoint(sessionUID string) ([]*liveHarness, error) {
 	p.sessions.mu.Lock()
 	defer p.sessions.mu.Unlock()
-	if p.sessions.checkpoints == nil {
-		p.sessions.checkpoints = map[string]int{}
+	if _, ok := p.sessions.checkpoints[sessionUID]; ok {
+		return nil, fmt.Errorf("%w: session %q is already being checkpointed by another fork", ErrCheckpointing, sessionUID)
 	}
-	p.sessions.checkpoints[sessionUID]++
+	if p.sessions.checkpoints == nil {
+		p.sessions.checkpoints = map[string]struct{}{}
+	}
+	p.sessions.checkpoints[sessionUID] = struct{}{}
 	open := make([]*liveHarness, 0, len(p.sessions.live[sessionUID]))
 	for l := range p.sessions.live[sessionUID] {
 		l.superseded.Store(true)
 		open = append(open, l)
 	}
-	return open
+	return open, nil
 }
 
 // endCheckpoint lifts the mark beginCheckpoint set.
 func (p *Placer) endCheckpoint(sessionUID string) {
 	p.sessions.mu.Lock()
 	defer p.sessions.mu.Unlock()
-	if p.sessions.checkpoints[sessionUID]--; p.sessions.checkpoints[sessionUID] <= 0 {
-		delete(p.sessions.checkpoints, sessionUID)
-	}
+	delete(p.sessions.checkpoints, sessionUID)
 }
 
 // endHarnesses ends the harness connections beginCheckpoint returned, and must run before a stateful
@@ -1063,7 +1070,10 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	// an in-flight turn cannot advance the head underneath a checkpoint that is not undoable. The
 	// checkpoint mark goes first, so no new turn opens a harness stream on the parent until the
 	// caller releases it after the last child is cloned.
-	open := p.beginCheckpoint(parentUID)
+	open, err := p.beginCheckpoint(parentUID)
+	if err != nil {
+		return api.SnapshotRef{}, nil, err
+	}
 	release := sync.OnceFunc(func() { p.endCheckpoint(parentUID) })
 	defer func() {
 		if err != nil {

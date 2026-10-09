@@ -157,6 +157,32 @@ func TestExecDuringACheckpointIsAborted(t *testing.T) {
 	}
 }
 
+// A stateful fork that arrives while another one is checkpointing the same parent is refused with no
+// side effects. The caller retries once the first fork returns, so it surfaces as Aborted.
+func TestForkDuringAnotherForksCheckpointIsAborted(t *testing.T) {
+	inner := local.New(echoagent.Harness{})
+	t.Cleanup(func() { _ = inner.Close() })
+	backend := &memoryBackend{Backend: inner}
+	c := checkpointClient(t, backend, &parkingModel{called: make(chan struct{})})
+	sess := mustCreate(t, c)
+
+	var nestedErr error
+	ran := false
+	backend.onSnapshot = func() {
+		if ran {
+			return // a nested fork that is not refused re-enters this hook
+		}
+		ran = true
+		nestedErr = forkParent(c, sess)
+	}
+	if err := forkParent(c, sess); err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+	if status.Code(nestedErr) != codes.Aborted {
+		t.Fatalf("Fork during another fork's checkpoint: want Aborted, got %v", nestedErr)
+	}
+}
+
 // liveBackend describes the harness without dialing it but reports a live harness, so every turn
 // checks the harness again on its own connection before it mints a fence (placement.LiveDescriber).
 type liveBackend struct{ *memoryBackend }

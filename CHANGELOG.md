@@ -195,7 +195,7 @@ provide.
   `placement.NewRegistry` gives its Placers one shared per-session state and session guard, and
   `placement.Registry.Add` gives a registered harness's Placer the same, so a fork through a static
   harness covers a turn on a registered one and the reverse. Both now fail if a Placer already
-  belongs to another registry or has an operation in progress. Three behavior changes follow:
+  belongs to another registry or has an operation in progress. Four behavior changes follow:
   - Before it snapshots, the fork waits until every turn whose stream it closed has minted its
     fence or returned, bounded by the caller's context. If the context ends first, the fork fails
     before snapshotting and records nothing.
@@ -205,6 +205,9 @@ provide.
   - A turn superseded by a fork's checkpoint, or started while one runs, returns an error wrapping
     the new `placement.ErrCheckpointing` (the superseded turn also wraps `eventlog.ErrFenced`).
     `Exec` and `Resume` report it as `ABORTED`, which callers retry.
+  - Stateful forks of one session do not nest. A fork that arrives while another one checkpoints
+    the parent or clones its children is refused before it fences or snapshots anything, with an
+    error wrapping `placement.ErrCheckpointing`, which `Fork` reports as `ABORTED`.
 - The substrate conformance suite (`integrations/substrate/e2e`) runs both tiers on the micro-VM
   sandbox class by default; the stateless tier used gVisor before. A host without KVM opts each
   tier back into gVisor with `ECHO_SANDBOX_CLASS=gvisor` and `COUNTER_SANDBOX_CLASS=gvisor`, after

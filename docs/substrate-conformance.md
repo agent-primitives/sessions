@@ -87,8 +87,10 @@ How the session layer uses it:
 - **A fan-out shares one checkpoint.** `Fork(count: N)` snapshots the parent once and clones N
   children from that single snapshot, so the whole fleet branches from identical state. A turn on
   the parent would wake it and replace that snapshot, so the Placer refuses one with
-  `ErrCheckpointing` (ABORTED) until the last child is cloned. A fan-out that fails partway releases
-  the parent before it tears the cloned children down.
+  `ErrCheckpointing` (ABORTED) until the last child is cloned. A second stateful fork of the parent
+  in that time is refused the same way, before it fences or snapshots anything, so it can neither
+  fail the first fork's SUSPEND record nor replace its snapshot. A fan-out that fails partway
+  releases the parent before it tears the cloned children down.
 
 Constraints inherited from substrate, enforced or surfaced rather than papered over:
 

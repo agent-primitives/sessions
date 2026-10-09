@@ -120,3 +120,61 @@ func TestForkReleasesTheParentBeforeStoppingTheChildren(t *testing.T) {
 		t.Fatalf("turn on the parent during the failed fork's teardown returned %v, want it to run", execErr)
 	}
 }
+
+// Checkpoints of one session do not nest. A second stateful fork that arrives while the first one
+// checkpoints the parent, or clones its children, is refused before it mints a fence or snapshots:
+// its fence would fail the first fork's SUSPEND record after the parent is already cold, and its
+// snapshot would replace the one the first fork's remaining children clone from.
+func TestForkRefusesAForkDuringAnotherForksCheckpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase func(b *routedBackend, nested func())
+	}{
+		{"checkpoint", func(b *routedBackend, nested func()) { b.onSnapshot = nested }},
+		{"fan-out", func(b *routedBackend, nested func()) {
+			b.onFork = func(child string) {
+				if child == "s1-child-1" {
+					nested()
+				}
+			}
+		}},
+	} {
+		for _, pc := range []struct {
+			name string
+			pair placerPair
+		}{
+			{"same placer", samePlacer},
+			{"registry", registryPair},
+		} {
+			t.Run(tc.name+"/"+pc.name, func(t *testing.T) {
+				store, err := sqlitelog.Open(":memory:")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer store.Close()
+				log := store.Session("s1")
+
+				backend := &routedBackend{desc: memDescriptor}
+				p, other := pc.pair(t, backend, echoagent.Model)
+				var nestedErr error
+				ran := false
+				tc.phase(backend, func() {
+					if ran {
+						return // a nested fork that is not refused re-enters this hook
+					}
+					ran = true
+					nestedErr = forkChildren(t, other, log, "s1", 1)
+				})
+				if err := forkChildren(t, p, log, "s1", 2); err != nil {
+					t.Fatalf("fork: %v", err)
+				}
+				if !errors.Is(nestedErr, placement.ErrCheckpointing) {
+					t.Fatalf("fork during another fork's %s returned %v, want ErrCheckpointing", tc.name, nestedErr)
+				}
+				if backend.snapshots != 1 {
+					t.Fatalf("the parent was checkpointed %d times, want once", backend.snapshots)
+				}
+			})
+		}
+	}
+}

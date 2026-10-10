@@ -3,6 +3,7 @@ package session_test
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -207,6 +208,55 @@ func TestExecSupersededDuringTheHarnessCheckIsAborted(t *testing.T) {
 	case err := <-execErr:
 		if status.Code(err) != codes.Aborted {
 			t.Fatalf("Exec superseded during the harness check: want Aborted, got %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("superseded Exec never returned")
+	}
+}
+
+// controllerParkedDescribe parks only the second Describe. On a backend that is not a live
+// describer the first is the turn's admission check and the second the controller's own check of
+// the connected harness before it records the turn; later ones (the fork's admission) answer.
+type controllerParkedDescribe struct {
+	echoagent.Harness
+	calls  atomic.Int32
+	parked chan struct{}
+}
+
+func (h *controllerParkedDescribe) Describe(ctx context.Context) (api.Descriptor, error) {
+	if h.calls.Add(1) != 2 {
+		return h.Harness.Describe(ctx)
+	}
+	close(h.parked)
+	<-ctx.Done()
+	return api.Descriptor{}, ctx.Err()
+}
+
+// A stateful fork that ends a turn while the controller is describing the connected harness
+// supersedes it: Aborted, not the Canceled that a cut Describe reports when the caller gave up.
+func TestExecSupersededDuringTheControllersHarnessDescribeIsAborted(t *testing.T) {
+	h := &controllerParkedDescribe{parked: make(chan struct{})}
+	inner := local.New(h)
+	t.Cleanup(func() { _ = inner.Close() })
+	c := checkpointClient(t, &memoryBackend{Backend: inner}, &parkingModel{called: make(chan struct{})})
+	sess := mustCreate(t, c)
+
+	execErr := make(chan error, 1)
+	go func() { execErr <- execHi(c, sess) }()
+	select {
+	case <-h.parked:
+	case err := <-execErr:
+		t.Fatalf("turn returned before the controller described the harness: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the controller never described the harness")
+	}
+	if err := forkParent(c, sess); err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+	select {
+	case err := <-execErr:
+		if status.Code(err) != codes.Aborted {
+			t.Fatalf("Exec superseded during the controller's Describe: want Aborted, got %v", err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("superseded Exec never returned")

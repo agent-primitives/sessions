@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"testing"
 
@@ -316,30 +317,35 @@ func TestSessionsExposesTheUnderlyingStub(t *testing.T) {
 	}
 }
 
-// ResumeRequest.boot is deprecated and the service never read it, so the SDK leaves it unset even
-// when a caller still passes true.
-func TestResumeDoesNotSendTheDeprecatedBootField(t *testing.T) {
-	var sent *v1.ResumeRequest
-	c, err := client.Dial("passthrough:///unused", client.WithDialOptions(
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithUnaryInterceptor(func(_ context.Context, _ string, req, _ any, _ *grpc.ClientConn, _ grpc.UnaryInvoker, _ ...grpc.CallOption) error {
-			sent, _ = req.(*v1.ResumeRequest)
-			return nil
-		}),
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = c.Close() })
+// ResumeRequest.boot is deprecated and the reference service ignores it, but the SDK still sends
+// the caller's value so a server that reads the field sees it.
+func TestResumeForwardsTheDeprecatedBootField(t *testing.T) {
+	for _, boot := range []bool{true, false} {
+		t.Run(fmt.Sprintf("boot=%t", boot), func(t *testing.T) {
+			var sent *v1.ResumeRequest
+			c, err := client.Dial("passthrough:///unused", client.WithDialOptions(
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithUnaryInterceptor(func(_ context.Context, _ string, req, _ any, _ *grpc.ClientConn, _ grpc.UnaryInvoker, _ ...grpc.CallOption) error {
+					sent, _ = req.(*v1.ResumeRequest)
+					return nil
+				}),
+			))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = c.Close() })
 
-	if _, err := c.Resume(t.Context(), "sess-1", true); err != nil {
-		t.Fatal(err)
-	}
-	if sent == nil || sent.GetSession() != "sess-1" {
-		t.Fatalf("Resume sent %v, want a ResumeRequest for sess-1", sent)
-	}
-	m := sent.ProtoReflect()
-	if boot := m.Descriptor().Fields().ByName("boot"); m.Has(boot) {
-		t.Fatalf("Resume sent the deprecated boot field: %v", sent)
+			if _, err := c.Resume(t.Context(), "sess-1", boot); err != nil {
+				t.Fatal(err)
+			}
+			if sent == nil || sent.GetSession() != "sess-1" {
+				t.Fatalf("Resume sent %v, want a ResumeRequest for sess-1", sent)
+			}
+			// Read through reflection: the generated Boot field and GetBoot are deprecated.
+			m := sent.ProtoReflect()
+			if got := m.Get(m.Descriptor().Fields().ByName("boot")).Bool(); got != boot {
+				t.Fatalf("Resume sent boot=%t, want %t", got, boot)
+			}
+		})
 	}
 }

@@ -293,9 +293,9 @@ func (c *Client) Suspend(ctx context.Context, uid string) (*v1.Session, error) {
 	return c.stub.Suspend(ctx, &v1.SuspendRequest{Session: uid})
 }
 
-// Resume brings a suspended session back. boot is ignored and not sent: the service never read
-// ResumeRequest.boot, which is deprecated, and the Runtime backend chooses how the session comes
-// back. The parameter stays so existing callers keep compiling.
-func (c *Client) Resume(ctx context.Context, uid string, _ bool) (*v1.Session, error) {
-	return c.stub.Resume(ctx, &v1.ResumeRequest{Session: uid})
+// Resume brings a suspended session back. boot is sent as ResumeRequest.boot, which is deprecated:
+// the reference service ignores it, and the Runtime backend chooses how the session comes back.
+// It is still sent so a server that reads the field sees what the caller asked for.
+func (c *Client) Resume(ctx context.Context, uid string, boot bool) (*v1.Session, error) {
+	return c.stub.Resume(ctx, &v1.ResumeRequest{Session: uid, Boot: boot}) //nolint:staticcheck // SA1019: boot is deprecated but still forwarded, see above.
 }

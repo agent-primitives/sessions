@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"net"
 	"testing"
 
 	"go.opentelemetry.io/otel"
@@ -10,10 +11,18 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/test/bufconn"
 
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/observability"
 	"github.com/agent-primitives/sessions/runtime/local"
+	"github.com/agent-primitives/sessions/session"
+	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 // TestSessionOperationsChainAcrossTraces checks the stitching contract: every mutating operation
@@ -94,5 +103,73 @@ func TestSessionOperationsChainAcrossTraces(t *testing.T) {
 		if !harnessTraces[ops[i].SpanContext().TraceID()] {
 			t.Fatalf("exec %d has no harness.run span in its trace", i)
 		}
+	}
+}
+
+// TestUnsampledForkRecordsNoTraceLinks checks that tracing off means no trace-link writes. With a
+// no-op provider or a sampler that drops the operation, the server context still carries the
+// caller's span context, but nothing will be exported to link to.
+func TestUnsampledForkRecordsNoTraceLinks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tp   trace.TracerProvider
+	}{
+		{"noop", noop.NewTracerProvider()},
+		{"never_sample", sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.NeverSample()))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prevTP, prevProp := otel.GetTracerProvider(), otel.GetTextMapPropagator()
+			otel.SetTracerProvider(tc.tp)
+			otel.SetTextMapPropagator(propagation.TraceContext{})
+			t.Cleanup(func() {
+				otel.SetTracerProvider(prevTP)
+				otel.SetTextMapPropagator(prevProp)
+			})
+
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			backend := local.New(echoagent.Harness{})
+			t.Cleanup(func() { _ = backend.Close() })
+			lis := bufconn.Listen(1 << 20)
+			srv := grpc.NewServer(observability.ServerTracing())
+			v1.RegisterSessionsServer(srv, session.NewService(store, echoRegistry(t, backend)))
+			go func() { _ = srv.Serve(lis) }()
+			t.Cleanup(srv.Stop)
+			conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			c := v1.NewSessionsClient(conn)
+
+			ctx := metadata.AppendToOutgoingContext(context.Background(),
+				"traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+			s, err := c.CreateSession(ctx, &v1.CreateSessionRequest{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			parent := s.GetMetadata().GetUid()
+			execOutputs(t, c, parent, "one", 0)
+			forked, err := c.Fork(ctx, &v1.ForkRequest{Session: parent, Count: 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			uids := []string{parent}
+			for _, child := range forked.GetChildren() {
+				uids = append(uids, child.GetMetadata().GetUid())
+			}
+			if len(uids) != 3 {
+				t.Fatalf("fork returned %d children, want 2", len(uids)-1)
+			}
+			for _, uid := range uids {
+				if tp, err := store.LastTraceParent(uid); err != nil || tp != "" {
+					t.Errorf("session %s has trace link %q (err %v), want none", uid, tp, err)
+				}
+			}
+		})
 	}
 }

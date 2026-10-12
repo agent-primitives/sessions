@@ -26,7 +26,7 @@ kubectl_kind() {
 }
 
 start_forward() {
-	kubectl_kind port-forward -n "${NAMESPACE}" service/agentsessions "${LOCAL_PORT}:8080" \
+	kubectl --context "${CONTEXT}" port-forward -n "${NAMESPACE}" service/agentsessions "${LOCAL_PORT}:8080" \
 		>"${WORK}/port-forward.log" 2>&1 &
 	PF_PID=$!
 	for _ in $(seq 1 30); do
@@ -34,7 +34,8 @@ start_forward() {
 			cat "${WORK}/port-forward.log" >&2
 			return 1
 		fi
-		if "${WORK}/agentctl" list --server "${SERVER}" >/dev/null 2>&1; then
+		if grep -q '^Forwarding from ' "${WORK}/port-forward.log" &&
+			"${WORK}/agentctl" list --server "${SERVER}" >/dev/null 2>&1; then
 			return 0
 		fi
 		sleep 1
@@ -96,6 +97,6 @@ fi
 "${WORK}/agentctl" verify --server "${SERVER}" --session "${session}"
 
 echo "==> correlation evidence"
-kubectl_kind logs -n "${NAMESPACE}" "${new_pod}" --tail=200 | grep "${session}" || true
+kubectl_kind logs -n "${NAMESPACE}" "${new_pod}" --tail=200 | grep -F "session_uid=${session}"
 kubectl_kind get pods -n "${NAMESPACE}" -o wide
 echo "production-shaped smoke passed for session ${session}"

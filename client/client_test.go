@@ -1,6 +1,7 @@
 package client_test
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"testing"
@@ -84,6 +85,58 @@ func TestExecCreatesSessionAndReturnsOutput(t *testing.T) {
 	}
 	if len(turn.Records) != 5 {
 		t.Fatalf("records = %d, want 5", len(turn.Records))
+	}
+}
+
+func TestExecConfigIsJournaledAndReplayed(t *testing.T) {
+	c := newClient(t)
+	var uid string
+	fromSeq := int64(1)
+	for _, tt := range []struct {
+		name   string
+		config []byte
+	}{
+		{name: "opaque bytes", config: []byte{0, 255, ' ', '\n', '\t'}},
+		{name: "unset"},
+		{name: "empty", config: []byte{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			turn, err := c.Exec(t.Context(), client.ExecOptions{
+				Session: uid,
+				Inputs:  []string{"hello"},
+				Config:  tt.config,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			uid = turn.Session.GetMetadata().GetUid()
+			replayed, err := c.Replay(t.Context(), uid, fromSeq, turn.LastSeq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fromSeq = turn.LastSeq + 1
+			for name, records := range map[string][]*v1.LogRecord{
+				"exec": turn.Records, "replay": replayed,
+			} {
+				starts := 0
+				for _, rec := range records {
+					if rec.GetEvent().GetKind() != v1.EventKind_EVENT_EXECUTION_START {
+						continue
+					}
+					starts++
+					start := rec.GetEvent().GetExecutionStart()
+					if start == nil {
+						t.Fatalf("%s: EXECUTION_START has no body", name)
+					}
+					if got := start.GetConfig(); !bytes.Equal(got, tt.config) {
+						t.Fatalf("%s: config = %x, want %x", name, got, tt.config)
+					}
+				}
+				if starts != 1 {
+					t.Fatalf("%s: EXECUTION_START count = %d, want 1", name, starts)
+				}
+			}
+		})
 	}
 }
 

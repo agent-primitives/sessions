@@ -146,6 +146,9 @@ type ExecOptions struct {
 	Inputs []string
 	// Harness overrides the session's configured harness for this turn.
 	Harness string
+	// Config is opaque per-execution configuration passed to the harness. It is journaled in
+	// EXECUTION_START and exposed by Replay; do not put credentials here.
+	Config []byte
 	// ExpectedLastSeq opts into the single-writer compare-and-swap. Nil appends at the current
 	// head. A stale value comes back as codes.Aborted rather than interleaving silently.
 	ExpectedLastSeq *int64
@@ -185,6 +188,7 @@ func (c *Client) Exec(ctx context.Context, opts ExecOptions) (*TurnResult, error
 	req := &v1.ExecRequest{
 		Session:         opts.Session,
 		Harness:         opts.Harness,
+		Config:          opts.Config,
 		ExpectedLastSeq: opts.ExpectedLastSeq,
 	}
 	for _, in := range opts.Inputs {

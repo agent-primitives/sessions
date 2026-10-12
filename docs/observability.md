@@ -103,9 +103,12 @@ pattern.
 
 A harness that its runtime can suspend must export its spans before the turn ends. Spans still
 buffered when a snapshot is taken are exported only if that snapshot is restored. `harnessnode`
-flushes at the end of every `Connect`, and the host waits briefly for `Connect` to close after `END`
-so the flush completes before the host can suspend the actor. Use `otelsetup.Flush` for the same
-effect in a custom harness server.
+ends its `Connect` server span and flushes before the handler returns, so the export finishes
+before gRPC sends the final status the host waits for. Ending the span in a gRPC stats handler, as
+`otelgrpc` does, is too late: grpc-go reports the end of an RPC to stats handlers only after it has
+written the status. A custom harness server that can be suspended needs the same ordering: end its
+spans and call `otelsetup.Flush` inside the handler. The flush is bounded to one second, so an
+unreachable collector costs spans rather than holding the turn open.
 
 Harness spans are reported by the harness, so treat them as untrusted, just as
 `IN_HARNESS_REPORTED` tool results are. They also need a network path from the sandbox to the

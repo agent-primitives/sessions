@@ -22,8 +22,14 @@ import (
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/stats"
+	"google.golang.org/grpc/status"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
@@ -83,12 +89,7 @@ func main() {
 	} else if lis, err = net.Listen("tcp", grpcAddr); err != nil {
 		log.Fatalf("harnessnode: listen %s: %v", grpcAddr, err)
 	}
-	srv := grpc.NewServer(
-		grpc.StatsHandler(flushingStatsHandler{otelgrpc.NewServerHandler()}),
-		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(slog.Default())),
-		grpc.ChainStreamInterceptor(flushTracesAfterTurn, observability.StreamServerInterceptor(slog.Default())),
-	)
-	v1.RegisterHarnessServer(srv, harnesswire.NewServer(harness))
+	srv := newServer(harness)
 
 	// readyz on a side port so the actor is reported live once the gRPC server is accepting.
 	readyz := &http.Server{
@@ -131,28 +132,83 @@ func selectHarness() (api.Harness, error) {
 	}
 }
 
-// flushingStatsHandler flushes again once otelgrpc has ended the RPC's own span, which happens after
-// the handler (and flushTracesAfterTurn) returns. Without it the harness-side Connect span would be
-// the one span of the turn still buffered at suspend time, orphaning harness.run in the trace.
-type flushingStatsHandler struct{ stats.Handler }
-
-func (h flushingStatsHandler) HandleRPC(ctx context.Context, s stats.RPCStats) {
-	h.Handler.HandleRPC(ctx, s)
-	if _, ok := s.(*stats.End); ok {
-		flushCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = otelsetup.Flush(flushCtx)
-	}
+// newServer builds the harnesswire gRPC server. otelgrpc traces everything but Connect; Connect gets
+// its span from traceConnect, which can end and export it before the turn completes.
+func newServer(harness api.Harness) *grpc.Server {
+	srv := grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler(
+			otelgrpc.WithTracerProvider(observability.ThirdPartyTracerProvider()),
+			otelgrpc.WithFilter(func(info *stats.RPCTagInfo) bool { return info.FullMethodName != v1.Harness_Connect_FullMethodName }),
+		)),
+		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(slog.Default())),
+		grpc.ChainStreamInterceptor(traceConnect, observability.StreamServerInterceptor(slog.Default())),
+	)
+	v1.RegisterHarnessServer(srv, harnesswire.NewServer(harness))
+	return srv
 }
 
-// flushTracesAfterTurn exports the turn's spans before Connect returns. The host waits for Connect
-// to finish and may then suspend this actor, and spans still buffered in a suspended actor are only
-// exported if that snapshot is ever restored. The flush is bounded so an unreachable collector
-// cannot hold a turn open.
-func flushTracesAfterTurn(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	err := handler(srv, ss)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+// traceConnect is Connect's server span, ended and exported before the handler returns. The host
+// waits for Connect's final status and may then suspend this actor, and spans still buffered in a
+// suspended actor are only exported if that snapshot is ever restored. otelgrpc cannot provide
+// that ordering: grpc-go writes the final status before it reports the RPC's end to stats handlers,
+// so otelgrpc's span ends, and could only be flushed, after the host has already moved on.
+//
+// The flush is bounded so an unreachable collector cannot hold a turn open.
+func traceConnect(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	if info.FullMethod != v1.Harness_Connect_FullMethodName {
+		return handler(srv, ss)
+	}
+	ctx := ss.Context()
+	md, _ := metadata.FromIncomingContext(ctx)
+	ctx = otel.GetTextMapPropagator().Extract(ctx, metadataCarrier(md))
+	name := strings.TrimPrefix(info.FullMethod, "/")
+	service, method, _ := strings.Cut(name, "/")
+	ctx, span := observability.Tracer().Start(ctx, name,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String("rpc.system", "grpc"),
+			attribute.String("rpc.service", service),
+			attribute.String("rpc.method", method),
+		))
+
+	err := handler(srv, &contextStream{ServerStream: ss, ctx: ctx})
+
+	code := status.Code(err)
+	span.SetAttributes(attribute.Int64("rpc.grpc.status_code", int64(code)))
+	if err != nil {
+		// The code, never the message: a status message can quote payload data.
+		span.SetStatus(otelcodes.Error, code.String())
+	}
+	span.End()
+	flushCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_ = otelsetup.Flush(ctx)
+	_ = otelsetup.Flush(flushCtx)
 	return err
+}
+
+type contextStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *contextStream) Context() context.Context { return s.ctx }
+
+// metadataCarrier reads W3C trace context from incoming gRPC metadata.
+type metadataCarrier metadata.MD
+
+func (c metadataCarrier) Get(key string) string {
+	if v := metadata.MD(c).Get(key); len(v) > 0 {
+		return v[0]
+	}
+	return ""
+}
+
+func (c metadataCarrier) Set(key, value string) { metadata.MD(c).Set(key, value) }
+
+func (c metadataCarrier) Keys() []string {
+	keys := make([]string, 0, len(c))
+	for k := range c {
+		keys = append(keys, k)
+	}
+	return keys
 }

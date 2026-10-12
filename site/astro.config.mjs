@@ -64,6 +64,7 @@ export default defineConfig({
             { label: "Security posture", slug: "security" },
             { label: "Observability", slug: "observability" },
             { label: "Tool executors", slug: "tool-executors" },
+            { label: "Production-shaped kind deployment", slug: "production-shaped-kind" },
           ],
         },
         {

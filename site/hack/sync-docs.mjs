@@ -54,6 +54,11 @@ const meta = {
     title: "Observability",
     description: "Structured operation logs, request correlation, and the data-safety contract.",
   },
+  "production-shaped-kind.md": {
+    title: "Production-shaped kind deployment",
+    description:
+      "Deploy a persistent Sessions control plane with Substrate chat actors and a real model provider, then verify continuity across a control-plane restart.",
+  },
   "quickstart.md": {
     title: "Quickstart",
     description:

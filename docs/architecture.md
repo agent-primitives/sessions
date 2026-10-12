@@ -71,7 +71,7 @@ companion determinism contract, exercised by `conformance/`):
   recovering call that fails is itself a cut, and the next `Resume` re-drives it again. A fork at a
   `MODEL_CALL` costs one provider call when the child resumes. This applies to journals with execution IDs; a v0.1.2 journal
   without them is not re-driven and `Resume` still fails with "recorded completion missing".
-- **I4 — memory-restore is not replay.** On `ResumeActor{boot:false}` the harness already holds its state
+- **I4 — memory-restore is not replay.** When a memory snapshot is restored the harness already holds its state
   in RAM, so `Start.History` is empty and the journal is **not** replayed into it (replaying would
   double-apply). The `REQUIRES_MEMORY_SNAPSHOT` harness carries this on its side by never reconstructing
   state from `History`.
@@ -95,8 +95,12 @@ The `Placer` wires Sessions to the `Runtime` SPI and owns the incarnation lifecy
   surfaced as `ErrUnplaceable` → `FailedPrecondition`. Honest degradation, before any compute or log write.
 - **Fence** — the log is the single fence authority; the Placer mints a fence and binds it to both the
   incarnation and the controller. A `Restore` mints a fresh fence so a new incarnation supersedes a zombie.
-- **Dial** — the harness is reached by dialing `Incarnation.Address`. One dial path, two address forms:
-  a `unix://` socket for `runtime/local`; a `host:port` (the actor's `PodIP`) for `runtime/substrate`.
+- **Dial** — the harness is reached by dialing `Incarnation.Address` with `Incarnation.CallMetadata` on
+  every call. One dial path, two address forms: a `unix://` socket for `runtime/local`; the
+  `atenet-router` `host:port` for `runtime/substrate`, whose `ate-target-actor` metadata names the actor.
+  Before a stateful fork checkpoints its parent the Placer closes the parent's open harness streams,
+  because substrate waits for an actor's in-flight requests to drain before it snapshots; `Suspend`
+  instead refuses a session whose turn is still running.
 - **Lifecycle map** — session `Suspend → Runtime.Snapshot`, `Resume → Runtime.Restore`, session-end
   `→ Runtime.Stop`.
 - **Fork** — capability-driven. A `STATELESS_REPLAY` session replay-forks (the child cold-boots and
@@ -170,9 +174,12 @@ stateDiagram-v2
   version check of its own: `spec_digest` fixes what the host dials, and the recorded version is
   the only check on what answers there.
 - **One session guard per registry.** `Registry.Add` gives a registered harness's Placer the same
-  session guard as the static ones, so overlapping `Exec`, `Suspend` and `Resume` on one session are
-  `ABORTED` whichever of its Placers each call reaches. A `PlacerFactory` returns a new Placer for
-  each call; one already used or registered elsewhere is not supported.
+  session guard and per-session checkpoint state as the static ones, so overlapping `Exec`,
+  `Suspend` and `Resume` on one session are `ABORTED` whichever of its Placers each call reaches,
+  a stateful `Fork` through any of them ends and refuses a turn through another, and a `Suspend`
+  and a stateful `Fork` of one session refuse each other (`ABORTED`). A
+  `PlacerFactory` returns a new Placer for each call; `Add` refuses one that belongs to another
+  registry or has an operation in progress.
 - **How placements are served is the host's choice.** A `PlacerFactory` turns a spec into a Placer, or
   refuses a placement the host cannot serve (`FAILED_PRECONDITION`, nothing stored). It must not dial,
   so a harness that is down does not keep the host from starting. A spec with a field or enum value

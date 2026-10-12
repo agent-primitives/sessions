@@ -6,7 +6,6 @@ import (
 	"log/slog"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
@@ -19,17 +18,23 @@ const TracerName = "github.com/aramase/agentsessions"
 
 // Tracer returns the agentsessions tracer from the global provider. Libraries only depend on the
 // OpenTelemetry API: until a process installs an SDK provider (see observability/otelsetup), every
-// span is a no-op and nothing leaves the process.
-func Tracer() trace.Tracer { return otel.Tracer(TracerName) }
+// span is a no-op and nothing leaves the process. Its spans never record a panic value (see
+// redactingProvider).
+func Tracer() trace.Tracer { return redacted(true).Tracer(TracerName) }
+
+// ThirdPartyTracerProvider is the provider to hand to third-party instrumentation (otelgrpc,
+// otelhttp). It drops status descriptions and error messages and strips URL credentials, because
+// that instrumentation records raw error text and full request URLs.
+func ThirdPartyTracerProvider() trace.TracerProvider { return redacted(false) }
 
 // ServerTracing instruments a gRPC server so it continues a caller's W3C trace context.
 func ServerTracing() grpc.ServerOption {
-	return grpc.StatsHandler(otelgrpc.NewServerHandler())
+	return grpc.StatsHandler(otelgrpc.NewServerHandler(otelgrpc.WithTracerProvider(ThirdPartyTracerProvider())))
 }
 
 // ClientTracing instruments a gRPC client connection so calls carry the caller's trace context.
 func ClientTracing() grpc.DialOption {
-	return grpc.WithStatsHandler(otelgrpc.NewClientHandler())
+	return grpc.WithStatsHandler(otelgrpc.NewClientHandler(otelgrpc.WithTracerProvider(ThirdPartyTracerProvider())))
 }
 
 // TraceParent encodes ctx's span context as a W3C traceparent, or "" when ctx carries no valid

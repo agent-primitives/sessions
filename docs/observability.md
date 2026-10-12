@@ -127,3 +127,16 @@ Operational logs and span attributes deliberately exclude:
 
 Use `error_kind`, gRPC status, identifiers, counts, and durations for diagnosis. Spans never
 record exception events or error strings.
+
+Third-party instrumentation does not follow this policy by default. `otelgrpc` puts the gRPC status
+message in the span status, `otelhttp` records `err.Error()` and the full request URL, query
+included, and the SDK records a panic's value when a span's `End` is deferred directly. Spans from
+`observability.Tracer()`, `observability.ServerTracing()`, `observability.ClientTracing()`, and the
+OpenAI-compatible client go through a redacting provider. It keeps status codes but drops
+third-party status descriptions, records only an error's type, drops `exception.message` and
+`exception.stacktrace`, and strips the query, user info, and fragment from `url.full`. The errors
+returned to callers are unchanged. Instrument other libraries with
+`observability.ThirdPartyTracerProvider()`. Spans a harness author starts with their own tracer
+are outside this policy.
+
+With tracing off, or when the sampler drops an operation, nothing is written to `session_traces`.

@@ -1041,7 +1041,8 @@ const rollbackTimeout = 30 * time.Second
 // mean a retry must fork at the new head rather than the original seq.
 //
 // For a stateful fork that returns a ref, the session's checkpoint mark is still held, so no turn
-// opens a harness stream on the parent until release is called. On error the mark is already lifted.
+// opens a harness stream on the parent until release is called. If it returns an error or panics,
+// the mark is already lifted.
 func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUID string, atSeq int64) (_ api.SnapshotRef, _ func(), err error) {
 	desc, err := p.admit(ctx, parentUID)
 	if err != nil {
@@ -1075,8 +1076,11 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 		return api.SnapshotRef{}, nil, err
 	}
 	release := sync.OnceFunc(func() { p.endCheckpoint(parentUID) })
+	// Lift the mark on every path but the one that hands release to the caller, a panic included:
+	// a recovered panic in the runtime's Snapshot must not leave the parent refused for good.
+	handedOff := false
 	defer func() {
-		if err != nil {
+		if !handedOff {
 			release()
 		}
 	}()
@@ -1126,6 +1130,7 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if ref.ExternalURI == "" {
 		return api.SnapshotRef{}, nil, fmt.Errorf("%w: runtime %q produced no external snapshot handle to clone from", ErrUnplaceable, desc.ID)
 	}
+	handedOff = true
 	return ref, release, nil
 }
 

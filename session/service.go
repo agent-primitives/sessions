@@ -97,7 +97,7 @@ func NewService(store *sqlitelog.Store, registry *placement.Registry, opts ...Op
 // It is best effort and a no-op when tracing is off: a failed exchange only costs a link.
 func (s *Service) chainTrace(ctx context.Context, uid string) {
 	span := trace.SpanFromContext(ctx)
-	if !span.IsRecording() || uid == "" {
+	if !span.IsRecording() || !span.SpanContext().IsSampled() || uid == "" {
 		return
 	}
 	span.SetAttributes(attribute.String("agentsessions.session_uid", uid))
@@ -118,7 +118,15 @@ func (s *Service) chainTrace(ctx context.Context, uid string) {
 
 // recordTrace makes the current operation uid's latest without linking back, which is how a fork
 // child starts its chain at the fork that created it.
+//
+// Only a sampled, recording span is recorded. With tracing off or the operation dropped by the
+// sampler, ctx can still carry a valid span context (the caller's, propagated in), but no span of
+// this operation will be exported to link to, so tracing off must mean no store writes.
 func (s *Service) recordTrace(ctx context.Context, uid string) {
+	span := trace.SpanFromContext(ctx)
+	if !span.IsRecording() || !span.SpanContext().IsSampled() {
+		return
+	}
 	tp := observability.TraceParent(ctx)
 	if tp == "" {
 		return

@@ -205,11 +205,14 @@ provide.
   - A turn superseded by a fork's checkpoint, or started while one runs, returns an error wrapping
     the new `placement.ErrCheckpointing` (the superseded turn also wraps `eventlog.ErrFenced`).
     `Exec` and `Resume` report it as `ABORTED`, which callers retry.
-  - Stateful forks of one session do not nest. A fork that arrives while another one checkpoints
-    the parent or clones its children is refused before it fences or snapshots anything, with an
-    error wrapping `placement.ErrCheckpointing`, which `Fork` reports as `ABORTED`.
-  - The hold covers turns this host starts after the fork begins. A turn whose `Runtime.Create` or
-    `Runtime.Restore` was already in flight, or a request from another host, can still wake the
+  - Stateful forks and `Suspend` of one session do not overlap; they hold the same checkpoint
+    mark. A fork or `Suspend` that arrives while a fork checkpoints the parent or clones its
+    children, or a fork that arrives while a `Suspend` runs, is refused before it fences or
+    snapshots anything, with an error wrapping `placement.ErrCheckpointing`, which `Fork` and
+    `Suspend` report as `ABORTED`.
+  - The hold starts when the fork installs its checkpoint mark and covers the turns this
+    `placement.Registry` drives. A turn whose `Runtime.Create` or `Runtime.Restore` was already in
+    flight when the mark was installed, or a request from outside this Registry, can still wake the
     parent before a child is cloned. A runtime that finds the fork source superseded returns an
     error wrapping the new `api.ErrSnapshotSuperseded`, which `Fork` reports as `ABORTED`; callers
     retry at the parent's new head.

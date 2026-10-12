@@ -176,7 +176,8 @@ stateDiagram-v2
 - **One session guard per registry.** `Registry.Add` gives a registered harness's Placer the same
   session guard and per-session checkpoint state as the static ones, so overlapping `Exec`,
   `Suspend` and `Resume` on one session are `ABORTED` whichever of its Placers each call reaches,
-  and a stateful `Fork` through any of them ends and refuses a turn through another. A
+  a stateful `Fork` through any of them ends and refuses a turn through another, and a `Suspend`
+  and a stateful `Fork` of one session refuse each other (`ABORTED`). A
   `PlacerFactory` returns a new Placer for each call; `Add` refuses one that belongs to another
   registry or has an operation in progress.
 - **How placements are served is the host's choice.** A `PlacerFactory` turns a spec into a Placer, or

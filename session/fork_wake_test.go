@@ -109,9 +109,9 @@ func (c *actorControl) CreateActorFromTag(_ context.Context, a substrate.ActorRe
 
 func (c *actorControl) DeleteTag(context.Context, substrate.SnapshotID) error { return nil }
 
-// A turn whose Runtime.Create or Runtime.Restore is already in flight when a stateful fork begins
-// is past the Placer's checkpoint check, so nothing on this host stops it waking the parent between
-// the fork's checkpoint and its tag. The substrate runtime then refuses to tag a snapshot the parent
+// A turn whose Runtime.Create or Runtime.Restore is already in flight when a stateful fork installs
+// its checkpoint mark is past the Placer's checkpoint check, so nothing in this Registry stops it
+// waking the parent between the fork's checkpoint and its tag. The substrate runtime then refuses to tag a snapshot the parent
 // no longer holds. That is a lost race the caller retries at the parent's new head, so Fork must
 // report it as Aborted, not Internal; and the turn, which finds the parent held by the fork, is
 // Aborted as well.

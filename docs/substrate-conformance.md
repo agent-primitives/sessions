@@ -87,9 +87,10 @@ How the session layer uses it:
 - **A fan-out shares one checkpoint.** `Fork(count: N)` snapshots the parent once and clones N
   children from that single snapshot, so the whole fleet branches from identical state. A turn on
   the parent would wake it and replace that snapshot, so the Placer refuses one with
-  `ErrCheckpointing` (ABORTED) until the last child is cloned. A second stateful fork of the parent
-  in that time is refused the same way, before it fences or snapshots anything, so it can neither
-  fail the first fork's SUSPEND record nor replace its snapshot. A fan-out that fails partway
+  `ErrCheckpointing` (ABORTED) until the last child is cloned. A second stateful fork or a
+  `Suspend` of the parent in that time is refused the same way, before it fences or snapshots
+  anything, so it can neither fail the first fork's SUSPEND record nor replace its snapshot; a fork
+  that arrives while a `Suspend` runs is refused too. A fan-out that fails partway
   releases the parent before it tears the cloned children down.
 
 Constraints inherited from substrate, enforced or surfaced rather than papered over:
@@ -101,9 +102,10 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   SUSPENDED holding the snapshot the fork took (a suspend always writes a new one), and otherwise
   deletes the tag and fails with `ErrSnapshotSuperseded`. That error wraps `api.ErrSnapshotSuperseded`,
   which `Fork` reports as ABORTED; the caller retries at the parent's new head. The Placer's hold on
-  the parent stops the turns it starts after the fork begins, but not a request from another host
-  or a turn whose `Runtime.Create` or `Runtime.Restore` was already in flight when the fork began;
-  this check is what catches those.
+  the parent starts when the fork installs its checkpoint mark and covers the turns this
+  `placement.Registry` drives. It does not stop a request from outside this Registry, or a turn whose
+  `Runtime.Create` or `Runtime.Restore` was already in flight when the mark was installed; this
+  check is what catches those.
 - The backend takes one tag per child (`fork-<child-uid>`, atespace-scoped). Each tag owns a full
   copy of the snapshot, and a child borrows its tag's copy until its own first suspend, so the tag
   lives as long as the child and `Stop` deletes it after deleting the child.
@@ -137,7 +139,8 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   that the checkpoint claimed its connection and writes nothing. Ending a stream only cancels the
   turn, so the checkpoint then waits, bounded by the caller's context, until every ended turn has
   made its fence call or returned. Only then is the second fence minted, the one the SUSPEND record
-  is written under, so no turn on this host can fail the record after the parent is already cold.
+  is written under, so no turn this Registry drives can fail the record after the parent is already
+  cold.
   The connections and the checkpoint mark are per session and shared by every Placer of a
   `placement.Registry`, including one `Registry.Add` registers later, so a turn routed to a
   different harness by `ExecRequest.harness` is covered.
@@ -256,8 +259,8 @@ Limits that come with the router, measured or read rather than assumed:
   closed. A stateful `Fork`, which supersedes the running turn instead, closes the parent's harness
   streams before it checkpoints. `TestSuspendUnderAnIdleHarnessStream` checks the Suspend half on a
   live cluster. Both cover turns any Placer of this process's `placement.Registry` drives; a turn
-  driven by another host is fenced by the log, but its stream stays open until it next touches the
-  log and can still stall a checkpoint.
+  driven outside this Registry is fenced by the log, but its stream stays open until it next touches
+  the log and can still stall a checkpoint.
 - **No caller authentication.** The router does not check who is calling before it resumes an actor
   and proxies to it, so any pod that can reach it can drive any harness. See
   [security.md](security.md).

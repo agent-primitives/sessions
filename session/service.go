@@ -742,7 +742,9 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 	}
 	log := s.store.Session(req.GetSession())
 	if _, err := placer.Suspend(ctx, log, req.GetSession()); err != nil {
-		if errors.Is(err, placement.ErrSessionBusy) {
+		// A running turn, or a stateful Fork checkpointing the session, refuses the Suspend before
+		// it touches compute or the journal; retry once that returns.
+		if errors.Is(err, placement.ErrSessionBusy) || errors.Is(err, placement.ErrCheckpointing) {
 			return nil, status.Error(codes.Aborted, err.Error())
 		}
 		return nil, status.Errorf(codes.Internal, "suspend: %v", err)

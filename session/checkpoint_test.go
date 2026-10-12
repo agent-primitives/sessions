@@ -192,6 +192,53 @@ func TestForkDuringAnotherForksCheckpointIsAborted(t *testing.T) {
 	}
 }
 
+func suspendSession(c v1.SessionsClient, sess string) error {
+	_, err := c.Suspend(context.Background(), &v1.SuspendRequest{Session: sess})
+	return err
+}
+
+// A Suspend and a stateful Fork of one session share the checkpoint mark. A Suspend that arrives
+// during a fork's checkpoint used to snapshot the parent again and mint a fence, so the fork's
+// SUSPEND record then failed with Aborted after the parent was already cold. Now whichever arrives
+// second is refused, retryably, before it touches compute or the journal, and the first completes.
+func TestSuspendAndForkDuringTheOthersCheckpointIsAborted(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		outer, inner func(v1.SessionsClient, string) error
+	}{
+		{"suspend during a fork's checkpoint", forkParent, suspendSession},
+		{"fork during a suspend", suspendSession, forkParent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := local.New(echoagent.Harness{})
+			t.Cleanup(func() { _ = inner.Close() })
+			backend := &memoryBackend{Backend: inner}
+			c := checkpointClient(t, backend, &parkingModel{called: make(chan struct{})})
+			sess := mustCreate(t, c)
+
+			var innerErr error
+			ran := false
+			backend.onSnapshot = func() {
+				if ran {
+					return // an inner call that is not refused re-enters this hook
+				}
+				ran = true
+				innerErr = tc.inner(c, sess)
+			}
+			if err := tc.outer(c, sess); err != nil {
+				t.Fatalf("the call that held the checkpoint: %v", err)
+			}
+			if status.Code(innerErr) != codes.Aborted {
+				t.Fatalf("%s: want Aborted, got %v", tc.name, innerErr)
+			}
+			backend.onSnapshot = nil
+			if err := tc.inner(c, sess); err != nil {
+				t.Fatalf("retry once the checkpoint returned: %v", err)
+			}
+		})
+	}
+}
+
 // A runtime that finds the fork's source snapshot superseded (the parent moved on between the
 // checkpoint and the clone) has lost a race the caller can retry at the parent's new head. It must
 // surface as Aborted, not Internal.

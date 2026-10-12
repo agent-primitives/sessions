@@ -120,8 +120,9 @@ type Placer struct {
 type sessionSet struct {
 	mu   sync.Mutex
 	live map[string]map[*liveHarness]struct{} // session UID -> open harness connections
-	// checkpoints holds the session UIDs a stateful fork is checkpointing. While a session is in it,
-	// no harness connection can be opened for the session and no other fork can checkpoint it.
+	// checkpoints holds the session UIDs a stateful fork or a Suspend is checkpointing. While a
+	// session is in it, no harness connection can be opened for the session and no other fork or
+	// Suspend can checkpoint it.
 	checkpoints map[string]struct{}
 	// shared is set when a Registry owns the set, so a Placer cannot join two registries' sets.
 	shared bool
@@ -547,8 +548,9 @@ func tcpDial(address string, opts []grpc.DialOption) (api.Harness, func() error,
 // ErrCheckpointing is returned when a turn cannot proceed because its session is being
 // checkpointed as the parent of a stateful Fork, which lasts until every child is cloned from the
 // checkpoint: either the turn tried to open a harness connection meanwhile, or the checkpoint ended
-// the connection the turn was using. It is retryable once the fork returns; session.Service maps it
-// to codes.Aborted.
+// the connection the turn was using. A stateful Fork or a Suspend that finds the session already
+// being checkpointed by another one returns it too. It is retryable once the checkpoint returns;
+// session.Service maps it to codes.Aborted.
 var ErrCheckpointing = errors.New("placement: session is being checkpointed")
 
 // errSuperseded is the cancellation cause of a turn whose harness connection a checkpoint ended. The
@@ -685,20 +687,17 @@ func (p *Placer) refuseDuringCheckpoint(sessionUID string) error {
 // aborts. Every successful call must be paired with endCheckpoint.
 //
 // Checkpoints do not nest: while another fork holds the mark, from its checkpoint until its last
-// child is cloned, beginCheckpoint fails with ErrCheckpointing and changes nothing. A second fork
-// would otherwise mint a fence that fails the first one's SUSPEND record after the parent is
-// already cold, or checkpoint the parent again and replace the snapshot the first one's remaining
-// children clone from.
+// child is cloned, or a Suspend holds it, beginCheckpoint fails with ErrCheckpointing and changes
+// nothing. A second fork would otherwise mint a fence that fails the first one's SUSPEND record
+// after the parent is already cold, or checkpoint the parent again and replace the snapshot the
+// first one's remaining children clone from; a fork beside a Suspend would fail the Suspend's
+// record the same way.
 func (p *Placer) beginCheckpoint(sessionUID string) ([]*liveHarness, error) {
 	p.sessions.mu.Lock()
 	defer p.sessions.mu.Unlock()
-	if _, ok := p.sessions.checkpoints[sessionUID]; ok {
-		return nil, fmt.Errorf("%w: session %q is already being checkpointed by another fork", ErrCheckpointing, sessionUID)
+	if err := p.setCheckpointLocked(sessionUID); err != nil {
+		return nil, err
 	}
-	if p.sessions.checkpoints == nil {
-		p.sessions.checkpoints = map[string]struct{}{}
-	}
-	p.sessions.checkpoints[sessionUID] = struct{}{}
 	open := make([]*liveHarness, 0, len(p.sessions.live[sessionUID]))
 	for l := range p.sessions.live[sessionUID] {
 		l.superseded.Store(true)
@@ -707,7 +706,30 @@ func (p *Placer) beginCheckpoint(sessionUID string) ([]*liveHarness, error) {
 	return open, nil
 }
 
-// endCheckpoint lifts the mark beginCheckpoint set.
+// markCheckpoint sets the session's checkpoint mark for a Suspend. Unlike beginCheckpoint it ends
+// no harness connection: Suspend holds the session guard, and every connection is opened by an Exec
+// or Resume under that guard, so none is open. It fails with ErrCheckpointing, changing nothing,
+// while a fork holds the mark. Every successful call must be paired with endCheckpoint.
+func (p *Placer) markCheckpoint(sessionUID string) error {
+	p.sessions.mu.Lock()
+	defer p.sessions.mu.Unlock()
+	return p.setCheckpointLocked(sessionUID)
+}
+
+// setCheckpointLocked sets the session's checkpoint mark, or fails with ErrCheckpointing if a fork
+// or Suspend already holds it. The caller holds sessionSet.mu.
+func (p *Placer) setCheckpointLocked(sessionUID string) error {
+	if _, ok := p.sessions.checkpoints[sessionUID]; ok {
+		return fmt.Errorf("%w: session %q is already being checkpointed by a fork or Suspend", ErrCheckpointing, sessionUID)
+	}
+	if p.sessions.checkpoints == nil {
+		p.sessions.checkpoints = map[string]struct{}{}
+	}
+	p.sessions.checkpoints[sessionUID] = struct{}{}
+	return nil
+}
+
+// endCheckpoint lifts the mark beginCheckpoint or markCheckpoint set.
 func (p *Placer) endCheckpoint(sessionUID string) {
 	p.sessions.mu.Lock()
 	defer p.sessions.mu.Unlock()
@@ -777,6 +799,13 @@ func (p *Placer) endHarnesses(ctx context.Context, sessionUID string, open []*li
 // this Placer or its Registry, Suspend fails with ErrSessionBusy without touching compute or the
 // journal, and the caller retries once the turn has returned. So the checkpoint never runs under an
 // open harness stream of a turn this Registry drives.
+//
+// Suspend also holds the session's checkpoint mark, the one a stateful Fork holds, from before it
+// snapshots until it has recorded the SUSPEND event. While a fork of the session holds the mark,
+// from its checkpoint until its last child is cloned, Suspend fails with ErrCheckpointing without
+// touching compute or the journal; a fork that arrives during a Suspend is refused the same way. So
+// a Suspend can neither fail the fork's SUSPEND record nor replace the snapshot its children clone
+// from.
 func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID string) (ref api.SnapshotRef, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	finish := observability.StartDebug(ctx, p.logger, "placement", "suspend", "session_uid", sessionUID)
@@ -787,6 +816,12 @@ func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID str
 		return api.SnapshotRef{}, err
 	}
 	defer release()
+	// The guard is taken first and never waited on (tryLock), and the mark is set under
+	// sessionSet.mu, which is never held while taking the guard, so the two cannot deadlock.
+	if err := p.markCheckpoint(sessionUID); err != nil {
+		return api.SnapshotRef{}, err
+	}
+	defer p.endCheckpoint(sessionUID)
 
 	inc := api.Incarnation{ID: sessionUID}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)

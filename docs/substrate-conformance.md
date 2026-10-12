@@ -139,7 +139,8 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   made its fence call or returned. Only then is the second fence minted, the one the SUSPEND record
   is written under, so no turn on this host can fail the record after the parent is already cold.
   The connections and the checkpoint mark are per session and shared by every Placer of a
-  `placement.Registry`, so a turn routed to a different harness by `ExecRequest.harness` is covered.
+  `placement.Registry`, including one `Registry.Add` registers later, so a turn routed to a
+  different harness by `ExecRequest.harness` is covered.
   If the context ends first, the fork aborts before it snapshots. A turn driven by another process
   is outside this: only the log fences it.
 

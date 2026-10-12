@@ -195,7 +195,7 @@ provide.
   `placement.NewRegistry` gives its Placers one shared per-session state and session guard, and
   `placement.Registry.Add` gives a registered harness's Placer the same, so a fork through a static
   harness covers a turn on a registered one and the reverse. Both now fail if a Placer already
-  belongs to another registry or has an operation in progress. Four behavior changes follow:
+  belongs to another registry or has an operation in progress. Five behavior changes follow:
   - Before it snapshots, the fork waits until every turn whose stream it closed has minted its
     fence or returned, bounded by the caller's context. If the context ends first, the fork fails
     before snapshotting and records nothing.
@@ -208,6 +208,11 @@ provide.
   - Stateful forks of one session do not nest. A fork that arrives while another one checkpoints
     the parent or clones its children is refused before it fences or snapshots anything, with an
     error wrapping `placement.ErrCheckpointing`, which `Fork` reports as `ABORTED`.
+  - The hold covers turns this host starts after the fork begins. A turn whose `Runtime.Create` or
+    `Runtime.Restore` was already in flight, or a request from another host, can still wake the
+    parent before a child is cloned. A runtime that finds the fork source superseded returns an
+    error wrapping the new `api.ErrSnapshotSuperseded`, which `Fork` reports as `ABORTED`; callers
+    retry at the parent's new head.
 - The substrate conformance suite (`integrations/substrate/e2e`) runs both tiers on the micro-VM
   sandbox class by default; the stateless tier used gVisor before. A host without KVM opts each
   tier back into gVisor with `ECHO_SANDBOX_CLASS=gvisor` and `COUNTER_SANDBOX_CLASS=gvisor`, after
@@ -228,11 +233,9 @@ provide.
   `ObjectRef.Namespace` is now `ObjectRef.Atespace`, and
   `ActorInfo` reports `Worker` and `Snapshot` instead of `PodIP` and `MeshDNS`.
   `integrations/substrate`'s `New` and `FromClient` drop their `dnsSuffix` argument, since nothing
-  dials an actor's mesh DNS name any more. A stateful fork now
-  checks the parent still holds the checkpoint it took around the tag, and fails with
-  `ErrSnapshotSuperseded` if the parent was resumed and suspended in between. It wraps the new
-  `api.ErrSnapshotSuperseded`, which a runtime returns for a fork source the parent no longer
-  holds, and `Fork` reports it as `ABORTED`, which callers retry at the parent's new head.
+  dials an actor's mesh DNS name any more. A stateful fork now checks on both sides of the tag that
+  the parent still holds the checkpoint the fork took, and otherwise fails with
+  `ErrSnapshotSuperseded`, which wraps `api.ErrSnapshotSuperseded`.
 
 ## v0.1.2
 

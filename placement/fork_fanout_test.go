@@ -44,7 +44,7 @@ func execAtHead(p *placement.Placer, log *sqlitelog.Log, uid string) error {
 
 // A stateful fork's children are cloned from the snapshot the parent holds. A turn that wakes the
 // parent before the last child is cloned replaces that snapshot, so the parent stays refused, on
-// every Placer of the Registry, until the whole fan-out is done.
+// every Placer of the Registry (static or added with Registry.Add), until the whole fan-out is done.
 func TestForkRefusesAParentTurnUntilTheLastChildIsCloned(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -52,6 +52,8 @@ func TestForkRefusesAParentTurnUntilTheLastChildIsCloned(t *testing.T) {
 	}{
 		{"same placer", samePlacer},
 		{"registry", registryPair},
+		{"added placer", addedPair},
+		{"through an added placer", addedPairReversed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hs := startHarnessServer(t, echoagent.Harness{})
@@ -145,6 +147,8 @@ func TestForkRefusesAForkDuringAnotherForksCheckpoint(t *testing.T) {
 		}{
 			{"same placer", samePlacer},
 			{"registry", registryPair},
+			{"added placer", addedPair},
+			{"through an added placer", addedPairReversed},
 		} {
 			t.Run(tc.name+"/"+pc.name, func(t *testing.T) {
 				store, err := sqlitelog.Open(":memory:")

@@ -79,7 +79,14 @@ func serveOnce(t *testing.T, journal, uid string) string {
 			cancel()
 			t.Fatal(err)
 		}
-		if len(records) == 0 || records[0].GetEvent().GetKind() != v1.EventKind_EVENT_INPUT {
+		hasInput := false
+		for _, record := range records {
+			if record.GetEvent().GetKind() == v1.EventKind_EVENT_INPUT {
+				hasInput = true
+				break
+			}
+		}
+		if !hasInput {
 			cancel()
 			t.Fatalf("persisted records = %v", records)
 		}

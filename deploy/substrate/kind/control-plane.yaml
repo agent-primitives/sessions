@@ -53,15 +53,18 @@ spec:
         app: agentsessions
     spec:
       serviceAccountName: agentsessions
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
         fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: journal-permissions
-          image: busybox:1.37
+          image: busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
           command:
             - sh
             - -c
@@ -69,6 +72,10 @@ spec:
           securityContext:
             runAsNonRoot: false
             runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN]
           volumeMounts:
             - name: journal
               mountPath: /data
@@ -87,9 +94,7 @@ spec:
             - --ateapi-addr=api.ate-system.svc:443
             - --ateapi-server-name=api.ate-system.svc
             - --ateapi-token-file=/var/run/secrets/tokens/ateapi-token
-            # The pinned kind installation uses an internal certificate not rooted in this image.
-            # Token authentication still authenticates the caller. This is not a production TLS setup.
-            - --ateapi-insecure-skip-verify
+            - --ateapi-ca-file=/var/run/secrets/ateapi-ca/trust-bundle.pem
             - --atespace=agentsessions
             - --actor-template-namespace=ate-agentsessions
             - --actor-template=chat-harness
@@ -128,6 +133,10 @@ spec:
           ports:
             - name: grpc
               containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
           readinessProbe:
             tcpSocket:
               port: grpc
@@ -138,6 +147,9 @@ spec:
               mountPath: /data
             - name: ateapi-token
               mountPath: /var/run/secrets/tokens
+              readOnly: true
+            - name: ateapi-ca
+              mountPath: /var/run/secrets/ateapi-ca
               readOnly: true
       volumes:
         - name: journal
@@ -150,6 +162,15 @@ spec:
                   audience: api.ate-system.svc
                   expirationSeconds: 3600
                   path: ateapi-token
+        - name: ateapi-ca
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: trust-bundle.pem
 ---
 apiVersion: v1
 kind: Service
@@ -183,3 +204,19 @@ spec:
         - podSelector:
             matchLabels:
               app: agentsessions
+      ports:
+        - protocol: TCP
+          port: 80
+---
+# Access through kubectl port-forward does not require pod-network ingress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-sessions-ingress
+  namespace: ate-agentsessions
+spec:
+  podSelector:
+    matchLabels:
+      app: agentsessions
+  policyTypes: [Ingress]
+  ingress: []

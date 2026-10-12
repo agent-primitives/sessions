@@ -177,7 +177,7 @@ It:
 3. Deletes the `agentsessions` pod and waits for its replacement.
 4. Reads and replays the same committed session after replacement.
 5. Executes another turn in the same session.
-6. Verifies the enlarged hash chain and prints correlation evidence.
+6. Verifies the enlarged hash chain and requires matching `session_uid` log evidence.
 
 The second turn proves continuation after control-plane restart. The stateless chat harness receives
 the committed first turn as history and the current input separately. The existing substrate actor
@@ -201,29 +201,34 @@ These operations are intentionally distinct:
 | Harness reconstruction | A fresh actor re-executes the harness against recorded effects. This is a separate operation. |
 | Memory restoration | A substrate memory snapshot restores in-actor RAM. The chat harness does not require this capability. |
 
-Controller-level reconstruction of the history-aware chat harness depends on the turn-boundary fix
-tracked in [#41](https://github.com/aramase/agentsessions/issues/41). Until that lands, this example
-does not delete the chat actor and present journal inspection as proof of harness reconstruction.
-The real-substrate conformance suite separately covers stateless echo replay and memory-snapshot
-restoration.
+The smoke leaves the chat actor running during control-plane replacement. It therefore demonstrates
+journal persistence and continuation, not controller-level harness replay or actor reconstruction.
+The real-substrate conformance suite separately covers stateless replay and memory-snapshot restoration.
 
 ## Trust boundaries and limitations
 
-- The Sessions endpoint is plaintext and unauthenticated. The documented path exposes it only
-  through a local `kubectl port-forward`.
-- The kind ate-api setup authenticates the projected service-account token but uses
-  `--ateapi-insecure-skip-verify` because its internal certificate is not rooted in the control-plane
-  image. A production deployment must provide and verify the ate-api CA.
+- The Sessions endpoint is plaintext and unauthenticated. A deny-all ingress NetworkPolicy blocks
+  pod-network access; the documented access path is a local `kubectl port-forward`.
+- NetworkPolicies require an enforcing CNI. The pinned kind installation enforces them; other
+  installations must verify enforcement before relying on these restrictions. ClusterIP alone is not
+  an access boundary.
+- The control plane verifies ate-api's TLS certificate using Substrate's projected service-DNS
+  ClusterTrustBundle and authenticates with a separate audience-scoped service-account token.
+  The default Kubernetes API token is not mounted.
+- At the pinned Substrate revision, ate-api checks token issuer and audience, not service-account
+  authorization. Any pod able to project a token for `api.ate-system.svc` can access the full Control
+  API. The audience token is not least-privilege authorization or a tenant boundary.
 - The pinned substrate revision is required. Newer revisions remove the direct pod-IP ingress used
   here, while the supported router path cannot yet carry the bidirectional gRPC harness stream.
 - `Harness.Connect` therefore uses the actor worker's reported pod IP over plaintext h2c. The
-  additional NetworkPolicy is a temporary, narrowly selected exception for the control-plane pod.
+  additional NetworkPolicy is a temporary, narrowly selected TCP 80 exception for the control-plane pod.
 - SQLite plus one `ReadWriteOnce` volume supports a single control-plane replica. It demonstrates
   durable restart, not high availability or concurrent replicas.
 - The static hostPath volume survives pod replacement but belongs to the kind node and disappears
   with the cluster. It is not a portable or production storage class.
 - The optional Ollama model cache uses the same kind-only hostPath approach and has no authentication;
-  its Service is cluster-internal.
+  its ingress policy allows only control-plane pods on TCP 11434. The CI modelstub likewise allows
+  only control-plane pods on TCP 8080, subject to CNI enforcement.
 - Project is a filter, not an authorization boundary. There is no production authentication,
   authorization, TLS termination, secret manager, or tenant isolation in this example.
 - `chatagent` sends the full recorded conversation on every turn. It is a reference context policy,

@@ -39,3 +39,22 @@ spec:
     - name: http
       port: 8080
       targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-sessions-to-modelstub
+  namespace: ate-agentsessions
+spec:
+  podSelector:
+    matchLabels:
+      app: modelstub
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: agentsessions
+      ports:
+        - protocol: TCP
+          port: 8080

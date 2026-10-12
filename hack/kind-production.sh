@@ -113,8 +113,8 @@ setup() {
 		--from-literal=auth-header="${MODEL_AUTH_HEADER}" \
 		--dry-run=client -o yaml | kubectl_kind apply -f -
 	if [[ -n "${MODEL_API_KEY:-}" ]]; then
-		kubectl_kind create secret generic agentsessions-model -n "${NAMESPACE}" \
-			--from-literal=api-key="${MODEL_API_KEY}" \
+		printf '%s' "${MODEL_API_KEY}" | kubectl_kind create secret generic agentsessions-model -n "${NAMESPACE}" \
+			--from-file=api-key=/dev/stdin \
 			--dry-run=client -o yaml | kubectl_kind apply -f -
 	fi
 

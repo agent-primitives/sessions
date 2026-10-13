@@ -53,14 +53,6 @@ func TestSubstrateHarnessFlagParsing(t *testing.T) {
 			values: []string{" counter = tmpl/counter,memory "},
 			want:   substrateHarnesses{"counter": {template: substrate.ObjectRef{Atespace: "tmpl", Name: "counter"}, memory: true}},
 		},
-		{
-			name:   "several",
-			values: []string{"a=t/a", "b=t/b,memory"},
-			want: substrateHarnesses{
-				"a": {template: substrate.ObjectRef{Atespace: "t", Name: "a"}},
-				"b": {template: substrate.ObjectRef{Atespace: "t", Name: "b"}, memory: true},
-			},
-		},
 		{name: "no equals", values: []string{"writer"}, wantErr: "want name=atespace/template"},
 		{name: "empty name", values: []string{"=t/a"}, wantErr: "want name=atespace/template"},
 		{name: "no atespace", values: []string{"a=template"}, wantErr: "is not atespace/template"},
@@ -68,7 +60,8 @@ func TestSubstrateHarnessFlagParsing(t *testing.T) {
 		{name: "nested path", values: []string{"a=t/b/c"}, wantErr: "is not atespace/template"},
 		{name: "uppercase", values: []string{"a=T/b"}, wantErr: "is not atespace/template"},
 		{name: "unknown option", values: []string{"a=t/b,snapshot"}, wantErr: `unknown option "snapshot"`},
-		{name: "duplicate", values: []string{"a=t/b", "a=t/c"}, wantErr: `harness "a" already registered`},
+		{name: "a second harness", values: []string{"a=t/a", "b=t/b,memory"}, wantErr: `given more than once (already "a"): only one substrate harness is supported`},
+		{name: "the same harness twice", values: []string{"a=t/b", "a=t/b"}, wantErr: `given more than once (already "a")`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got := substrateHarnesses{}
@@ -152,6 +145,31 @@ func TestSubstrateStartupChecks(t *testing.T) {
 				t.Fatal("a refused start built a control client")
 			}
 		})
+	}
+}
+
+// Substrate harnesses would share one actor per session, so the daemon refuses a second
+// -substrate-harness as a command-line error: it prints the reason and the usage and exits 2, before
+// it opens the journal or dials the ate-api.
+func TestSecondSubstrateHarnessIsRefused(t *testing.T) {
+	journal := filepath.Join(t.TempDir(), "journal.db")
+	dialed := false
+	newControl := func(grpc.ClientConnInterface) substrate.ControlClient { dialed = true; return nil }
+	var out strings.Builder
+	err := Run([]string{"-journal", journal, "-addr", "127.0.0.1:0", "-model", "m", "-substrate-atespace", "s",
+		"-substrate-harness", "a=t/a", "-substrate-harness", "b=t/b,memory"}, WithSubstrate(newControl), withOutput(&out))
+	if !errors.Is(err, ErrUsage) {
+		t.Fatalf("Run error = %v, want ErrUsage (exit status 2)", err)
+	}
+	const want = `invalid value "b=t/b,memory" for flag -substrate-harness: given more than once (already "a"): only one substrate harness is supported, because substrate harnesses would share one actor per session`
+	if !strings.Contains(out.String(), want) || !strings.Contains(out.String(), "Usage of agentsessionsd") {
+		t.Fatalf("output = %q, want %q, then the usage", out.String(), want)
+	}
+	if _, statErr := os.Stat(journal); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("a refused start left a journal behind: %v", statErr)
+	}
+	if dialed {
+		t.Fatal("a refused start built a control client")
 	}
 }
 

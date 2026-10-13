@@ -44,7 +44,9 @@ type substrateHarness struct {
 	memory   bool
 }
 
-// substrateHarnesses collects repeated -substrate-harness name=atespace/template[,memory] flags.
+// substrateHarnesses holds the -substrate-harness name=atespace/template[,memory] flag. It takes one
+// entry: runtime/substrate names a session's actor by session UID in the one -substrate-atespace, so
+// a second substrate harness would attach to the first one's actor (see Set).
 type substrateHarnesses map[string]substrateHarness
 
 func (s substrateHarnesses) String() string {
@@ -57,8 +59,12 @@ func (s substrateHarnesses) Set(value string) error {
 	if !ok || name == "" || ref == "" {
 		return fmt.Errorf("want name=atespace/template or name=atespace/template,memory, got %q", value)
 	}
-	if _, exists := s[name]; exists {
-		return fmt.Errorf("harness %q already registered", name)
+	if len(s) > 0 {
+		// A turn an ExecRequest.harness override sent to the second harness would run on the first
+		// one's actor and template, and the cold-create guard would count it on the wrong harness.
+		// Refused until actors are named per harness (docs/substrate-conformance.md, "Substrate
+		// placement binding").
+		return fmt.Errorf("given more than once (already %q): only one substrate harness is supported, because substrate harnesses would share one actor per session", s.String())
 	}
 	ref, tier, hasTier := strings.Cut(ref, ",")
 	h := substrateHarness{}
@@ -117,12 +123,12 @@ func registerSubstrateFlags(fs *flag.FlagSet) *substrateFlags {
 			f.only = append(f.only, fl.Name)
 		}
 	})
-	fs.Var(f.harnesses, "substrate-harness", "run a harness as an agent-substrate actor per session, as name=atespace/template; append ,memory for a REQUIRES_MEMORY_SNAPSHOT harness. The tier is not checked against the image's Describe: a stateful image declared without ,memory loses its RAM state on fork. Repeatable")
+	fs.Var(f.harnesses, "substrate-harness", "run a harness as an agent-substrate actor per session, as name=atespace/template; append ,memory for a REQUIRES_MEMORY_SNAPSHOT harness. The tier is not checked against the image's Describe: a stateful image declared without ,memory loses its RAM state on fork. Give it at most once")
 	f.atespace = fs.String("substrate-atespace", "", "atespace the session actors are created in; required with -substrate-harness. Must not change while sessions exist: their actors stay in the old atespace, and a REQUIRES_MEMORY_SNAPSHOT session with committed turns is then refused")
 	f.ateapi = fs.String("ateapi-addr", "api.ate-system.svc:443", "address of the substrate ate-api Control service (TLS)")
 	f.serverName = fs.String("ateapi-server-name", "", "TLS server name for the ate-api; empty uses the host of -ateapi-addr")
 	f.caFile = fs.String("ateapi-ca-file", "", "PEM CA bundle that signs the ate-api serving certificate; empty uses the system roots")
-	f.insecureVerify = fs.Bool("ateapi-insecure-skip-verify", false, "do not verify the ate-api serving certificate (the bearer token stays the credential); for a dev cluster only")
+	f.insecureVerify = fs.Bool("ateapi-insecure-skip-verify", false, "do not verify the ate-api serving certificate, so a server impersonating the ate-api receives the -ateapi-token-file bearer token; for a dev cluster only")
 	f.tokenFile = fs.String("ateapi-token-file", "", "file holding the bearer token for the ate-api, re-read on every call so a rotated projected token is picked up")
 	f.router = fs.String("atenet-router", substrate.DefaultRouterAddress, "host:port of the atenet-router that reaches session actors over h2c")
 	return f
@@ -207,7 +213,7 @@ var ateapiReconnectBackoff = grpc.ConnectParams{
 	MinConnectTimeout: 20 * time.Second,
 }
 
-// backends dials the ate-api once and builds one substrate backend per -substrate-harness. The
+// backends dials the ate-api once and builds the substrate backend for the -substrate-harness. The
 // returned close function releases the connection. grpc.NewClient does not connect, so nothing is
 // sent before the first session is placed.
 func (f *substrateFlags) backends(newControl SubstrateControlFunc, logger *slog.Logger) (map[string]placement.Backend, func(), error) {
@@ -217,7 +223,7 @@ func (f *substrateFlags) backends(newControl SubstrateControlFunc, logger *slog.
 	tlsConfig := &tls.Config{
 		MinVersion:         tls.VersionTLS12,
 		ServerName:         *f.serverName,
-		InsecureSkipVerify: *f.insecureVerify, //nolint:gosec // opt-in for a dev cluster; the bearer token stays the credential
+		InsecureSkipVerify: *f.insecureVerify, //nolint:gosec // opt-in for a dev cluster; the bearer token is then sent to whatever server answers
 	}
 	if *f.caFile != "" {
 		pem, err := os.ReadFile(*f.caFile)

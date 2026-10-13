@@ -68,8 +68,10 @@ provide.
   in `-substrate-atespace`, controlled over the ate-api (`-ateapi-addr`, TLS, with
   `-ateapi-token-file` re-read on every call, `-ateapi-ca-file` or `-ateapi-insecure-skip-verify`)
   and reached through `-atenet-router`. It requires `-model`, and refuses the other substrate flags
-  without a `-substrate-harness`. The neutral `cmd/agentsessionsd` does not offer these flags; both
-  binaries are now built from `internal/agentsessionsd`.
+  without a `-substrate-harness`. It takes one `-substrate-harness` and exits with status 2 on a
+  second: actors are named by session UID in the one atespace, so two substrate harnesses would
+  share a session's actor (see `docs/substrate-conformance.md`). The neutral `cmd/agentsessionsd`
+  does not offer these flags; both binaries are now built from `internal/agentsessionsd`.
 - `HarnessRegistry` API (`api/harness_registry.proto`): register, get, list and retire harnesses on a
   running host. A registration is immutable and identified by its name and `spec_digest`. Retiring a
   harness refuses new sessions while existing sessions keep running, resuming and forking;
@@ -106,9 +108,12 @@ provide.
   fresh harness that had lost the session's RAM state. The Placer now reads the journal before
   `Runtime.Create` to fill the new `api.SessionSpec.CommittedTurns`; other backends ignore it. The
   count is per harness: a turn an `ExecRequest.harness` override ran elsewhere does not count, while
-  a turn with no recorded harness name, or one this host does not serve, does. `Sessions.Resume` of
-  such a session whose actor is gone is `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) too, where
-  it used to be `INTERNAL`; a stateless session's `Resume` keeps its error.
+  a turn with no recorded harness name, or one this host does not serve, does. Two substrate
+  backends on one atespace share each session's actor, so the count misses the turns the other one
+  ran there; `agentsessionsd` allows one substrate harness for this reason, and a program that
+  builds its own registry must do the same. `Sessions.Resume` of such a session whose actor is gone
+  is `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) too, where it used to be `INTERNAL`; a
+  stateless session's `Resume` keeps its error.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

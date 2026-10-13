@@ -100,11 +100,13 @@ provide.
 - `agentsessionsd` now refuses positional arguments, naming them, and exits with status 2. It used
   to ignore them, along with every flag after the first one, since flag parsing stops there.
 - `runtime/substrate` no longer cold-creates an actor for a `REQUIRES_MEMORY_SNAPSHOT` session that
-  has a committed turn but no actor (deleted out of band, or the daemon restarted with another
-  `-substrate-atespace`). `Exec` fails with `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and
-  nothing is created, where it used to continue the journal on a fresh harness that had lost the
-  session's RAM state. The Placer now reads the journal before `Runtime.Create` to fill the new
-  `api.SessionSpec.CommittedTurns`; other backends ignore it.
+  has a committed turn on that harness but no actor (deleted out of band, or the daemon restarted
+  with another `-substrate-atespace`). `Exec` fails with `FAILED_PRECONDITION`
+  (`api.ErrMemoryStateLost`) and nothing is created, where it used to continue the journal on a
+  fresh harness that had lost the session's RAM state. The Placer now reads the journal before
+  `Runtime.Create` to fill the new `api.SessionSpec.CommittedTurns`; other backends ignore it. The
+  count is per harness: a turn an `ExecRequest.harness` override ran elsewhere does not count, while
+  a turn with no recorded harness name, or one this host does not serve, does.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

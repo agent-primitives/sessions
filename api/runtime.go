@@ -105,11 +105,14 @@ type SessionSpec struct {
 	Image      string
 	Harness    string
 	Identity   IdentityRef
-	// CommittedTurns is how many turns the session's journal records as completed (END events) when
-	// the host places it: zero for a new session, and for a forked child the turns of the copied
-	// prefix. A backend uses it to refuse creating fresh compute for a REQUIRES_MEMORY_SNAPSHOT
+	// CommittedTurns is how many turns the session's journal records as completed (END events) on the
+	// harness being placed, when the host places it: zero for a new session, and for a forked child
+	// the turns of the copied prefix that ran on this harness. A turn another harness ran (an
+	// ExecRequest.harness override) is not counted, since it left no state in this harness's
+	// compute; a turn the host cannot attribute (no recorded harness name, or a name it does not
+	// serve) is. A backend uses it to refuse creating fresh compute for a REQUIRES_MEMORY_SNAPSHOT
 	// session that already has state only its old compute held (ErrMemoryStateLost). A caller that
-	// leaves it zero declares a session with no completed turns.
+	// leaves it zero declares a session with no completed turns on this harness.
 	CommittedTurns int
 	// resource requests, env, mounts elided for v0
 }

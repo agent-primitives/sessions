@@ -11,6 +11,7 @@ import (
 	"github.com/aramase/agentsessions/api"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/placement"
+	"github.com/aramase/agentsessions/runtime/local"
 	"github.com/aramase/agentsessions/runtime/substrate"
 	"github.com/aramase/agentsessions/sqlitelog"
 )
@@ -90,4 +91,90 @@ func TestExecAfterTheActorIsLost(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The memory-tier guard counts only the turns its own harness ran. A turn ExecRequest.harness sent to
+// another harness left nothing in the memory harness's actor, so a default turn after it creates the
+// actor as on a new session. Once the memory harness has run a turn, losing its actor is refused
+// however many override turns ran in between.
+func TestMemoryStateLostCountsOnlyTheMemoryHarnessTurns(t *testing.T) {
+	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+	desc, err := echoagent.Harness{}.Describe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	desc.ID = "mem"
+	desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
+	backend := substrate.New(ctl, "space", substrate.ObjectRef{Atespace: "space", Name: "mem"}, desc)
+	dial := placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
+		return echoagent.Harness{}, func() error { return nil }, nil
+	})
+	echo := local.New(echoagent.Harness{})
+	t.Cleanup(func() { _ = echo.Close() })
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	r, err := placement.NewRegistry("mem", map[string]*placement.Placer{
+		"mem":  placement.New(backend, echoagent.Model, dial),
+		"echo": placement.New(echo, echoagent.Model),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := serveRegistry(t, store, r)
+	ctx := context.Background()
+	hasActor := func(sess string) bool {
+		ctl.mu.Lock()
+		defer ctl.mu.Unlock()
+		_, ok := ctl.status[sess]
+		return ok
+	}
+	loseActor := func(sess string) {
+		t.Helper()
+		if err := ctl.DeleteActor(ctx, substrate.ActorRef{Atespace: "space", Name: sess}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("override turn then default turn creates the actor", func(t *testing.T) {
+		sess := mustCreate(t, c)
+		if err := execOn(ctx, c, sess, "echo"); err != nil {
+			t.Fatalf("override turn: %v", err)
+		}
+		if hasActor(sess) {
+			t.Fatal("the override turn created a substrate actor")
+		}
+		if err := execHi(c, sess); err != nil {
+			t.Fatalf("default turn after an override turn: %v", err)
+		}
+		if !hasActor(sess) {
+			t.Fatal("the default turn did not create the memory harness's actor")
+		}
+	})
+
+	t.Run("default, override, lost actor, default is refused", func(t *testing.T) {
+		sess := mustCreate(t, c)
+		if err := execHi(c, sess); err != nil {
+			t.Fatalf("first default turn: %v", err)
+		}
+		if err := execOn(ctx, c, sess, "echo"); err != nil {
+			t.Fatalf("override turn: %v", err)
+		}
+		loseActor(sess)
+		err := execHi(c, sess)
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("default turn after the actor was lost: want FailedPrecondition, got %v", err)
+		}
+		msg := status.Convert(err).Message()
+		for _, want := range []string{sess, "1 committed turn(s) on harness \"mem\"", "cannot be reconstructed"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("error %q does not contain %q", msg, want)
+			}
+		}
+		if hasActor(sess) {
+			t.Error("the refused turn created an actor for the session")
+		}
+	})
 }

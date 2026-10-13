@@ -72,19 +72,30 @@ the harness's own `Describe` reports.
 
 A session's journal records its harness name, not where that harness's actors live. The atespace,
 the ActorTemplate and the declared tier come from the daemon's flags at each start, and the session
-store keeps none of them. Two ways that loses a `REQUIRES_MEMORY_SNAPSHOT` session's RAM state:
+store keeps none of them. Three ways that goes wrong for a `REQUIRES_MEMORY_SNAPSHOT` session:
 
-- **The binding changes under existing sessions.** Restarting with another `-substrate-atespace` (or
-  template) makes the next `Exec` look for the session's actor where it never was. Without the check
-  below, `Create` would cold-create a new actor from the template and continue the journal with a
-  harness that remembers none of it.
+- **The binding changes under existing sessions.** Restarting with another `-substrate-atespace`
+  makes the next `Exec` look for the session's actor where it never was. Without the check below,
+  `Create` would cold-create a new actor from the template and continue the journal with a harness
+  that remembers none of it. Changing a harness's template does not move its actors, which are named
+  by session UID in the atespace: an existing session's actor is found and attached, still running
+  the old template, and only new sessions and stateless fork children get the new one. Nothing
+  reports the difference.
+- **Harnesses share one actor per session.** Every `-substrate-harness` creates its actors in the one
+  `-substrate-atespace`, under the session UID. A turn an `ExecRequest.harness` override sends to a
+  second substrate harness finds the first harness's actor running and attaches to it, so it runs on
+  the first harness's template. This is from reading `runtime/substrate`; no test exercises it.
 - **The tier is mis-declared.** A stateful image declared without `,memory` is treated as
   `STATELESS_REPLAY`: a fork cold-creates the child and replays the journal into it, and a lost actor
   is recreated, both without the parent's RAM.
 
 What is enforced today: `runtime/substrate` refuses to cold-create an actor for a
-`REQUIRES_MEMORY_SNAPSHOT` session whose journal already has a committed turn (an `END` record). The
-Placer counts those turns and passes them in `api.SessionSpec.CommittedTurns`; `Create` returns
+`REQUIRES_MEMORY_SNAPSHOT` session whose journal already has a committed turn (an `END` record) on
+that harness. The Placer counts those turns and passes them in `api.SessionSpec.CommittedTurns`. It
+attributes a turn by the harness name its `EXECUTION_START` recorded: a turn an `ExecRequest.harness`
+override sent to another harness is not counted, a name that aliases the same Placer in the
+registry is, and so is a turn it cannot attribute (no recorded name, or a name this host does not
+serve), so an unknown history refuses rather than cold-creates. `Create` returns
 `substrate.ErrMemoryStateLost` (wrapping `api.ErrMemoryStateLost`, `FAILED_PRECONDITION` at the
 Sessions API), names the session, and creates nothing. An existing actor, running or suspended, is
 attached or resumed as before; a stateless session, or a memory-tier session with no committed turn,
@@ -96,6 +107,8 @@ Open questions, not implemented:
 TODO(spike): should the session store persist each session's substrate binding (atespace, template, declared tier) at its first placement, and refuse a turn when the daemon's configured binding differs?
 
 TODO(spike): should `runtime/substrate` verify the live harness's `Describe` resumability against the configured tier, given that `Placer.recheck` runs only for a `LiveDescriber` backend and does not compare tiers?
+
+TODO(spike): should a substrate actor name carry the harness as well as the session, or `Create` refuse to attach to an actor created from another template, so two `-substrate-harness` entries cannot share one session's actor?
 
 `examples/agentsuite-substrate` runs this end to end on kind: an AgentSuite agent rendered into an
 ActorTemplate and served with `-substrate-harness`, then suspended, resumed, replayed and forked.

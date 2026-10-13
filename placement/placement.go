@@ -113,6 +113,11 @@ type Placer struct {
 	// stateful fork's checkpoint taken through one harness's Placer also covers a turn another Placer
 	// runs on the same session (ExecRequest.harness can differ from the session's default).
 	sessions *sessionSet
+
+	// registry is the Registry this Placer was given to, or nil for a standalone Placer. It is set
+	// before the Placer is in use (NewRegistry, Registry.Add) and never changes, so Exec can resolve a
+	// recorded harness name to the Placer that ran it.
+	registry *Registry
 }
 
 // sessionSet is the per-session state a checkpoint coordinates on. It is keyed by session UID
@@ -313,8 +318,10 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		return api.Incarnation{}, err
 	}
 	// The backend needs the committed-turn count to tell a new session from one whose compute is gone:
-	// a memory-tier harness can be cold-started only for the former (api.ErrMemoryStateLost).
-	turns, err := committedTurns(log)
+	// a memory-tier harness can be cold-started only for the former (api.ErrMemoryStateLost). Only
+	// turns this Placer ran count: a turn ExecRequest.harness sent to another harness left no state in
+	// this one's compute.
+	turns, err := p.committedTurns(log, cfg.harness)
 	if err != nil {
 		return api.Incarnation{}, err
 	}
@@ -1204,20 +1211,51 @@ func appendLifecycleAt(log eventlog.Store, expectedLastSeq, fence int64, lc api.
 	return err
 }
 
-// committedTurns counts the turns the journal records as completed (END events), the inherited
-// prefix of a forked child included.
-func committedTurns(log eventlog.Store) (int, error) {
+// committedTurns counts the turns the journal records as completed (END events) that ran on this
+// Placer, the inherited prefix of a forked child included. current is the registry name this
+// execution runs under (WithHarness).
+//
+// A turn is attributed by the harness name its EXECUTION_START recorded (ranHere). A turn that cannot
+// be attributed (a legacy turn with no recorded name, or a name this host does not serve) is
+// counted: undercounting would let a memory-tier backend cold-create compute for a session whose
+// state it held, while overcounting can only refuse.
+func (p *Placer) committedTurns(log eventlog.Store, current string) (int, error) {
 	recs, err := log.Read(1)
 	if err != nil {
 		return 0, fmt.Errorf("placement: read journal: %w", err)
 	}
+	harnessOf := make(map[string]string) // execution ID -> recorded harness name
 	n := 0
 	for _, rec := range recs {
-		if rec.Event.Kind == api.EventEnd {
-			n++
+		ev := rec.Event
+		switch ev.Kind {
+		case api.EventExecutionStart:
+			if ev.ExecutionID != "" && ev.ExecutionStart != nil {
+				harnessOf[ev.ExecutionID] = ev.ExecutionStart.Harness
+			}
+		case api.EventEnd:
+			// A legacy END has no execution ID, so it maps to no name and is counted.
+			if p.ranHere(harnessOf[ev.ExecutionID], current) {
+				n++
+			}
 		}
 	}
 	return n, nil
+}
+
+// ranHere reports whether a turn recorded under the harness name recorded may have run on this
+// Placer, for an execution running under the name current. In a Registry the answer is whether
+// recorded resolves to this Placer, so a name that aliases it counts; a standalone Placer has only
+// the name it is running under to compare. Every case it cannot decide counts as this Placer's.
+func (p *Placer) ranHere(recorded, current string) bool {
+	if recorded == "" {
+		return true
+	}
+	if p.registry != nil {
+		q, ok := p.registry.lookup(recorded)
+		return !ok || q == p
+	}
+	return current == "" || recorded == current
 }
 
 // lastSuspendRef returns the SnapshotRef from the most recent SUSPEND event THIS session wrote, or —

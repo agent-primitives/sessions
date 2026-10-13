@@ -188,9 +188,10 @@ func (b *Backend) ref(name string) ActorRef { return ActorRef{Atespace: b.atespa
 //     starts it from the template's golden snapshot (a harness captured right after it became ready,
 //     before any session touched it) or, if that is not built yet, cold-boots the template spec.
 //     Either way the harness carries no session state, which is what the first placement needs.
-//     For a REQUIRES_MEMORY_SNAPSHOT harness whose session already has committed turns
-//     (SessionSpec.CommittedTurns), that is exactly wrong: the state those turns built lived only in
-//     the missing actor's RAM, so Create refuses with ErrMemoryStateLost and creates nothing.
+//     For a REQUIRES_MEMORY_SNAPSHOT harness whose session already has committed turns on this
+//     harness (SessionSpec.CommittedTurns), that is exactly wrong: the state those turns built
+//     lived only in the missing actor's RAM, so Create refuses with ErrMemoryStateLost and creates
+//     nothing.
 //   - RUNNING — attach. Return the actor's incarnation without touching it. This covers the second
 //     and later turns of a session, and the first turn of a FORKED CHILD, whose actor was created
 //     from the parent's snapshot and resumed before it was ever handed out.
@@ -239,9 +240,9 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	// snapshot or tag of it is reachable from here. A stateless harness rebuilds from the journal; a
 	// memory-tier one would silently continue the journal with none of the state it recorded.
 	if s.CommittedTurns > 0 && b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
-		return api.Incarnation{}, fmt.Errorf("%w: session %q has %d committed turn(s) but actor %s/%s does not exist, "+
+		return api.Incarnation{}, fmt.Errorf("%w: session %q has %d committed turn(s) on harness %q but actor %s/%s does not exist, "+
 			"so its in-RAM state cannot be reconstructed; no actor was created",
-			ErrMemoryStateLost, sessionUID, s.CommittedTurns, ref.Atespace, ref.Name)
+			ErrMemoryStateLost, sessionUID, s.CommittedTurns, b.descriptor.ID, ref.Atespace, ref.Name)
 	}
 
 	createFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "create_actor",

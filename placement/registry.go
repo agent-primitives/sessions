@@ -130,6 +130,7 @@ func NewRegistry(defaultHarness string, placers map[string]*Placer, opts ...Regi
 	for name, p := range placers {
 		p.guard = r.guard
 		p.sessions = r.sessions
+		p.registry = r
 		r.byName[name] = p
 		r.static[name] = true
 	}
@@ -175,6 +176,7 @@ func (r *Registry) Add(name string, p *Placer) error {
 		}
 		p.guard = r.guard
 		p.sessions = r.sessions
+		p.registry = r
 	}
 	r.byName[name] = p
 	return nil
@@ -239,6 +241,14 @@ func (r *Registry) Has(name string) bool {
 	_, served := r.byName[name]
 	_, unavailable := r.unavailable[name]
 	return served || unavailable
+}
+
+// lookup returns the Placer registered under name, without For's default for an empty name.
+func (r *Registry) lookup(name string) (*Placer, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p, ok := r.byName[name]
+	return p, ok
 }
 
 // For returns the Placer for a harness name. An empty name selects the default, which is how a

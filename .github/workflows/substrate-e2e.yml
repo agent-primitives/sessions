@@ -406,9 +406,11 @@ jobs:
 
       - name: Build the production-shaped images
         run: |
-          echo "CONTROL_IMG=$(cd integrations/substrate && ko build ./cmd/controlplane)" >> "$GITHUB_ENV"
-          echo "MODELSTUB_IMG=$(cd integrations/substrate && ko build ./cmd/modelstub)" >> "$GITHUB_ENV"
-          echo "ATEOM_GVISOR_IMG=$(cd _substrate && ko build ./cmd/ateom-gvisor)" >> "$GITHUB_ENV"
+          {
+            echo "CONTROL_IMG=$(cd integrations/substrate && ko build ./cmd/controlplane)"
+            echo "MODELSTUB_IMG=$(cd integrations/substrate && ko build ./cmd/modelstub)"
+            echo "ATEOM_GVISOR_IMG=$(cd _substrate && ko build ./cmd/ateom-gvisor)"
+          } >> "$GITHUB_ENV"
 
       - name: Deploy the chat gVisor WorkerPool
         run: |

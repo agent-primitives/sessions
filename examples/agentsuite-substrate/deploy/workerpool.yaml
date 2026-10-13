@@ -1,0 +1,26 @@
+# gVisor workers for the agent's actors. kind on an arm64 Mac has no KVM, so the micro-VM class is not
+# available there; this pool is the demo's only sandbox. One worker builds the template's golden
+# snapshot, the others host the session actor and its fork child.
+#
+# The workload label is what the rendered ActorTemplate's workerSelector matches (binding.json). It
+# is demo-scoped because worker eligibility matches labels across every pool in the cluster.
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: agentsuite-demo-gvisor
+  namespace: agentsuite-demo
+  labels:
+    workload: agentsuite-demo-gvisor
+spec:
+  replicas: 3
+  sandboxClasses:
+    - name: gvisor
+  workerImage: ATEOM_IMAGE
+  template:
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+      requests:
+        cpu: 100m
+        memory: 256Mi

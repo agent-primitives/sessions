@@ -1,0 +1,11 @@
+{
+  "apiVersion": "kmx.kaimahi.dev/v1alpha1",
+  "kind": "AgentSessionsBinding",
+  "target": {"platform": "kind", "id": "kind-agentsuite-demo"},
+  "placement": {"backend": "substrate"},
+  "atespace": "agentsuite-demo",
+  "sandbox": {"class": "gvisor", "configName": "gvisor-default"},
+  "snapshot": {"fidelity": "MEMORY", "storageLocation": "gs://ate-snapshots/agentsuite-demo/"},
+  "resources": {"cpu": "1", "memory": "512Mi"},
+  "workerSelector": {"matchLabels": {"workload": "agentsuite-demo-gvisor"}}
+}

@@ -67,6 +67,9 @@ The tier is declared, not discovered: placement gates on it before an actor exis
 `REQUIRES_MEMORY_SNAPSHOT` harness as stateless would let a fork rebuild it by replay and lose its
 RAM state, so declare what the harness's own `Describe` reports.
 
+`examples/agentsuite-substrate` runs this end to end on kind: an AgentSuite agent rendered into an
+ActorTemplate and served with `-substrate-harness`, then suspended, resumed, replayed and forked.
+
 ## SPI → substrate mapping
 
 | `api.Runtime` | substrate Control |

@@ -1,0 +1,67 @@
+# agentsessionsd, substrate build (integrations/substrate/cmd/agentsessionsd). It journals to an
+# emptyDir: the demo's journal lives as long as this pod.
+#
+# It reaches the ate-api with the pod's projected ServiceAccount token and verifies the ate-api's
+# serving certificate against the cluster's servicedns ClusterTrustBundle, and reaches the agent's
+# actors through the atenet-router. Model calls go to MODEL_BASE_URL, the in-cluster fake model by
+# default; the optional key comes from the agentsessionsd-model Secret, never from the manifest.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentsessionsd
+  namespace: agentsuite-demo
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: agentsessionsd}
+  template:
+    metadata:
+      labels: {app: agentsessionsd}
+    spec:
+      containers:
+        - name: agentsessionsd
+          image: DAEMON_IMAGE
+          args:
+            - -addr=:8080
+            - -journal=/data/agentsessions.db
+            - -model=MODEL_ID
+            - -model-base-url=MODEL_BASE_URL
+            - SUBSTRATE_HARNESS_FLAG
+            - -substrate-atespace=agentsuite-demo
+            - -ateapi-addr=api.ate-system.svc:443
+            - -ateapi-server-name=api.ate-system.svc
+            - -ateapi-ca-file=/var/run/ate/ca/ca.pem
+            - -ateapi-token-file=/var/run/ate/token/token
+            - -atenet-router=atenet-router.ate-system.svc:80
+          env:
+            - name: MODEL_API_KEY
+              valueFrom:
+                secretKeyRef: {name: agentsessionsd-model, key: api-key, optional: true}
+          ports: [{containerPort: 8080}]
+          readinessProbe:
+            tcpSocket: {port: 8080}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: ate-token, mountPath: /var/run/ate/token, readOnly: true}
+            - {name: ate-ca, mountPath: /var/run/ate/ca, readOnly: true}
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: ate-token
+          projected:
+            sources:
+              - serviceAccountToken: {audience: api.ate-system.svc, expirationSeconds: 3600, path: token}
+        - name: ate-ca
+          projected:
+            sources:
+              - clusterTrustBundle: {name: "servicedns.podcert.ate.dev:identity:primary-bundle", path: ca.pem}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentsessionsd
+  namespace: agentsuite-demo
+spec:
+  selector: {app: agentsessionsd}
+  ports: [{port: 8080, targetPort: 8080}]

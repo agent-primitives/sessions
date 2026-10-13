@@ -31,9 +31,12 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	# A real OpenAI-compatible provider.
 	MODEL_BASE_URL="${AGENTSUITE_MODEL_BASE_URL}"
 	MODEL_ID="${AGENTSUITE_MODEL:?set AGENTSUITE_MODEL with AGENTSUITE_MODEL_BASE_URL}"
+	# The harness requests the provider's model, not the fixture's.
+	HARNESS_MODEL="${MODEL_ID}"
 else
 	MODEL_BASE_URL="http://fakemodel.${NS}.svc:8080/v1"
 	MODEL_ID=triage-model
+	HARNESS_MODEL=""
 fi
 
 step "agent-substrate ${SUBSTRATE_REF:0:8} checkout in ${SUBSTRATE}"
@@ -45,14 +48,18 @@ if [[ "$(git -C "${SUBSTRATE}" rev-parse HEAD)" != "${SUBSTRATE_REF}" ]]; then
 	git -C "${SUBSTRATE}" checkout -q "${SUBSTRATE_REF}"
 fi
 
-if ! kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER_NAME}"; then
-	step "kind cluster ${KIND_CLUSTER_NAME} and ate-system (substrate's kind lane: create-kind-cluster.sh, then install-ate-kind.sh, which runs ate-setup)"
+if ! kind get clusters 2>/dev/null | grep -qx "${CLUSTER}"; then
+	step "kind cluster ${CLUSTER} and ate-system (substrate's kind lane: create-kind-cluster.sh, then install-ate-kind.sh, which runs ate-setup)"
 	(cd "${SUBSTRATE}" && hack/create-kind-cluster.sh)
+	node_id >"${OWNED}"
 	(cd "${SUBSTRATE}" && ATE_CREDENTIAL_PROVIDER='{"name":"k8s.io"}' ATE_INSTALL_ROLLOUT_TIMEOUT=10m \
 		hack/install-ate-kind.sh --deploy-ate-system)
 else
-	step "reusing kind cluster ${KIND_CLUSTER_NAME}"
-	kind export kubeconfig --name "${KIND_CLUSTER_NAME}" --kubeconfig "${KUBECONFIG}"
+	step "reusing kind cluster ${CLUSTER}"
+	if [[ "$(owned_id)" != "$(node_id)" ]]; then
+		echo "note: up.sh did not create kind cluster ${CLUSTER}, so down.sh will not delete it"
+	fi
+	kind export kubeconfig --name "${CLUSTER}" --kubeconfig "${KUBECONFIG}"
 	"${K[@]}" -n ate-system rollout status deploy/ate-api-server --timeout=120s
 fi
 
@@ -77,7 +84,7 @@ echo "harness image: ${HARNESS_IMAGE}"
 
 step "render the composition: ActorTemplate + harness registration"
 (cd "${HERE}" && go run ./cmd/emit render -suite suite -agent "${AGENT}" -platform "linux/${ARCH}" \
-	-binding binding.json -image "${HARNESS_IMAGE}" -out "${WORK}/render")
+	-binding binding.json -image "${HARNESS_IMAGE}" -model "${HARNESS_MODEL}" -out "${WORK}/render")
 TEMPLATE="$(cat "${WORK}/render/template-name")"
 cat "${WORK}/render/harness-registration.json"
 
@@ -115,10 +122,16 @@ FAKEMODEL_IMAGE="$(cd "${HERE}" && ko build --base-import-paths ./cmd/fakemodel)
 DAEMON_IMAGE="$(cd "${ROOT}/integrations/substrate" && ko build --base-import-paths ./cmd/agentsessionsd)"
 # MODEL_ID and MODEL_BASE_URL were set and validated at the top, before any cluster change.
 if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
-	# Replace the key. It reaches the Secret over stdin, never argv or a file.
-	"${K[@]}" -n "${NS}" delete secret agentsessionsd-model --ignore-not-found
 	if [[ -n "${MODEL_API_KEY:-}" ]]; then
-		printf '%s' "${MODEL_API_KEY}" | "${K[@]}" -n "${NS}" create secret generic agentsessionsd-model --from-file=api-key=/dev/stdin
+		# Replace the key in place: render the Secret client-side and apply it, so a failed apply
+		# leaves the stored key as it was. The key reaches kubectl over stdin, never argv or a file.
+		# Server-side apply keeps no last-applied annotation, so the key is not copied into metadata.
+		printf '%s' "${MODEL_API_KEY}" |
+			"${K[@]}" -n "${NS}" create secret generic agentsessionsd-model --from-file=api-key=/dev/stdin --dry-run=client -o yaml |
+			"${K[@]}" -n "${NS}" apply --server-side --force-conflicts --field-manager=agentsuite-demo -f -
+	else
+		# An endpoint that takes no key: drop a stored one, so it is not sent there.
+		"${K[@]}" -n "${NS}" delete secret agentsessionsd-model --ignore-not-found
 	fi
 else
 	# Drop any key a previous real-provider run left, so the fake model never receives it.

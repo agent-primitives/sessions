@@ -57,6 +57,28 @@ func TestLoadPinsInstructions(t *testing.T) {
 	}
 }
 
+// The harness requests the override when one is set, and the manifest's model otherwise.
+func TestWithModel(t *testing.T) {
+	h, err := Load(stage(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.WithModel("").Model; got != "triage-model" {
+		t.Fatalf("no override: model = %q, want the manifest's triage-model", got)
+	}
+	o := h.WithModel("gpt-x")
+	if o.Model != "gpt-x" || h.Model != "triage-model" {
+		t.Fatalf("override: model = %q (original %q), want gpt-x and the original unchanged", o.Model, h.Model)
+	}
+	sink := &recordingSink{}
+	if err := o.Run(t.Context(), &api.Start{Inputs: []api.Message{*api.TextMessage("user", "hi")}}, sink); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.requests) != 1 || sink.requests[0].Model != "gpt-x" {
+		t.Fatalf("requests = %+v, want one for gpt-x", sink.requests)
+	}
+}
+
 // Every model call goes through the host: the instructions as the system message, the recorded
 // conversation in order, then this turn's inputs. Events other than input and output are not
 // conversation.

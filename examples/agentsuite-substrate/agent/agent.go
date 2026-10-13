@@ -16,6 +16,11 @@ import (
 	"github.com/aramase/agentsessions/api"
 )
 
+// ModelEnv names the environment variable that overrides the model the agent's manifest declares.
+// The ActorTemplate sets it when the host is pointed at a real provider, which serves its own model
+// IDs rather than the fixture's.
+const ModelEnv = "AGENTSUITE_MODEL"
+
 // Harness runs one agent. It keeps nothing in memory between turns: each turn's context is the
 // instructions, the recorded history, and the new inputs, so a fresh actor resumes it by replay.
 type Harness struct {
@@ -46,6 +51,15 @@ func Load(dir string) (Harness, error) {
 		return Harness{}, fmt.Errorf("instructions digest %s does not match the agent manifest's %s", got, a.Instructions.Digest)
 	}
 	return Harness{ID: a.ID, Model: a.Model.Model, Instructions: string(instructions)}, nil
+}
+
+// WithModel returns h requesting model instead of the manifest's model. An empty model keeps the
+// manifest's.
+func (h Harness) WithModel(model string) Harness {
+	if model != "" {
+		h.Model = model
+	}
+	return h
 }
 
 // Describe reports the agent id and a version derived from the instructions, so a replay against a

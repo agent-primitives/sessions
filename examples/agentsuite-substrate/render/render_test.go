@@ -1,6 +1,8 @@
 package render
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,25 +12,34 @@ import (
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/examples/agentsuite-substrate/agent"
 )
 
 const digestA = "sha256:" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func TestTemplateNameIsContentAddressed(t *testing.T) {
-	base := TemplateName("support-desk", "triage", digestA, "sha256:b")
+	base := TemplateName("support-desk", "triage", digestA, "sha256:b", "")
 	if !strings.HasPrefix(base, "support-desk-triage-") || len(base) != len("support-desk-triage-")+8 {
 		t.Fatalf("name = %q", base)
 	}
-	if TemplateName("support-desk", "triage", digestA, "sha256:b") != base {
+	if TemplateName("support-desk", "triage", digestA, "sha256:b", "") != base {
 		t.Fatal("same inputs must give the same name")
 	}
-	if TemplateName("support-desk", "triage", digestA, "sha256:c") == base {
+	if TemplateName("support-desk", "triage", digestA, "sha256:c", "") == base {
 		t.Fatal("another binding must give another template")
 	}
-	if TemplateName("support-desk", "triage", "sha256:"+strings.Repeat("c", 64), "sha256:b") == base {
+	if TemplateName("support-desk", "triage", "sha256:"+strings.Repeat("c", 64), "sha256:b", "") == base {
 		t.Fatal("another image must give another template")
 	}
-	long := TemplateName(strings.Repeat("Suite_", 20), strings.Repeat("agent.", 20), digestA, "sha256:b")
+	// No model keeps the original formula, so an existing template keeps its name.
+	sum := sha256.Sum256([]byte(digestA + "\n" + "sha256:b"))
+	if want := "support-desk-triage-" + hex.EncodeToString(sum[:])[:8]; base != want {
+		t.Fatalf("name = %q, want %q", base, want)
+	}
+	if TemplateName("support-desk", "triage", digestA, "sha256:b", "gpt-x") == base {
+		t.Fatal("a model override must give another template")
+	}
+	long := TemplateName(strings.Repeat("Suite_", 20), strings.Repeat("agent.", 20), digestA, "sha256:b", "")
 	if len(long) > 63 || !dnsLabel.MatchString(long) || long[len(long)-8:] != base[len(base)-8:] {
 		t.Fatalf("long name = %q (%d chars): want a DNS label of at most 63 that keeps hash8", long, len(long))
 	}
@@ -44,12 +55,12 @@ func TestRenderMapsTheComposition(t *testing.T) {
 		t.Fatal(err)
 	}
 	image := "localhost:5001/agentsuite-harness@" + digestA
-	out, err := Render(comp, image, b)
+	out, err := Render(comp, image, b, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	tmpl := out.Template
-	name := TemplateName("support-desk", "triage", digestA, b.Digest())
+	name := TemplateName("support-desk", "triage", digestA, b.Digest(), "")
 	if tmpl.GetMetadata().GetName() != name || tmpl.GetMetadata().GetAtespace() != "agentsuite-demo" {
 		t.Fatalf("metadata = %v, want agentsuite-demo/%s", tmpl.GetMetadata(), name)
 	}
@@ -60,6 +71,9 @@ func TestRenderMapsTheComposition(t *testing.T) {
 	env := map[string]string{}
 	for _, e := range c.GetEnv() {
 		env[e.GetName()] = e.GetValue()
+	}
+	if _, ok := env[agent.ModelEnv]; ok {
+		t.Fatalf("env = %v: without a model override the harness must keep the agent's model", env)
 	}
 	if env["HARNESS_ADDR"] != ":80" || env["AGENT_DIR"] != AgentDir {
 		t.Fatalf("env = %v, want harnesswire on :80", env)
@@ -87,8 +101,40 @@ func TestRenderMapsTheComposition(t *testing.T) {
 	if out.DaemonFlag != "triage=agentsuite-demo/"+name {
 		t.Fatalf("daemon flag = %q", out.DaemonFlag)
 	}
-	if _, err := Render(comp, "localhost:5001/agentsuite-harness:latest", b); err == nil {
+	if _, err := Render(comp, "localhost:5001/agentsuite-harness:latest", b, ""); err == nil {
 		t.Fatal("a tag-only image must be refused: substrate requires a digest-pinned reference")
+	}
+}
+
+// A real provider serves its own model IDs, not the fixture's. The override reaches the harness
+// through the template's env, and the template name changes with it, so a rerun with another model
+// creates another template instead of reusing one whose harness requests the old model.
+func TestRenderOverridesTheModel(t *testing.T) {
+	comp, err := Load("../suite", "triage", "linux/arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := LoadBinding("../binding.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := "localhost:5001/agentsuite-harness@" + digestA
+	out, err := Render(comp, image, b, "gpt-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range out.Template.GetContainers()[0].GetEnv() {
+		if e.GetName() == agent.ModelEnv {
+			got = append(got, e.GetValue())
+		}
+	}
+	if len(got) != 1 || got[0] != "gpt-x" {
+		t.Fatalf("%s in the template env = %v, want [gpt-x]", agent.ModelEnv, got)
+	}
+	name := TemplateName("support-desk", "triage", digestA, b.Digest(), "gpt-x")
+	if out.Template.GetMetadata().GetName() != name || out.DaemonFlag != "triage=agentsuite-demo/"+name {
+		t.Fatalf("template %q, daemon flag %q: want both on %s", out.Template.GetMetadata().GetName(), out.DaemonFlag, name)
 	}
 }
 

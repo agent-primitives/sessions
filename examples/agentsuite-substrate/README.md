@@ -9,8 +9,11 @@ credentials.
 cd examples/agentsuite-substrate
 ./up.sh     # cluster, ate-system, images, template, agentsessionsd (2.5 minutes in the recorded run)
 ./demo.sh   # the demo itself (under a minute of wall clock; about 5 minutes narrated)
-./down.sh   # delete the cluster
+./down.sh   # delete the cluster, only if up.sh created it
 ```
+
+The recipe is for a disposable kind cluster you trust: nothing in it authenticates callers (see
+[the gaps](#gaps-this-poc-works-around)).
 
 ## What the demo shows
 
@@ -47,10 +50,10 @@ on an arm64 Mac needs an arm64 image.
 
 | ActorTemplate field | Value |
 |---|---|
-| `metadata.name` | `<suite>-<agent>-<hash8>`, where `hash8` is the first 8 hex of `sha256(image digest + "\n" + binding digest)`. The binding digest is the SHA-256 of its JCS form. The name is a DNS label of at most 63 characters, and only suite and agent are truncated. |
+| `metadata.name` | `<suite>-<agent>-<hash8>`, where `hash8` is the first 8 hex of `sha256(image digest + "\n" + binding digest)`, with `"\n" + model` appended when `emit render -model` overrides the agent's model. The binding digest is the SHA-256 of its JCS form. The name is a DNS label of at most 63 characters, and only suite and agent are truncated. |
 | `metadata.atespace` | `binding.atespace` |
 | `containers[0].image` | The harness image, which must be digest-pinned. |
-| `containers[0].env` | `HARNESS_ADDR=:80`, `HARNESS_READYZ=:8081`, `AGENT_DIR=/agent`. No model credentials: they stay with the host. |
+| `containers[0].env` | `HARNESS_ADDR=:80`, `HARNESS_READYZ=:8081`, `AGENT_DIR=/agent`, and `AGENTSUITE_MODEL` when `-model` is given. No model credentials: they stay with the host. |
 | `containers[0].wakeupProbe` | `GET /readyz` on 8081 |
 | `containers[0].securityContext` | `capabilities: {}`, adding none |
 | `containers[0].resources` | `binding.resources` |
@@ -71,6 +74,12 @@ the registration is applied as `-substrate-harness=triage=<atespace>/<template>`
   running. The first `up.sh` on a machine also pulls the ate-system images, so it takes longer than
   the 2.5 minutes recorded.
 - `up.sh` writes its own kubeconfig in the work directory and never changes your current context.
+- The cluster is `agentsuite-demo`; set `AGENTSUITE_DEMO_CLUSTER` to use another name. The scripts
+  ignore an exported `KIND_CLUSTER_NAME` (the conformance recipe in
+  [docs/substrate-conformance.md](../../docs/substrate-conformance.md) sets one for its own cluster).
+  `up.sh` reuses a cluster that already has the name; `down.sh` deletes it only if `up.sh` created
+  it, which it records in the work directory, and otherwise refuses and prints the `kind delete`
+  command.
 
 ## A real model
 
@@ -80,12 +89,19 @@ AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 ./demo.sh
 ```
 
 `up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL` before it changes the cluster,
-so a misconfigured rerun leaves an existing key in place. It puts the key in the
-`agentsessionsd-model` Secret through stdin, so it never appears in argv or a file, and points
-`agentsessionsd` at the endpoint. `demo.sh` then skips the checks that depend on the fake's replies
-and counter. The replay still fails if the controller sees a model call. This path was run against
-the in-cluster fake standing in as the endpoint, with a dummy key; it has not been run against a
-hosted provider. A later fake-provider `up.sh` deletes the Secret, so the fake never receives a key.
+so a misconfigured rerun leaves an existing key in place. It applies the key to the
+`agentsessionsd-model` Secret through stdin, so it never appears in argv or a file, and a failed
+apply leaves the stored key unchanged. It points `agentsessionsd` at the endpoint, and the harness
+requests `AGENTSUITE_MODEL` instead of the fixture's `triage-model`: the ActorTemplate carries it as
+an env var, so each model gets its own template. `demo.sh` then skips the checks that depend on the
+fake's replies and counter. The replay still fails if the controller sees a model call.
+
+The Secret follows the latest `up.sh`. A real-provider `up.sh` without `MODEL_API_KEY` deletes any
+stored key, for endpoints that take none, so export `MODEL_API_KEY` again on every real-provider
+run. A fake-provider `up.sh` deletes it too, so the fake never receives a key.
+
+This path was run against the in-cluster fake standing in as the endpoint, with a dummy key; it has
+not been run against a hosted provider.
 
 ## Gaps this PoC works around
 
@@ -113,6 +129,21 @@ hosted provider. A later fake-provider `up.sh` deletes the Secret, so the fake n
   - host authentication on the harness: a per-session credential the host presents and the harness
     checks. The router's allowlist lets any listed client reach any actor, so it cannot keep one
     session's host from driving another session's actor.
+- **Nothing authenticates callers of the Sessions API either.** The `agentsessionsd` ClusterIP
+  Service serves every Sessions RPC over plaintext gRPC with no credentials, as
+  [docs/security.md](../../docs/security.md#what-is-not-protected) says of every path in the
+  reference implementation. Any pod that can reach the Service can read, drive, fork and suspend
+  every session, and with a real provider spend its model budget. `demo.sh` reaches it through a
+  port-forward. Run this only on a disposable cluster whose workloads you trust; what would close it
+  is authentication and authorization on the Sessions API, which the repo does not have yet.
+- **The substrate binding is configuration, not session state.** The `-substrate-atespace` and
+  template come from the daemon's flags at each start, and the session store does not record them.
+  Changing them while sessions exist strands those sessions' actors in the old atespace. The tier is
+  declared in the flag (`,memory` for `REQUIRES_MEMORY_SNAPSHOT`) and not checked against the image's
+  `Describe`, so a stateful image declared without it loses its RAM state on fork. This demo's
+  harness is stateless and declared so. A memory-tier session with committed turns whose actor is
+  gone is refused (`FAILED_PRECONDITION`) rather than given a fresh actor. See
+  [Substrate placement binding](../../docs/substrate-conformance.md#substrate-placement-binding).
 - **The journal lives in an emptyDir.** It lasts as long as the `agentsessionsd` pod.
 - **The AgentSessionsBinding is a draft.** kaimahi does not define the kind yet. `binding.json`
   follows the draft field list, and `snapshot.fidelity` replaces the draft's `onCommit`, which

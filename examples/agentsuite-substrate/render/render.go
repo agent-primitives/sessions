@@ -4,8 +4,8 @@
 //
 // The field mapping follows the AgentSuite to ActorTemplate design (v0): the template name is
 // content-addressed, <suite>-<agent>-<hash8> with hash8 the first 8 hex of
-// sha256(image digest + "\n" + binding digest), so the same image under another binding is another
-// template; the harness speaks harnesswire on port 80 with a /readyz wakeup probe on 8081; the
+// sha256(image digest + "\n" + binding digest), with "\n" + model appended when the harness's model
+// is overridden, so the same image under another binding or model is another template; the harness speaks harnesswire on port 80 with a /readyz wakeup probe on 8081; the
 // sandbox, snapshot, resources and worker selector come from the binding. Model credentials are host
 // configuration and never rendered.
 package render
@@ -26,6 +26,7 @@ import (
 	"github.com/kaimahi-agents/kaimahi/agentsuite"
 
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/examples/agentsuite-substrate/agent"
 )
 
 // HarnessPort is the port the harness serves harnesswire on; the atenet-router forwards only to 80.
@@ -189,10 +190,15 @@ var (
 )
 
 // TemplateName is <suite>-<agent>-<hash8>: hash8 is the first 8 hex of
-// sha256(imageDigest + "\n" + bindingDigest). The result is a DNS label of at most 63 characters;
+// sha256(imageDigest + "\n" + bindingDigest), with "\n" + model appended when model is not empty
+// (the template then carries a model override in its env). The result is a DNS label of at most 63 characters;
 // suite and agent are lowercased, sanitized and truncated to fit, never hash8.
-func TemplateName(suite, agent, imageDigest, bindingDigest string) string {
-	sum := sha256.Sum256([]byte(imageDigest + "\n" + bindingDigest))
+func TemplateName(suite, agent, imageDigest, bindingDigest, model string) string {
+	content := imageDigest + "\n" + bindingDigest
+	if model != "" {
+		content += "\n" + model
+	}
+	sum := sha256.Sum256([]byte(content))
 	hash8 := hex.EncodeToString(sum[:])[:8]
 	clean := func(s string) string {
 		return strings.Trim(notLabel.ReplaceAllString(strings.ToLower(s), "-"), "-")
@@ -222,8 +228,10 @@ type Output struct {
 }
 
 // Render maps a composition, its digest-pinned harness image and a binding onto an ActorTemplate and
-// a harness registration. The harness registration's name is the agent id.
-func Render(c *Composition, image string, b *Binding) (*Output, error) {
+// a harness registration. The harness registration's name is the agent id. A non-empty model is the
+// provider model the harness requests in place of the agent's own: it is set in the template's env
+// (AGENTSUITE_MODEL) and folded into the template name.
+func Render(c *Composition, image string, b *Binding, model string) (*Output, error) {
 	m := pinnedImage.FindStringSubmatch(image)
 	if m == nil {
 		return nil, fmt.Errorf("image %q: substrate requires a digest-pinned reference (name@sha256:<64 hex>)", image)
@@ -236,7 +244,7 @@ func Render(c *Composition, image string, b *Binding) (*Output, error) {
 	if err != nil {
 		return nil, err
 	}
-	name := TemplateName(c.Suite, c.Agent.ID, m[1], b.Digest())
+	name := TemplateName(c.Suite, c.Agent.ID, m[1], b.Digest(), model)
 	container := &atepb.Container{
 		Name:  "harness",
 		Image: image,
@@ -251,6 +259,9 @@ func Render(c *Composition, image string, b *Binding) (*Output, error) {
 		},
 		// Add no capabilities: the harness needs none, and the template is the only place to say so.
 		SecurityContext: &atepb.SecurityContext{Capabilities: &atepb.Capabilities{}},
+	}
+	if model != "" {
+		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.ModelEnv, Value: model})
 	}
 	var limits []*atepb.Limits
 	if b.Resources.CPU != "" {

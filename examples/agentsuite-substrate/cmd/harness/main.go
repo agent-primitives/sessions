@@ -32,6 +32,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("harness: load agent: %v", err)
 	}
+	h = h.WithModel(os.Getenv(agent.ModelEnv))
 	addr, readyzAddr := env("HARNESS_ADDR", ":80"), env("HARNESS_READYZ", ":8081")
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -55,7 +56,7 @@ func main() {
 		srv.GracefulStop()
 		_ = readyz.Close()
 	}()
-	log.Printf("harness: agent %q serving harnesswire on %s, readyz on %s", h.ID, addr, readyzAddr)
+	log.Printf("harness: agent %q (model %q) serving harnesswire on %s, readyz on %s", h.ID, h.Model, addr, readyzAddr)
 	if err := srv.Serve(lis); err != nil {
 		log.Fatalf("harness: serve: %v", err)
 	}

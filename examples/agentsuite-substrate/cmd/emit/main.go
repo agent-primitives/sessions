@@ -2,7 +2,7 @@
 //
 //	emit bundle -suite DIR -agent ID -platform os/arch -out DIR
 //	    stage the agent manifest and instructions for the harness image (the image's agent layer)
-//	emit render -suite DIR -agent ID -platform os/arch -binding FILE -image REF@sha256:... -out DIR
+//	emit render -suite DIR -agent ID -platform os/arch -binding FILE -image REF@sha256:... [-model ID] -out DIR
 //	    write actortemplate.json, harness-registration.json, agentsessionsd.args and template-name
 package main
 
@@ -75,6 +75,7 @@ func renderCmd(args []string) error {
 	fs, c := flags("render")
 	binding := fs.String("binding", "binding.json", "AgentSessionsBinding file")
 	image := fs.String("image", "", "digest-pinned harness image, name@sha256:...")
+	model := fs.String("model", "", "provider model the harness requests instead of the agent's own; empty keeps the agent's")
 	_ = fs.Parse(args)
 	comp, err := render.Load(c.suite, c.agent, c.platform)
 	if err != nil {
@@ -84,7 +85,7 @@ func renderCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	out, err := render.Render(comp, *image, b)
+	out, err := render.Render(comp, *image, b, *model)
 	if err != nil {
 		return err
 	}

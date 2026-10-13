@@ -567,25 +567,32 @@ func TestForkCleanupSurvivesACancelledCaller(t *testing.T) {
 	}
 }
 
-// A REQUIRES_MEMORY_SNAPSHOT session keeps state only in its actor's RAM. Once it has a committed
+// A REQUIRES_MEMORY_SNAPSHOT session keeps state only in its actor's RAM. Once it has a started
 // turn, an actor that no longer exists cannot be replaced by a fresh one from the template: that would
 // continue the journal with a harness that remembers none of it. Create must refuse with
-// ErrMemoryStateLost and create nothing. Every other combination keeps the usual placement.
+// ErrMemoryStateLost and create nothing. It counts the turns only after GetActor reports the actor
+// missing ("count" follows "get"), so a turn journaled while the call was being placed is seen, and
+// it fails closed when the count fails. Every other combination keeps the usual placement, without
+// reading the journal.
 func TestCreateRefusesToColdCreateAMemorySessionWithTurns(t *testing.T) {
 	memory := func(m *mockControl) *substrate.Backend { return newMemoryBackend(m) }
 	stateless := func(m *mockControl) *substrate.Backend { return newBackend(m) }
+	errCount := errors.New("journal unreadable")
 	for _, tc := range []struct {
 		name      string
 		backend   func(*mockControl) *substrate.Backend
 		turns     int
+		countErr  error
 		existing  substrate.ActorStatus // StatusUnknown: the actor does not exist
 		wantCalls []string
-		wantLost  bool
+		wantErr   error
 	}{
 		{name: "memory tier with turns and no actor is refused", backend: memory, turns: 2,
-			wantCalls: []string{"get:sess-x"}, wantLost: true},
+			wantCalls: []string{"get:sess-x", "count"}, wantErr: substrate.ErrMemoryStateLost},
+		{name: "memory tier whose count fails is refused", backend: memory, countErr: errCount,
+			wantCalls: []string{"get:sess-x", "count"}, wantErr: errCount},
 		{name: "memory tier with zero turns creates", backend: memory,
-			wantCalls: []string{"get:sess-x", "create:sess-x", "resume:sess-x"}},
+			wantCalls: []string{"get:sess-x", "count", "create:sess-x", "resume:sess-x"}},
 		{name: "stateless tier with turns creates", backend: stateless, turns: 2,
 			wantCalls: []string{"get:sess-x", "create:sess-x", "resume:sess-x"}},
 		{name: "memory tier with turns attaches to a running actor", backend: memory, turns: 2, existing: substrate.StatusRunning,
@@ -598,11 +605,15 @@ func TestCreateRefusesToColdCreateAMemorySessionWithTurns(t *testing.T) {
 			if tc.existing != substrate.StatusUnknown {
 				m.exists("sess-x", tc.existing)
 			}
-			inc, err := tc.backend(m).Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x", CommittedTurns: tc.turns})
+			count := func() (int, error) {
+				m.calls = append(m.calls, "count")
+				return tc.turns, tc.countErr
+			}
+			inc, err := tc.backend(m).Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x", StartedTurns: count})
 			if !reflect.DeepEqual(m.calls, tc.wantCalls) {
 				t.Errorf("calls=%v want %v", m.calls, tc.wantCalls)
 			}
-			if !tc.wantLost {
+			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("Create: %v", err)
 				}
@@ -611,18 +622,35 @@ func TestCreateRefusesToColdCreateAMemorySessionWithTurns(t *testing.T) {
 				}
 				return
 			}
-			if !errors.Is(err, substrate.ErrMemoryStateLost) || !errors.Is(err, api.ErrMemoryStateLost) {
-				t.Fatalf("Create error = %v, want ErrMemoryStateLost wrapping api.ErrMemoryStateLost", err)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Create error = %v, want %v", err, tc.wantErr)
 			}
-			for _, want := range []string{`"sess-x"`, "cannot be reconstructed"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q does not contain %q", err, want)
+			if tc.wantErr == substrate.ErrMemoryStateLost {
+				if !errors.Is(err, api.ErrMemoryStateLost) {
+					t.Fatalf("Create error = %v, want it to wrap api.ErrMemoryStateLost", err)
+				}
+				for _, want := range []string{`"sess-x"`, "2 started turn(s)", "cannot be reconstructed"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q does not contain %q", err, want)
+					}
 				}
 			}
 			if _, ok := m.actors["sess-x"]; ok {
 				t.Error("refused Create left an actor behind")
 			}
 		})
+	}
+}
+
+// A caller that leaves StartedTurns nil declares a session with no started turns, so a memory-tier
+// session's actor is created as on a new session.
+func TestCreateWithNoTurnCountCreates(t *testing.T) {
+	m := &mockControl{info: running("worker-a")}
+	if _, err := newMemoryBackend(m).Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if want := []string{"get:sess-x", "create:sess-x", "resume:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+		t.Errorf("calls=%v want %v", m.calls, want)
 	}
 }
 

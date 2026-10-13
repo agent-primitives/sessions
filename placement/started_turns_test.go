@@ -13,27 +13,32 @@ import (
 	"github.com/aramase/agentsessions/runtime/local"
 )
 
-// specRecorder records the SessionSpec of every Create it forwards.
+// specRecorder asks every Create for the started-turn count, as a memory-tier backend does, and
+// records it. A count that fails fails the Create, which then creates nothing.
 type specRecorder struct {
 	*local.Backend
-	specs []api.SessionSpec
+	counts []int
 }
 
 func (b *specRecorder) Create(ctx context.Context, s *api.SessionSpec) (api.Incarnation, error) {
-	b.specs = append(b.specs, *s)
+	n, err := s.StartedTurns()
+	if err != nil {
+		return api.Incarnation{}, err
+	}
+	b.counts = append(b.counts, n)
 	return b.Backend.Create(ctx, s)
 }
 
-// failingRead fails every journal read, so the committed-turn count cannot be taken.
+// failingRead fails every journal read, so the started-turn count cannot be taken.
 type failingRead struct{ eventlog.Store }
 
 var errRead = errors.New("read failed")
 
 func (failingRead) Read(int64) ([]eventlog.Record, error) { return nil, errRead }
 
-// The backend tells a new session from one whose compute is gone by the committed-turn count the
-// Placer passes to Create: 0 before the first turn, then one more per completed turn.
-func TestExecPassesCommittedTurnsToCreate(t *testing.T) {
+// The backend tells a new session from one whose compute is gone by the started-turn count the
+// Placer offers Create: 0 before the first turn, then one more per turn.
+func TestExecOffersStartedTurnsToCreate(t *testing.T) {
 	inner := local.New(echoagent.Harness{})
 	t.Cleanup(func() { _ = inner.Close() })
 	b := &specRecorder{Backend: inner}
@@ -48,17 +53,13 @@ func TestExecPassesCommittedTurnsToCreate(t *testing.T) {
 			t.Fatalf("turn %d: %v", i+1, err)
 		}
 	}
-	var got []int
-	for _, s := range b.specs {
-		got = append(got, s.CommittedTurns)
-	}
-	if want := []int{0, 1, 2}; !slices.Equal(got, want) {
-		t.Fatalf("CommittedTurns per Create = %v, want %v", got, want)
+	if got, want := b.counts, []int{0, 1, 2}; !slices.Equal(got, want) {
+		t.Fatalf("StartedTurns per Create = %v, want %v", got, want)
 	}
 }
 
 // A journal the Placer cannot read gives no turn count, so it must not guess zero (which would let a
-// memory-tier session be cold-created): Exec fails before Create.
+// memory-tier session be cold-created): the count fails, and so does Exec, with nothing created.
 func TestExecRefusesWhenTheJournalCannotBeRead(t *testing.T) {
 	inner := local.New(echoagent.Harness{})
 	t.Cleanup(func() { _ = inner.Close() })
@@ -69,19 +70,13 @@ func TestExecRefusesWhenTheJournalCannotBeRead(t *testing.T) {
 	if !errors.Is(err, errRead) {
 		t.Fatalf("Exec error = %v, want the read error", err)
 	}
-	if len(b.specs) != 0 {
-		t.Fatalf("Create was called %d times after a failed journal read", len(b.specs))
+	if len(b.counts) != 0 {
+		t.Fatalf("Create went ahead %d times after a failed journal read", len(b.counts))
 	}
 }
 
-// createCounts returns the CommittedTurns of every Create b has seen, in order.
-func createCounts(b *specRecorder) []int {
-	var got []int
-	for _, s := range b.specs {
-		got = append(got, s.CommittedTurns)
-	}
-	return got
-}
+// createCounts returns the StartedTurns of every Create b has seen, in order.
+func createCounts(b *specRecorder) []int { return b.counts }
 
 // execAs runs one turn on p, recorded under the harness name, the way session.Service routes it.
 func execAs(t *testing.T, p *placement.Placer, log eventlog.Store, name string) {
@@ -100,7 +95,7 @@ func execAs(t *testing.T, p *placement.Placer, log eventlog.Store, name string) 
 // never ran for the session would be refused as if it had lost state. A name that aliases this
 // Placer in the registry ran on the same compute, so its turns do count, and so does a turn recorded
 // under a name this host does not serve, since nothing proves it ran elsewhere.
-func TestCommittedTurnsCountOnlyTurnsThisPlacerRan(t *testing.T) {
+func TestStartedTurnsCountOnlyTurnsThisPlacerRan(t *testing.T) {
 	newBackend := func() *specRecorder {
 		inner := local.New(echoagent.Harness{})
 		t.Cleanup(func() { _ = inner.Close() })
@@ -121,17 +116,17 @@ func TestCommittedTurnsCountOnlyTurnsThisPlacerRan(t *testing.T) {
 	execAs(t, mem, log, "elsewhere") // mem: 2 before, 3 after
 	execAs(t, mem, log, "mem")       // mem: 3 before
 	if got, want := createCounts(memBackend), []int{0, 1, 2, 3}; !slices.Equal(got, want) {
-		t.Errorf("CommittedTurns per Create on mem = %v, want %v", got, want)
+		t.Errorf("StartedTurns per Create on mem = %v, want %v", got, want)
 	}
 	// other's own two turns, not mem's or the alias's: the unknown name counts for every Placer.
 	if got, want := createCounts(otherBackend), []int{0, 1}; !slices.Equal(got, want) {
-		t.Errorf("CommittedTurns per Create on other = %v, want %v", got, want)
+		t.Errorf("StartedTurns per Create on other = %v, want %v", got, want)
 	}
 }
 
 // A Placer outside a registry knows only the name it is running under, so it counts the turns
 // recorded under that name; run with no name, it cannot attribute anything and counts every turn.
-func TestCommittedTurnsOnAStandalonePlacer(t *testing.T) {
+func TestStartedTurnsOnAStandalonePlacer(t *testing.T) {
 	inner := local.New(echoagent.Harness{})
 	t.Cleanup(func() { _ = inner.Close() })
 	b := &specRecorder{Backend: inner}
@@ -141,18 +136,20 @@ func TestCommittedTurnsOnAStandalonePlacer(t *testing.T) {
 	execAs(t, p, log, "b")
 	execAs(t, p, log, "a")
 	if got, want := createCounts(b), []int{0, 0, 1}; !slices.Equal(got, want) {
-		t.Errorf("CommittedTurns per Create = %v, want %v", got, want)
+		t.Errorf("StartedTurns per Create = %v, want %v", got, want)
 	}
-	if n, err := p.CommittedTurns(log, ""); err != nil || n != 3 {
-		t.Errorf("CommittedTurns with no name = %d, %v; want 3", n, err)
+	if n, err := p.StartedTurns(log, ""); err != nil || n != 3 {
+		t.Errorf("StartedTurns with no name = %d, %v; want 3", n, err)
 	}
 }
 
-// A turn whose EXECUTION_START recorded no harness name (written before names were recorded), and a
-// legacy END with no execution ID at all, cannot be attributed, so they count for every Placer:
-// undercounting would let a memory-tier harness be cold-created over the state it held. A turn
-// recorded under another harness the registry serves does not count.
-func TestCommittedTurnsCountsTurnsWithNoRecordedHarness(t *testing.T) {
+// Every started turn counts, not only completed ones: a turn that ended in ERROR or was interrupted
+// (no END) may have changed the harness's RAM state. A turn whose EXECUTION_START recorded no harness
+// name (written before names were recorded), and a legacy turn with no execution ID at all, cannot be
+// attributed, so they count for every Placer: undercounting would let a memory-tier harness be
+// cold-created over the state it held. A turn recorded under another harness the registry serves
+// does not count.
+func TestStartedTurnsCountsTurnsWithNoRecordedHarness(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		events []api.Event
@@ -161,6 +158,26 @@ func TestCommittedTurnsCountsTurnsWithNoRecordedHarness(t *testing.T) {
 		{name: "legacy END with no execution ID", events: []api.Event{
 			{Kind: api.EventEnd},
 		}, want: 1},
+		{name: "legacy turns: completed, failed, then an open tail", events: []api.Event{
+			{Kind: api.EventInput}, {Kind: api.EventOutput}, {Kind: api.EventEnd},
+			{Kind: api.EventLifecycle},
+			{Kind: api.EventInput}, {Kind: api.EventError},
+			{Kind: api.EventInput},
+		}, want: 3},
+		{name: "a turn that ended in ERROR", events: []api.Event{
+			{Kind: api.EventExecutionStart, ExecutionID: "x1", ExecutionStart: &api.ExecutionStart{Harness: "mem"}},
+			{Kind: api.EventInput, ExecutionID: "x1"},
+			{Kind: api.EventError, ExecutionID: "x1"},
+		}, want: 1},
+		{name: "an interrupted turn with no END or ERROR", events: []api.Event{
+			{Kind: api.EventExecutionStart, ExecutionID: "x1", ExecutionStart: &api.ExecutionStart{Harness: "mem"}},
+			{Kind: api.EventInput, ExecutionID: "x1"},
+		}, want: 1},
+		{name: "a legacy tail superseded by an EXECUTION_START", events: []api.Event{
+			{Kind: api.EventInput},
+			{Kind: api.EventExecutionStart, ExecutionID: "x1", ExecutionStart: &api.ExecutionStart{Harness: "mem"}},
+			{Kind: api.EventEnd, ExecutionID: "x1"},
+		}, want: 2},
 		{name: "EXECUTION_START with no harness name", events: []api.Event{
 			{Kind: api.EventExecutionStart, ExecutionID: "x1", ExecutionStart: &api.ExecutionStart{}},
 			{Kind: api.EventEnd, ExecutionID: "x1"},
@@ -184,8 +201,8 @@ func TestCommittedTurnsCountsTurnsWithNoRecordedHarness(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if n, err := mem.CommittedTurns(log, "mem"); err != nil || n != tc.want {
-				t.Errorf("CommittedTurns = %d, %v; want %d", n, err, tc.want)
+			if n, err := mem.StartedTurns(log, "mem"); err != nil || n != tc.want {
+				t.Errorf("StartedTurns = %d, %v; want %d", n, err, tc.want)
 			}
 		})
 	}

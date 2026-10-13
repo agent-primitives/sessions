@@ -2,7 +2,9 @@ package session_test
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -17,7 +19,7 @@ import (
 	"github.com/aramase/agentsessions/sqlitelog"
 )
 
-// A session whose actor disappeared after a committed turn (deleted out of band, or a host restarted
+// A session whose actor disappeared after a turn (deleted out of band, or a host restarted
 // against another atespace) has no compute to attach to and nothing to restore. For a
 // REQUIRES_MEMORY_SNAPSHOT harness the next Exec must be refused with FAILED_PRECONDITION, naming the
 // session, and must not create an actor: a fresh one would continue the journal without the state the
@@ -169,7 +171,7 @@ func TestMemoryStateLostCountsOnlyTheMemoryHarnessTurns(t *testing.T) {
 			t.Fatalf("default turn after the actor was lost: want FailedPrecondition, got %v", err)
 		}
 		msg := status.Convert(err).Message()
-		for _, want := range []string{sess, "1 committed turn(s) on harness \"mem\"", "cannot be reconstructed"} {
+		for _, want := range []string{sess, "1 started turn(s) on harness \"mem\"", "cannot be reconstructed"} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("error %q does not contain %q", msg, want)
 			}
@@ -253,5 +255,121 @@ func TestResumeAfterTheActorIsLost(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// failingHarness is the echo harness with a turn that fails after it has started, the way a harness
+// fails part way through, having possibly changed its in-memory state.
+type failingHarness struct{ echoagent.Harness }
+
+var errTurnFailed = errors.New("turn failed part way")
+
+func (failingHarness) Run(context.Context, *api.Start, api.EventSink) error { return errTurnFailed }
+
+// newMemoryHost serves one REQUIRES_MEMORY_SNAPSHOT substrate harness, "mem", on ctl and store, as one
+// agentsessionsd host would; the harness each turn reaches is har.
+func newMemoryHost(t *testing.T, ctl *actorControl, store *sqlitelog.Store, har api.Harness) v1.SessionsClient {
+	t.Helper()
+	desc, err := echoagent.Harness{}.Describe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	desc.ID = "mem"
+	desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
+	backend := substrate.New(ctl, "space", substrate.ObjectRef{Atespace: "space", Name: "mem"}, desc)
+	dial := placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
+		return har, func() error { return nil }, nil
+	})
+	r, err := placement.NewRegistry("mem", map[string]*placement.Placer{"mem": placement.New(backend, echoagent.Model, dial)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return serveRegistry(t, store, r)
+}
+
+// A turn that started and then failed may have changed the harness's RAM before it failed, so it
+// counts as much as a completed one: when the only turn of a memory-tier session ended in ERROR and
+// its actor is lost, the next Exec is refused with FAILED_PRECONDITION, creates no actor and journals
+// nothing, rather than continue the journal (which holds that turn's input) on a fresh actor.
+func TestExecAfterAFailedTurnAndALostActorIsRefused(t *testing.T) {
+	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	c := newMemoryHost(t, ctl, store, failingHarness{})
+	sess := mustCreate(t, c)
+	if err := execHi(c, sess); err == nil {
+		t.Fatal("the first turn succeeded; want it to fail")
+	}
+	if err := ctl.DeleteActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: sess}); err != nil {
+		t.Fatal(err)
+	}
+	head, err := store.Session(sess).Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = execHi(c, sess)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("turn after a failed turn and a lost actor: want FailedPrecondition, got %v", err)
+	}
+	if msg := status.Convert(err).Message(); !strings.Contains(msg, "1 started turn(s)") {
+		t.Errorf("error %q does not report the failed turn", msg)
+	}
+	ctl.mu.Lock()
+	_, recreated := ctl.status[sess]
+	ctl.mu.Unlock()
+	if recreated {
+		t.Error("the refused turn created an actor for the session")
+	}
+	if got, err := store.Session(sess).Head(); err != nil || got != head {
+		t.Errorf("journal head after the refused turn = %d (err %v), want %d: nothing may be journaled", got, err, head)
+	}
+}
+
+// Two hosts share the journal and the atespace. Host A starts the session's first turn and, before
+// its Create looks for the actor, host B runs the first turn on a new actor, which is then deleted.
+// A finds no actor. Had A counted the session's turns before looking (0), it would create a fresh
+// actor, and once its stale append failed the next turn would attach to that actor and continue the
+// journal without B's turn's state. The count is taken after GetActor reports the actor missing, so
+// A sees B's turn and refuses with FAILED_PRECONDITION, creating nothing.
+func TestTurnRecordedByAnotherHostBeforeTheActorIsLostIsCounted(t *testing.T) {
+	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	hostA := newMemoryHost(t, ctl, store, echoagent.Harness{})
+	hostB := newMemoryHost(t, ctl, store, echoagent.Harness{})
+	sess := mustCreate(t, hostA)
+
+	var fired atomic.Bool
+	var hostBErr error
+	ctl.onGet = func(actor string) {
+		// Only host A's first look runs this; host B's own GetActor calls pass straight through.
+		if actor != sess || !fired.CompareAndSwap(false, true) {
+			return
+		}
+		// Host A is inside Create, about to look for the actor. Host B runs the first turn, then
+		// the actor is lost.
+		hostBErr = errors.Join(execHi(hostB, sess),
+			ctl.DeleteActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: sess}))
+	}
+	err = execHi(hostA, sess)
+	ctl.onGet = nil
+	if hostBErr != nil {
+		t.Fatalf("host B's turn: %v", hostBErr)
+	}
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("host A's turn after host B's turn and a lost actor: want FailedPrecondition, got %v", err)
+	}
+	ctl.mu.Lock()
+	_, recreated := ctl.status[sess]
+	ctl.mu.Unlock()
+	if recreated {
+		t.Error("host A created an actor over the state host B's turn built")
 	}
 }

@@ -15,7 +15,7 @@ func SetDescribeTimeout(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { describeTimeout = old })
 }
 
-// CommittedTurns exposes the committed-turn count Exec passes to Create.
-func (p *Placer) CommittedTurns(log eventlog.Store, current string) (int, error) {
-	return p.committedTurns(log, current)
+// StartedTurns exposes the started-turn count Exec offers to Create.
+func (p *Placer) StartedTurns(log eventlog.Store, current string) (int, error) {
+	return p.startedTurns(log, current)
 }

@@ -188,10 +188,10 @@ func (b *Backend) ref(name string) ActorRef { return ActorRef{Atespace: b.atespa
 //     starts it from the template's golden snapshot (a harness captured right after it became ready,
 //     before any session touched it) or, if that is not built yet, cold-boots the template spec.
 //     Either way the harness carries no session state, which is what the first placement needs.
-//     For a REQUIRES_MEMORY_SNAPSHOT harness whose session already has committed turns on this
-//     harness (SessionSpec.CommittedTurns), that is exactly wrong: the state those turns built
-//     lived only in the missing actor's RAM, so Create refuses with ErrMemoryStateLost and creates
-//     nothing.
+//     For a REQUIRES_MEMORY_SNAPSHOT harness whose session already has started turns on this
+//     harness (SessionSpec.StartedTurns, counted after GetActor reports the actor missing), that is
+//     exactly wrong: the state those turns built lived only in the missing actor's RAM, so Create
+//     refuses with ErrMemoryStateLost and creates nothing.
 //   - RUNNING — attach. Return the actor's incarnation without touching it. This covers the second
 //     and later turns of a session, and the first turn of a FORKED CHILD, whose actor was created
 //     from the parent's snapshot and resumed before it was ever handed out.
@@ -238,11 +238,19 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 
 	// The actor is gone (deleted out of band, or the backend now points at another atespace) and no
 	// snapshot or tag of it is reachable from here. A stateless harness rebuilds from the journal; a
-	// memory-tier one would silently continue the journal with none of the state it recorded.
-	if s.CommittedTurns > 0 && b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
-		return api.Incarnation{}, fmt.Errorf("%w: session %q has %d committed turn(s) on harness %q but actor %s/%s does not exist, "+
-			"so its in-RAM state cannot be reconstructed; no actor was created",
-			ErrMemoryStateLost, sessionUID, s.CommittedTurns, b.descriptor.ID, ref.Atespace, ref.Name)
+	// memory-tier one would silently continue the journal with none of the state it recorded. Count
+	// the turns only now that the actor is known to be missing: every turn that ran on it was journaled
+	// before it ran, so a turn another host ran while this call was being placed is counted too.
+	if b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot && s.StartedTurns != nil {
+		turns, err := s.StartedTurns()
+		if err != nil {
+			return api.Incarnation{}, fmt.Errorf("substrate: count the session's started turns: %w", err)
+		}
+		if turns > 0 {
+			return api.Incarnation{}, fmt.Errorf("%w: session %q has %d started turn(s) on harness %q but actor %s/%s does not exist, "+
+				"so its in-RAM state cannot be reconstructed; no actor was created",
+				ErrMemoryStateLost, sessionUID, turns, b.descriptor.ID, ref.Atespace, ref.Name)
+		}
 	}
 
 	createFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "create_actor",
@@ -364,10 +372,11 @@ var ErrNoSnapshotToClone = errors.New("substrate: fork of a memory-snapshot harn
 // It wraps api.ErrSnapshotSuperseded, which the session service reports as ABORTED.
 var ErrSnapshotSuperseded = fmt.Errorf("substrate: parent snapshot was superseded before the fork could tag it: %w", api.ErrSnapshotSuperseded)
 
-// ErrMemoryStateLost is returned by Create when a REQUIRES_MEMORY_SNAPSHOT session that already has
-// committed turns has no actor to attach to or resume. Its state existed only in that actor's RAM, so
-// a new actor from the template would continue the journal with a harness that remembers none of it.
-// Restore returns it too when such a session's actor is gone, since its snapshot went with it.
+// ErrMemoryStateLost is returned by Create when a REQUIRES_MEMORY_SNAPSHOT session that already has a
+// started turn on this harness has no actor to attach to or resume. Its state existed only in that
+// actor's RAM, so a new actor from the template would continue the journal with a harness that
+// remembers none of it. Restore returns it for every such session whose actor is gone, whatever its
+// journal records (an interrupted first turn included), since the snapshot went with the actor.
 // It wraps api.ErrMemoryStateLost, which the session service reports as FAILED_PRECONDITION.
 var ErrMemoryStateLost = fmt.Errorf("substrate: refusing to cold-create an actor: %w", api.ErrMemoryStateLost)
 

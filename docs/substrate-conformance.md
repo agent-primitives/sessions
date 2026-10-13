@@ -89,27 +89,33 @@ second of which the daemon prevents by refusing a second `-substrate-harness`:
   the second. The cold-create guard below counts turns per harness, so after that shared actor is
   lost, a harness that never ran a turn for the session would cold-create over state the other
   harness built. `agentsessionsd` therefore accepts `-substrate-harness` at most once and exits
-  with status 2 on a second; per-harness actor names are the open question below. A program that
-  builds its own `placement.Registry` with two substrate backends on one atespace still has both
-  problems.
+  with status 2 on a second; per-harness actor names are the open question below. The rule is per
+  daemon: two `agentsessionsd` hosts that share a journal and an atespace but serve different
+  `-substrate-harness` names still share each session's actor, and so does a program that builds
+  its own `placement.Registry` with two substrate backends on one atespace.
 - **The tier is mis-declared.** A stateful image declared without `,memory` is treated as
   `STATELESS_REPLAY`: a fork cold-creates the child and replays the journal into it, and a lost actor
   is recreated, both without the parent's RAM.
 
 What is enforced today: `runtime/substrate` refuses to cold-create an actor for a
-`REQUIRES_MEMORY_SNAPSHOT` session whose journal already has a committed turn (an `END` record) on
-that harness. The Placer counts those turns and passes them in `api.SessionSpec.CommittedTurns`. It
-attributes a turn by the harness name its `EXECUTION_START` recorded: a turn an `ExecRequest.harness`
-override sent to another harness is not counted, a name that aliases the same Placer in the
-registry is, and so is a turn it cannot attribute (no recorded name, or a name this host does not
-serve), so an unknown history refuses rather than cold-creates. `Create` returns
-`substrate.ErrMemoryStateLost` (wrapping `api.ErrMemoryStateLost`, `FAILED_PRECONDITION` at the
-Sessions API), names the session, and creates nothing. An existing actor, running or suspended, is
-attached or resumed as before; a stateless session, or a memory-tier session with no committed turn,
-is created as before. `Restore` (`Sessions.Resume`) of a memory-tier session whose actor is gone
-returns the same error, since the snapshot it would resume went with the actor; `GetActor` confirms
-the absence after the resume fails. The check only sees the tier the daemon is configured with, so
-it does not cover a mis-declared tier.
+`REQUIRES_MEMORY_SNAPSHOT` session whose journal already has a started turn (an `EXECUTION_START`)
+on that harness, whether that turn completed, failed or was interrupted, since any of them may have
+changed the actor's RAM. The Placer hands `Create` a counter in `api.SessionSpec.StartedTurns`, and
+`Create` calls it only after `GetActor` reports the actor missing. A turn is journaled before it
+runs, so every turn that ran on the lost actor is counted then, including one another host sharing
+the journal ran while this `Exec` was being placed. The Placer attributes a turn by the harness name
+its `EXECUTION_START` recorded: a turn an `ExecRequest.harness` override sent to another harness is
+not counted, a name that aliases the same Placer in the registry is, and so is a turn it cannot
+attribute (no recorded name, a name this host does not serve, or a legacy turn with no
+`EXECUTION_START`), so an unknown history refuses rather than cold-creates. A journal that cannot be
+read refuses too. `Create` returns `substrate.ErrMemoryStateLost` (wrapping
+`api.ErrMemoryStateLost`, `FAILED_PRECONDITION` at the Sessions API), names the session, and creates
+nothing. An existing actor, running or suspended, is attached or resumed as before; a stateless
+session, or a memory-tier session with no started turn, is created as before. `Restore`
+(`Sessions.Resume`) returns the same error for every memory-tier session whose actor is gone,
+whatever its journal records (a session interrupted on its first turn included), since the snapshot
+it would resume went with the actor; `GetActor` confirms the absence after the resume fails. The
+check only sees the tier the daemon is configured with, so it does not cover a mis-declared tier.
 
 Open questions, not implemented:
 
@@ -126,7 +132,7 @@ ActorTemplate and served with `-substrate-harness`, then suspended, resumed, rep
 
 | `api.Runtime` | substrate Control |
 |---|---|
-| `Create` | `CreateActor` + `ResumeActor` (starts from the template's golden snapshot, or cold-boots); refused for a memory-tier session with committed turns and no actor |
+| `Create` | `CreateActor` + `ResumeActor` (starts from the template's golden snapshot, or cold-boots); refused for a memory-tier session with started turns and no actor |
 | `Snapshot(EXTERNAL)` | `SuspendActor` (RAM+disk snapshot to storage, worker freed, actor SUSPENDED) |
 | `Restore` | `ResumeActor` (restores the actor's own snapshot on a possibly-different worker) |
 | `Fork` (stateless) | `CreateActor` + `ResumeActor` — a replay-fork; the journal reconstructs the child |

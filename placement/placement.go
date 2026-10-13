@@ -317,17 +317,17 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	if err = p.refuseDuringCheckpoint(sessionUID); err != nil {
 		return api.Incarnation{}, err
 	}
-	// The backend needs the committed-turn count to tell a new session from one whose compute is gone:
+	// The backend needs the started-turn count to tell a new session from one whose compute is gone:
 	// a memory-tier harness can be cold-started only for the former (api.ErrMemoryStateLost). Only
 	// turns this Placer ran count: a turn ExecRequest.harness sent to another harness left no state in
-	// this one's compute.
-	turns, err := p.committedTurns(log, cfg.harness)
-	if err != nil {
-		return api.Incarnation{}, err
-	}
+	// this one's compute. The backend counts when it has seen the compute is missing, not here, so a
+	// turn another host journals in between is not missed (see api.SessionSpec.StartedTurns).
+	spec := &api.SessionSpec{SessionUID: sessionUID, StartedTurns: func() (int, error) {
+		return p.startedTurns(log, cfg.harness)
+	}}
 	createFinished := observability.StartDebug(ctx, p.logger, "placement", "create_compute",
-		"session_uid", sessionUID, "committed_turns", turns)
-	inc, err = p.backend.Create(ctx, &api.SessionSpec{SessionUID: sessionUID, CommittedTurns: turns})
+		"session_uid", sessionUID)
+	inc, err = p.backend.Create(ctx, spec)
 	if err != nil {
 		createFinished(err, "error_kind", "runtime_create_failed")
 		return inc, err
@@ -1211,36 +1211,58 @@ func appendLifecycleAt(log eventlog.Store, expectedLastSeq, fence int64, lc api.
 	return err
 }
 
-// committedTurns counts the turns the journal records as completed (END events) that ran on this
-// Placer, the inherited prefix of a forked child included. current is the registry name this
-// execution runs under (WithHarness).
+// startedTurns counts the turns the journal records as started that ran on this Placer, the
+// inherited prefix of a forked child included: every EXECUTION_START, whether its turn completed,
+// failed or was interrupted, since a turn that did not complete may still have changed the harness's
+// state. current is the registry name this execution runs under (WithHarness).
 //
 // A turn is attributed by the harness name its EXECUTION_START recorded (ranHere). A turn that cannot
-// be attributed (a legacy turn with no recorded name, or a name this host does not serve) is
-// counted: undercounting would let a memory-tier backend cold-create compute for a session whose
-// state it held, while overcounting can only refuse.
-func (p *Placer) committedTurns(log eventlog.Store, current string) (int, error) {
+// be attributed (a turn with no recorded name, a name this host does not serve, or a legacy turn
+// written before EXECUTION_START existed) is counted: undercounting would let a memory-tier backend
+// cold-create compute for a session whose state it held, while overcounting can only refuse.
+func (p *Placer) startedTurns(log eventlog.Store, current string) (int, error) {
 	recs, err := log.Read(1)
 	if err != nil {
 		return 0, fmt.Errorf("placement: read journal: %w", err)
 	}
-	harnessOf := make(map[string]string) // execution ID -> recorded harness name
 	n := 0
+	inLegacyTurn := false
 	for _, rec := range recs {
 		ev := rec.Event
-		switch ev.Kind {
-		case api.EventExecutionStart:
-			if ev.ExecutionID != "" && ev.ExecutionStart != nil {
-				harnessOf[ev.ExecutionID] = ev.ExecutionStart.Harness
+		switch {
+		case ev.Kind == api.EventExecutionStart:
+			inLegacyTurn = false
+			recorded := ""
+			if ev.ExecutionStart != nil {
+				recorded = ev.ExecutionStart.Harness
 			}
-		case api.EventEnd:
-			// A legacy END has no execution ID, so it maps to no name and is counted.
-			if p.ranHere(harnessOf[ev.ExecutionID], current) {
+			if p.ranHere(recorded, current) {
 				n++
+			}
+		case ev.ExecutionID == "" && isLegacyTurnEvent(ev.Kind):
+			// A legacy turn has no EXECUTION_START: it is a run of events with no execution ID that
+			// an END or ERROR closes, or that is still open at the tail.
+			if !inLegacyTurn {
+				n++
+				inLegacyTurn = true
+			}
+			if ev.Kind == api.EventEnd || ev.Kind == api.EventError {
+				inLegacyTurn = false
 			}
 		}
 	}
 	return n, nil
+}
+
+// isLegacyTurnEvent reports whether an event of kind k with no execution ID belongs to a turn written
+// before EXECUTION_START existed (the kinds controller.legacyPrefix accepts, lifecycle excluded).
+func isLegacyTurnEvent(k api.EventKind) bool {
+	switch k {
+	case api.EventInput, api.EventModelCall, api.EventOutput, api.EventToolCall,
+		api.EventToolResult, api.EventUsage, api.EventEnd, api.EventError:
+		return true
+	}
+	return false
 }
 
 // ranHere reports whether a turn recorded under the harness name recorded may have run on this

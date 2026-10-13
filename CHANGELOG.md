@@ -70,7 +70,8 @@ provide.
   and reached through `-atenet-router`. It requires `-model`, and refuses the other substrate flags
   without a `-substrate-harness`. It takes one `-substrate-harness` and exits with status 2 on a
   second: actors are named by session UID in the one atespace, so two substrate harnesses would
-  share a session's actor (see `docs/substrate-conformance.md`). The neutral `cmd/agentsessionsd`
+  share a session's actor. The rule is per daemon: two hosts sharing a journal and an atespace with
+  different `-substrate-harness` names share it too (see `docs/substrate-conformance.md`). The neutral `cmd/agentsessionsd`
   does not offer these flags; both binaries are now built from `internal/agentsessionsd`.
 - `HarnessRegistry` API (`api/harness_registry.proto`): register, get, list and retire harnesses on a
   running host. A registration is immutable and identified by its name and `spec_digest`. Retiring a
@@ -102,18 +103,21 @@ provide.
 - `agentsessionsd` now refuses positional arguments, naming them, and exits with status 2. It used
   to ignore them, along with every flag after the first one, since flag parsing stops there.
 - `runtime/substrate` no longer cold-creates an actor for a `REQUIRES_MEMORY_SNAPSHOT` session that
-  has a committed turn on that harness but no actor (deleted out of band, or the daemon restarted
-  with another `-substrate-atespace`). `Exec` fails with `FAILED_PRECONDITION`
-  (`api.ErrMemoryStateLost`) and nothing is created, where it used to continue the journal on a
-  fresh harness that had lost the session's RAM state. The Placer now reads the journal before
-  `Runtime.Create` to fill the new `api.SessionSpec.CommittedTurns`; other backends ignore it. The
-  count is per harness: a turn an `ExecRequest.harness` override ran elsewhere does not count, while
-  a turn with no recorded harness name, or one this host does not serve, does. Two substrate
-  backends on one atespace share each session's actor, so the count misses the turns the other one
-  ran there; `agentsessionsd` allows one substrate harness for this reason, and a program that
-  builds its own registry must do the same. `Sessions.Resume` of such a session whose actor is gone
-  is `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) too, where it used to be `INTERNAL`; a
-  stateless session's `Resume` keeps its error.
+  has a started turn on that harness (completed, failed or interrupted) but no actor (deleted out of
+  band, or the daemon restarted with another `-substrate-atespace`). `Exec` fails with
+  `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and nothing is created, where it used to continue
+  the journal on a fresh harness that had lost the session's RAM state. `Runtime.Create` gets a
+  journal counter in the new `api.SessionSpec.StartedTurns`, which `runtime/substrate` calls only
+  after it finds the actor missing, so a turn another host recorded meanwhile is counted; other
+  backends ignore it. The count is per harness: a turn an `ExecRequest.harness` override ran
+  elsewhere does not count, while a turn with no recorded harness name, or one this host does not
+  serve, does. Two substrate backends on one atespace share each session's actor, so the count
+  misses the turns the other one ran there; `agentsessionsd` allows one substrate harness for this
+  reason, but the rule is per daemon, so hosts sharing a journal and an atespace must serve the same
+  one, and a program that builds its own registry must do the same. `Sessions.Resume` of any
+  memory-tier session whose actor is gone, whatever its journal records, is `FAILED_PRECONDITION`
+  (`api.ErrMemoryStateLost`) too, where it used to be `INTERNAL`; a stateless session's `Resume`
+  keeps its error.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

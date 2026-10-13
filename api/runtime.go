@@ -11,12 +11,14 @@ import (
 // caller can retry the fork at the parent's new head.
 var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was superseded")
 
-// ErrMemoryStateLost reports that a backend refused to create fresh compute for a session whose
-// harness keeps its state only in RAM (REQUIRES_MEMORY_SNAPSHOT) and whose journal already records a
-// completed turn, because nothing is left to restore that state from. The journal cannot rebuild it
-// (I4), so a fresh incarnation would continue the journal with a harness that has forgotten it.
-// Restore returns it when the compute holding such a session's snapshot no longer exists. The caller
-// cannot fix this by retrying; the session service reports it as FAILED_PRECONDITION.
+// ErrMemoryStateLost reports that a backend cannot give a session whose harness keeps its state only
+// in RAM (REQUIRES_MEMORY_SNAPSHOT) the compute that held that state, because the compute is gone.
+// Create returns it rather than create fresh compute when the journal already records a started turn
+// on that harness (SessionSpec.StartedTurns). Restore returns it for any such session whose compute
+// no longer exists, whatever the journal records, since the snapshot it would restore went with the
+// compute. The journal cannot rebuild the state (I4), so fresh compute would continue the journal with
+// a harness that has forgotten it. The caller cannot fix this by retrying; the session service
+// reports it as FAILED_PRECONDITION.
 var ErrMemoryStateLost = errors.New("runtime: session's in-memory harness state is lost")
 
 // Runtime is the compute/sandbox SPI. Pod, Kata Pod Sandboxing, Cloud Hypervisor,
@@ -106,15 +108,20 @@ type SessionSpec struct {
 	Image      string
 	Harness    string
 	Identity   IdentityRef
-	// CommittedTurns is how many turns the session's journal records as completed (END events) on the
-	// harness being placed, when the host places it: zero for a new session, and for a forked child
-	// the turns of the copied prefix that ran on this harness. A turn another harness ran (an
-	// ExecRequest.harness override) is not counted, since it left no state in this harness's
-	// compute; a turn the host cannot attribute (no recorded harness name, or a name it does not
-	// serve) is. A backend uses it to refuse creating fresh compute for a REQUIRES_MEMORY_SNAPSHOT
-	// session that already has state only its old compute held (ErrMemoryStateLost). A caller that
-	// leaves it zero declares a session with no completed turns on this harness.
-	CommittedTurns int
+	// StartedTurns counts the turns the session's journal records as started (an EXECUTION_START) on
+	// the harness being placed, whether they completed, failed or were interrupted: any of them may
+	// have changed that harness's in-memory state. For a forked child it counts the turns of the copied
+	// prefix that ran on this harness. A turn another harness ran (an ExecRequest.harness override) is
+	// not counted, since it left no state in this harness's compute; a turn the host cannot attribute
+	// (no recorded harness name, or a name it does not serve) is.
+	//
+	// A backend uses it to refuse creating fresh compute for a REQUIRES_MEMORY_SNAPSHOT session that
+	// already has state only its old compute held (ErrMemoryStateLost). It is a function rather than a
+	// number so that the backend counts only after it has seen the compute is missing: a turn is
+	// journaled before it runs, so every turn that ran on the lost compute is then visible, including
+	// one another host sharing the journal recorded while this call was being placed. A backend that
+	// does not need it does not call it. Nil declares a session with no started turns on this harness.
+	StartedTurns func() (int, error)
 	// resource requests, env, mounts elided for v0
 }
 

@@ -124,7 +124,7 @@ func registerSubstrateFlags(fs *flag.FlagSet) *substrateFlags {
 		}
 	})
 	fs.Var(f.harnesses, "substrate-harness", "run a harness as an agent-substrate actor per session, as name=atespace/template; append ,memory for a REQUIRES_MEMORY_SNAPSHOT harness. The tier is not checked against the image's Describe: a stateful image declared without ,memory loses its RAM state on fork. Give it at most once")
-	f.atespace = fs.String("substrate-atespace", "", "atespace the session actors are created in; required with -substrate-harness. Must not change while sessions exist: their actors stay in the old atespace, and a REQUIRES_MEMORY_SNAPSHOT session with committed turns is then refused")
+	f.atespace = fs.String("substrate-atespace", "", "atespace the session actors are created in; required with -substrate-harness. Must not change while sessions exist: their actors stay in the old atespace, and a REQUIRES_MEMORY_SNAPSHOT session with a started turn is then refused")
 	f.ateapi = fs.String("ateapi-addr", "api.ate-system.svc:443", "address of the substrate ate-api Control service (TLS)")
 	f.serverName = fs.String("ateapi-server-name", "", "TLS server name for the ate-api; empty uses the host of -ateapi-addr")
 	f.caFile = fs.String("ateapi-ca-file", "", "PEM CA bundle that signs the ate-api serving certificate; empty uses the system roots")

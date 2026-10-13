@@ -19,20 +19,25 @@ import (
 // lifecycleControl is a stateful ate-api Control double for the stateful fork path: it keeps one
 // Actor per name and moves it through the states substrate reports, with the held snapshot in
 // ActorStatus.snapshots the way substrate at f03327bd and later records it. A suspend appends a new
-// COMPLETED generation (and leaves a stale PENDING one behind when pendingOnSuspend is set); a
-// CreateActor from a tag borrows the tag's snapshot as generation 1.
+// COMPLETED generation (a PENDING one when completeOnSuspend is false); a CreateActor from a tag
+// borrows the tag's snapshot as generation 1.
+//
+// CreateTag copies the snapshot completed, which the double records as each durable copy completes
+// rather than reading it back from the status list with the adapter's heldSnapshot, so a wrong choice
+// in heldSnapshot cannot pass by being made on both sides.
 type lifecycleControl struct {
 	atepb.ControlClient
 
 	mu                sync.Mutex
 	actors            map[string]*atepb.Actor
 	tags              map[string]string // tag name -> snapshot uri it copied
+	completed         map[string]string // actor name -> uri of its most recent COMPLETED durable copy
 	calls             []string
 	completeOnSuspend bool
 }
 
 func newLifecycleControl() *lifecycleControl {
-	return &lifecycleControl{actors: map[string]*atepb.Actor{}, tags: map[string]string{}, completeOnSuspend: true}
+	return &lifecycleControl{actors: map[string]*atepb.Actor{}, tags: map[string]string{}, completed: map[string]string{}, completeOnSuspend: true}
 }
 
 func (l *lifecycleControl) record(call string) { l.calls = append(l.calls, call) }
@@ -55,6 +60,7 @@ func (l *lifecycleControl) CreateActor(_ context.Context, in *atepb.CreateActorR
 		snap.Owner = atepb.SnapshotOwner_SNAPSHOT_OWNER_TAG
 		st.Snapshots = []*atepb.Snapshot{snap}
 		st.LastAssignedGeneration = 1
+		l.completed[name] = uri
 	}
 	a := &atepb.Actor{Metadata: in.GetActor().GetMetadata(), ActorTemplate: in.GetActor().GetActorTemplate(), Status: st}
 	l.actors[name] = a
@@ -90,7 +96,11 @@ func (l *lifecycleControl) SuspendActor(_ context.Context, in *atepb.SuspendActo
 		if l.completeOnSuspend {
 			st = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
 		}
-		a.Status.Snapshots = append(a.Status.Snapshots, durableSnapshot(gen, fmt.Sprintf("gs://b/atespaces/space/actors/%s/snapshots/s%d", name, gen), st))
+		uri := fmt.Sprintf("gs://b/atespaces/space/actors/%s/snapshots/s%d", name, gen)
+		a.Status.Snapshots = append(a.Status.Snapshots, durableSnapshot(gen, uri, st))
+		if l.completeOnSuspend {
+			l.completed[name] = uri
+		}
 		a.Status.LastAssignedGeneration = gen
 	}
 	a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
@@ -103,6 +113,7 @@ func (l *lifecycleControl) DeleteActor(_ context.Context, in *atepb.DeleteActorR
 	defer l.mu.Unlock()
 	l.record("delete:" + in.GetActor().GetName())
 	delete(l.actors, in.GetActor().GetName())
+	delete(l.completed, in.GetActor().GetName())
 	return &atepb.Actor{}, nil
 }
 
@@ -117,17 +128,16 @@ func (l *lifecycleControl) GetActor(_ context.Context, in *atepb.GetActorRequest
 }
 
 // CreateTag copies the source's latest COMPLETED durable snapshot, as substrate's TagActorSnapshot
-// does, and refuses an actor that holds none.
+// does, and refuses an actor that holds none. It does not use heldSnapshot: see lifecycleControl.
 func (l *lifecycleControl) CreateTag(_ context.Context, in *atepb.CreateTagRequest, _ ...grpc.CallOption) (*atepb.Tag, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	tg := in.GetTag()
 	l.record("tag:" + tg.GetSourceActor().GetName() + "->" + tg.GetMetadata().GetName())
-	a, ok := l.actors[tg.GetSourceActor().GetName()]
-	if !ok {
+	if _, ok := l.actors[tg.GetSourceActor().GetName()]; !ok {
 		return nil, status.Errorf(codes.NotFound, "Actor %s not found", tg.GetSourceActor().GetName())
 	}
-	uri := heldSnapshot(a.GetStatus())
+	uri := l.completed[tg.GetSourceActor().GetName()]
 	if uri == "" {
 		return nil, status.Errorf(codes.FailedPrecondition, "Actor %s holds no snapshot", tg.GetSourceActor().GetName())
 	}

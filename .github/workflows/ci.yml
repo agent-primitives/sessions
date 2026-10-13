@@ -176,6 +176,15 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          working-directory: examples/agentsuite-substrate
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
   integrity:
     # Full cross-language provenance audit: record a real journal, have an INDEPENDENT Python
     # implementation (protobuf + RFC 8785 JCS) reproduce and verify the whole chain, then prove it

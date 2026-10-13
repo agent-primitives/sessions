@@ -557,3 +557,62 @@ func TestForkCleanupSurvivesACancelledCaller(t *testing.T) {
 		t.Fatalf("cleanup must run on a detached context, calls=%v", m.calls)
 	}
 }
+
+// A REQUIRES_MEMORY_SNAPSHOT session keeps state only in its actor's RAM. Once it has a committed
+// turn, an actor that no longer exists cannot be replaced by a fresh one from the template: that would
+// continue the journal with a harness that remembers none of it. Create must refuse with
+// ErrMemoryStateLost and create nothing. Every other combination keeps the usual placement.
+func TestCreateRefusesToColdCreateAMemorySessionWithTurns(t *testing.T) {
+	memory := func(m *mockControl) *substrate.Backend { return newMemoryBackend(m) }
+	stateless := func(m *mockControl) *substrate.Backend { return newBackend(m) }
+	for _, tc := range []struct {
+		name      string
+		backend   func(*mockControl) *substrate.Backend
+		turns     int
+		existing  substrate.ActorStatus // StatusUnknown: the actor does not exist
+		wantCalls []string
+		wantLost  bool
+	}{
+		{name: "memory tier with turns and no actor is refused", backend: memory, turns: 2,
+			wantCalls: []string{"get:sess-x"}, wantLost: true},
+		{name: "memory tier with zero turns creates", backend: memory,
+			wantCalls: []string{"get:sess-x", "create:sess-x", "resume:sess-x"}},
+		{name: "stateless tier with turns creates", backend: stateless, turns: 2,
+			wantCalls: []string{"get:sess-x", "create:sess-x", "resume:sess-x"}},
+		{name: "memory tier with turns attaches to a running actor", backend: memory, turns: 2, existing: substrate.StatusRunning,
+			wantCalls: []string{"get:sess-x"}},
+		{name: "memory tier with turns resumes a suspended actor", backend: memory, turns: 2, existing: substrate.StatusSuspended,
+			wantCalls: []string{"get:sess-x", "resume:sess-x"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockControl{info: running("worker-a")}
+			if tc.existing != substrate.StatusUnknown {
+				m.exists("sess-x", tc.existing)
+			}
+			inc, err := tc.backend(m).Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x", CommittedTurns: tc.turns})
+			if !reflect.DeepEqual(m.calls, tc.wantCalls) {
+				t.Errorf("calls=%v want %v", m.calls, tc.wantCalls)
+			}
+			if !tc.wantLost {
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				if inc.CallMetadata[substrate.TargetActorHeader] != "space/sess-x" {
+					t.Fatalf("incarnation=%+v want the session's actor", inc)
+				}
+				return
+			}
+			if !errors.Is(err, substrate.ErrMemoryStateLost) || !errors.Is(err, api.ErrMemoryStateLost) {
+				t.Fatalf("Create error = %v, want ErrMemoryStateLost wrapping api.ErrMemoryStateLost", err)
+			}
+			for _, want := range []string{`"sess-x"`, "cannot be reconstructed"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+			if _, ok := m.actors["sess-x"]; ok {
+				t.Error("refused Create left an actor behind")
+			}
+		})
+	}
+}

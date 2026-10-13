@@ -842,7 +842,8 @@ func execError(err error) error {
 	switch {
 	case errors.Is(err, placement.ErrSessionBusy):
 		return status.Error(codes.Aborted, err.Error())
-	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch):
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch),
+		errors.Is(err, api.ErrMemoryStateLost):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return status.Error(codes.Unavailable, err.Error())

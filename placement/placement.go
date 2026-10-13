@@ -312,8 +312,15 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	if err = p.refuseDuringCheckpoint(sessionUID); err != nil {
 		return api.Incarnation{}, err
 	}
-	createFinished := observability.StartDebug(ctx, p.logger, "placement", "create_compute", "session_uid", sessionUID)
-	inc, err = p.backend.Create(ctx, &api.SessionSpec{SessionUID: sessionUID})
+	// The backend needs the committed-turn count to tell a new session from one whose compute is gone:
+	// a memory-tier harness can be cold-started only for the former (api.ErrMemoryStateLost).
+	turns, err := committedTurns(log)
+	if err != nil {
+		return api.Incarnation{}, err
+	}
+	createFinished := observability.StartDebug(ctx, p.logger, "placement", "create_compute",
+		"session_uid", sessionUID, "committed_turns", turns)
+	inc, err = p.backend.Create(ctx, &api.SessionSpec{SessionUID: sessionUID, CommittedTurns: turns})
 	if err != nil {
 		createFinished(err, "error_kind", "runtime_create_failed")
 		return inc, err
@@ -955,6 +962,8 @@ func placementErrorKind(err error) string {
 		return "harness_unavailable"
 	case errors.Is(err, ErrCheckpointing):
 		return "checkpointing"
+	case errors.Is(err, api.ErrMemoryStateLost):
+		return "memory_state_lost"
 	case errors.Is(err, ErrSessionBusy), errors.Is(err, eventlog.ErrConflict):
 		return "conflict"
 	case errors.Is(err, eventlog.ErrFenced):
@@ -1193,6 +1202,22 @@ func appendLifecycle(log eventlog.Store, lc api.Lifecycle) error {
 func appendLifecycleAt(log eventlog.Store, expectedLastSeq, fence int64, lc api.Lifecycle) error {
 	_, err := log.Append(expectedLastSeq, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &lc})
 	return err
+}
+
+// committedTurns counts the turns the journal records as completed (END events), the inherited
+// prefix of a forked child included.
+func committedTurns(log eventlog.Store) (int, error) {
+	recs, err := log.Read(1)
+	if err != nil {
+		return 0, fmt.Errorf("placement: read journal: %w", err)
+	}
+	n := 0
+	for _, rec := range recs {
+		if rec.Event.Kind == api.EventEnd {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // lastSuspendRef returns the SnapshotRef from the most recent SUSPEND event THIS session wrote, or —

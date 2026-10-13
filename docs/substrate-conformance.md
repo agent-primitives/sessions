@@ -53,7 +53,7 @@ The substrate build of `agentsessionsd` adds these flags:
 | Flag | Meaning |
 |---|---|
 | `-substrate-harness name=atespace/template[,memory]` | Serve harness `name` from that ActorTemplate, one actor per session. `,memory` declares `REQUIRES_MEMORY_SNAPSHOT`; the default is `STATELESS_REPLAY`. Repeatable. Requires `-model`, like `-harness`. |
-| `-substrate-atespace` | Atespace the session actors are created in (required). It must already exist. |
+| `-substrate-atespace` | Atespace the session actors are created in (required). It must already exist, and must not change while sessions exist: see [Substrate placement binding](#substrate-placement-binding). |
 | `-ateapi-addr` | ate-api Control address, TLS (default `api.ate-system.svc:443`). |
 | `-ateapi-token-file` | Bearer token file, re-read on every call, so a projected ServiceAccount token rotates. |
 | `-ateapi-ca-file`, `-ateapi-server-name` | Verify the ate-api certificate against this CA and name; the default is the system roots and the host of `-ateapi-addr`. |
@@ -63,9 +63,39 @@ The substrate build of `agentsessionsd` adds these flags:
 The other flags only configure `-substrate-harness` entries; given without one, the daemon refuses
 to start rather than ignore them.
 
-The tier is declared, not discovered: placement gates on it before an actor exists. Declaring a
-`REQUIRES_MEMORY_SNAPSHOT` harness as stateless would let a fork rebuild it by replay and lose its
-RAM state, so declare what the harness's own `Describe` reports.
+The tier is declared, not discovered: placement gates on it before an actor exists, and nothing
+checks it against the image's own `Describe`. Declaring a `REQUIRES_MEMORY_SNAPSHOT` harness as
+stateless lets fork and a lost actor rebuild it by replay, which loses its RAM state, so declare what
+the harness's own `Describe` reports.
+
+### Substrate placement binding
+
+A session's journal records its harness name, not where that harness's actors live. The atespace,
+the ActorTemplate and the declared tier come from the daemon's flags at each start, and the session
+store keeps none of them. Two ways that loses a `REQUIRES_MEMORY_SNAPSHOT` session's RAM state:
+
+- **The binding changes under existing sessions.** Restarting with another `-substrate-atespace` (or
+  template) makes the next `Exec` look for the session's actor where it never was. Without the check
+  below, `Create` would cold-create a new actor from the template and continue the journal with a
+  harness that remembers none of it.
+- **The tier is mis-declared.** A stateful image declared without `,memory` is treated as
+  `STATELESS_REPLAY`: a fork cold-creates the child and replays the journal into it, and a lost actor
+  is recreated, both without the parent's RAM.
+
+What is enforced today: `runtime/substrate` refuses to cold-create an actor for a
+`REQUIRES_MEMORY_SNAPSHOT` session whose journal already has a committed turn (an `END` record). The
+Placer counts those turns and passes them in `api.SessionSpec.CommittedTurns`; `Create` returns
+`substrate.ErrMemoryStateLost` (wrapping `api.ErrMemoryStateLost`, `FAILED_PRECONDITION` at the
+Sessions API), names the session, and creates nothing. An existing actor, running or suspended, is
+attached or resumed as before; a stateless session, or a memory-tier session with no committed turn,
+is created as before. The check only sees the tier the daemon is configured with, so it does not
+cover a mis-declared tier.
+
+Open questions, not implemented:
+
+TODO(spike): should the session store persist each session's substrate binding (atespace, template, declared tier) at its first placement, and refuse a turn when the daemon's configured binding differs?
+
+TODO(spike): should `runtime/substrate` verify the live harness's `Describe` resumability against the configured tier, given that `Placer.recheck` runs only for a `LiveDescriber` backend and does not compare tiers?
 
 `examples/agentsuite-substrate` runs this end to end on kind: an AgentSuite agent rendered into an
 ActorTemplate and served with `-substrate-harness`, then suspended, resumed, replayed and forked.
@@ -74,7 +104,7 @@ ActorTemplate and served with `-substrate-harness`, then suspended, resumed, rep
 
 | `api.Runtime` | substrate Control |
 |---|---|
-| `Create` | `CreateActor` + `ResumeActor` (starts from the template's golden snapshot, or cold-boots) |
+| `Create` | `CreateActor` + `ResumeActor` (starts from the template's golden snapshot, or cold-boots); refused for a memory-tier session with committed turns and no actor |
 | `Snapshot(EXTERNAL)` | `SuspendActor` (RAM+disk snapshot to storage, worker freed, actor SUSPENDED) |
 | `Restore` | `ResumeActor` (restores the actor's own snapshot on a possibly-different worker) |
 | `Fork` (stateless) | `CreateActor` + `ResumeActor` — a replay-fork; the journal reconstructs the child |
@@ -356,6 +386,11 @@ prefix plus the `FORK` marker), then resumes the **parent** and requires it to c
 fork checkpoints its parent, it does not consume it. The fan-out is timed and logged, so a run reports
 the real per-child clone cost rather than leaving it asserted.
 
+`TestMemorySessionWhoseActorIsLostIsRefused` drives the counter one turn, deletes its actor and
+requires the next turn to fail with `api.ErrMemoryStateLost`, with no actor created and nothing
+journaled. A fresh actor would answer 1 again where the journal expects 2, which is the silent loss
+the check exists to stop.
+
 `TestForkOfMemoryHarnessAtHistoricalSeqIsRefused` pins the honest-degradation half on real compute: a
 stateful fork behind the head is refused, and the refusal leaves the parent usable.
 
@@ -457,7 +492,7 @@ for tier in echo counter; do
   hack/wait-worker-pool.sh "${tier}-gvisor"
 done
 HARNESS_IMAGE="${HARNESS_IMAGE}" ECHO_SANDBOX_CLASS=gvisor COUNTER_SANDBOX_CLASS=gvisor \
-  hack/run-e2e-job.sh 'TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestMemorySnapshotSuspendResume|TestFork|TestConcurrentSessionsReachTheirOwnActors' \
+  hack/run-e2e-job.sh 'TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestMemorySnapshotSuspendResume|TestMemorySessionWhoseActorIsLostIsRefused|TestFork|TestConcurrentSessionsReachTheirOwnActors' \
   "${E2E_IMAGE}" 1800
 ```
 

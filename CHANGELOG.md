@@ -99,6 +99,12 @@ provide.
   `RegisterHarness` reactivates the row for every host sharing the journal.
 - `agentsessionsd` now refuses positional arguments, naming them, and exits with status 2. It used
   to ignore them, along with every flag after the first one, since flag parsing stops there.
+- `runtime/substrate` no longer cold-creates an actor for a `REQUIRES_MEMORY_SNAPSHOT` session that
+  has a committed turn but no actor (deleted out of band, or the daemon restarted with another
+  `-substrate-atespace`). `Exec` fails with `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and
+  nothing is created, where it used to continue the journal on a fresh harness that had lost the
+  session's RAM state. The Placer now reads the journal before `Runtime.Create` to fill the new
+  `api.SessionSpec.CommittedTurns`; other backends ignore it.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

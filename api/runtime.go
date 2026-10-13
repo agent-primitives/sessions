@@ -11,6 +11,13 @@ import (
 // caller can retry the fork at the parent's new head.
 var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was superseded")
 
+// ErrMemoryStateLost reports that a backend refused to create fresh compute for a session whose
+// harness keeps its state only in RAM (REQUIRES_MEMORY_SNAPSHOT) and whose journal already records a
+// completed turn, because nothing is left to restore that state from. The journal cannot rebuild it
+// (I4), so a fresh incarnation would continue the journal with a harness that has forgotten it. The
+// caller cannot fix this by retrying; the session service reports it as FAILED_PRECONDITION.
+var ErrMemoryStateLost = errors.New("runtime: session's in-memory harness state is lost")
+
 // Runtime is the compute/sandbox SPI. Pod, Kata Pod Sandboxing, Cloud Hypervisor,
 // Dragonball, Hyperlight, and agent-substrate all implement it. There is no gVisor
 // requirement — backends are interchangeable, and the host reads Capabilities to place
@@ -98,6 +105,12 @@ type SessionSpec struct {
 	Image      string
 	Harness    string
 	Identity   IdentityRef
+	// CommittedTurns is how many turns the session's journal records as completed (END events) when
+	// the host places it: zero for a new session, and for a forked child the turns of the copied
+	// prefix. A backend uses it to refuse creating fresh compute for a REQUIRES_MEMORY_SNAPSHOT
+	// session that already has state only its old compute held (ErrMemoryStateLost). A caller that
+	// leaves it zero declares a session with no completed turns.
+	CommittedTurns int
 	// resource requests, env, mounts elided for v0
 }
 

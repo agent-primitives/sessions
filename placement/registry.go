@@ -11,18 +11,24 @@ import (
 	"github.com/aramase/agentsessions/eventlog"
 )
 
-// ErrUnknownHarness is returned for a harness name the host does not serve. session.Service
-// surfaces it as InvalidArgument: naming a harness that does not exist is a caller mistake, not a
+// ErrUnknownHarness is returned for a name unknown to this host. session.Service surfaces it as
+// InvalidArgument: naming a harness that does not exist is a caller mistake, not a
 // host fault, and failing is the point. Silently substituting a different harness would run the
 // session on something other than what was asked for, and the log would record that as if it had
 // been intended.
 var ErrUnknownHarness = errors.New("placement: unknown harness")
 
+// ErrHarnessUnservable means a registered name is known to this host but cannot run here.
+// Unlike ErrHarnessUnavailable (a transport/backend outage on a usable Placer), this is a
+// registration-load failure: the name remains reserved and visible to operators.
+var ErrHarnessUnservable = errors.New("placement: registered harness is unservable on this host")
+
 // ErrRecordedHarnessNotServed refuses recovery when the pending invocation names a registry entry
 // this host no longer serves. Unlike a caller's unknown name, it is a recovery precondition.
 var ErrRecordedHarnessNotServed = errors.New("placement: recorded harness is not served")
 
-// ErrHarnessExists is returned by Add for a name that already resolves.
+// ErrHarnessExists is returned by Add and MarkUnavailable for a name already in use or reserved
+// for a static harness. This includes unservable names, which remain in use but do not resolve.
 var ErrHarnessExists = errors.New("placement: harness name already in use")
 
 // Registry resolves a harness name to the Placer that runs it.
@@ -33,14 +39,16 @@ var ErrHarnessExists = errors.New("placement: harness name already in use")
 // runtime is what a Placer already does.
 //
 // The entries given to NewRegistry are static: built into the host or configured when it starts.
-// Add puts a registered harness in later, on a running host. An entry is never replaced or removed
-// once added, because a session's turns, streams and fences are coordinated through the Placer it
-// resolves to, and a second Placer for the same name would split that coordination.
+// Add puts a registered harness in later, on a running host; MarkUnavailable reserves one that
+// cannot be loaded. An entry is never replaced or removed once added, because a session's turns,
+// streams and fences are coordinated through the Placer it resolves to, and a second Placer for the
+// same name would split that coordination.
 type Registry struct {
 	mu             sync.RWMutex
 	byName         map[string]*Placer
-	static         map[string]bool // immutable after NewRegistry
-	reserved       map[string]bool // immutable after NewRegistry
+	unavailable    map[string]error // registered names that cannot run on this host
+	static         map[string]bool  // immutable after NewRegistry
+	reserved       map[string]bool  // immutable after NewRegistry
 	defaultHarness string
 
 	// guard and sessions are shared by every Placer in byName, static or added, because
@@ -104,6 +112,7 @@ func NewRegistry(defaultHarness string, placers map[string]*Placer, opts ...Regi
 	}
 	r := &Registry{
 		byName:         make(map[string]*Placer, len(placers)),
+		unavailable:    make(map[string]error),
 		static:         make(map[string]bool, len(placers)),
 		reserved:       map[string]bool{},
 		defaultHarness: defaultHarness,
@@ -154,6 +163,9 @@ func (r *Registry) Add(name string, p *Placer) error {
 	if _, ok := r.byName[name]; ok {
 		return fmt.Errorf("%w: %q", ErrHarnessExists, name)
 	}
+	if _, ok := r.unavailable[name]; ok {
+		return fmt.Errorf("%w: %q", ErrHarnessExists, name)
+	}
 	if p.sessions != r.sessions {
 		if p.sessions.shared {
 			return fmt.Errorf("placement: harness %q: placer already belongs to another registry", name)
@@ -165,6 +177,28 @@ func (r *Registry) Add(name string, p *Placer) error {
 		p.sessions = r.sessions
 	}
 	r.byName[name] = p
+	return nil
+}
+
+// MarkUnavailable reserves a registered name whose stored spec or local placement cannot be
+// loaded. This records a permanent host-local registration failure, not a transient backend
+// outage (ErrHarnessUnavailable). It never replaces a live Placer or a previously recorded failure.
+func (r *Registry) MarkUnavailable(name string, cause error) error {
+	if name == "" || cause == nil {
+		return errors.New("placement: MarkUnavailable needs a name and a cause")
+	}
+	if r.Reserved(name) {
+		return fmt.Errorf("%w: %q is reserved for a static harness", ErrHarnessExists, name)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.byName[name]; ok {
+		return fmt.Errorf("%w: %q", ErrHarnessExists, name)
+	}
+	if _, ok := r.unavailable[name]; ok {
+		return fmt.Errorf("%w: %q", ErrHarnessExists, name)
+	}
+	r.unavailable[name] = cause
 	return nil
 }
 
@@ -197,12 +231,14 @@ func (r *Registry) ReservedNames() []string {
 	return out
 }
 
-// Has reports whether name resolves.
+// Has reports whether this host knows the name, including registrations it cannot serve.
+// For, not Has, determines whether a usable Placer exists.
 func (r *Registry) Has(name string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	_, ok := r.byName[name]
-	return ok
+	_, served := r.byName[name]
+	_, unavailable := r.unavailable[name]
+	return served || unavailable
 }
 
 // For returns the Placer for a harness name. An empty name selects the default, which is how a
@@ -213,7 +249,11 @@ func (r *Registry) For(harness string) (*Placer, error) {
 	}
 	r.mu.RLock()
 	p, ok := r.byName[harness]
+	cause, unavailable := r.unavailable[harness]
 	r.mu.RUnlock()
+	if unavailable {
+		return nil, fmt.Errorf("%w: harness %q: %w", ErrHarnessUnservable, harness, cause)
+	}
 	if !ok {
 		return nil, fmt.Errorf("%w %q (registered: %v)", ErrUnknownHarness, harness, r.Names())
 	}
@@ -280,12 +320,16 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 // created without one, so a stored harness always refers to something the host can actually run.
 func (r *Registry) Default() string { return r.defaultHarness }
 
-// Names lists the registered harnesses in sorted order, for startup logs and error messages.
+// Names lists the served and unservable known harnesses in sorted order, for startup logs and
+// error messages. Has/Names include unavailable names, while For alone resolves a usable Placer.
 func (r *Registry) Names() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]string, 0, len(r.byName))
+	out := make([]string, 0, len(r.byName)+len(r.unavailable))
 	for name := range r.byName {
+		out = append(out, name)
+	}
+	for name := range r.unavailable {
 		out = append(out, name)
 	}
 	sort.Strings(out)

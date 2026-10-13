@@ -146,6 +146,86 @@ func TestRegistryAdd(t *testing.T) {
 	}
 }
 
+// An incompatible stored registration remains a known, reserved name; it must never fall through
+// to the unknown-name path or be replaced by a newly constructed Placer.
+func TestRegistryUnavailableName(t *testing.T) {
+	r, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": newPlacer(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cause := errors.New("unsupported placement")
+	if err := r.MarkUnavailable("old", cause); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Has("old") || !slices.Equal(r.Names(), []string{"echo", "old"}) {
+		t.Fatalf("unavailable name not reserved: Has=%t Names=%v", r.Has("old"), r.Names())
+	}
+	if _, err := r.For("old"); !errors.Is(err, placement.ErrHarnessUnservable) || !errors.Is(err, cause) || errors.Is(err, placement.ErrUnknownHarness) {
+		t.Fatalf("For(old)=%v, want unservable wrapping cause (not unknown)", err)
+	} else if err.Error() != `placement: registered harness is unservable on this host: harness "old": unsupported placement` {
+		t.Fatalf("For(old)=%v, want explicit harness name and load cause", err)
+	}
+	if err := r.Add("old", newPlacer(t)); !errors.Is(err, placement.ErrHarnessExists) {
+		t.Fatalf("Add(old)=%v, want ErrHarnessExists", err)
+	}
+	if _, err := r.For("missing"); !errors.Is(err, placement.ErrUnknownHarness) {
+		t.Fatalf("For(missing)=%v, want ErrUnknownHarness", err)
+	}
+}
+
+// Refused MarkUnavailable calls must not replace static or added Placers, overwrite an earlier
+// failure, or reserve a name without the information needed to diagnose it.
+func TestRegistryMarkUnavailableRefusals(t *testing.T) {
+	cause := errors.New("unsupported placement")
+	for _, tc := range []struct {
+		name       string
+		harness    string
+		cause      error
+		wantExists bool
+	}{
+		{"static", "echo", cause, true},
+		{"reserved", "chat", cause, true},
+		{"added", "reg", cause, true},
+		{"repeat", "old", errors.New("replacement failure"), true},
+		{"empty name", "", cause, false},
+		{"nil cause", "new", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			echo, reg := newPlacer(t), newPlacer(t)
+			r, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": echo}, placement.WithReservedNames("chat"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Add("reg", reg); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.MarkUnavailable("old", cause); err != nil {
+				t.Fatal(err)
+			}
+			err = r.MarkUnavailable(tc.harness, tc.cause)
+			if tc.wantExists {
+				if !errors.Is(err, placement.ErrHarnessExists) {
+					t.Fatalf("MarkUnavailable(%q)=%v, want ErrHarnessExists", tc.harness, err)
+				}
+			} else if err == nil || err.Error() != "placement: MarkUnavailable needs a name and a cause" {
+				t.Fatalf("MarkUnavailable(%q)=%v, want invalid name/cause refusal", tc.harness, err)
+			}
+			if got, err := r.For("echo"); err != nil || got != echo {
+				t.Fatalf("static Placer changed: %v, %v", got, err)
+			}
+			if got, err := r.For("reg"); err != nil || got != reg {
+				t.Fatalf("added Placer changed: %v, %v", got, err)
+			}
+			if _, err := r.For("old"); !errors.Is(err, placement.ErrHarnessUnservable) || !errors.Is(err, cause) {
+				t.Fatalf("original load failure changed: %v", err)
+			}
+			if !slices.Equal(r.Names(), []string{"echo", "old", "reg"}) {
+				t.Fatalf("refused call reserved a new name: %v", r.Names())
+			}
+		})
+	}
+}
+
 // Lookups run concurrently with Add on a live host; -race checks the locking.
 func TestRegistryAddIsSafeAlongsideLookups(t *testing.T) {
 	r, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": newPlacer(t)})

@@ -12,11 +12,14 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/aramase/agentsessions/api"
@@ -67,8 +70,9 @@ var ErrAdmissionInterrupted = errors.New("placement: admission interrupted")
 
 // Backend is the compute Runtime the Placer drives. It exposes the harness DESCRIPTOR so the Placer
 // can gate CanPlace before Create (placement must not provision compute to learn a harness's needs);
-// the harness itself is reached by dialing Incarnation.Address (Harness.Connect) — the one dial path
-// both runtime/local and substrate use. runtime/local satisfies this.
+// the harness itself is reached by dialing Incarnation.Address with Incarnation.CallMetadata on every
+// call (Harness.Connect) — the one dial path both runtime/local and substrate use. runtime/local
+// satisfies this.
 type Backend interface {
 	api.Runtime
 	Describe(ctx context.Context) (api.Descriptor, error)
@@ -103,14 +107,41 @@ type Placer struct {
 	// Private for a standalone Placer; NewRegistry and Registry.Add wire the Registry's shared
 	// guard before use.
 	guard *sessionGuard
+
+	// sessions tracks open harness connections and checkpoints per session UID. New gives each
+	// Placer its own; NewRegistry replaces it with one set shared by every Placer it routes to, so a
+	// stateful fork's checkpoint taken through one harness's Placer also covers a turn another Placer
+	// runs on the same session (ExecRequest.harness can differ from the session's default).
+	sessions *sessionSet
 }
 
-// Dialer opens a Harness.Connect client to the harness at a runtime-specific address and returns a
-// closer for the connection. runtime/local passes a unix-socket address (unix://…); substrate passes
-// the actor's pod IP as host:port (PodIP:80), dialed directly over h2c — the atenet mesh is
-// HTTP/1.1-only to actors, so gRPC bypasses the router. The default dialer handles both forms;
-// WithDialer overrides it (tests). This is the one transport seam the harness rides unchanged.
-type Dialer func(address string) (api.Harness, func() error, error)
+// sessionSet is the per-session state a checkpoint coordinates on. It is keyed by session UID
+// alone, so Placers that share one see each other's connections and checkpoints.
+type sessionSet struct {
+	mu   sync.Mutex
+	live map[string]map[*liveHarness]struct{} // session UID -> open harness connections
+	// checkpoints holds the session UIDs a stateful fork or a Suspend is checkpointing. While a
+	// session is in it, no harness connection can be opened for the session and no other fork or
+	// Suspend can checkpoint it.
+	checkpoints map[string]struct{}
+	// shared is set when a Registry owns the set, so a Placer cannot join two registries' sets.
+	shared bool
+}
+
+// busy reports whether any session has an open harness connection or a checkpoint in progress.
+// Entries are deleted when they drop to zero, so an idle set is empty.
+func (s *sessionSet) busy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.live) > 0 || len(s.checkpoints) > 0
+}
+
+// Dialer opens a Harness.Connect client to the harness an incarnation names and returns a closer for
+// the connection. runtime/local passes a unix-socket address (unix://…); substrate passes the
+// atenet-router's host:port, dialed over h2c, plus CallMetadata naming the actor, which the client
+// must attach to every call. The default dialer handles both forms; WithDialer overrides it (tests).
+// This is the one transport seam the harness rides unchanged.
+type Dialer func(inc api.Incarnation) (api.Harness, func() error, error)
 
 // Option configures a Placer.
 type Option func(*Placer)
@@ -215,11 +246,12 @@ func (p *Placer) DescriptorID() string { return p.descriptorID }
 // New builds a Placer over a compute backend and the live model.
 func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
 	p := &Placer{
-		backend: backend,
-		model:   model,
-		dial:    defaultDial,
-		logger:  slog.New(slog.DiscardHandler),
-		guard:   new(sessionGuard),
+		backend:  backend,
+		model:    model,
+		dial:     DefaultDial,
+		logger:   slog.New(slog.DiscardHandler),
+		guard:    new(sessionGuard),
+		sessions: &sessionSet{},
 	}
 	for _, o := range opts {
 		o(p)
@@ -275,6 +307,11 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		return api.Incarnation{}, err
 	}
 
+	// Refuse before provisioning: on substrate, Create on an actor a stateful fork is checkpointing
+	// would either fail or wake it. openHarness re-checks atomically; this only saves the round trip.
+	if err = p.refuseDuringCheckpoint(sessionUID); err != nil {
+		return api.Incarnation{}, err
+	}
 	createFinished := observability.StartDebug(ctx, p.logger, "placement", "create_compute", "session_uid", sessionUID)
 	inc, err = p.backend.Create(ctx, &api.SessionSpec{SessionUID: sessionUID})
 	if err != nil {
@@ -289,25 +326,32 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		"runtime", inc.Runtime,
 		"transport", addressTransport(inc.Address),
 	)
-	har, closeHarness, err := p.dial(inc.Address)
+	ctx, live, err := p.openHarness(ctx, sessionUID, inc)
 	if err != nil {
 		dialFinished(err, "error_kind", "harness_dial_failed")
 		return inc, err
 	}
 	dialFinished(nil)
-	defer p.closeHarness(ctx, sessionUID, inc.ID, closeHarness)
+	defer p.releaseHarness(ctx, sessionUID, inc.ID, live)
+	har := live.harness
 	if err := p.recheck(ctx, sessionUID, har); err != nil {
 		return inc, err
 	}
 
 	fenceFinished := observability.StartDebug(ctx, p.logger, "placement", "mint_fence", "session_uid", sessionUID)
 	fence, err := log.NewFence()
+	live.fenceMinted()
 	if err != nil {
 		fenceFinished(err, "error_kind", "new_fence_failed")
 		return inc, err
 	}
 	fenceFinished(nil)
 	inc.FenceToken = fence // Placer-owned: the incarnation carries the token Suspend/Resume will need
+	// A checkpoint may have begun while the fence was being minted. Stop before the controller writes
+	// anything under a fence the checkpoint's does not cover.
+	if err := live.checkSuperseded(ctx); err != nil {
+		return inc, err
+	}
 	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer),
 		controller.WithStart(cfg.config, cfg.resumeFromSeq),
 		controller.WithHarness(cfg.harness))
@@ -316,7 +360,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		return inc, err
 	}
 	if err := c.Exec(ctx, har, inputs, expectedLastSeq); err != nil {
-		return inc, controllerError(ctx, err)
+		return inc, turnError(ctx, err)
 	}
 	return inc, nil
 }
@@ -351,6 +395,13 @@ func (p *Placer) recheck(ctx context.Context, sessionUID string, har api.Harness
 		return nil
 	}
 	_, err := p.gate(ctx, sessionUID, "verify_execution_harness", har.Describe)
+	if err != nil && errors.Is(context.Cause(ctx), errSuperseded) {
+		// A checkpoint of the session ended this turn's connection during the check. Report the
+		// checkpoint, as turnError does for a running turn, and format the check's error with %v so
+		// that ErrAdmissionInterrupted is not in the chain: the call is retryable (ABORTED), not
+		// cancelled by its caller.
+		return fmt.Errorf("%w (harness check ended with: %v)", errSuperseded, err)
+	}
 	return err
 }
 
@@ -427,27 +478,53 @@ func describeError(ctx context.Context, err error, timedOut bool) error {
 	}
 }
 
-// defaultDial reaches a harnesswire server by address form: runtime/local passes a unix-socket
-// address (unix://…); substrate passes the actor's pod IP as host:port (PodIP:80). Both ride the same
-// harnesswire gRPC client; only the transport differs. One dial path, two address forms.
-func defaultDial(address string) (api.Harness, func() error, error) {
-	if sock, ok := strings.CutPrefix(address, "unix://"); ok {
-		return unixDial(sock)
-	}
-	return tcpDial(address)
-}
-
-// unixDial connects to a harnesswire server on a unix socket (runtime/local).
-func unixDial(sock string) (api.Harness, func() error, error) {
-	conn, err := grpc.NewClient(
-		"passthrough:///agentlocal",
+// DefaultDial reaches a harnesswire server by address form: runtime/local passes a unix-socket
+// address (unix://…); substrate passes the atenet-router's host:port. Both ride the same harnesswire
+// gRPC client with the incarnation's CallMetadata attached to every call; only the transport
+// differs. One dial path, two address forms.
+func DefaultDial(inc api.Incarnation) (api.Harness, func() error, error) {
+	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
 		grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+	}
+	if len(inc.CallMetadata) > 0 {
+		md := metadata.New(inc.CallMetadata)
+		opts = append(opts,
+			grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, callOpts ...grpc.CallOption) error {
+				return invoker(withCallMetadata(ctx, md), method, req, reply, cc, callOpts...)
+			}),
+			grpc.WithChainStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, callOpts ...grpc.CallOption) (grpc.ClientStream, error) {
+				return streamer(withCallMetadata(ctx, md), desc, cc, method, callOpts...)
+			}),
+		)
+	}
+	if sock, ok := strings.CutPrefix(inc.Address, "unix://"); ok {
+		return unixDial(sock, opts)
+	}
+	return tcpDial(inc.Address, opts)
+}
+
+// withCallMetadata attaches the incarnation's routing metadata to an outgoing call, replacing any
+// value the caller set for the same keys: the incarnation, not the call site, decides which sandbox
+// a call reaches.
+func withCallMetadata(ctx context.Context, md metadata.MD) context.Context {
+	out, _ := metadata.FromOutgoingContext(ctx)
+	out = out.Copy()
+	for k, v := range md {
+		out[k] = v
+	}
+	return metadata.NewOutgoingContext(ctx, out)
+}
+
+// unixDial connects to a harnesswire server on a unix socket (runtime/local).
+func unixDial(sock string, opts []grpc.DialOption) (api.Harness, func() error, error) {
+	conn, err := grpc.NewClient(
+		"passthrough:///agentlocal",
+		append(opts, grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", sock)
-		}),
+		}))...,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("placement: dial unix %s: %w", sock, err)
@@ -455,27 +532,280 @@ func unixDial(sock string) (api.Harness, func() error, error) {
 	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
 }
 
-// tcpDial connects to a harnesswire server at a TCP host:port over h2c (cleartext HTTP/2). Substrate
-// exposes the actor's harness on PodIP:80; an in-cluster caller dials it directly, bypassing the
-// HTTP/1.1-only atenet router. No TLS: the harness terminates plaintext gRPC, which is why this
-// path belongs on a trusted network only (see docs/security.md).
-func tcpDial(address string) (api.Harness, func() error, error) {
-	conn, err := grpc.NewClient(
-		address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
-		grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
-	)
+// tcpDial connects to a harnesswire server at a TCP host:port over h2c (cleartext HTTP/2). For
+// substrate that is the atenet-router, which selects the actor from the call metadata and carries
+// the gRPC stream to the actor over mTLS between router and worker. The leg from this process to the
+// router is plaintext and the router does not authenticate callers, so this path belongs on a
+// trusted network only (see docs/security.md).
+func tcpDial(address string, opts []grpc.DialOption) (api.Harness, func() error, error) {
+	conn, err := grpc.NewClient(address, opts...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("placement: dial %s: %w", address, err)
 	}
 	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
 }
 
+// ErrCheckpointing is returned when a turn cannot proceed because its session is being
+// checkpointed as the parent of a stateful Fork, which lasts until every child is cloned from the
+// checkpoint: either the turn tried to open a harness connection meanwhile, or the checkpoint ended
+// the connection the turn was using. A stateful Fork or a Suspend that finds the session already
+// being checkpointed by another one returns it too. It is retryable once the checkpoint returns;
+// session.Service maps it to codes.Aborted.
+var ErrCheckpointing = errors.New("placement: session is being checkpointed")
+
+// errSuperseded is the cancellation cause of a turn whose harness connection a checkpoint ended. The
+// checkpoint mints its fence before it ends the connection, so the turn has been superseded exactly
+// as a fenced writer is, and the error says both.
+var errSuperseded = fmt.Errorf("%w: in-flight turn superseded and its harness connection closed: %w", ErrCheckpointing, eventlog.ErrFenced)
+
+// turnError reports why a turn failed. When a checkpoint ended the turn's harness connection, the
+// error the turn itself surfaced is incidental (a cancelled model call, a closed stream, a cut
+// Describe), so the checkpoint is reported as the cause and the incidental error is kept for
+// diagnosis; controllerError is not applied, because it would report the cut Describe as the
+// caller's cancellation. Otherwise the controller's Describe boundary is mapped by controllerError.
+func turnError(ctx context.Context, err error) error {
+	if cause := context.Cause(ctx); errors.Is(cause, errSuperseded) {
+		if errors.Is(err, errSuperseded) {
+			return err
+		}
+		return fmt.Errorf("%w (turn ended with: %w)", cause, err)
+	}
+	return controllerError(ctx, err)
+}
+
+// liveHarness is one open harness connection and the means to end it from outside the turn that
+// owns it.
+type liveHarness struct {
+	harness api.Harness
+	cancel  context.CancelCauseFunc
+	once    sync.Once
+	close   func() error
+	err     error
+	// superseded is set, under sessionSet.mu, by the checkpoint that collects this connection, BEFORE
+	// that checkpoint mints its fence. A turn whose fence is newer than the checkpoint's is not
+	// fenced by it, but is guaranteed to observe this flag, so it checks the flag after minting.
+	superseded atomic.Bool
+	// minted is closed once the turn can no longer mint a fence: right after its one NewFence call
+	// returns, or when the turn releases the connection without having made it. A checkpoint waits
+	// on it so that no turn's fence can land after the fence the checkpoint records under.
+	minted     chan struct{}
+	mintedOnce sync.Once
+}
+
+// fenceMinted records that the turn has made its one NewFence call, successful or not.
+func (l *liveHarness) fenceMinted() {
+	l.mintedOnce.Do(func() { close(l.minted) })
+}
+
+// checkSuperseded fails with errSuperseded if a checkpoint has claimed this connection or already
+// ended it. The turn calls it right after minting its fence and before it writes anything.
+func (l *liveHarness) checkSuperseded(ctx context.Context) error {
+	if l.superseded.Load() {
+		return errSuperseded
+	}
+	if ctx.Err() != nil {
+		return turnError(ctx, ctx.Err())
+	}
+	return nil
+}
+
+// end cancels the turn's context, which ends its Connect stream, and closes the connection. It is
+// idempotent, so the owning turn and a checkpoint can both call it.
+func (l *liveHarness) end(cause error) error {
+	l.once.Do(func() {
+		l.cancel(cause)
+		l.err = l.close()
+	})
+	return l.err
+}
+
+// openHarness dials the incarnation's harness and registers the connection under the session, so a
+// checkpoint of that session can end it. The returned context is the turn's: it is cancelled when
+// the connection is ended from outside.
+//
+// Registration is refused with ErrCheckpointing while a checkpoint of the session is in progress.
+// The check and the registration happen under the same lock beginCheckpoint takes, so every turn
+// either registered before the checkpoint began (and is ended by it) or never opens a stream.
+func (p *Placer) openHarness(ctx context.Context, sessionUID string, inc api.Incarnation) (context.Context, *liveHarness, error) {
+	har, closeHarness, err := p.dial(inc)
+	if err != nil {
+		return ctx, nil, err
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	l := &liveHarness{harness: har, cancel: cancel, close: closeHarness, minted: make(chan struct{})}
+	p.sessions.mu.Lock()
+	if _, ok := p.sessions.checkpoints[sessionUID]; ok {
+		p.sessions.mu.Unlock()
+		// Nothing was sent on the connection, so the close error carries no information.
+		_ = l.end(context.Canceled)
+		return ctx, nil, fmt.Errorf("%w: session %q", ErrCheckpointing, sessionUID)
+	}
+	if p.sessions.live == nil {
+		p.sessions.live = map[string]map[*liveHarness]struct{}{}
+	}
+	if p.sessions.live[sessionUID] == nil {
+		p.sessions.live[sessionUID] = map[*liveHarness]struct{}{}
+	}
+	p.sessions.live[sessionUID][l] = struct{}{}
+	p.sessions.mu.Unlock()
+	return ctx, l, nil
+}
+
+// releaseHarness deregisters and closes a turn's harness connection when the turn returns.
+func (p *Placer) releaseHarness(ctx context.Context, sessionUID, incarnationID string, l *liveHarness) {
+	p.sessions.mu.Lock()
+	delete(p.sessions.live[sessionUID], l)
+	if len(p.sessions.live[sessionUID]) == 0 {
+		delete(p.sessions.live, sessionUID)
+	}
+	p.sessions.mu.Unlock()
+	l.fenceMinted() // a turn that returns before minting never will
+	finish := observability.StartDebug(context.WithoutCancel(ctx), p.logger, "placement", "close_harness",
+		"session_uid", sessionUID,
+		"incarnation_id", incarnationID,
+	)
+	err := l.end(context.Canceled)
+	finish(err, "error_kind", closeErrorKind(err))
+}
+
+// refuseDuringCheckpoint fails with ErrCheckpointing while a checkpoint of the session is in
+// progress. It is an early exit only; openHarness is where the refusal is enforced.
+func (p *Placer) refuseDuringCheckpoint(sessionUID string) error {
+	p.sessions.mu.Lock()
+	defer p.sessions.mu.Unlock()
+	if _, ok := p.sessions.checkpoints[sessionUID]; ok {
+		return fmt.Errorf("%w: session %q", ErrCheckpointing, sessionUID)
+	}
+	return nil
+}
+
+// beginCheckpoint marks the session as being checkpointed, so openHarness refuses new connections
+// for it, and returns the connections already open, each marked superseded. Taking the mark and the
+// set under one lock is what leaves no window for a turn to slip a stream in between. The caller
+// mints its fence after this returns, so a turn that mints a newer fence still sees the superseded
+// mark (checkSuperseded) and writes nothing. A connection stays marked even if the checkpoint
+// aborts. Every successful call must be paired with endCheckpoint.
+//
+// Checkpoints do not nest: while another fork holds the mark, from its checkpoint until its last
+// child is cloned, or a Suspend holds it, beginCheckpoint fails with ErrCheckpointing and changes
+// nothing. A second fork would otherwise mint a fence that fails the first one's SUSPEND record
+// after the parent is already cold, or checkpoint the parent again and replace the snapshot the
+// first one's remaining children clone from; a fork beside a Suspend would fail the Suspend's
+// record the same way.
+func (p *Placer) beginCheckpoint(sessionUID string) ([]*liveHarness, error) {
+	p.sessions.mu.Lock()
+	defer p.sessions.mu.Unlock()
+	if err := p.setCheckpointLocked(sessionUID); err != nil {
+		return nil, err
+	}
+	open := make([]*liveHarness, 0, len(p.sessions.live[sessionUID]))
+	for l := range p.sessions.live[sessionUID] {
+		l.superseded.Store(true)
+		open = append(open, l)
+	}
+	return open, nil
+}
+
+// markCheckpoint sets the session's checkpoint mark for a Suspend. Unlike beginCheckpoint it ends
+// no harness connection: Suspend holds the session guard, and every connection is opened by an Exec
+// or Resume under that guard, so none is open. It fails with ErrCheckpointing, changing nothing,
+// while a fork holds the mark. Every successful call must be paired with endCheckpoint.
+func (p *Placer) markCheckpoint(sessionUID string) error {
+	p.sessions.mu.Lock()
+	defer p.sessions.mu.Unlock()
+	return p.setCheckpointLocked(sessionUID)
+}
+
+// setCheckpointLocked sets the session's checkpoint mark, or fails with ErrCheckpointing if a fork
+// or Suspend already holds it. The caller holds sessionSet.mu.
+func (p *Placer) setCheckpointLocked(sessionUID string) error {
+	if _, ok := p.sessions.checkpoints[sessionUID]; ok {
+		return fmt.Errorf("%w: session %q is already being checkpointed by a fork or Suspend", ErrCheckpointing, sessionUID)
+	}
+	if p.sessions.checkpoints == nil {
+		p.sessions.checkpoints = map[string]struct{}{}
+	}
+	p.sessions.checkpoints[sessionUID] = struct{}{}
+	return nil
+}
+
+// endCheckpoint lifts the mark beginCheckpoint or markCheckpoint set.
+func (p *Placer) endCheckpoint(sessionUID string) {
+	p.sessions.mu.Lock()
+	defer p.sessions.mu.Unlock()
+	delete(p.sessions.checkpoints, sessionUID)
+}
+
+// endHarnesses ends the harness connections beginCheckpoint returned, and must run before a stateful
+// fork checkpoints the session's compute. Substrate drains the actor's in-flight requests before it
+// snapshots, and an open Connect stream idling on a model call counts as one: left open, it stalls
+// the checkpoint until that drain times out. Ending the stream also stops a turn the checkpoint has
+// just fenced from talking to a harness that will be frozen mid-call.
+//
+// Suspend does not call it: it refuses to run beside an Exec or Resume of the session
+// (ErrSessionBusy), and they hold the session guard until their harness connection is closed.
+//
+// The caller mints its fence first, so the turn being ended can no longer write: it records no
+// ERROR for an interruption the host caused, and it returns errSuperseded. A turn that minted a newer
+// fence in between is stopped by the superseded mark beginCheckpoint set (checkSuperseded).
+//
+// Ending a stream only cancels the turn's context, and a turn that registered but has not yet
+// minted its fence still mints one. So endHarnesses then waits, bounded by ctx, until every ended
+// turn has made its fence call or returned. After it returns nil, no turn run by a Placer sharing
+// this session set can mint a fence on the session, and the fence the caller mints next is the
+// newest one the checkpoint will see. If ctx ends first, it returns an error and the caller must
+// abort before checkpointing.
+//
+// It covers connections opened by every Placer sharing this Placer's session set: all Placers of
+// one Registry, so a turn routed by ExecRequest.harness to another harness's Placer is ended too.
+// A turn driven by another process is fenced by the log as before, but its stream stays open until
+// that turn next touches the log or returns.
+func (p *Placer) endHarnesses(ctx context.Context, sessionUID string, open []*liveHarness) (err error) {
+	if len(open) == 0 {
+		return nil
+	}
+	finish := observability.StartDebug(ctx, p.logger, "placement", "end_harness_streams",
+		"session_uid", sessionUID,
+		"connections", len(open),
+	)
+	var closeErrs []error
+	for _, l := range open {
+		closeErrs = append(closeErrs, l.end(errSuperseded))
+	}
+	defer func() {
+		if err != nil {
+			finish(err, "error_kind", "superseded_turn_not_settled")
+			return
+		}
+		closeErr := errors.Join(closeErrs...)
+		finish(closeErr, "error_kind", closeErrorKind(closeErr))
+	}()
+	for _, l := range open {
+		select {
+		case <-l.minted:
+		case <-ctx.Done():
+			return fmt.Errorf("placement: waiting for the superseded turn on session %q to finish minting its fence: %w", sessionUID, context.Cause(ctx))
+		}
+	}
+	return nil
+}
+
 // Suspend transitions the incarnation to cold via SnapshotExternal, then records the SnapshotRef
 // in a SUSPEND lifecycle event so Resume can recover it from the tamper-evident chain (§5.1).
 // Snapshot owns dedicated compute release and retains the handles Restore needs; Stop would
 // destructively tear them down. Snapshot keys on the session id, so a minimal incarnation suffices.
+//
+// Suspend does not interrupt a running turn. While an Exec or Resume of the session runs through
+// this Placer or its Registry, Suspend fails with ErrSessionBusy without touching compute or the
+// journal, and the caller retries once the turn has returned. So the checkpoint never runs under an
+// open harness stream of a turn this Registry drives.
+//
+// Suspend also holds the session's checkpoint mark, the one a stateful Fork holds, from before it
+// snapshots until it has recorded the SUSPEND event. While a fork of the session holds the mark,
+// from its checkpoint until its last child is cloned, Suspend fails with ErrCheckpointing without
+// touching compute or the journal; a fork that arrives during a Suspend is refused the same way. So
+// a Suspend can neither fail the fork's SUSPEND record nor replace the snapshot its children clone
+// from.
 func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID string) (ref api.SnapshotRef, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	finish := observability.StartDebug(ctx, p.logger, "placement", "suspend", "session_uid", sessionUID)
@@ -486,6 +816,12 @@ func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID str
 		return api.SnapshotRef{}, err
 	}
 	defer release()
+	// The guard is taken first and never waited on (tryLock), and the mark is set under
+	// sessionSet.mu, which is never held while taking the guard, so the two cannot deadlock.
+	if err := p.markCheckpoint(sessionUID); err != nil {
+		return api.SnapshotRef{}, err
+	}
+	defer p.endCheckpoint(sessionUID)
 
 	inc := api.Incarnation{ID: sessionUID}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
@@ -539,6 +875,9 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		return err
 	}
 	sourceFinished(nil, "memory_snapshot", ref.Memory)
+	if err := p.refuseDuringCheckpoint(sessionUID); err != nil {
+		return err
+	}
 	inc, err = p.backend.Restore(ctx, ref)
 	if err != nil {
 		return err
@@ -549,31 +888,36 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		"runtime", inc.Runtime,
 		"transport", addressTransport(inc.Address),
 	)
-	har, closeHarness, err := p.dial(inc.Address)
+	ctx, live, err := p.openHarness(ctx, sessionUID, inc)
 	if err != nil {
 		dialFinished(err, "error_kind", "harness_dial_failed")
 		return err
 	}
 	dialFinished(nil)
-	defer p.closeHarness(ctx, sessionUID, inc.ID, closeHarness)
+	defer p.releaseHarness(ctx, sessionUID, inc.ID, live)
+	har := live.harness
 	if err := p.recheck(ctx, sessionUID, har); err != nil {
 		return err
 	}
 	fenceFinished := observability.StartDebug(ctx, p.logger, "placement", "mint_fence", "session_uid", sessionUID)
 	fence, err := log.NewFence()
+	live.fenceMinted()
 	if err != nil {
 		fenceFinished(err, "error_kind", "new_fence_failed")
 		return err
 	}
 	fenceFinished(nil)
 	inc.FenceToken = fence
+	if err := live.checkSuperseded(ctx); err != nil {
+		return err
+	}
 	copts := append(p.controllerOpts(fence, sessionUID, controller.Observer{}), controller.WithHarness(cfg.harness))
 	c, err := controller.New(log, p.model, copts...)
 	if err != nil {
 		return err
 	}
 	if _, err := c.Resume(ctx, har); err != nil {
-		return controllerError(ctx, err)
+		return turnError(ctx, err)
 	}
 	head, err := log.Head()
 	if err != nil {
@@ -590,15 +934,6 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 type ForkChild struct {
 	UID string
 	Log eventlog.Store
-}
-
-func (p *Placer) closeHarness(ctx context.Context, sessionUID, incarnationID string, closeHarness func() error) {
-	finish := observability.StartDebug(ctx, p.logger, "placement", "close_harness",
-		"session_uid", sessionUID,
-		"incarnation_id", incarnationID,
-	)
-	err := closeHarness()
-	finish(err, "error_kind", closeErrorKind(err))
 }
 
 func addressTransport(address string) string {
@@ -618,6 +953,8 @@ func placementErrorKind(err error) string {
 		return "descriptor_mismatch"
 	case errors.Is(err, ErrHarnessUnavailable):
 		return "harness_unavailable"
+	case errors.Is(err, ErrCheckpointing):
+		return "checkpointing"
 	case errors.Is(err, ErrSessionBusy), errors.Is(err, eventlog.ErrConflict):
 		return "conflict"
 	case errors.Is(err, eventlog.ErrFenced):
@@ -648,7 +985,9 @@ func closeErrorKind(err error) string {
 // parent is checkpointed first and every child is cloned from that snapshot.
 //
 // The whole fan-out shares ONE parent checkpoint: N children cost one snapshot and N clones, and all
-// of them branch from the identical state.
+// of them branch from the identical state. The parent's checkpoint mark is held until the last child
+// is cloned, so a turn on the parent is refused (ErrCheckpointing) for the whole fan-out instead of
+// waking the parent and replacing the snapshot the remaining children clone from.
 func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID string, children []ForkChild, atSeq int64) (err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	finish := observability.StartDebug(ctx, p.logger, "placement", "fork",
@@ -658,18 +997,25 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 	)
 	defer func() { finish(err, "error_kind", placementErrorKind(err)) }()
 
-	ref, err := p.forkSource(ctx, parent, parentUID, atSeq)
+	ref, release, err := p.forkSource(ctx, parent, parentUID, atSeq)
 	if err != nil {
 		return err
 	}
+	defer release()
 	// A failed fan-out must not strand compute. The child UIDs are minted per request and returned
 	// only on success, so anything provisioned before the failure would otherwise be unreachable —
 	// unstoppable workers nobody can name.
 	created := make([]string, 0, len(children))
+	abort := func(err error) error {
+		// Release the parent first. Nothing in the teardown reads it, and holding the mark through
+		// up to MaxForkChildren × rollbackTimeout of Stops would refuse its turns for that long.
+		release()
+		p.rollbackFork(ctx, created)
+		return err
+	}
 	for _, child := range children {
 		if _, err := p.backend.Fork(ctx, ref, api.ForkOpts{ChildSessionUID: child.UID}); err != nil {
-			p.rollbackFork(ctx, created)
-			return err
+			return abort(err)
 		}
 		created = append(created, child.UID)
 		copyFinished := observability.StartDebug(ctx, p.logger, "placement", "copy_fork_log",
@@ -680,8 +1026,7 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 		err := controller.Fork(parent, child.Log, atSeq)
 		copyFinished(err, "error_kind", placementErrorKind(err))
 		if err != nil {
-			p.rollbackFork(ctx, created)
-			return err
+			return abort(err)
 		}
 	}
 	return nil
@@ -716,7 +1061,8 @@ func (p *Placer) stopOrphan(ctx context.Context, uid string) {
 // rollbackTimeout bounds the best-effort teardown of ONE child of a failed fan-out.
 const rollbackTimeout = 30 * time.Second
 
-// forkSource produces the SnapshotRef the child is forked from.
+// forkSource produces the SnapshotRef the child is forked from, and a release func the caller must
+// call once every child is cloned (it is idempotent, and a no-op for a stateless fork).
 //
 // For a stateless harness that is just the parent's handle (nothing to clone). For a memory harness
 // it is a FRESH snapshot of the parent, recorded as a SUSPEND lifecycle event so the ref stays
@@ -728,13 +1074,17 @@ const rollbackTimeout = 30 * time.Second
 // returns, the parent is cold with a SUSPEND event on its chain whether or not the children go on to
 // provision. That is a recoverable state (Resume brings the parent back), not a leak, but it does
 // mean a retry must fork at the new head rather than the original seq.
-func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUID string, atSeq int64) (api.SnapshotRef, error) {
+//
+// For a stateful fork that returns a ref, the session's checkpoint mark is still held, so no turn
+// opens a harness stream on the parent until release is called. If it returns an error or panics,
+// the mark is already lifted.
+func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUID string, atSeq int64) (_ api.SnapshotRef, _ func(), err error) {
 	desc, err := p.admit(ctx, parentUID)
 	if err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
 	}
 	if desc.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
-		return api.SnapshotRef{Local: parentUID}, nil
+		return api.SnapshotRef{Local: parentUID}, func() {}, nil
 	}
 	// Check the head BEFORE minting a fence. Minting is an autocommitted bump that supersedes any
 	// in-flight writer, so doing it first would let a fork that is then REFUSED as unplaceable still
@@ -742,48 +1092,81 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	// off than before it was asked.
 	head, err := parent.Head()
 	if err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
 	}
 	// A memory snapshot captures the parent's RAM as it is NOW, so it can only realize a fork taken
 	// at the log head. Branching a stateful session at a historical seq would pair an old prefix with
 	// present-day RAM; refuse — with no side effects at all — instead of producing that mismatch.
 	if atSeq != head {
-		return api.SnapshotRef{}, fmt.Errorf("%w: harness %q requires %s, which can only fork at the log head (%d), not seq %d",
+		return api.SnapshotRef{}, nil, fmt.Errorf("%w: harness %q requires %s, which can only fork at the log head (%d), not seq %d",
 			ErrUnplaceable, desc.ID, desc.Capabilities.Resumability, head, atSeq)
 	}
 	// Past this point the fork is committing, so superseding the current writer is intended.
 	// Unlike Suspend, Fork is not covered by the session guard. Fencing before the snapshot means
-	// an in-flight turn cannot advance the head underneath a checkpoint that is not undoable.
-	fence, err := parent.NewFence()
+	// an in-flight turn cannot advance the head underneath a checkpoint that is not undoable. The
+	// checkpoint mark goes first, so no new turn opens a harness stream on the parent until the
+	// caller releases it after the last child is cloned.
+	open, err := p.beginCheckpoint(parentUID)
 	if err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
+	}
+	release := sync.OnceFunc(func() { p.endCheckpoint(parentUID) })
+	// Lift the mark on every path but the one that hands release to the caller, a panic included:
+	// a recovered panic in the runtime's Snapshot must not leave the parent refused for good.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
+	if _, err := parent.NewFence(); err != nil {
+		return api.SnapshotRef{}, nil, err
 	}
 	// A turn could still have committed in the window before that fence landed. Re-check now, while
 	// aborting is free: after the snapshot the parent is cold whether or not the fork proceeds.
 	if head, err = parent.Head(); err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
 	}
 	if atSeq != head {
-		return api.SnapshotRef{}, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
+		return api.SnapshotRef{}, nil, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
+	}
+	if err := p.endHarnesses(ctx, parentUID, open); err != nil {
+		return api.SnapshotRef{}, nil, err
+	}
+	// A turn ended above may have minted a newer fence after ours. It wrote nothing
+	// (checkSuperseded), but its fence would leave ours stale and fail the SUSPEND append after the
+	// parent is already cold. endHarnesses returned only once every such turn had minted, and no new
+	// turn can open, so mint the fence the record is written under now, and re-check the head while
+	// aborting is still free.
+	fence, err := parent.NewFence()
+	if err != nil {
+		return api.SnapshotRef{}, nil, err
+	}
+	if head, err = parent.Head(); err != nil {
+		return api.SnapshotRef{}, nil, err
+	}
+	if atSeq != head {
+		return api.SnapshotRef{}, nil, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
 	}
 	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID}, api.SnapshotExternal)
 	if err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
 	}
 	// Record the checkpoint before validating it: the parent is already cold, and the SUSPEND event
 	// is what keeps that fact on the chain. CAS on atSeq — the seq the head check validated — rather
 	// than a re-read head, so a writer that minted an even newer fence in the meantime aborts the
 	// fork instead of silently widening the children's prefix past the RAM they were cloned from.
 	if err := appendLifecycleAt(parent, atSeq, fence, api.Lifecycle{Kind: api.LifecycleSuspend, Snapshot: &ref}); err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, nil, err
 	}
 	// Only now refuse an unusable checkpoint. A memory-capable runtime that yields no external handle
 	// cannot clone, and cold-booting the children instead is the silent divergence this whole path
 	// exists to prevent.
 	if ref.ExternalURI == "" {
-		return api.SnapshotRef{}, fmt.Errorf("%w: runtime %q produced no external snapshot handle to clone from", ErrUnplaceable, desc.ID)
+		return api.SnapshotRef{}, nil, fmt.Errorf("%w: runtime %q produced no external snapshot handle to clone from", ErrUnplaceable, desc.ID)
 	}
-	return ref, nil
+	handedOff = true
+	return ref, release, nil
 }
 
 // appendLifecycle mints a fresh fence and records a lifecycle event at the head observed afterward.

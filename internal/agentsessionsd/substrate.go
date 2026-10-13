@@ -117,8 +117,8 @@ func registerSubstrateFlags(fs *flag.FlagSet) *substrateFlags {
 			f.only = append(f.only, fl.Name)
 		}
 	})
-	fs.Var(f.harnesses, "substrate-harness", "run a harness as an agent-substrate actor per session, as name=atespace/template; append ,memory for a REQUIRES_MEMORY_SNAPSHOT harness; repeatable")
-	f.atespace = fs.String("substrate-atespace", "", "atespace the session actors are created in; required with -substrate-harness")
+	fs.Var(f.harnesses, "substrate-harness", "run a harness as an agent-substrate actor per session, as name=atespace/template; append ,memory for a REQUIRES_MEMORY_SNAPSHOT harness. The tier is not checked against the image's Describe: a stateful image declared without ,memory loses its RAM state on fork. Repeatable")
+	f.atespace = fs.String("substrate-atespace", "", "atespace the session actors are created in; required with -substrate-harness. Must not change while sessions exist: their actors stay in the old atespace, and a REQUIRES_MEMORY_SNAPSHOT session with committed turns is then refused")
 	f.ateapi = fs.String("ateapi-addr", "api.ate-system.svc:443", "address of the substrate ate-api Control service (TLS)")
 	f.serverName = fs.String("ateapi-server-name", "", "TLS server name for the ate-api; empty uses the host of -ateapi-addr")
 	f.caFile = fs.String("ateapi-ca-file", "", "PEM CA bundle that signs the ate-api serving certificate; empty uses the system roots")
@@ -244,6 +244,9 @@ func (f *substrateFlags) backends(newControl SubstrateControlFunc, logger *slog.
 	ctl := newControl(conn)
 	backends := make(map[string]placement.Backend, len(f.harnesses))
 	for name, h := range f.harnesses {
+		// The declared tier is trusted as given; nothing compares it with the image's Describe, and
+		// the atespace and template are not recorded per session. docs/substrate-conformance.md
+		// ("Substrate placement binding") tracks both.
 		resumability := api.ResumabilityStatelessReplay
 		if h.memory {
 			resumability = api.ResumabilityRequiresMemorySnapshot

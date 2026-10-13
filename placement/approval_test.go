@@ -39,7 +39,7 @@ func placementGateCall() api.ToolCall {
 type approvalBackend struct {
 	placement.Backend
 	describes, creates, restores, snapshots, stops int
-	beforeSnapshot                                 func()
+	beforeSnapshot                                 func(context.Context)
 }
 
 func (b *approvalBackend) Describe(ctx context.Context) (api.Descriptor, error) {
@@ -57,7 +57,7 @@ func (b *approvalBackend) Restore(ctx context.Context, ref api.SnapshotRef) (api
 func (b *approvalBackend) Snapshot(ctx context.Context, inc api.Incarnation, kind api.SnapshotKind) (api.SnapshotRef, error) {
 	b.snapshots++
 	if b.beforeSnapshot != nil {
-		b.beforeSnapshot()
+		b.beforeSnapshot(ctx)
 	}
 	return b.Backend.Snapshot(ctx, inc, kind)
 }
@@ -174,20 +174,69 @@ func TestPlacementApprovalWireParkAutoSuspend(t *testing.T) {
 	}
 }
 
+// A stateful checkpoint through another route can supersede the stateless approval turn.
+// Its park must not start a second snapshot or hide the checkpoint cause.
+func TestPlacementApprovalSupersededParkDoesNotHandoff(t *testing.T) {
+	log := newSuspendStore(t).Session("s")
+	checkpointBackend := &routedBackend{desc: memDescriptor}
+	checkpoint := placement.New(checkpointBackend, nil)
+	var turn *placement.Placer
+	har := placementGateHarness{run: func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+		_, park := sink.ToolCall(ctx, placementGateCall())
+		if !errors.Is(park, api.ErrApprovalParked) {
+			t.Fatalf("gate=%v", park)
+		}
+		if err := forkChildren(t, checkpoint, log, "s", 1); err != nil {
+			t.Fatalf("checkpoint=%v", err)
+		}
+		return park
+	}}
+	runtime := local.New(har)
+	t.Cleanup(func() { _ = runtime.Close() })
+	b := &approvalBackend{Backend: runtime}
+	turn = placement.New(b, nil, placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
+		return har, func() error { return nil }, nil
+	}))
+	if _, err := placement.NewRegistry("checkpoint", map[string]*placement.Placer{"checkpoint": checkpoint, "turn": turn}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := turn.Exec(t.Context(), log, "s", nil, 0)
+	if !errors.Is(err, placement.ErrCheckpointing) || errors.Is(err, api.ErrApprovalParked) {
+		t.Fatalf("superseded park=%v, want checkpoint refusal only", err)
+	}
+	if b.snapshots != 0 || checkpointBackend.snapshots != 1 {
+		t.Fatalf("approval snapshots=%d checkpoint snapshots=%d", b.snapshots, checkpointBackend.snapshots)
+	}
+}
+
 func TestPlacementApprovalCloseBeforeSnapshotOnce(t *testing.T) {
 	ctl := newSuspendControl()
 	desc, _ := (placementGateHarness{}).Describe(t.Context())
 	b := &approvalBackend{Backend: substrate.New(ctl, "space", substrate.ObjectRef{Name: "gate"}, desc)}
+	log := newSuspendStore(t).Session("s")
+	checkpointBackend := &routedBackend{desc: memDescriptor}
+	checkpoint := placement.New(checkpointBackend, nil)
 	closes := 0
-	b.beforeSnapshot = func() {
+	b.beforeSnapshot = func(ctx context.Context) {
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("closing the invocation canceled snapshot context: %v", err)
+		}
 		if closes != 1 {
 			t.Fatalf("snapshot before exactly one close: closes=%d", closes)
 		}
+		if err := forkChildren(t, checkpoint, log, "s", 1); !errors.Is(err, placement.ErrCheckpointing) {
+			t.Fatalf("fork during approval snapshot=%v, want ErrCheckpointing", err)
+		}
+		if checkpointBackend.snapshots != 0 {
+			t.Fatal("refused fork touched compute")
+		}
 	}
-	p := placement.New(b, nil, placement.WithDialer(func(string) (api.Harness, func() error, error) {
+	p := placement.New(b, nil, placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 		return placementGateHarness{}, func() error { closes++; return nil }, nil
 	}))
-	log := newSuspendStore(t).Session("s")
+	if _, err := placement.NewRegistry("checkpoint", map[string]*placement.Placer{"checkpoint": checkpoint, "turn": p}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := p.Exec(t.Context(), log, "s", nil, 0); !errors.Is(err, api.ErrApprovalParked) {
 		t.Fatal(err)
 	}

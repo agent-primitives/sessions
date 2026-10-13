@@ -51,7 +51,7 @@ func TestPlacementApprovalHandoffFailuresPreserveCause(t *testing.T) {
 			desc, _ := har.Describe(t.Context())
 			b := &approvalBackend{Backend: substrate.New(ctl, "space", substrate.ObjectRef{Name: "gate"}, desc)}
 			closes := 0
-			p := placement.New(b, nil, placement.WithDialer(func(string) (api.Harness, func() error, error) {
+			p := placement.New(b, nil, placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 				return har, func() error {
 					closes++
 					if mode == "close" {
@@ -147,7 +147,7 @@ func TestRegistryApprovalSuspendRecordedRetry(t *testing.T) {
 			ctl.snapshotErr = errors.New("snapshot unavailable")
 			desc, _ := (placementGateHarness{}).Describe(t.Context())
 			b := &approvalBackend{Backend: substrate.New(ctl, "space", substrate.ObjectRef{Name: "gate"}, desc)}
-			recorded := placement.New(b, nil, placement.WithDialer(func(string) (api.Harness, func() error, error) {
+			recorded := placement.New(b, nil, placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 				return placementGateHarness{}, func() error { return nil }, nil
 			}))
 			def, db := newApprovalNoIOPlacer(t)
@@ -376,7 +376,7 @@ func TestPlacementApprovalAutoHandoffContention(t *testing.T) {
 				b := &approvalBackend{Backend: substrate.New(ctl, "space", substrate.ObjectRef{Name: "gate"}, desc)}
 				closes := 0
 				recorded := placement.New(b, nil,
-					placement.WithDialer(func(string) (api.Harness, func() error, error) {
+					placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 						return har, func() error {
 							closes++
 							pause("close")
@@ -401,7 +401,7 @@ func TestPlacementApprovalAutoHandoffContention(t *testing.T) {
 					}
 					seedPlacementApproval(t, log.Store, "recorded", api.EventApprovalResult)
 				}
-				b.beforeSnapshot = func() { pause("snapshot") }
+				b.beforeSnapshot = func(context.Context) { pause("snapshot") }
 				log.beforeSuspend = func() { pause("append") }
 				before := mustApprovalHead(t, log)
 				type result struct {
@@ -606,7 +606,7 @@ func TestPlacementApprovalJoinedRunFailureIsNotHandoff(t *testing.T) {
 				desc, _ := har.Describe(t.Context())
 				b := &approvalBackend{Backend: substrate.New(ctl, "space", substrate.ObjectRef{Name: "gate"}, desc)}
 				closes, effects := 0, 0
-				p := placement.New(b, nil, placement.WithDialer(func(string) (api.Harness, func() error, error) {
+				p := placement.New(b, nil, placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 					return har, func() error { closes++; return nil }, nil
 				}), placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					effects++

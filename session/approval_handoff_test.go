@@ -68,7 +68,7 @@ func TestPublicApprovalJoinedRunFailureIsNotSuccessfulPark(t *testing.T) {
 				b := &publicGateBackend{Backend: local.New(h)}
 				t.Cleanup(func() { _ = b.Close() })
 				var closes, effects atomic.Int32
-				p := placement.New(b, nil, placement.WithDialer(func(string) (api.Harness, func() error, error) {
+				p := placement.New(b, nil, placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 					return h, func() error { closes.Add(1); return nil }, nil
 				}), placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					effects.Add(1)

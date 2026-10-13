@@ -8,7 +8,6 @@ import (
 	"net"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,13 +16,14 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+
+	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
-	"github.com/aramase/agentsessions/harnesswire"
 	"github.com/aramase/agentsessions/integrations/substrate/e2e/internal/approvalfixture"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/session"
@@ -36,8 +36,61 @@ const (
 	approvalMemoryTemplate = "approval-memory"
 )
 
+// Approval fixtures use their own image and pools; templates are Control resources, not CRDs.
+func approvalTemplateSpec(t *testing.T, atespace string) *atepb.ActorTemplate {
+	return approvalSpec(t, atespace, approvalTemplate, "stateless", "agentsessions-approval-harness", "gvisor-default", atepb.SandboxClass_SANDBOX_CLASS_GVISOR)
+}
+
+func approvalMemoryTemplateSpec(t *testing.T, atespace string) *atepb.ActorTemplate {
+	return approvalSpec(t, atespace, approvalMemoryTemplate, "memory", "agentsessions-approval-memory", "microvm", atepb.SandboxClass_SANDBOX_CLASS_MICROVM)
+}
+
+func approvalSpec(t *testing.T, atespace, name, mode, pool, config string, class atepb.SandboxClass) *atepb.ActorTemplate {
+	t.Helper()
+	c := harnessContainer("")
+	c.Image = env("APPROVAL_HARNESS_IMAGE", "")
+	c.Command = []string{"/ko-app/approval-harness"}
+	c.Env = []*atepb.EnvVar{{Name: "HARNESS_MODE", Value: mode}}
+	return &atepb.ActorTemplate{
+		Metadata:       &atepb.ResourceMetadata{Atespace: atespace, Name: name},
+		Containers:     []*atepb.Container{c},
+		WorkerSelector: &atepb.Selector{MatchLabels: map[string]string{"workload": pool}},
+		SandboxConfig:  &atepb.SandboxConfig{SandboxClass: class, ConfigName: config},
+		SnapshotConfig: &atepb.SnapshotConfig{
+			OnCommit:        atepb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			StorageLocation: env("SNAPSHOT_LOCATION", "gs://ate-snapshots/agentsessions/") + name + "/",
+		},
+	}
+}
+
+func TestApprovalTemplateSpecs(t *testing.T) {
+	t.Setenv("APPROVAL_HARNESS_IMAGE", "registry/approval@sha256:fixture")
+	for _, tc := range []struct {
+		name, mode, pool, config string
+		class                    atepb.SandboxClass
+		spec                     func(*testing.T, string) *atepb.ActorTemplate
+	}{
+		{"stateless", "stateless", "agentsessions-approval-harness", "gvisor-default", atepb.SandboxClass_SANDBOX_CLASS_GVISOR, approvalTemplateSpec},
+		{"memory", "memory", "agentsessions-approval-memory", "microvm", atepb.SandboxClass_SANDBOX_CLASS_MICROVM, approvalMemoryTemplateSpec},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := tc.spec(t, "templates")
+			c := spec.GetContainers()[0]
+			if spec.GetMetadata().GetAtespace() != "templates" || c.GetImage() != "registry/approval@sha256:fixture" || !reflect.DeepEqual(c.GetCommand(), []string{"/ko-app/approval-harness"}) {
+				t.Fatalf("wrong fixture identity: %v", spec)
+			}
+			if c.GetEnv()[0].GetName() != "HARNESS_MODE" || c.GetEnv()[0].GetValue() != tc.mode || c.GetWakeupProbe().GetHttpGet().GetPort() != 8081 {
+				t.Fatalf("wrong served mode/readiness: %v", c)
+			}
+			if spec.GetWorkerSelector().GetMatchLabels()["workload"] != tc.pool || spec.GetSandboxConfig().GetSandboxClass() != tc.class || spec.GetSandboxConfig().GetConfigName() != tc.config || spec.GetSnapshotConfig().GetOnCommit() != atepb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL {
+				t.Fatalf("wrong pool/snapshot selection: %v", spec)
+			}
+		})
+	}
+}
+
 // TestApprovalOnGVisor drives public Sessions over gRPC; every actor call uses real substrate
-// Control and direct PodIP Harness.Connect. No live result is claimed by an offline skip.
+// Control and router Harness.Connect. No live result is claimed by an offline skip.
 func TestApprovalOnGVisor(t *testing.T) {
 	f := newFixture(t, uniqueUID("e2e-approval"))
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Minute)
@@ -46,7 +99,7 @@ func TestApprovalOnGVisor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend := f.backend(approvalTemplate, desc)
+	backend := f.backend(t, approvalTemplateSpec, desc)
 	runApprovalSuite(t, ctx, backend, func(uid string) { stopQuietly(t, backend, uid) }, true)
 }
 
@@ -60,7 +113,7 @@ func TestApprovalMemoryRefusalOnMicroVM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend := f.backend(approvalMemoryTemplate, desc)
+	backend := f.backend(t, approvalMemoryTemplateSpec, desc)
 	effects := approvalEffects(t)
 	runtime := &approvalRuntime{Backend: backend}
 	store := journal(t)
@@ -77,7 +130,7 @@ func TestApprovalMemoryRefusalOnMicroVM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	har, closeHar, err := approvalDial(inc.Address)
+	har, closeHar, err := placement.DefaultDial(inc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +360,7 @@ func runApprovalSession(t *testing.T, ctx context.Context, runtime *approvalRunt
 	if err != nil {
 		t.Fatal(err)
 	}
-	har, closeHar, err := approvalDial(inc.Address)
+	har, closeHar, err := placement.DefaultDial(inc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,21 +455,6 @@ func serveApprovalSessions(t *testing.T, store *sqlitelog.Store, r *placement.Re
 		t.Fatal(err)
 	}
 	return v1.NewSessionsClient(conn), func() { _ = conn.Close(); server.Stop() }
-}
-func approvalDial(address string) (api.Harness, func() error, error) {
-	options := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
-	if sock, ok := strings.CutPrefix(address, "unix://"); ok {
-		address = "passthrough:///approval-fixture"
-		options = append(options, grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", sock)
-		}))
-	}
-	conn, err := grpc.NewClient(address, options...)
-	if err != nil {
-		return nil, nil, err
-	}
-	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
 }
 func approvalEffects(t *testing.T) *approvalfixture.Effects {
 	t.Helper()

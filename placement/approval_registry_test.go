@@ -162,7 +162,7 @@ func newApprovalNoIOPlacer(t *testing.T) (*placement.Placer, *approvalBackend) {
 	runtime := local.New(placementGateHarness{})
 	t.Cleanup(func() { _ = runtime.Close() })
 	b := &approvalBackend{Backend: runtime}
-	return placement.New(b, nil, placement.WithDialer(func(string) (api.Harness, func() error, error) {
+	return placement.New(b, nil, placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 		t.Fatal("pending approval dialed harness")
 		return nil, nil, nil
 	})), b

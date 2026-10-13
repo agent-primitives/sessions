@@ -110,7 +110,7 @@ func Run(args []string, opts ...Option) error {
 	if fs.NArg() > 0 {
 		// The flag package reports its own parse errors before the usage; this one is ours, so print
 		// it the same way. Parsing stops at the first non-flag, so every later flag is in fs.Args too.
-		fmt.Fprintf(fs.Output(), "unexpected arguments %q: every argument must be a flag\n", fs.Args())
+		_, _ = fmt.Fprintf(fs.Output(), "unexpected arguments %q: every argument must be a flag\n", fs.Args())
 		fs.Usage()
 		return fmt.Errorf("%w: unexpected arguments %q", ErrUsage, fs.Args())
 	}

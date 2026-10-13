@@ -77,7 +77,10 @@ type options struct {
 }
 
 // Run parses args (without the program name) and serves until SIGINT or SIGTERM. -h returns
-// flag.ErrHelp; any other command-line error wraps ErrUsage.
+// flag.ErrHelp. A flag that does not parse (a second -substrate-harness included) and positional
+// arguments wrap ErrUsage. A configuration check after parsing (a -substrate-harness with no
+// -model, a substrate flag without -substrate-harness, and the like) returns a plain error, which
+// Main prints and reports with status 1.
 func Run(args []string, opts ...Option) error {
 	var o options
 	for _, opt := range opts {

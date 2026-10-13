@@ -27,7 +27,8 @@ var ErrHarnessUnservable = errors.New("placement: registered harness is unservab
 // this host no longer serves. Unlike a caller's unknown name, it is a recovery precondition.
 var ErrRecordedHarnessNotServed = errors.New("placement: recorded harness is not served")
 
-// ErrHarnessExists is returned by Add for a name that already resolves.
+// ErrHarnessExists is returned by Add and MarkUnavailable for a name already in use or reserved
+// for a static harness. This includes unservable names, which remain in use but do not resolve.
 var ErrHarnessExists = errors.New("placement: harness name already in use")
 
 // Registry resolves a harness name to the Placer that runs it.
@@ -251,7 +252,7 @@ func (r *Registry) For(harness string) (*Placer, error) {
 	cause, unavailable := r.unavailable[harness]
 	r.mu.RUnlock()
 	if unavailable {
-		return nil, fmt.Errorf("%w %q: %w", ErrHarnessUnservable, harness, cause)
+		return nil, fmt.Errorf("%w: harness %q: %w", ErrHarnessUnservable, harness, cause)
 	}
 	if !ok {
 		return nil, fmt.Errorf("%w %q (registered: %v)", ErrUnknownHarness, harness, r.Names())

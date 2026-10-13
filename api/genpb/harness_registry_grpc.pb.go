@@ -48,6 +48,8 @@ type HarnessRegistryClient interface {
 	// a new placement. An identical repeat of a registration isolated during startup returns
 	// UNCHANGED or REACTIVATED with unservable_reason set; it does not claim this host serves it.
 	// An identical compatible repeat of a row added since startup can load it locally without restart.
+	// Repeating a RETIRED registration reactivates it for every host sharing the journal; restart the
+	// host instead to serve only its existing sessions without reactivation.
 	RegisterHarness(ctx context.Context, in *RegisterHarnessRequest, opts ...grpc.CallOption) (*RegisterHarnessResponse, error)
 	// NOT_FOUND for a name that is neither STATIC nor registered.
 	GetHarness(ctx context.Context, in *GetHarnessRequest, opts ...grpc.CallOption) (*HarnessRegistration, error)
@@ -118,6 +120,8 @@ type HarnessRegistryServer interface {
 	// a new placement. An identical repeat of a registration isolated during startup returns
 	// UNCHANGED or REACTIVATED with unservable_reason set; it does not claim this host serves it.
 	// An identical compatible repeat of a row added since startup can load it locally without restart.
+	// Repeating a RETIRED registration reactivates it for every host sharing the journal; restart the
+	// host instead to serve only its existing sessions without reactivation.
 	RegisterHarness(context.Context, *RegisterHarnessRequest) (*RegisterHarnessResponse, error)
 	// NOT_FOUND for a name that is neither STATIC nor registered.
 	GetHarness(context.Context, *GetHarnessRequest) (*HarnessRegistration, error)

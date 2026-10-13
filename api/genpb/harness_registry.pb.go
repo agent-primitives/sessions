@@ -145,7 +145,8 @@ const (
 	// The name already held this spec and was ACTIVE. Stored registration unchanged; a host that
 	// had not loaded a row added since startup may now serve it locally.
 	RegisterOutcome_REGISTER_OUTCOME_UNCHANGED RegisterOutcome = 2
-	// The name already held this spec and was RETIRED. It is ACTIVE again.
+	// The name already held this spec and was RETIRED. It is ACTIVE again for every host sharing
+	// the journal. To load a RETIRED row for existing sessions without reactivating it, restart the host.
 	RegisterOutcome_REGISTER_OUTCOME_REACTIVATED RegisterOutcome = 3
 )
 
@@ -435,8 +436,10 @@ type HarnessRegistration struct {
 	// startup load remains known locally; Sessions operations needing it fail FAILED_PRECONDITION.
 	// A row added by another host after startup is visible here but unknown to this host's Sessions
 	// routing until restart or a local RegisterHarness with the identical compatible spec; selecting
-	// it for Create or auto-create Exec fails INVALID_ARGUMENT until loaded. A pending recorded
-	// Resume can still fail FAILED_PRECONDITION under the existing recovery rule. Strict decoding
+	// it for Create or auto-create Exec fails INVALID_ARGUMENT until loaded. For a RETIRED row,
+	// restart this host to serve its existing sessions without reactivating it: RegisterHarness
+	// reactivates the row for every host sharing the journal. A pending recorded Resume can still
+	// fail FAILED_PRECONDITION under the existing recovery rule. Strict decoding
 	// refuses unsupported stored fields and enum values, rather than accepting a partial spec.
 	// This is a host-local status, never stored: another compatible host may serve the same row.
 	// Do not match on this human-readable explanation.

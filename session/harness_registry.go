@@ -435,7 +435,11 @@ func (h *HarnessRegistry) observe(ctx context.Context, out *v1.HarnessRegistrati
 	name := out.GetMetadata().GetName()
 	p, err := h.registry.For(name)
 	if err != nil {
-		out.ObserveError = err.Error()
+		if errors.Is(err, placement.ErrUnknownHarness) {
+			out.ObserveError = "harness is not loaded on this host"
+		} else {
+			out.ObserveError = err.Error()
+		}
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, observeTimeout)
@@ -561,6 +565,8 @@ func (h *HarnessRegistry) registrationProto(rec sqlitelog.HarnessRecord) *v1.Har
 	} else if _, err := h.registry.For(rec.Name); err != nil {
 		if errors.Is(err, placement.ErrHarnessUnservable) {
 			out.UnservableReason = err.Error()
+		} else if rec.State == sqlitelog.HarnessRetired {
+			out.UnservableReason = "registration is not loaded on this host; restart this host to serve its existing sessions"
 		} else {
 			out.UnservableReason = "registration is not loaded on this host; restart this host or register the identical compatible spec locally to serve it"
 		}

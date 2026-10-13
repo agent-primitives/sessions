@@ -40,6 +40,7 @@ func TestStoredHarnessUnknownFieldDoesNotStopStartup(t *testing.T) {
 				{Name: "b-bad", UID: "uid-bad", Spec: `{"remote":{"address":"127.0.0.1:9001"},"capabilities":{"resumability":"RESUMABILITY_STATELESS_REPLAY"},"futureField":true}`, SpecDigest: "original-digest"},
 				{Name: "c-good", UID: "uid-more", Spec: `{"remote":{"address":"127.0.0.1:9002"},"capabilities":{"resumability":"RESUMABILITY_STATELESS_REPLAY"}}`, SpecDigest: "more-digest"},
 				{Name: "d-enum", UID: "uid-enum", Spec: `{"remote":{"address":"127.0.0.1:9003"},"capabilities":{"resumability":99}}`, SpecDigest: "enum-digest"},
+				{Name: "e-enum", UID: "uid-future", Spec: `{"remote":{"address":"127.0.0.1:9004"},"capabilities":{"resumability":"RESUMABILITY_FUTURE"}}`, SpecDigest: "future-digest"},
 			} {
 				if _, _, err := store.RegisterHarness(rec); err != nil {
 					t.Fatal(err)
@@ -97,6 +98,10 @@ func TestStoredHarnessUnknownFieldDoesNotStopStartup(t *testing.T) {
 			if err != nil || enum.GetSpec() != nil || !strings.Contains(enum.GetUnservableReason(), "possible host/schema version skew") || !strings.Contains(enum.GetUnservableReason(), "99") {
 				t.Fatalf("unknown numeric enum accepted: %v, %v", enum, err)
 			}
+			future, err := h.harnesses.GetHarness(ctx, &v1.GetHarnessRequest{Name: "e-enum"})
+			if err != nil || future.GetSpec() != nil || !strings.Contains(future.GetUnservableReason(), "possible host/schema version skew") || !strings.Contains(future.GetUnservableReason(), "RESUMABILITY_FUTURE") {
+				t.Fatalf("unknown named enum accepted: %v, %v", future, err)
+			}
 			// The incompatible row must not truncate a list page, even when it falls between
 			// compatible registrations or is RETIRED.
 			var names []string
@@ -116,7 +121,7 @@ func TestStoredHarnessUnknownFieldDoesNotStopStartup(t *testing.T) {
 					break
 				}
 			}
-			if !equalStrings(names, []string{"a-good", "b-bad", "c-good", "d-enum", "echo", "echo2"}) {
+			if !equalStrings(names, []string{"a-good", "b-bad", "c-good", "d-enum", "e-enum", "echo", "echo2"}) {
 				t.Fatalf("paged registrations = %v", names)
 			}
 			if retired {
@@ -140,7 +145,7 @@ func TestStoredHarnessUnknownFieldDoesNotStopStartup(t *testing.T) {
 			if _, err := h.harnesses.RegisterHarness(ctx, &v1.RegisterHarnessRequest{Name: "b-bad", Spec: remoteSpec("127.0.0.1:9000")}); status.Code(err) != codes.AlreadyExists {
 				t.Fatalf("conflicting registration = %v, want AlreadyExists", err)
 			}
-			for _, name := range []string{"b-bad", "d-enum"} {
+			for _, name := range []string{"b-bad", "d-enum", "e-enum"} {
 				_, err := createOn(ctx, h.sessions, name)
 				assertRefusal("Create("+name+")", err)
 				assertRefusal("auto Exec("+name+")", execOn(ctx, h.sessions, "", name))
@@ -372,6 +377,74 @@ func TestStoredHarnessAddNameCollisionRemainsFatal(t *testing.T) {
 	}
 }
 
+// Restarting loads a retired row added by another host without reactivating it. The recovery hint
+// must not suggest RegisterHarness, which would allow new sessions on every host sharing the store.
+func TestStoredRetiredHarnessAddedSinceStartupRecoveryHint(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "journal.db")
+	h := startRegistryHost(t, path)
+	spec := remoteSpec("a:1")
+	canonical, err := canon.Proto(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.store.RegisterHarness(sqlitelog.HarnessRecord{
+		Name: "later", UID: "uid-later", Spec: string(canonical),
+		SpecDigest: fmt.Sprintf("sha256:%x", sha256.Sum256(canonical)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.RetireHarness("later", "existing sessions only"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.PutSession(sqlitelog.SessionMeta{UID: "existing", Harness: "later"}); err != nil {
+		t.Fatal(err)
+	}
+	assertHint := func(got *v1.HarnessRegistration) {
+		t.Helper()
+		if got.GetState() != v1.HarnessState_HARNESS_STATE_RETIRED || !strings.Contains(got.GetUnservableReason(), "restart this host to serve its existing sessions") || strings.Contains(got.GetUnservableReason(), "register") {
+			t.Fatalf("retired row recovery hint = %v; want restart for existing sessions, not re-registration", got)
+		}
+	}
+	got, err := h.harnesses.GetHarness(ctx, &v1.GetHarnessRequest{Name: "later", Observe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHint(got)
+	page, err := h.harnesses.ListHarnesses(ctx, &v1.ListHarnessesRequest{IncludeRetired: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed bool
+	for _, entry := range page.GetHarnesses() {
+		if entry.GetMetadata().GetName() == "later" {
+			listed = true
+			assertHint(entry)
+		}
+	}
+	if !listed {
+		t.Fatal("retired row missing from ListHarnesses")
+	}
+	retired, err := h.harnesses.RetireHarness(ctx, &v1.RetireHarnessRequest{Name: "later"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHint(retired)
+
+	h.stop()
+	h = startRegistryHost(t, path)
+	loaded, err := h.harnesses.GetHarness(ctx, &v1.GetHarnessRequest{Name: "later"})
+	if err != nil || loaded.GetState() != v1.HarnessState_HARNESS_STATE_RETIRED || loaded.GetUnservableReason() != "" || loaded.GetRetireReason() != "existing sessions only" || !proto.Equal(loaded.GetRetireTime(), retired.GetRetireTime()) {
+		t.Fatalf("restart changed retirement or failed to load: %v, %v", loaded, err)
+	}
+	if err := execOn(ctx, h.sessions, "existing", ""); err != nil {
+		t.Fatalf("existing session after restart: %v", err)
+	}
+	if _, err := createOn(ctx, h.sessions, "later"); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("Create on retired row after restart = %v, want FailedPrecondition", err)
+	}
+}
+
 // A valid registration made on another host since startup is visible but not locally loaded.
 // The Sessions service treats the name as unknown until an identical compatible registration
 // loads it locally; that call need not restart the host or alter the immutable stored row.
@@ -390,7 +463,7 @@ func TestStoredHarnessAddedSinceStartupIsNotLoaded(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := h.harnesses.GetHarness(ctx, &v1.GetHarnessRequest{Name: "later", Observe: true})
-	if err != nil || got.GetSpec() == nil || got.GetSpecDigest() != digest || !strings.Contains(got.GetUnservableReason(), "restart") || !strings.Contains(got.GetUnservableReason(), "register the identical compatible spec") || got.GetObserved() != nil || got.GetObserveError() == "" {
+	if err != nil || got.GetSpec() == nil || got.GetSpecDigest() != digest || !strings.Contains(got.GetUnservableReason(), "restart") || !strings.Contains(got.GetUnservableReason(), "register the identical compatible spec") || got.GetObserved() != nil || got.GetObserveError() != "harness is not loaded on this host" {
 		t.Fatalf("newly registered row projected as loaded: %v, %v", got, err)
 	}
 	if _, err := createOn(ctx, h.sessions, "later"); status.Code(err) != codes.InvalidArgument {

@@ -121,7 +121,9 @@ sources:
   cannot be registered.
 - **Registered** harnesses are added at runtime through the `HarnessRegistry` API
   (`api/harness_registry.proto`) and stored in the `harnesses` table of the journal database
-  (schema version 2). The host loads every stored registration at startup, retired ones included.
+  (schema version 2). At startup the host loads each usable stored registration, retired ones
+  included. An unloadable registration stays reserved and visible with `unservable_reason` instead
+  of stopping startup.
 
 Several hosts can share one journal, and their static names can differ. A name must not be static on
 one and registered on another: the registered harness's sessions would run on the static one, and

@@ -3,6 +3,7 @@ package session_test
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -16,9 +17,11 @@ import (
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/canon"
+	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
+	"github.com/aramase/agentsessions/session"
 	"github.com/aramase/agentsessions/sqlitelog"
 )
 
@@ -246,6 +249,126 @@ func TestStoredHarnessFactoryFailuresAreIsolated(t *testing.T) {
 	h.stop()
 	if failedRelease.Load() != 1 || wrongRelease.Load() != 1 || healthyRelease.Load() != 1 {
 		t.Fatalf("Close release counts: failed=%d wrong=%d healthy=%d", failedRelease.Load(), wrongRelease.Load(), healthyRelease.Load())
+	}
+}
+
+// Run the startup load from Describe while Exec holds the Placer's guard. This exercises Add's
+// busy refusal synchronously, without moving state under a concurrently running operation.
+type loadDuringDescribeBackend struct {
+	placement.Backend
+	load func()
+}
+
+func (b *loadDuringDescribeBackend) Describe(ctx context.Context) (api.Descriptor, error) {
+	if b.load != nil {
+		load := b.load
+		b.load = nil
+		load()
+	}
+	return b.Backend.Describe(ctx)
+}
+
+// A factory can return a descriptor-compatible Placer that Add refuses to adopt. Such a local
+// factory failure must reserve only its own registration, not prevent later entries from loading.
+func TestStoredHarnessPlacerAdoptionFailuresAreIsolated(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		owned bool
+		cause string
+	}{
+		{"owned", true, "placer already belongs to another registry"},
+		{"busy", false, "placer has an operation in progress"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "journal.db")
+			first := startRegistryHost(t, path)
+			for _, name := range []string{"a-bad", "z-healthy"} {
+				registerHarness(t, first, name, remoteSpec("127.0.0.1:9000"))
+			}
+			first.stop()
+
+			backend := local.New(echoagent.Harness{})
+			t.Cleanup(func() { _ = backend.Close() })
+			b := &loadDuringDescribeBackend{Backend: backend}
+			bad := placement.New(b, echoagent.Model)
+			var badRelease, healthyRelease, badLoads atomic.Int32
+			factory := func(name string, spec *v1.HarnessSpec) (*placement.Placer, func(), error) {
+				if name == "a-bad" {
+					badLoads.Add(1)
+					return bad, func() { badRelease.Add(1) }, nil
+				}
+				p, release, err := echoFactory(name, spec)
+				return p, func() { healthyRelease.Add(1); release() }, err
+			}
+			var h *registryHost
+			load := func() { h = startRegistryHostWith(t, path, factory) }
+			if tc.owned {
+				if _, err := placement.NewRegistry("owner", map[string]*placement.Placer{"owner": bad}); err != nil {
+					t.Fatal(err)
+				}
+				load()
+			} else {
+				b.load = load
+				if _, err := bad.Exec(t.Context(), eventlog.AsStore(eventlog.New()), "busy", nil, 0); err != nil {
+					t.Fatalf("turn containing startup load: %v", err)
+				}
+			}
+			if h == nil {
+				t.Fatal("startup load never ran")
+			}
+			if badRelease.Load() != 1 || healthyRelease.Load() != 0 {
+				t.Fatalf("startup releases: bad=%d healthy=%d", badRelease.Load(), healthyRelease.Load())
+			}
+			got, err := h.harnesses.GetHarness(t.Context(), &v1.GetHarnessRequest{Name: "a-bad", Observe: true})
+			if err != nil || got.GetSpec() == nil || !strings.Contains(got.GetUnservableReason(), tc.cause) || got.GetObserved() != nil || got.GetObserveError() == "" {
+				t.Fatalf("refused Placer projection/observation = %v, %v", got, err)
+			}
+			if _, err := createOn(t.Context(), h.sessions, "a-bad"); status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), tc.cause) {
+				t.Fatalf("Create on refused Placer = %v, want FailedPrecondition with adoption cause", err)
+			}
+			repeat := registerHarness(t, h, "a-bad", remoteSpec("127.0.0.1:9000"))
+			if repeat.GetOutcome() != v1.RegisterOutcome_REGISTER_OUTCOME_UNCHANGED || repeat.GetHarness().GetUnservableReason() == "" || badLoads.Load() != 1 {
+				t.Fatalf("repeat retried refused Placer: %v (loads=%d)", repeat, badLoads.Load())
+			}
+			good, err := createOn(t.Context(), h.sessions, "z-healthy")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outs := execOutputs(t, h.sessions, good, "live", 0); len(outs) != 1 || outs[0] != "echo:live" {
+				t.Fatalf("later healthy registration did not execute: %v", outs)
+			}
+			h.stop()
+			if badRelease.Load() != 1 || healthyRelease.Load() != 1 {
+				t.Fatalf("Close releases: bad=%d healthy=%d", badRelease.Load(), healthyRelease.Load())
+			}
+		})
+	}
+}
+
+// A name collision is a registry invariant failure, not an isolated factory failure.
+func TestStoredHarnessAddNameCollisionRemainsFatal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.db")
+	first := startRegistryHost(t, path)
+	registerHarness(t, first, "duplicate", remoteSpec("127.0.0.1:9000"))
+	first.stop()
+	store := openStore(t, path)
+	registry, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": newEchoPlacer(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Add("duplicate", newEchoPlacer(t)); err != nil {
+		t.Fatal(err)
+	}
+	var released atomic.Int32
+	reg, err := session.NewHarnessRegistry(store, registry, func(name string, spec *v1.HarnessSpec) (*placement.Placer, func(), error) {
+		p, release, err := echoFactory(name, spec)
+		return p, func() { released.Add(1); release() }, err
+	})
+	if !errors.Is(err, placement.ErrHarnessExists) || reg != nil {
+		t.Fatalf("NewHarnessRegistry = %v, %v; want fatal ErrHarnessExists", reg, err)
+	}
+	if released.Load() != 1 {
+		t.Fatalf("collision released factory output %d times, want 1", released.Load())
 	}
 }
 

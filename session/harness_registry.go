@@ -146,7 +146,10 @@ func (h *HarnessRegistry) load(rec sqlitelog.HarnessRecord) error {
 		if release != nil {
 			release()
 		}
-		return err
+		if errors.Is(err, placement.ErrHarnessExists) {
+			return err
+		}
+		return h.unavailable(rec.Name, err)
 	}
 	h.keep(release)
 	return nil

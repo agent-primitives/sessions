@@ -99,8 +99,10 @@ serve), so an unknown history refuses rather than cold-creates. `Create` returns
 `substrate.ErrMemoryStateLost` (wrapping `api.ErrMemoryStateLost`, `FAILED_PRECONDITION` at the
 Sessions API), names the session, and creates nothing. An existing actor, running or suspended, is
 attached or resumed as before; a stateless session, or a memory-tier session with no committed turn,
-is created as before. The check only sees the tier the daemon is configured with, so it does not
-cover a mis-declared tier.
+is created as before. `Restore` (`Sessions.Resume`) of a memory-tier session whose actor is gone
+returns the same error, since the snapshot it would resume went with the actor; `GetActor` confirms
+the absence after the resume fails. The check only sees the tier the daemon is configured with, so
+it does not cover a mis-declared tier.
 
 Open questions, not implemented:
 

@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/aramase/agentsessions/api"
+	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
@@ -177,4 +178,80 @@ func TestMemoryStateLostCountsOnlyTheMemoryHarnessTurns(t *testing.T) {
 			t.Error("the refused turn created an actor for the session")
 		}
 	})
+}
+
+// Resume of a suspended session restores its actor's own snapshot. When the actor is gone, a
+// REQUIRES_MEMORY_SNAPSHOT session's state went with it: Resume is refused with FAILED_PRECONDITION,
+// naming the session, creates no actor and journals nothing. A STATELESS_REPLAY session keeps the
+// INTERNAL resume error it had before; this rule is only about RAM state.
+func TestResumeAfterTheActorIsLost(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tier api.Resumability
+		want codes.Code
+	}{
+		{name: "memory tier is refused", tier: api.ResumabilityRequiresMemorySnapshot, want: codes.FailedPrecondition},
+		{name: "stateless tier is unchanged", tier: api.ResumabilityStatelessReplay, want: codes.Internal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+			desc, err := echoagent.Harness{}.Describe(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			desc.Capabilities.Resumability = tc.tier
+			backend := substrate.New(ctl, "space", substrate.ObjectRef{Atespace: "space", Name: "echo"}, desc)
+			dial := placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
+				return echoagent.Harness{}, func() error { return nil }, nil
+			})
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			r, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": placement.New(backend, echoagent.Model, dial)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := serveRegistry(t, store, r)
+			ctx := context.Background()
+			sess := mustCreate(t, c)
+			if err := execHi(c, sess); err != nil {
+				t.Fatalf("first turn: %v", err)
+			}
+			if _, err := c.Suspend(ctx, &v1.SuspendRequest{Session: sess}); err != nil {
+				t.Fatalf("suspend: %v", err)
+			}
+			if err := ctl.DeleteActor(ctx, substrate.ActorRef{Atespace: "space", Name: sess}); err != nil {
+				t.Fatal(err)
+			}
+			head, err := store.Session(sess).Head()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = c.Resume(ctx, &v1.ResumeRequest{Session: sess})
+			if status.Code(err) != tc.want {
+				t.Fatalf("resume after the actor was lost: want %v, got %v", tc.want, err)
+			}
+			ctl.mu.Lock()
+			_, recreated := ctl.status[sess]
+			ctl.mu.Unlock()
+			if recreated {
+				t.Error("the failed resume created an actor for the session")
+			}
+			if got, err := store.Session(sess).Head(); err != nil || got != head {
+				t.Errorf("journal head after the failed resume = %d (err %v), want %d: nothing may be journaled", got, err, head)
+			}
+			if tc.want != codes.FailedPrecondition {
+				return
+			}
+			msg := status.Convert(err).Message()
+			for _, want := range []string{sess, "cannot be restored"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error %q does not contain %q", msg, want)
+				}
+			}
+		})
+	}
 }

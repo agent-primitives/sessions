@@ -33,6 +33,9 @@ type mockControl struct {
 	// afterGet, when set, runs after GetActor answers, so a test can move an actor's state in the
 	// window between a check and the call it guards.
 	afterGet func(name string)
+	// resumeErr, when set, fails ResumeActor; getErr fails GetActor.
+	resumeErr error
+	getErr    error
 }
 
 // exists records an actor at a status, so GetActor reports it as already placed.
@@ -53,6 +56,9 @@ func (m *mockControl) CreateActor(ctx context.Context, a substrate.ActorRef, _ s
 }
 func (m *mockControl) ResumeActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	m.calls = append(m.calls, "resume:"+a.Name)
+	if m.resumeErr != nil {
+		return substrate.ActorInfo{}, m.resumeErr
+	}
 	m.exists(a.Name, substrate.StatusRunning)
 	return m.info, nil
 }
@@ -86,6 +92,9 @@ func (m *mockControl) GetActor(ctx context.Context, a substrate.ActorRef) (subst
 	m.calls = append(m.calls, "get:"+a.Name)
 	if m.afterGet != nil {
 		defer m.afterGet(a.Name)
+	}
+	if m.getErr != nil {
+		return substrate.ActorInfo{}, m.getErr
 	}
 	if st, ok := m.actors[a.Name]; ok {
 		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name]}, nil
@@ -612,6 +621,61 @@ func TestCreateRefusesToColdCreateAMemorySessionWithTurns(t *testing.T) {
 			}
 			if _, ok := m.actors["sess-x"]; ok {
 				t.Error("refused Create left an actor behind")
+			}
+		})
+	}
+}
+
+// Restore resumes the actor that holds the session's snapshot. When a REQUIRES_MEMORY_SNAPSHOT
+// session's actor no longer exists, the snapshot went with it, so Restore reports ErrMemoryStateLost
+// (FAILED_PRECONDITION at the Sessions API) instead of the resume error, and creates nothing. Every
+// other failure keeps the resume error.
+func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
+	memory := func(m *mockControl) *substrate.Backend { return newMemoryBackend(m) }
+	stateless := func(m *mockControl) *substrate.Backend { return newBackend(m) }
+	resumeErr := errors.New("rpc error: code = NotFound desc = actor not found")
+	for _, tc := range []struct {
+		name      string
+		backend   func(*mockControl) *substrate.Backend
+		existing  substrate.ActorStatus // StatusUnknown: the actor does not exist
+		getErr    error
+		wantCalls []string
+		wantLost  bool
+	}{
+		{name: "memory tier without an actor", backend: memory,
+			wantCalls: []string{"resume:sess-x", "get:sess-x"}, wantLost: true},
+		{name: "memory tier whose actor exists keeps the resume error", backend: memory, existing: substrate.StatusSuspended,
+			wantCalls: []string{"resume:sess-x", "get:sess-x"}},
+		{name: "memory tier whose GetActor fails keeps the resume error", backend: memory, getErr: errors.New("unavailable"),
+			wantCalls: []string{"resume:sess-x", "get:sess-x"}},
+		{name: "stateless tier keeps the resume error", backend: stateless,
+			wantCalls: []string{"resume:sess-x"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockControl{info: running("worker-a"), resumeErr: resumeErr, getErr: tc.getErr}
+			if tc.existing != substrate.StatusUnknown {
+				m.exists("sess-x", tc.existing)
+			}
+			_, err := tc.backend(m).Restore(context.Background(), api.SnapshotRef{Local: "sess-x", ExternalURI: "gs://snap/sess-x", Memory: true})
+			if !reflect.DeepEqual(m.calls, tc.wantCalls) {
+				t.Errorf("calls=%v want %v", m.calls, tc.wantCalls)
+			}
+			if !tc.wantLost {
+				if !errors.Is(err, resumeErr) || errors.Is(err, api.ErrMemoryStateLost) {
+					t.Fatalf("Restore error = %v, want the resume error and not ErrMemoryStateLost", err)
+				}
+				return
+			}
+			if !errors.Is(err, substrate.ErrMemoryStateLost) || !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, resumeErr) {
+				t.Fatalf("Restore error = %v, want ErrMemoryStateLost wrapping api.ErrMemoryStateLost and the resume error", err)
+			}
+			for _, want := range []string{`"sess-x"`, "space/sess-x", "cannot be restored"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+			if _, ok := m.actors["sess-x"]; ok {
+				t.Error("Restore created an actor")
 			}
 		})
 	}

@@ -106,7 +106,9 @@ provide.
   fresh harness that had lost the session's RAM state. The Placer now reads the journal before
   `Runtime.Create` to fill the new `api.SessionSpec.CommittedTurns`; other backends ignore it. The
   count is per harness: a turn an `ExecRequest.harness` override ran elsewhere does not count, while
-  a turn with no recorded harness name, or one this host does not serve, does.
+  a turn with no recorded harness name, or one this host does not serve, does. `Sessions.Resume` of
+  such a session whose actor is gone is `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) too, where
+  it used to be `INTERNAL`; a stateless session's `Resume` keeps its error.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

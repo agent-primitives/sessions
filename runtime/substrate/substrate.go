@@ -323,11 +323,32 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (inc api.Inc
 	info, err := b.ctl.ResumeActor(ctx, b.ref(name)) // restores the actor's own snapshot
 	if err != nil {
 		resumeFinished(err, "error_kind", "resume_actor_failed")
+		if lost := b.memoryActorGone(ctx, name, err); lost != nil {
+			return api.Incarnation{}, lost
+		}
 		return api.Incarnation{}, fmt.Errorf("substrate: resume (restore) actor: %w", err)
 	}
 	resumeFinished(nil, "actor_status", info.Status)
 	inc, err = b.incarnation(name, info)
 	return inc, err
+}
+
+// memoryActorGone reports, after resumeErr, that a REQUIRES_MEMORY_SNAPSHOT harness's actor no longer
+// exists, as ErrMemoryStateLost wrapping resumeErr too. The snapshot Restore would resume belonged to
+// that actor, so the state is gone with it and there is nothing to retry. It asks GetActor, whose
+// ControlClient contract reports a missing actor as ErrActorNotFound, rather than reading
+// ResumeActor's error. It returns nil for a stateless harness, whose state is in the journal, and
+// when the actor exists or GetActor fails too, so the caller keeps the resume error.
+func (b *Backend) memoryActorGone(ctx context.Context, name string, resumeErr error) error {
+	if b.descriptor.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
+		return nil
+	}
+	ref := b.ref(name)
+	if _, err := b.ctl.GetActor(ctx, ref); !errors.Is(err, ErrActorNotFound) {
+		return nil
+	}
+	return fmt.Errorf("%w: actor %s/%s of session %q on harness %q does not exist, so its in-RAM state cannot be restored; no actor was created: resume: %w",
+		ErrMemoryStateLost, ref.Atespace, ref.Name, name, b.descriptor.ID, resumeErr)
 }
 
 // ErrNoSnapshotToClone is returned when a REQUIRES_MEMORY_SNAPSHOT harness is forked without a
@@ -346,6 +367,7 @@ var ErrSnapshotSuperseded = fmt.Errorf("substrate: parent snapshot was supersede
 // ErrMemoryStateLost is returned by Create when a REQUIRES_MEMORY_SNAPSHOT session that already has
 // committed turns has no actor to attach to or resume. Its state existed only in that actor's RAM, so
 // a new actor from the template would continue the journal with a harness that remembers none of it.
+// Restore returns it too when such a session's actor is gone, since its snapshot went with it.
 // It wraps api.ErrMemoryStateLost, which the session service reports as FAILED_PRECONDITION.
 var ErrMemoryStateLost = fmt.Errorf("substrate: refusing to cold-create an actor: %w", api.ErrMemoryStateLost)
 

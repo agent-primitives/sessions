@@ -14,8 +14,9 @@ var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was supers
 // ErrMemoryStateLost reports that a backend refused to create fresh compute for a session whose
 // harness keeps its state only in RAM (REQUIRES_MEMORY_SNAPSHOT) and whose journal already records a
 // completed turn, because nothing is left to restore that state from. The journal cannot rebuild it
-// (I4), so a fresh incarnation would continue the journal with a harness that has forgotten it. The
-// caller cannot fix this by retrying; the session service reports it as FAILED_PRECONDITION.
+// (I4), so a fresh incarnation would continue the journal with a harness that has forgotten it.
+// Restore returns it when the compute holding such a session's snapshot no longer exists. The caller
+// cannot fix this by retrying; the session service reports it as FAILED_PRECONDITION.
 var ErrMemoryStateLost = errors.New("runtime: session's in-memory harness state is lost")
 
 // Runtime is the compute/sandbox SPI. Pod, Kata Pod Sandboxing, Cloud Hypervisor,

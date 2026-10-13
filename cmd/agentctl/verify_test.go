@@ -8,7 +8,36 @@ import (
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/canon"
 	"github.com/aramase/agentsessions/wire"
+	"google.golang.org/protobuf/proto"
 )
+
+func TestVerifyRecordsPreservesActorPresence(t *testing.T) {
+	for _, present := range []bool{false, true} {
+		t.Run(map[bool]string{false: "absent", true: "present-empty"}[present], func(t *testing.T) {
+			event := &v1.Event{Kind: v1.EventKind_EVENT_INPUT}
+			if present {
+				event.Actor = &v1.IdentityRef{}
+			}
+			hash, err := canon.HashRecordProto("", 1, event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := &v1.LogRecord{Seq: 1, Event: event, ContentHash: hash}
+			if err := verifyRecords([]*v1.LogRecord{record}, 1); err != nil {
+				t.Fatalf("valid protobuf presence rejected: %v", err)
+			}
+			tampered := proto.Clone(record).(*v1.LogRecord)
+			if present {
+				tampered.Event.Actor = nil
+			} else {
+				tampered.Event.Actor = &v1.IdentityRef{}
+			}
+			if err := verifyRecords([]*v1.LogRecord{tampered}, 1); err == nil {
+				t.Fatal("altered protobuf presence accepted")
+			}
+		})
+	}
+}
 
 func TestVerifyRecords(t *testing.T) {
 	records := makeRecords(t,

@@ -67,7 +67,12 @@ func Proto(m proto.Message) ([]byte, error) {
 // chain envelope (prev_hash, seq), canonicalized as one JCS object. seq is encoded as a string
 // (proto3-JSON's int64 convention) so it is exact regardless of a consumer's JSON number type.
 func Record(prevHash string, seq int64, ev api.Event) ([]byte, error) {
-	ej, err := marshalOpts.Marshal(wire.EventToProto(ev))
+	return RecordProto(prevHash, seq, wire.EventToProto(ev))
+}
+
+// RecordProto preserves the received event's protobuf field presence when verifying a journal.
+func RecordProto(prevHash string, seq int64, ev proto.Message) ([]byte, error) {
+	ej, err := marshalOpts.Marshal(ev)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +91,12 @@ func Record(prevHash string, seq int64, ev api.Event) ([]byte, error) {
 // HashRecord is content_hash: lowercase-hex SHA-256 over the canonical record bytes. At a fork,
 // a child's first record uses prev_hash = parent@R.content_hash, turning the chain into a tree.
 func HashRecord(prevHash string, seq int64, ev api.Event) (string, error) {
-	b, err := Record(prevHash, seq, ev)
+	return HashRecordProto(prevHash, seq, wire.EventToProto(ev))
+}
+
+// HashRecordProto hashes a received event without a potentially lossy domain-type conversion.
+func HashRecordProto(prevHash string, seq int64, ev proto.Message) (string, error) {
+	b, err := RecordProto(prevHash, seq, ev)
 	if err != nil {
 		return "", err
 	}

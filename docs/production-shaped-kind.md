@@ -43,7 +43,11 @@ endpoint configuration and credentials remain in the control-plane pod. Every mo
 back through `EventSink.Model` and is executed by the host-side model client.
 
 The control plane uses ate-api to create, resume, inspect, suspend, and delete actors. It does not
-use the Kubernetes API to manage harness compute.
+use the Kubernetes API to manage harness compute. At startup it also provisions the atespace-scoped
+chat ActorTemplate through ate-api and waits for its golden snapshot. An existing immutable template
+must match the requested image, model, and sandbox configuration; otherwise startup fails explicitly.
+Harness connections use the atenet-router Service with `ate-target-actor` routing metadata, never
+direct worker pod IPs.
 
 ## Prerequisites
 
@@ -51,6 +55,7 @@ use the Kubernetes API to manage harness compute.
 - Go
 - `kubectl`
 - `ko`
+- GNU `timeout` (on macOS, install GNU coreutils and make `timeout` available on PATH)
 - Either the optional in-cluster Ollama deployment, or another OpenAI-compatible endpoint reachable
   from inside the kind cluster
 
@@ -124,7 +129,7 @@ The deployment contains:
 - A statically bound `ReadWriteOnce` hostPath volume for `/data/agentsessions.db`.
 - A projected service-account token used to authenticate to ate-api.
 - A two-worker gVisor pool and `chat-harness` ActorTemplate.
-- A NetworkPolicy exception allowing only the control-plane pod to dial worker pods directly.
+- Router-mediated harness connections, with no direct worker-ingress exception.
 - Optionally, an in-cluster Ollama Deployment and persistent model cache.
 
 ## Drive it with `agentctl`
@@ -179,6 +184,11 @@ It:
 5. Executes another turn in the same session.
 6. Verifies the enlarged hash chain and requires matching `session_uid` log evidence.
 
+With the modelstub, the two-turn chain contains ten records, including an `EXECUTION_START` for each
+turn. Readiness probes have a three-second per-call deadline and a thirty-second overall deadline;
+the complete smoke is bounded to fifteen minutes. Override `PROBE_TIMEOUT_SECONDS`,
+`READY_TIMEOUT_SECONDS`, or `SMOKE_TIMEOUT_SECONDS` when a slower environment needs more time.
+
 The second turn proves continuation after control-plane restart. The stateless chat harness receives
 the committed first turn as history and the current input separately. The existing substrate actor
 may still be running, so this experiment does **not** claim that harness compute was reconstructed.
@@ -218,10 +228,11 @@ The real-substrate conformance suite separately covers stateless replay and memo
 - At the pinned Substrate revision, ate-api checks token issuer and audience, not service-account
   authorization. Any pod able to project a token for `api.ate-system.svc` can access the full Control
   API. The audience token is not least-privilege authorization or a tenant boundary.
-- The pinned substrate revision is required. Newer revisions remove the direct pod-IP ingress used
-  here, while the supported router path cannot yet carry the bidirectional gRPC harness stream.
-- `Harness.Connect` therefore uses the actor worker's reported pod IP over plaintext h2c. The
-  additional NetworkPolicy is a temporary, narrowly selected TCP 80 exception for the control-plane pod.
+- `Harness.Connect` uses plaintext h2c through the atenet-router Service. Routing metadata selects
+  the actor; it is not an authorization credential. Router ingress is not a tenant boundary.
+- The router bounds streams with a five-minute route timeout and a thirty-second idle timeout.
+  Long model calls can outlast these limits; see the route-timeout discussion in
+  [substrate-conformance.md](substrate-conformance.md).
 - SQLite plus one `ReadWriteOnce` volume supports a single control-plane replica. It demonstrates
   durable restart, not high availability or concurrent replicas.
 - The static hostPath volume survives pod replacement but belongs to the kind node and disappears
@@ -239,3 +250,6 @@ The real-substrate conformance suite separately covers stateless replay and memo
 ```bash
 hack/kind-production.sh teardown
 ```
+
+Teardown deletes only the selected kind cluster. It leaves the shared `kind-registry` container
+intact because other clusters, such as a separate lab, may still need its images.

@@ -96,8 +96,9 @@ spec:
             - --ateapi-token-file=/var/run/secrets/tokens/ateapi-token
             - --ateapi-ca-file=/var/run/secrets/ateapi-ca/trust-bundle.pem
             - --atespace=agentsessions
-            - --actor-template-namespace=ate-agentsessions
+            - --actor-template-atespace=agentsessions
             - --actor-template=chat-harness
+            - --harness-image=HARNESS_IMAGE
           env:
             - name: PROJECT
               valueFrom:
@@ -184,29 +185,6 @@ spec:
     - name: grpc
       port: 8080
       targetPort: grpc
----
-# Direct worker-pod ingress is temporary. The pinned substrate router cannot carry the bidirectional
-# Harness.Connect gRPC stream, so the control plane dials the actor's reported PodIP:80.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-agentsessions-to-workers
-  namespace: ate-agentsessions
-spec:
-  podSelector:
-    matchExpressions:
-      - key: ate.dev/worker-pool
-        operator: Exists
-  policyTypes:
-    - Ingress
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              app: agentsessions
-      ports:
-        - protocol: TCP
-          port: 80
 ---
 # Access through kubectl port-forward does not require pod-network ingress.
 apiVersion: networking.k8s.io/v1

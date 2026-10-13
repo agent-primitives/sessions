@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/harness/chatagent"
@@ -51,8 +52,9 @@ type config struct {
 	ateapiCAFile             string
 	ateapiInsecureSkipVerify bool
 	atespace                 string
-	templateNamespace        string
+	templateAtespace         string
 	templateName             string
+	harnessImage             string
 	showVersion              bool
 }
 
@@ -99,8 +101,9 @@ func parseConfig(args []string) (config, error) {
 	fs.StringVar(&cfg.ateapiCAFile, "ateapi-ca-file", "", "PEM CA bundle for ate-api; empty uses system roots")
 	fs.BoolVar(&cfg.ateapiInsecureSkipVerify, "ateapi-insecure-skip-verify", false, "skip ate-api certificate verification (kind demo only)")
 	fs.StringVar(&cfg.atespace, "atespace", "agentsessions", "atespace that owns session actors")
-	fs.StringVar(&cfg.templateNamespace, "actor-template-namespace", "ate-agentsessions", "namespace containing the chat ActorTemplate")
+	fs.StringVar(&cfg.templateAtespace, "actor-template-atespace", "agentsessions", "atespace containing the chat ActorTemplate")
 	fs.StringVar(&cfg.templateName, "actor-template", "chat-harness", "chat ActorTemplate name")
+	fs.StringVar(&cfg.harnessImage, "harness-image", "", "digest-pinned harnessnode image for the chat ActorTemplate (required)")
 	fs.BoolVar(&cfg.showVersion, "version", false, "print the build version and exit")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
@@ -120,13 +123,17 @@ func parseConfig(args []string) (config, error) {
 		{"ateapi-server-name", cfg.ateapiServerName},
 		{"ateapi-token-file", cfg.ateapiTokenFile},
 		{"atespace", cfg.atespace},
-		{"actor-template-namespace", cfg.templateNamespace},
+		{"actor-template-atespace", cfg.templateAtespace},
 		{"actor-template", cfg.templateName},
+		{"harness-image", cfg.harnessImage},
 	}
 	for _, field := range required {
 		if strings.TrimSpace(field.value) == "" {
 			return config{}, fmt.Errorf("-%s is required", field.name)
 		}
+	}
+	if !strings.Contains(cfg.harnessImage, "@sha256:") {
+		return config{}, fmt.Errorf("-harness-image must be pinned by digest")
 	}
 	return cfg, nil
 }
@@ -157,9 +164,15 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 	}
 	defer func() { _ = conn.Close() }()
 
-	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	initCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	if err := ensureAtespace(initCtx, atepb.NewControlClient(conn), cfg.atespace); err != nil {
+		return err
+	}
+	if err := ensureAtespace(initCtx, atepb.NewControlClient(conn), cfg.templateAtespace); err != nil {
+		return err
+	}
+	if err := ensureChatTemplate(initCtx, atepb.NewControlClient(conn), cfg); err != nil {
 		return err
 	}
 
@@ -168,9 +181,9 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 		return fmt.Errorf("describe chat harness: %w", err)
 	}
 	backend := runtimesubstrate.New(
-		ateadapter.New(conn, ""),
+		ateadapter.New(conn),
 		cfg.atespace,
-		runtimesubstrate.ObjectRef{Namespace: cfg.templateNamespace, Name: cfg.templateName},
+		runtimesubstrate.ObjectRef{Atespace: cfg.templateAtespace, Name: cfg.templateName},
 		descriptor,
 		runtimesubstrate.WithLogger(logger),
 	)
@@ -184,6 +197,68 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 		Project:          cfg.project,
 		ModelDescription: cfg.model + " @ " + cfg.modelBaseURL + cfg.modelPath,
 	}, registry, logger)
+}
+
+func chatTemplate(cfg config) *atepb.ActorTemplate {
+	return &atepb.ActorTemplate{
+		Metadata: &atepb.ResourceMetadata{Atespace: cfg.templateAtespace, Name: cfg.templateName},
+		WorkerSelector: &atepb.Selector{MatchLabels: map[string]string{
+			"workload": "agentsessions-chat-gvisor",
+		}},
+		Containers: []*atepb.Container{{
+			Name: "harness", Image: cfg.harnessImage, Command: []string{"/ko-app/harnessnode"},
+			Env: []*atepb.EnvVar{
+				{Name: "HARNESS_KIND", Value: "chat"},
+				{Name: "HARNESS_MODEL", Value: cfg.model},
+			},
+			WakeupProbe: &atepb.ContainerWakeupProbe{
+				HttpGet: &atepb.HTTPGetAction{Path: "/readyz", Port: 8081}, TimeoutSeconds: 120,
+			},
+			Resources: &atepb.Resources{Limits: []*atepb.Limits{
+				{Name: "cpu", Quantity: "1"}, {Name: "memory", Quantity: "512Mi"},
+			}},
+		}},
+		SnapshotConfig: &atepb.SnapshotConfig{
+			OnCommit:        atepb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			StorageLocation: "gs://ate-snapshots/agentsessions/" + cfg.templateName + "/",
+		},
+		SandboxConfig: &atepb.SandboxConfig{
+			SandboxClass: atepb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor-default",
+		},
+	}
+}
+
+func ensureChatTemplate(ctx context.Context, ctl atepb.ControlClient, cfg config) error {
+	want := chatTemplate(cfg)
+	ref := &atepb.ObjectRef{Atespace: cfg.templateAtespace, Name: cfg.templateName}
+	_, err := ctl.CreateActorTemplate(ctx, &atepb.CreateActorTemplateRequest{ActorTemplate: want})
+	if err != nil && status.Code(err) != codes.AlreadyExists {
+		return fmt.Errorf("create chat template: %w", err)
+	}
+	for {
+		got, err := ctl.GetActorTemplate(ctx, &atepb.GetActorTemplateRequest{ActorTemplate: ref})
+		if err != nil {
+			return fmt.Errorf("get chat template: %w", err)
+		}
+		if !proto.Equal(got.GetWorkerSelector(), want.GetWorkerSelector()) ||
+			!proto.Equal(got.GetSandboxConfig(), want.GetSandboxConfig()) ||
+			!proto.Equal(got.GetSnapshotConfig(), want.GetSnapshotConfig()) ||
+			len(got.GetContainers()) != 1 || !proto.Equal(got.GetContainers()[0], want.GetContainers()[0]) {
+			return fmt.Errorf("chat template %s/%s differs from requested image, model, or sandbox; templates are immutable, use a new -actor-template name", ref.GetAtespace(), ref.GetName())
+		}
+		golden := got.GetStatus().GetGoldenSnapshotStatus()
+		if msg := golden.GetErrorMessage(); msg != "" {
+			return fmt.Errorf("chat template golden snapshot failed: %s", msg)
+		}
+		if golden.GetGoldenTag().GetName() != "" {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for chat template golden snapshot: %w", ctx.Err())
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 func chatRegistry(runtime *runtimesubstrate.Backend, modelFn controller.ModelFunc, streamFn controller.StreamFunc, logger *slog.Logger) (*placement.Registry, error) {

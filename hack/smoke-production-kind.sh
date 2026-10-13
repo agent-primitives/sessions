@@ -2,6 +2,19 @@
 # Exercises the production-shaped deployment exclusively through the Sessions API.
 set -euo pipefail
 
+SMOKE_TIMEOUT_SECONDS="${SMOKE_TIMEOUT_SECONDS:-900}"
+READY_TIMEOUT_SECONDS="${READY_TIMEOUT_SECONDS:-30}"
+PROBE_TIMEOUT_SECONDS="${PROBE_TIMEOUT_SECONDS:-3}"
+for value in "${SMOKE_TIMEOUT_SECONDS}" "${READY_TIMEOUT_SECONDS}" "${PROBE_TIMEOUT_SECONDS}"; do
+	if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
+		echo "smoke and readiness timeouts must be positive integer seconds" >&2
+		exit 2
+	fi
+done
+if [[ "${1:-}" != "--bounded" ]]; then
+	exec timeout --kill-after=5s "${SMOKE_TIMEOUT_SECONDS}s" bash "$0" --bounded
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLUSTER="${CLUSTER:-kind}"
 CONTEXT="kind-${CLUSTER}"
@@ -20,6 +33,8 @@ cleanup() {
 	rm -rf "${WORK}"
 }
 trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 kubectl_kind() {
 	kubectl --context "${CONTEXT}" "$@"
@@ -29,17 +44,24 @@ start_forward() {
 	kubectl --context "${CONTEXT}" port-forward -n "${NAMESPACE}" service/agentsessions "${LOCAL_PORT}:8080" \
 		>"${WORK}/port-forward.log" 2>&1 &
 	PF_PID=$!
-	for _ in $(seq 1 30); do
+	local deadline=$((SECONDS + READY_TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
 		if ! kill -0 "${PF_PID}" 2>/dev/null; then
 			cat "${WORK}/port-forward.log" >&2
 			return 1
 		fi
+		local remaining=$((deadline - SECONDS))
+		if ((remaining <= 0)); then
+			break
+		fi
 		if grep -q '^Forwarding from ' "${WORK}/port-forward.log" &&
-			"${WORK}/agentctl" list --server "${SERVER}" >/dev/null 2>&1; then
+			timeout --kill-after=1s "$((remaining < PROBE_TIMEOUT_SECONDS ? remaining : PROBE_TIMEOUT_SECONDS))s" \
+				"${WORK}/agentctl" list --server "${SERVER}" >/dev/null 2>&1; then
 			return 0
 		fi
 		sleep 1
 	done
+	echo "Sessions readiness timed out after ${READY_TIMEOUT_SECONDS}s" >&2
 	cat "${WORK}/port-forward.log" >&2
 	return 1
 }

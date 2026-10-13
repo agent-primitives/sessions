@@ -429,7 +429,8 @@ type HarnessRegistration struct {
 	// Set only when GetHarnessRequest.observe is true and Describe succeeded: what the harness
 	// reported just now. Never stored.
 	Observed *HarnessDescriptor `protobuf:"bytes,8,opt,name=observed,proto3" json:"observed,omitempty"`
-	// Set only when GetHarnessRequest.observe is true and Describe failed: why.
+	// Set only when GetHarnessRequest.observe is true: why this host cannot serve the harness
+	// (isolated or not loaded), or why Describe failed. Never stored.
 	ObserveError string `protobuf:"bytes,9,opt,name=observe_error,json=observeError,proto3" json:"observe_error,omitempty"`
 	// Nonempty if this host cannot serve a stored registration. The row remains visible and its
 	// name reserved in the journal, ACTIVE or RETIRED. A registration isolated during this host's

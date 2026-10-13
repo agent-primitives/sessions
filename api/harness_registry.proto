@@ -93,7 +93,8 @@ message HarnessRegistration {
   // Set only when GetHarnessRequest.observe is true and Describe succeeded: what the harness
   // reported just now. Never stored.
   HarnessDescriptor observed = 8;
-  // Set only when GetHarnessRequest.observe is true and Describe failed: why.
+  // Set only when GetHarnessRequest.observe is true: why this host cannot serve the harness
+  // (isolated or not loaded), or why Describe failed. Never stored.
   string observe_error = 9;
   // Nonempty if this host cannot serve a stored registration. The row remains visible and its
   // name reserved in the journal, ACTIVE or RETIRED. A registration isolated during this host's

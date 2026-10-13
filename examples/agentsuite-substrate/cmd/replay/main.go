@@ -60,7 +60,7 @@ func run(server, uid, router, atespace, modelURL, statsURL string) error {
 	head := recs[len(recs)-1]
 	fmt.Printf("journal: %d records, hash chain verifies locally (head seq=%d hash=%.16s)\n", len(recs), head.Seq, head.Hash)
 
-	before, err := modelCalls(statsURL)
+	before, err := modelCalls(ctx, statsURL)
 	if err != nil {
 		return err
 	}
@@ -89,7 +89,7 @@ func run(server, uid, router, atespace, modelURL, statsURL string) error {
 	if err != nil {
 		return fmt.Errorf("replay: %w", err)
 	}
-	after, err := modelCalls(statsURL)
+	after, err := modelCalls(ctx, statsURL)
 	if err != nil {
 		return err
 	}
@@ -112,16 +112,23 @@ func run(server, uid, router, atespace, modelURL, statsURL string) error {
 }
 
 // modelCalls reads the fake provider's call counter; with no URL (a real provider) it reports 0 and
-// the controller's own count is the proof.
-func modelCalls(statsURL string) (int64, error) {
+// the controller's own count is the proof. ctx bounds the request and the body read.
+func modelCalls(ctx context.Context, statsURL string) (int64, error) {
 	if statsURL == "" {
 		return 0, nil
 	}
-	resp, err := http.Get(statsURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statsURL, nil)
+	if err != nil {
+		return 0, fmt.Errorf("read fake model stats: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("read fake model stats: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("read fake model stats: %s", resp.Status)
+	}
 	var s struct {
 		Calls int64 `json:"calls"`
 	}

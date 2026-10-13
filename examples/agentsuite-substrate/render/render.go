@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
@@ -87,10 +88,8 @@ func Load(dir, agentID, platform string) (*Composition, error) {
 	if err := agentsuite.Unmarshal(agentJSON, &agent); err != nil {
 		return nil, fmt.Errorf("agent %s: %w", agentID, err)
 	}
-	// v0 renders tool-free, invoke-free agents only: the harness protocol has no tool parts wired
-	// to suite tools yet, and invokes need host-mediated child sessions.
-	if len(agent.ToolProviders) > 0 || len(agent.Invokes) > 0 {
-		return nil, fmt.Errorf("agent %s declares tool providers or invokes; this v0 renderer supports tool-free single agents only", agentID)
+	if err := supported(agent); err != nil {
+		return nil, err
 	}
 	instructions, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(agent.Instructions.Path)))
 	if err != nil {
@@ -104,6 +103,31 @@ func Load(dir, agentID, platform string) (*Composition, error) {
 		AgentJSON:    agentJSON,
 		Instructions: instructions,
 	}, nil
+}
+
+// ModelProtocol is the only model protocol an agent can declare: agentsessionsd answers the
+// harness's model calls with its -model, an OpenAI-compatible endpoint.
+const ModelProtocol = "openai-compatible"
+
+// reservedHarnesses are the harness names agentsessionsd serves itself (echo, and chat with -model);
+// it refuses to start with a -substrate-harness of either name.
+var reservedHarnesses = []string{"chat", "echo"}
+
+// supported reports whether this v0 renderer can deploy the agent.
+func supported(a agentsuite.Agent) error {
+	// v0 renders tool-free, invoke-free agents only: the harness protocol has no tool parts wired
+	// to suite tools yet, and invokes need host-mediated child sessions.
+	if len(a.ToolProviders) > 0 || len(a.Invokes) > 0 {
+		return fmt.Errorf("agent %s declares tool providers or invokes; this v0 renderer supports tool-free single agents only", a.ID)
+	}
+	if a.Model.Protocol != ModelProtocol {
+		return fmt.Errorf("agent %s: model protocol %q: the host serves an %s model only", a.ID, a.Model.Protocol, ModelProtocol)
+	}
+	// The agent id becomes the harness name.
+	if slices.Contains(reservedHarnesses, a.ID) {
+		return fmt.Errorf("agent id %q is the name of a harness agentsessionsd serves itself (%s); rename the agent", a.ID, strings.Join(reservedHarnesses, ", "))
+	}
+	return nil
 }
 
 func readStrict(path string, out any) error {
@@ -233,6 +257,10 @@ type Output struct {
 // provider model the harness requests in place of the agent's own: it is set in the template's env
 // (AGENTSUITE_MODEL) and folded into the template name.
 func Render(c *Composition, image string, b *Binding, model string) (*Output, error) {
+	// Load checked the agent; check again for a Composition built by hand.
+	if err := supported(c.Agent); err != nil {
+		return nil, err
+	}
 	m := pinnedImage.FindStringSubmatch(image)
 	if m == nil {
 		return nil, fmt.Errorf("image %q: substrate requires a digest-pinned reference (name@sha256:<64 hex>)", image)

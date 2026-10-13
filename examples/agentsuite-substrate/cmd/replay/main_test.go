@@ -1,8 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
@@ -57,4 +63,50 @@ func TestLoadJournal(t *testing.T) {
 			t.Fatalf("error = %v, want a verification failure", err)
 		}
 	})
+}
+
+func TestModelCalls(t *testing.T) {
+	release := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"calls":7}`) })
+	mux.HandleFunc("/error", func(w http.ResponseWriter, _ *http.Request) {
+		// A JSON error body without "calls" would decode as 0 calls.
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error":"x"}`)
+	})
+	mux.HandleFunc("/stall-headers", func(http.ResponseWriter, *http.Request) { <-release })
+	mux.HandleFunc("/stall-body", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"calls":`)
+		w.(http.Flusher).Flush()
+		<-release
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	defer close(release) // runs before srv.Close, so the stalled handlers return
+
+	if n, err := modelCalls(context.Background(), ""); n != 0 || err != nil {
+		t.Fatalf("no stats URL: got %d, %v; want 0, nil", n, err)
+	}
+	if n, err := modelCalls(context.Background(), srv.URL+"/stats"); n != 7 || err != nil {
+		t.Fatalf("stats: got %d, %v; want 7, nil", n, err)
+	}
+	if _, err := modelCalls(context.Background(), srv.URL+"/error"); err == nil || !strings.Contains(err.Error(), "500") {
+		t.Fatalf("error status: err = %v, want the status reported", err)
+	}
+	// A counter that stalls, before its headers or in the middle of its body, ends with the
+	// caller's context instead of hanging the replay.
+	for _, path := range []string{"/stall-headers", "/stall-body"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		start := time.Now()
+		_, err := modelCalls(ctx, srv.URL+path)
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("%s: err = %v, want the context deadline", path, err)
+		}
+		if d := time.Since(start); d > 10*time.Second {
+			t.Errorf("%s: returned after %v", path, d)
+		}
+	}
 }

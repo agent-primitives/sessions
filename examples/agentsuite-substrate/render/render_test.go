@@ -179,3 +179,44 @@ func TestLoadBindingIsStrict(t *testing.T) {
 		t.Fatalf("err = %v, want unknown fields refused", err)
 	}
 }
+
+// The v0 renderer refuses an agent the host cannot serve: a model protocol other than the
+// OpenAI-compatible one agentsessionsd's -model speaks, or an id that becomes a harness name the
+// daemon reserves for its built-ins. Render checks a hand-built Composition the same way Load does.
+func TestRenderRefusesUnsupportedAgents(t *testing.T) {
+	comp, err := Load("../suite", "triage", "linux/arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := LoadBinding("../binding.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := "localhost:5001/agentsuite-harness@" + digestA
+	for _, tc := range []struct {
+		name    string
+		mutate  func(c *Composition)
+		wantErr string
+	}{
+		{"anthropic protocol", func(c *Composition) { c.Agent.Model.Protocol = "anthropic" }, `model protocol "anthropic"`},
+		// The AgentSuite schema requires a protocol (minLength 1), so an empty one never validates;
+		// the renderer refuses it too rather than assume a default.
+		{"empty protocol", func(c *Composition) { c.Agent.Model.Protocol = "" }, `model protocol ""`},
+		{"chat id", func(c *Composition) { c.Agent.ID = "chat" }, `agent id "chat" is the name of a harness agentsessionsd serves itself`},
+		{"echo id", func(c *Composition) { c.Agent.ID = "echo" }, `agent id "echo" is the name of a harness agentsessionsd serves itself`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := *comp
+			tc.mutate(&c)
+			if err := supported(c.Agent); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("supported: err = %v, want %q", err, tc.wantErr)
+			}
+			if _, err := Render(&c, image, b, ""); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Render: err = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+	if err := supported(comp.Agent); err != nil {
+		t.Fatalf("the demo's triage agent must be supported: %v", err)
+	}
+}

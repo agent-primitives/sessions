@@ -27,6 +27,9 @@ provide.
 
 ### Added
 
+- Go SDK callers can pass opaque per-execution config through `client.ExecOptions.Config`.
+  Omitting it keeps the existing empty-config behavior. Config is durable journal content exposed
+  by Replay; do not include credentials. No wire or journal schema change.
 - The chat harness accepts a per-execution `system_prompt` in its JSON config, prepended before
   conversation history and current inputs.
 - `agentsessionsd --harness name=address` registers a harness that is already running, over TCP
@@ -57,9 +60,6 @@ provide.
 
 ### Compatibility
 
-- Go SDK callers can pass opaque per-execution config through `client.ExecOptions.Config`.
-  Omitting it keeps the existing empty-config behavior. Config is durable journal content exposed
-  by Replay; do not include credentials. No wire or journal schema change.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

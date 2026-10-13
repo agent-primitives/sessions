@@ -148,6 +148,7 @@ type ExecOptions struct {
 	Harness string
 	// Config is opaque per-execution configuration passed to the harness. It is journaled in
 	// EXECUTION_START and exposed by Replay; do not put credentials here.
+	// Nil sends no config; it is not carried over from earlier turns.
 	Config []byte
 	// ExpectedLastSeq opts into the single-writer compare-and-swap. Nil appends at the current
 	// head. A stale value comes back as codes.Aborted rather than interleaving silently.

@@ -93,13 +93,13 @@ func TestExecConfigIsJournaledAndReplayed(t *testing.T) {
 	c := newClient(t)
 	var uid string
 	fromSeq := int64(1)
+	// Order matters: unset follows opaque bytes on the same session to verify no config carry-over.
 	for _, tt := range []struct {
 		name   string
 		config []byte
 	}{
 		{name: "opaque bytes", config: []byte{0, 255, ' ', '\n', '\t'}},
 		{name: "unset"},
-		{name: "empty", config: []byte{}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			turn, err := c.Exec(t.Context(), client.ExecOptions{

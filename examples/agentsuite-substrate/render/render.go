@@ -5,9 +5,10 @@
 // The field mapping follows the AgentSuite to ActorTemplate design (v0): the template name is
 // content-addressed, <suite>-<agent>-<hash8> with hash8 the first 8 hex of
 // sha256(image digest + "\n" + binding digest), with "\n" + model appended when the harness's model
-// is overridden, so the same image under another binding or model is another template; the harness speaks harnesswire on port 80 with a /readyz wakeup probe on 8081; the
-// sandbox, snapshot, resources and worker selector come from the binding. Model credentials are host
-// configuration and never rendered.
+// is overridden, so the same image under another binding or model is another template; the harness
+// speaks harnesswire on port 80 with a /readyz wakeup probe on 8081; the sandbox, snapshot,
+// resources and worker selector come from the binding. Model credentials are host configuration and
+// never rendered.
 package render
 
 import (

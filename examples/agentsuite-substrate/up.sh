@@ -137,11 +137,18 @@ else
 	# Drop any key a previous real-provider run left, so the fake model never receives it.
 	"${K[@]}" -n "${NS}" delete secret agentsessionsd-model --ignore-not-found
 fi
+# agentsessionsd reads the key into its environment once, at container start, so a Secret change
+# alone never reaches it. Stamp the Secret's resourceVersion ("none" once deleted) into the pod
+# template: a rotated or deleted key changes the template and restarts the pod, and an unchanged one
+# leaves the pod (and its emptyDir journal) alone.
+MODEL_SECRET_VERSION="$("${K[@]}" -n "${NS}" get secret agentsessionsd-model --ignore-not-found -o jsonpath='{.metadata.resourceVersion}')"
+MODEL_SECRET_VERSION="${MODEL_SECRET_VERSION:-none}"
 sed -e "s#FAKEMODEL_IMAGE#${FAKEMODEL_IMAGE}#" "${HERE}/deploy/fakemodel.yaml" | "${K[@]}" apply -f -
 sed -e "s#DAEMON_IMAGE#${DAEMON_IMAGE}#" -e "s#MODEL_ID#${MODEL_ID}#" -e "s#MODEL_BASE_URL#${MODEL_BASE_URL}#" \
 	-e "s#SUBSTRATE_HARNESS_FLAG#$(cat "${WORK}/render/agentsessionsd.args")#" \
+	-e "s#MODEL_SECRET_VERSION#${MODEL_SECRET_VERSION}#" \
 	"${HERE}/deploy/agentsessionsd.yaml" >"${WORK}/agentsessionsd.yaml"
-if grep -nE 'DAEMON_IMAGE|MODEL_ID|MODEL_BASE_URL|SUBSTRATE_HARNESS_FLAG' "${WORK}/agentsessionsd.yaml" >&2; then
+if grep -nE 'DAEMON_IMAGE|MODEL_ID|MODEL_BASE_URL|SUBSTRATE_HARNESS_FLAG|MODEL_SECRET_VERSION' "${WORK}/agentsessionsd.yaml" >&2; then
 	echo "unreplaced placeholder in the rendered agentsessionsd.yaml" >&2
 	exit 1
 fi

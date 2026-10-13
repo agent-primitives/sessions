@@ -18,6 +18,10 @@ spec:
   template:
     metadata:
       labels: {app: agentsessionsd}
+      annotations:
+        # The MODEL_API_KEY env var is read at container start. up.sh stamps the Secret's
+        # resourceVersion here, so a rotated or deleted key restarts the pod.
+        agentsuite-demo/model-secret-version: "MODEL_SECRET_VERSION"
     spec:
       containers:
         - name: agentsessionsd

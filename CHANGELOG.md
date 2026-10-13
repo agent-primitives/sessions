@@ -16,6 +16,14 @@ provide.
 
 ### Fixed
 
+- The substrate adapter (`integrations/substrate`) builds against agent-substrate `96dffb28`, which
+  replaced `ActorStatus.external_snapshot` with a `snapshots` list (substrate `f03327bd`) and
+  `SnapshotConfig.on_commit` with `preferred_fidelity`. The held snapshot is now the
+  highest-generation entry whose durable copy is `COMPLETED`, the one substrate restores and tags,
+  so a stateful fork keeps cloning the snapshot its suspend produced. Against an ate-api older than
+  `f03327bd` the adapter reads no snapshot and a stateful fork refuses with `ErrNoSnapshotToClone`;
+  upgrade substrate and the adapter together. The CI cluster moves to the same commit, and the
+  `deploy/substrate` WorkerPools use its `sandboxClasses` list in place of `sandboxClass`.
 - Session-level suspend no longer destroys the Substrate actor needed by resume. Both replay-based
   and memory-snapshot sessions retain their restore handle after `Placer.Suspend`; explicit `Stop`
   remains destructive teardown.

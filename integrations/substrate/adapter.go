@@ -75,13 +75,13 @@ func (ad *Adapter) ResumeActor(ctx context.Context, actor substrate.ActorRef) (s
 }
 
 // SuspendActor snapshots the actor to durable storage and frees the worker, returning the URI of the
-// external snapshot the actor now holds.
+// external snapshot the actor now holds (see heldSnapshot).
 func (ad *Adapter) SuspendActor(ctx context.Context, actor substrate.ActorRef) (string, error) {
 	resp, err := ad.ctl.SuspendActor(ctx, &atepb.SuspendActorRequest{Actor: objectRef(actor)})
 	if err != nil {
 		return "", err
 	}
-	return resp.GetActor().GetStatus().GetExternalSnapshot().GetSnapshotUri(), nil
+	return heldSnapshot(resp.GetActor().GetStatus()), nil
 }
 
 // DeleteActor deletes a suspended actor.
@@ -155,8 +155,36 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 	return substrate.ActorInfo{
 		Status:   actorStatus(st.GetState()),
 		Worker:   st.GetWorkerAssignment().GetWorkerPod(),
-		Snapshot: st.GetExternalSnapshot().GetSnapshotUri(),
+		Snapshot: heldSnapshot(st),
 	}
+}
+
+// heldSnapshot returns the object-storage URI of the external snapshot the actor holds: the
+// highest-generation entry of ActorStatus.snapshots whose durable copy is COMPLETED, or "" when there
+// is none. That is the snapshot substrate restores on ResumeActor and copies on CreateTag
+// (findLatestDurableSnapshot in substrate's controlapi), so comparing it before and after a tag
+// proves which snapshot the tag took.
+//
+// Entries that are not candidates: a PENDING durable copy is still being written (a suspend in
+// flight), and an entry with no durable copy is a node-local pause checkpoint, which a tag cannot
+// copy. An actor seeded from a tag holds the tag's snapshot as generation 1 until its own first
+// suspend, so a fork child reports the borrowed URI, under the tag's prefix.
+//
+// Substrate f03327bd replaced the single ActorStatus.external_snapshot (field 4) with this list. A
+// server older than that still sends field 4, which this client does not read, so it reports "" and
+// a stateful fork refuses with ErrNoSnapshotToClone rather than tagging a snapshot it cannot name.
+func heldSnapshot(st *atepb.ActorStatus) string {
+	var held *atepb.Snapshot
+	for _, snap := range st.GetSnapshots() {
+		durable := snap.GetDurableSnapshot()
+		if durable.GetStatus() != atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED || durable.GetObject().GetSnapshotUri() == "" {
+			continue
+		}
+		if held == nil || snap.GetGeneration() > held.GetGeneration() {
+			held = snap
+		}
+	}
+	return held.GetDurableSnapshot().GetObject().GetSnapshotUri()
 }
 
 // actorStatus narrows substrate's lifecycle onto the states the backend acts on. Transitional states

@@ -25,18 +25,61 @@ x86_64 | amd64) ARCH=amd64 ;;
 esac
 export KO_DOCKER_REPO=localhost:5001 KO_DEFAULTPLATFORMS="linux/${ARCH}"
 
-# Validate the model settings before anything touches the cluster, so a misconfigured rerun exits
-# without changing the existing deployment or its agentsessionsd-model Secret.
+# Validate every input before anything touches the cluster, so a misconfigured rerun exits without
+# changing the cluster, the existing deployment or its agentsessionsd-model Secret.
+refuse() {
+	echo "$*; nothing was changed" >&2
+	exit 1
+}
+
+# The placeholders in deploy/agentsessionsd.yaml. Each is replaced literally, never through a sed
+# expression, so a value is copied as written ('&', '#' and '\' included).
+DAEMON_PLACEHOLDERS=(MODEL_ID MODEL_BASE_URL DAEMON_IMAGE SUBSTRATE_HARNESS_FLAG MODEL_SECRET_VERSION)
+# unfilled prints the placeholders the text $1 still contains, in DAEMON_PLACEHOLDERS order.
+unfilled() {
+	local p left=""
+	for p in "${DAEMON_PLACEHOLDERS[@]}"; do
+		if [[ "$1" == *"${p}"* ]]; then left="${left:+${left} }${p}"; fi
+	done
+	echo "${left}"
+}
+
 if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	# A real OpenAI-compatible provider.
 	MODEL_BASE_URL="${AGENTSUITE_MODEL_BASE_URL}"
 	MODEL_ID="${AGENTSUITE_MODEL:?set AGENTSUITE_MODEL with AGENTSUITE_MODEL_BASE_URL}"
 	# The harness requests the provider's model, not the fixture's.
 	HARNESS_MODEL="${MODEL_ID}"
+	# Both land in a YAML plain scalar: whitespace or a control character would change the YAML
+	# around them, and a placeholder name would be replaced again further down.
+	unsafe='[[:space:][:cntrl:]]'
+	for var in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL; do
+		if [[ "${!var}" =~ ${unsafe} ]]; then
+			refuse "${var} contains whitespace or a control character"
+		fi
+		if [[ -n "$(unfilled "${!var}")" ]]; then
+			refuse "${var} contains $(unfilled "${!var}"), a placeholder of deploy/agentsessionsd.yaml"
+		fi
+	done
 else
 	MODEL_BASE_URL="http://fakemodel.${NS}.svc:8080/v1"
 	MODEL_ID=triage-model
 	HARNESS_MODEL=""
+fi
+# Render the model settings into the agentsessionsd manifest now, so a value that cannot be
+# rendered stops the run here. The image, harness flag and Secret version are filled in later.
+DAEMON_MANIFEST="$(<"${HERE}/deploy/agentsessionsd.yaml")"
+DAEMON_MANIFEST=${DAEMON_MANIFEST//MODEL_ID/"${MODEL_ID}"}
+DAEMON_MANIFEST=${DAEMON_MANIFEST//MODEL_BASE_URL/"${MODEL_BASE_URL}"}
+if [[ "$(unfilled "${DAEMON_MANIFEST}")" != "DAEMON_IMAGE SUBSTRATE_HARNESS_FLAG MODEL_SECRET_VERSION" ]]; then
+	refuse "deploy/agentsessionsd.yaml: after the model settings it holds the placeholders '$(unfilled "${DAEMON_MANIFEST}")', want DAEMON_IMAGE, SUBSTRATE_HARNESS_FLAG and MODEL_SECRET_VERSION"
+fi
+
+# deploy/ and this script create the atespace ${ATESPACE}, and agentsessionsd's
+# -substrate-atespace names it, so the binding the template is rendered from must name it too.
+BINDING_ATESPACE="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("atespace", ""))' "${HERE}/binding.json")"
+if [[ "${BINDING_ATESPACE}" != "${ATESPACE}" ]]; then
+	refuse "binding.json names atespace '${BINDING_ATESPACE}', but the demo deploys into atespace ${ATESPACE}"
 fi
 
 step "agent-substrate ${SUBSTRATE_REF:0:8} checkout in ${SUBSTRATE}"
@@ -74,16 +117,23 @@ if [[ "${stage}" == absent || "${stage}" == incomplete ]]; then
 		step "kind cluster ${CLUSTER} (substrate's kind lane: create-kind-cluster.sh)"
 	fi
 	rm -f "${SETUP}"
+	# Record ownership as soon as the node exists, even when the script fails, or up.sh is
+	# interrupted, after kind created it, so a rerun can finish the cluster and down.sh can delete it.
+	record_owner() {
+		id="$(node_id)"
+		if [[ -n "${id}" ]]; then
+			echo "${id}" >"${OWNED}"
+		else
+			rm -f "${OWNED}"
+		fi
+	}
+	trap record_owner EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
 	rc=0
 	(cd "${SUBSTRATE}" && hack/create-kind-cluster.sh) || rc=$?
-	# Record ownership as soon as the node exists, even when the script failed after creating it, so
-	# a rerun can finish the cluster and down.sh can delete it.
-	id="$(node_id)"
-	if [[ -n "${id}" ]]; then
-		echo "${id}" >"${OWNED}"
-	else
-		rm -f "${OWNED}"
-	fi
+	trap - EXIT INT TERM
+	record_owner
 	if ((rc != 0)); then
 		echo "create-kind-cluster.sh failed (exit ${rc}); rerun up.sh to recreate the cluster" >&2
 		exit "${rc}"
@@ -115,7 +165,7 @@ sed -e "s#ATEOM_IMAGE#${ATEOM_IMAGE}#" "${HERE}/deploy/workerpool.yaml" | "${K[@
 "${ROOT}/hack/wait-worker-pool.sh" agentsuite-demo-gvisor "${NS}" 600
 
 step "harness image for agent ${AGENT} (linux/${ARCH} composition)"
-CTXDIR="${WORK}/harness-image"
+CTXDIR="${STATE}/harness-image"
 rm -rf "${CTXDIR}" && mkdir -p "${CTXDIR}"
 (cd "${HERE}" && go run ./cmd/emit bundle -suite suite -agent "${AGENT}" -platform "linux/${ARCH}" -out "${CTXDIR}/agent")
 (cd "${HERE}" && CGO_ENABLED=0 GOOS=linux GOARCH="${ARCH}" go build -trimpath -o "${CTXDIR}/harness" ./cmd/harness)
@@ -126,14 +176,14 @@ echo "harness image: ${HARNESS_IMAGE}"
 
 step "render the composition: ActorTemplate + harness registration"
 (cd "${HERE}" && go run ./cmd/emit render -suite suite -agent "${AGENT}" -platform "linux/${ARCH}" \
-	-binding binding.json -image "${HARNESS_IMAGE}" -model "${HARNESS_MODEL}" -out "${WORK}/render")
-TEMPLATE="$(cat "${WORK}/render/template-name")"
-cat "${WORK}/render/harness-registration.json"
+	-binding binding.json -image "${HARNESS_IMAGE}" -model "${HARNESS_MODEL}" -out "${STATE}/render")
+TEMPLATE="$(cat "${STATE}/render/template-name")"
+cat "${STATE}/render/harness-registration.json"
 
 step "atespace ${ATESPACE} and ActorTemplate ${TEMPLATE}; wait for its golden snapshot"
 "${ATE[@]}" get atespace "${ATESPACE}" >/dev/null 2>&1 || "${ATE[@]}" create atespace "${ATESPACE}"
 if ! "${ATE[@]}" get actor-template "${TEMPLATE}" -a "${ATESPACE}" >/dev/null 2>&1; then
-	"${ATE[@]}" create actor-template -f "${WORK}/render/actortemplate.json"
+	"${ATE[@]}" create actor-template -f "${STATE}/render/actortemplate.json"
 fi
 golden_tag() {
 	"${ATE[@]}" get actor-template "${TEMPLATE}" -a "${ATESPACE}" -o json | python3 -c '
@@ -162,7 +212,14 @@ echo "golden snapshot tag: ${golden}"
 step "fake model and agentsessionsd (substrate build)"
 FAKEMODEL_IMAGE="$(cd "${HERE}" && ko build --base-import-paths ./cmd/fakemodel)"
 DAEMON_IMAGE="$(cd "${ROOT}/integrations/substrate" && ko build --base-import-paths ./cmd/agentsessionsd)"
-# MODEL_ID and MODEL_BASE_URL were set and validated at the top, before any cluster change.
+# Finish rendering everything but the Secret's version before the Secret changes. The model settings
+# were rendered at the top.
+DAEMON_MANIFEST=${DAEMON_MANIFEST//DAEMON_IMAGE/"${DAEMON_IMAGE}"}
+DAEMON_MANIFEST=${DAEMON_MANIFEST//SUBSTRATE_HARNESS_FLAG/"$(cat "${STATE}/render/agentsessionsd.args")"}
+if [[ "$(unfilled "${DAEMON_MANIFEST}")" != MODEL_SECRET_VERSION ]]; then
+	echo "rendered agentsessionsd.yaml: unexpected placeholders left: $(unfilled "${DAEMON_MANIFEST}"); the agentsessionsd-model Secret and the Deployment were not changed" >&2
+	exit 1
+fi
 if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	if [[ -n "${MODEL_API_KEY:-}" ]]; then
 		# Replace the key in place: render the Secret client-side and apply it, so a failed apply
@@ -186,15 +243,9 @@ fi
 MODEL_SECRET_VERSION="$("${K[@]}" -n "${NS}" get secret agentsessionsd-model --ignore-not-found -o jsonpath='{.metadata.resourceVersion}')"
 MODEL_SECRET_VERSION="${MODEL_SECRET_VERSION:-none}"
 sed -e "s#FAKEMODEL_IMAGE#${FAKEMODEL_IMAGE}#" "${HERE}/deploy/fakemodel.yaml" | "${K[@]}" apply -f -
-sed -e "s#DAEMON_IMAGE#${DAEMON_IMAGE}#" -e "s#MODEL_ID#${MODEL_ID}#" -e "s#MODEL_BASE_URL#${MODEL_BASE_URL}#" \
-	-e "s#SUBSTRATE_HARNESS_FLAG#$(cat "${WORK}/render/agentsessionsd.args")#" \
-	-e "s#MODEL_SECRET_VERSION#${MODEL_SECRET_VERSION}#" \
-	"${HERE}/deploy/agentsessionsd.yaml" >"${WORK}/agentsessionsd.yaml"
-if grep -nE 'DAEMON_IMAGE|MODEL_ID|MODEL_BASE_URL|SUBSTRATE_HARNESS_FLAG|MODEL_SECRET_VERSION' "${WORK}/agentsessionsd.yaml" >&2; then
-	echo "unreplaced placeholder in the rendered agentsessionsd.yaml" >&2
-	exit 1
-fi
-"${K[@]}" apply -f "${WORK}/agentsessionsd.yaml"
+DAEMON_MANIFEST=${DAEMON_MANIFEST//MODEL_SECRET_VERSION/"${MODEL_SECRET_VERSION}"}
+printf '%s\n' "${DAEMON_MANIFEST}" >"${STATE}/agentsessionsd.yaml"
+"${K[@]}" apply -f "${STATE}/agentsessionsd.yaml"
 "${K[@]}" -n "${NS}" rollout status deploy/fakemodel --timeout=180s
 "${K[@]}" -n "${NS}" rollout status deploy/agentsessionsd --timeout=180s
 "${K[@]}" -n "${NS}" logs deploy/agentsessionsd | grep -E 'listening|substrate harness' || true

@@ -1,27 +1,34 @@
 package scripts_test
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 // These tests run up.sh and down.sh against stub tools, to pin how they decide whether the demo's
-// kind cluster exists and whose it is. Nothing here touches Docker or a cluster: every tool the
-// scripts call before the cluster phase ends is a stub that appends its arguments to a call log.
+// kind cluster exists and whose it is, what up.sh validates before it changes anything, and what
+// it renders. Nothing here touches Docker or a cluster: every tool the scripts call is a stub that
+// appends its arguments to a call log, except python3, which is the host's (the scripts parse JSON
+// with it).
 
 const cluster = "demo"
 
 // stubs is one run's fake environment.
 type stubs struct {
-	dir  string // the stubs' state: the call log and the control-plane container ID
+	dir  string // the stubs' state: the call log, the control-plane container ID, kubectl's stdin
 	work string // AGENTSUITE_DEMO_WORK
 	env  []string
 }
+
+// digest is the image digest the ko and docker stubs report.
+const digest = "sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // stub writes an executable shell script named name into bin.
 func stub(t *testing.T, bin, name, body string) {
@@ -39,6 +46,10 @@ func newStubs(t *testing.T) *stubs {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Skip("bash not found")
+	}
+	python3, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not found")
 	}
 	s := &stubs{dir: t.TempDir(), work: t.TempDir()}
 	bin := filepath.Join(s.dir, "bin")
@@ -65,22 +76,81 @@ if [ "$1 $2" = "get clusters" ]; then
 	[ -z "${STUB_CLUSTERS:-}" ] || echo "$STUB_CLUSTERS"
 fi
 `)
-	// docker inspect reports the control-plane container ID kept in $STUB_DIR/node-id.
+	// docker inspect reports the control-plane container ID kept in $STUB_DIR/node-id, or the
+	// harness image's digest.
 	stub(t, bin, "docker", log+`
 case "$1" in
 info) echo arm64 ;;
-inspect) [ -f "$STUB_DIR/node-id" ] && cat "$STUB_DIR/node-id" || exit 1 ;;
+inspect)
+	case "$3" in
+	*RepoDigests*) echo "localhost:5001/agentsuite-harness@`+digest+`" ;;
+	*) [ -f "$STUB_DIR/node-id" ] && cat "$STUB_DIR/node-id" || exit 1 ;;
+	esac
+	;;
 esac
 `)
 	// go stands in for the first step after the cluster phase (building kubectl-ate) and stops the
-	// run there with a status the tests recognize.
-	stub(t, bin, "go", log+"exit 97\n")
-	for _, name := range []string{"ko", "git", "python3", "kubectl", "curl"} {
+	// run there with a status the tests recognize, unless STUB_FULL is set: then it succeeds, and
+	// emit render writes the files up.sh reads.
+	stub(t, bin, "go", log+`
+[ -n "${STUB_FULL:-}" ] || exit 97
+if [ "$1 $2 $3" = "run ./cmd/emit render" ]; then
+	prev=
+	for a; do
+		[ "$prev" = -out ] && out=$a
+		prev=$a
+	done
+	mkdir -p "$out"
+	echo tmpl-1 >"$out/template-name"
+	echo '{}' >"$out/harness-registration.json"
+	echo '-substrate-harness=triage=agentsuite-demo/tmpl-1' >"$out/agentsessionsd.args"
+fi
+`)
+	stub(t, bin, "ko", log+`echo "localhost:5001/${3##*/}@`+digest+`"`+"\n")
+	// kubectl keeps what it is given on stdin, reports the agentsessionsd-model Secret's
+	// resourceVersion as STUB_SECRET_VERSION, and one stable worker pod.
+	stub(t, bin, "kubectl", log+`
+case " $* " in
+*" -f - "*) cat >>"$STUB_DIR/kubectl-stdin" ;;
+*" get secret "*) echo "${STUB_SECRET_VERSION:-}" ;;
+*" get pods "*) echo "worker-0=10.0.0.1" ;;
+esac
+`)
+	// python3 is the host's. STUB_BINDING stands in for the binding.json up.sh reads.
+	stub(t, bin, "python3", log+`
+if [ -n "${STUB_BINDING:-}" ] && [ "$#" -eq 3 ] && [ "$1" = -c ] && [ "${3##*/}" = binding.json ]; then
+	set -- -c "$2" "$STUB_BINDING"
+fi
+exec "`+python3+`" "$@"
+`)
+	// The waits in up.sh and hack/wait-worker-pool.sh need not wait for stubs.
+	stub(t, bin, "sleep", "")
+	for _, name := range []string{"git", "curl"} {
 		stub(t, bin, name, log)
 	}
-	// create-kind-cluster.sh creates the control-plane container, then exits STUB_CREATE_RC.
+	// kubectl-ate is built into the work directory by up.sh's go build; the go stub builds nothing.
+	if err := os.MkdirAll(filepath.Join(s.work, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stub(t, filepath.Join(s.work, "bin"), "kubectl-ate", log+`
+case " $* " in
+*" -o json "*) echo '{"status": {"goldenSnapshotStatus": {"goldenTag": {"name": "golden-1"}}}}' ;;
+esac
+`)
+	// create-kind-cluster.sh creates the control-plane container, then exits STUB_CREATE_RC. With
+	// STUB_CREATE_SIGNAL it first interrupts up.sh, as a Ctrl-C (INT, which also reaches this
+	// script) or a kill of up.sh (TERM) would while kind is still running.
 	stub(t, filepath.Join(substrate, "hack"), "create-kind-cluster.sh", `echo "create-kind-cluster.sh" >>"$STUB_DIR/calls"
 echo "${STUB_NEW_NODE_ID:-node-1}" >"$STUB_DIR/node-id"
+if [ -n "${STUB_CREATE_SIGNAL:-}" ]; then
+	i=0
+	while [ ! -s "$STUB_DIR/script-pid" ] && [ "$i" -lt 500 ]; do
+		/bin/sleep 0.01
+		i=$((i + 1))
+	done
+	kill -s "$STUB_CREATE_SIGNAL" "$(cat "$STUB_DIR/script-pid")"
+	[ "$STUB_CREATE_SIGNAL" != INT ] || kill -s INT $$
+fi
 exit "${STUB_CREATE_RC:-0}"
 `)
 	stub(t, filepath.Join(substrate, "hack"), "install-ate-kind.sh", `echo "install-ate-kind.sh $*" >>"$STUB_DIR/calls"
@@ -135,15 +205,31 @@ func (s *stubs) read(t *testing.T, name string) string {
 }
 
 // run runs script with extra environment and returns its exit status, combined output and the
-// calls the stubs logged.
+// calls the stubs logged. The script's PID is in $STUB_DIR/script-pid while it runs.
 func (s *stubs) run(t *testing.T, script string, env ...string) (int, string, string) {
 	t.Helper()
-	if err := os.Remove(filepath.Join(s.dir, "calls")); err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatal(err)
+	for _, name := range []string{"calls", "kubectl-stdin", "script-pid"} {
+		if err := os.Remove(filepath.Join(s.dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
 	}
 	cmd := exec.Command("./" + script)
 	cmd.Env = append(append([]string{}, s.env...), env...)
-	out, err := cmd.CombinedOutput()
+	var buf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &buf, &buf
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Renamed into place, so a stub that waits for the file reads a whole PID.
+	pid := filepath.Join(s.dir, "script-pid")
+	if err := os.WriteFile(pid+".tmp", []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(pid+".tmp", pid); err != nil {
+		t.Fatal(err)
+	}
+	err := cmd.Wait()
+	out := buf.Bytes()
 	code := 0
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
@@ -203,6 +289,30 @@ func TestUpClusterPhase(t *testing.T) {
 			wantCalls: []string{"create-kind-cluster.sh"},
 			noCalls:   []string{"install-ate-kind.sh"},
 			wantOwned: "node-1", wantSetup: "<absent>",
+		},
+		{
+			// A Ctrl-C reaches kind and up.sh; up.sh still records the node kind created.
+			name: "an interrupt after the node exists records ownership", env: []string{"STUB_CREATE_SIGNAL=INT"},
+			wantCode:  130,
+			wantCalls: []string{"create-kind-cluster.sh"},
+			noCalls:   []string{"kind export", "install-ate-kind.sh"},
+			wantOwned: "node-1", wantSetup: "<absent>",
+		},
+		{
+			name: "a TERM after the node exists records ownership", env: []string{"STUB_CREATE_SIGNAL=TERM"},
+			wantCode:  143,
+			wantCalls: []string{"create-kind-cluster.sh"},
+			noCalls:   []string{"kind export", "install-ate-kind.sh"},
+			wantOwned: "node-1", wantSetup: "<absent>",
+		},
+		{
+			// The rerun after the interrupt recreates the cluster up.sh recorded.
+			name: "an interrupted rerun records the new node", env: []string{"STUB_CLUSTERS=" + cluster, "STUB_NEW_NODE_ID=node-2", "STUB_CREATE_SIGNAL=TERM"},
+			node: "node-1", owned: "node-1",
+			wantCode: 143, wantOut: "its setup did not finish; recreating it",
+			wantCalls: []string{"create-kind-cluster.sh"},
+			noCalls:   []string{"install-ate-kind.sh"},
+			wantOwned: "node-2", wantSetup: "<absent>",
 		},
 		{
 			name: "an owned cluster whose create did not finish is recreated", env: []string{"STUB_CLUSTERS=" + cluster, "STUB_NEW_NODE_ID=node-2"},
@@ -320,6 +430,160 @@ func TestDown(t *testing.T) {
 			}
 			if !tc.wantKept && (owned != "<absent>" || setup != "<absent>") {
 				t.Errorf("records = %q, %q, want them removed", owned, setup)
+			}
+		})
+	}
+}
+
+// A kind cluster name may contain '.', which grep -x would read as any character.
+func TestClusterNameIsMatchedLiterally(t *testing.T) {
+	s := newStubs(t)
+	code, out, calls := s.run(t, "down.sh", "AGENTSUITE_DEMO_CLUSTER=demo.x", "STUB_CLUSTERS=demo-x")
+	if code != 0 || !strings.Contains(out, "no kind cluster demo.x; nothing to delete") {
+		t.Fatalf("down.sh exit %d, want 0 and demo.x not listed\noutput:\n%s\ncalls:\n%s", code, out, calls)
+	}
+	code, out, _ = s.run(t, "down.sh", "AGENTSUITE_DEMO_CLUSTER=../x")
+	if code != 1 || !strings.Contains(out, "AGENTSUITE_DEMO_CLUSTER=../x: want lowercase letters") {
+		t.Fatalf("down.sh exit %d, want 1 and the name refused\noutput:\n%s", code, out)
+	}
+}
+
+// up.sh refuses inputs it cannot deploy before it runs anything that touches the cluster (or even
+// lists it), so a misconfigured rerun leaves the cluster, the deployment and the
+// agentsessionsd-model Secret as they were.
+func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
+	binding := func(t *testing.T, atespace string) string {
+		t.Helper()
+		b, err := os.ReadFile("binding.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "binding.json")
+		b = bytes.Replace(b, []byte(`"atespace": "agentsuite-demo"`), []byte(`"atespace": "`+atespace+`"`), 1)
+		if err := os.WriteFile(path, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	provider := []string{"AGENTSUITE_MODEL_BASE_URL=https://llm.example/v1", "AGENTSUITE_MODEL=m", "MODEL_API_KEY=k"}
+	for _, tc := range []struct {
+		name    string
+		env     func(t *testing.T) []string
+		wantOut string
+	}{
+		{
+			name: "a base URL with whitespace",
+			env: func(*testing.T) []string {
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=https://llm.example/v1 x")
+			},
+			wantOut: "AGENTSUITE_MODEL_BASE_URL contains whitespace or a control character; nothing was changed",
+		},
+		{
+			name:    "a model with a newline",
+			env:     func(*testing.T) []string { return append(provider, "AGENTSUITE_MODEL=m\n- -evil") },
+			wantOut: "AGENTSUITE_MODEL contains whitespace or a control character; nothing was changed",
+		},
+		{
+			name: "a base URL naming a placeholder",
+			env: func(*testing.T) []string {
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=https://llm.example/DAEMON_IMAGE")
+			},
+			wantOut: "AGENTSUITE_MODEL_BASE_URL contains DAEMON_IMAGE, a placeholder of deploy/agentsessionsd.yaml",
+		},
+		{
+			name:    "a binding for another atespace",
+			env:     func(t *testing.T) []string { return []string{"STUB_BINDING=" + binding(t, "other")} },
+			wantOut: "binding.json names atespace 'other', but the demo deploys into atespace agentsuite-demo; nothing was changed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStubs(t)
+			s.node(t, "node-1")
+			s.record(t, "created-cluster", "node-1")
+			s.record(t, "setup-cluster", "node-1 installed")
+			code, out, calls := s.run(t, "up.sh", append(tc.env(t), "STUB_CLUSTERS="+cluster, "STUB_FULL=1")...)
+			if code != 1 || !strings.Contains(out, tc.wantOut) {
+				t.Fatalf("up.sh exit %d, want 1 with %q\noutput:\n%s", code, tc.wantOut, out)
+			}
+			for _, c := range []string{"git ", "kind ", "kubectl", "create-kind-cluster.sh", "ko "} {
+				if strings.Contains(calls, c) {
+					t.Errorf("calls contain %q:\n%s", c, calls)
+				}
+			}
+		})
+	}
+}
+
+// up.sh renders the agentsessionsd Deployment with every value copied as written: a model URL with
+// '&' and '#' (which a sed s### expression would mangle or choke on) reaches the manifest intact.
+func TestUpRendersTheDaemon(t *testing.T) {
+	const (
+		url   = "https://llm.example/v1?api-version=2&tenant=a#b"
+		model = `gpt&x#1\1`
+	)
+	for _, tc := range []struct {
+		name        string
+		env         []string
+		wantLines   []string
+		wantSecret  string // the Secret call that precedes the apply
+		wantVersion string
+	}{
+		{
+			name:        "fake provider",
+			wantLines:   []string{"- -model=triage-model", "- -model-base-url=http://fakemodel.agentsuite-demo.svc:8080/v1"},
+			wantSecret:  "delete secret agentsessionsd-model --ignore-not-found",
+			wantVersion: "none",
+		},
+		{
+			name:        "real provider",
+			env:         []string{"AGENTSUITE_MODEL_BASE_URL=" + url, "AGENTSUITE_MODEL=" + model, "MODEL_API_KEY=k", "STUB_SECRET_VERSION=7"},
+			wantLines:   []string{"- -model=" + model, "- -model-base-url=" + url},
+			wantSecret:  "apply --server-side",
+			wantVersion: "7",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStubs(t)
+			s.node(t, "node-1")
+			s.record(t, "created-cluster", "node-1")
+			s.record(t, "setup-cluster", "node-1 installed")
+			code, out, calls := s.run(t, "up.sh", append(tc.env, "STUB_CLUSTERS="+cluster, "STUB_FULL=1")...)
+			if code != 0 {
+				t.Fatalf("up.sh exit %d, want 0\noutput:\n%s\ncalls:\n%s", code, out, calls)
+			}
+			path := filepath.Join(s.work, "cluster-"+cluster, "agentsessionsd.yaml")
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := map[string]bool{}
+			for _, l := range strings.Split(string(b), "\n") {
+				lines[strings.TrimSpace(l)] = true
+			}
+			want := append([]string{
+				"image: localhost:5001/agentsessionsd@" + digest,
+				"- -substrate-harness=triage=agentsuite-demo/tmpl-1",
+				`agentsuite-demo/model-secret-version: "` + tc.wantVersion + `"`,
+			}, tc.wantLines...)
+			for _, l := range want {
+				if !lines[l] {
+					t.Errorf("rendered manifest has no line %q:\n%s", l, b)
+				}
+			}
+			for _, p := range []string{"DAEMON_IMAGE", "MODEL_ID", "MODEL_BASE_URL", "SUBSTRATE_HARNESS_FLAG", "MODEL_SECRET_VERSION"} {
+				if strings.Contains(string(b), p) {
+					t.Errorf("rendered manifest still contains %s", p)
+				}
+			}
+			secret := strings.Index(calls, tc.wantSecret)
+			apply := strings.Index(calls, "apply -f "+path)
+			if secret < 0 || apply < secret {
+				t.Errorf("want %q, then apply -f %s:\n%s", tc.wantSecret, path, calls)
+			}
+			// The kubeconfig and the composition are this cluster's.
+			if !strings.Contains(calls, "kind export kubeconfig --name demo --kubeconfig "+filepath.Join(s.work, "cluster-demo", "kubeconfig")) ||
+				!strings.Contains(calls, "-out "+filepath.Join(s.work, "cluster-demo", "render")) {
+				t.Errorf("want the kubeconfig and render output under %s:\n%s", filepath.Join(s.work, "cluster-demo"), calls)
 			}
 		})
 	}

@@ -34,7 +34,7 @@ The recipe is for a disposable kind cluster you trust: nothing in it authenticat
 | Path | What it is |
 |---|---|
 | `suite/` | An AgentSuite (`support-desk`) with one tool-free agent, `triage`, and compositions for `linux/amd64` and `linux/arm64`. |
-| `binding.json` | A draft `AgentSessionsBinding` (`kmx.kaimahi.dev/v1alpha1`) for kind: atespace, gVisor sandbox, MEMORY snapshots, worker selector. |
+| `binding.json` | A draft `AgentSessionsBinding` (`kmx.kaimahi.dev/v1alpha1`) for kind: atespace, gVisor sandbox, MEMORY snapshots, worker selector. `up.sh` refuses an atespace other than `agentsuite-demo`, the one `deploy/` uses. |
 | `render/`, `cmd/emit` | `emit bundle` stages the agent layer (manifest and instructions) for the image. `emit render` writes the ActorTemplate, the harness registration and the daemon flag. |
 | `agent/`, `cmd/harness`, `Dockerfile.harness` | The harness image. It serves harnesswire on :80 and `/readyz` on :8081. The instructions are the system prompt, and the harness checks them against the digest in the agent manifest. Each model call is `sink.Model`. |
 | `fakemodel/`, `cmd/fakemodel` | A deterministic OpenAI-compatible endpoint. Its reply lists the user's issues so far, and `GET /stats` reports how many calls it has served. |
@@ -73,19 +73,23 @@ the registration is applied as `-substrate-harness=triage=<atespace>/<template>`
 - About 4 GiB free in the Docker VM. The recorded run used an 8 GiB VM with no other kind cluster
   running. The first `up.sh` on a machine also pulls the ate-system images, so it takes longer than
   the 2.5 minutes recorded.
-- `up.sh` writes its own kubeconfig in the work directory and never changes your current context.
-- The cluster is `agentsuite-demo`; set `AGENTSUITE_DEMO_CLUSTER` to use another name. The scripts
-  ignore an exported `KIND_CLUSTER_NAME` (the conformance recipe in
-  [docs/substrate-conformance.md](../../docs/substrate-conformance.md) sets one for its own cluster).
+- `up.sh` writes its own kubeconfig and never changes your current context. The kubeconfig, the
+  rendered composition and the rendered `agentsessionsd.yaml` are in `cluster-<name>/` under the
+  work directory, one per cluster; the tools in `bin/` and the substrate checkout are shared.
+- The cluster is `agentsuite-demo`; set `AGENTSUITE_DEMO_CLUSTER` to use another name (lowercase
+  letters, digits, `.` and `-`). The scripts ignore an exported `KIND_CLUSTER_NAME` (the
+  conformance recipe in [docs/substrate-conformance.md](../../docs/substrate-conformance.md) sets
+  one for its own cluster).
   `up.sh` reuses a cluster that already has the name; `down.sh` deletes it only if `up.sh` created
   it, which it records in the work directory, and otherwise refuses and prints the `kind delete`
   command. Both scripts stop without changing anything when `kind get clusters` fails, and `up.sh`
   refuses to create the cluster when kind does not list it but its `-control-plane` container
   exists, since substrate's `create-kind-cluster.sh` deletes a cluster of that name first.
-- `up.sh` records its cluster as soon as the container exists, and how far its setup got. A rerun
-  after a failed first `up.sh` installs ate-system if only that step failed, or recreates the
-  cluster if `create-kind-cluster.sh` did not finish; it does not install into a cluster it did not
-  create.
+- `up.sh` records its cluster as soon as the container exists, also when `create-kind-cluster.sh`
+  fails or `up.sh` is interrupted (`INT`, `TERM`) after kind created it, and how far its setup got.
+  A rerun after a failed first `up.sh` installs ate-system if only that step failed, or recreates
+  the cluster if `create-kind-cluster.sh` did not finish; it does not install into a cluster it did
+  not create.
 
 ## A real model
 
@@ -94,16 +98,17 @@ AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 AGENTSUITE_MODEL=<model> MOD
 AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 ./demo.sh
 ```
 
-`up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL` before it changes the
-cluster, so a misconfigured rerun leaves an existing key in place. It applies the key to the
-`agentsessionsd-model` Secret through stdin, so it never appears in argv or a file, and a failed
-apply leaves the stored key unchanged. `agentsessionsd` reads the key only when it starts, so
+`up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL`, or either one with
+whitespace or a control character in it, before it changes the cluster, so a misconfigured rerun
+leaves an existing key in place. Both are copied into the Deployment as written: `&`, `#` and `?`
+in the URL are kept. It applies the key to the `agentsessionsd-model` Secret through stdin, so it
+never appears in argv or a file, and a failed apply leaves the stored key unchanged. `agentsessionsd` reads the key only when it starts, so
 `up.sh` stamps the Secret's version into the Deployment's pod template: a new or deleted key
 restarts the pod, which also drops its emptyDir journal, and an unchanged key leaves it running. It
 points `agentsessionsd` at the endpoint, and the harness requests `AGENTSUITE_MODEL` instead of the
 fixture's `triage-model`: the ActorTemplate carries it as an env var, so each model gets its own
-template. `demo.sh` then skips the checks that depend on the fake's replies and counter. The replay
-still fails if the controller sees a model call.
+template. `demo.sh` then skips the checks that depend on the fake's replies and counter, and does
+not port-forward the fake. The replay still fails if the controller sees a model call.
 
 The Secret, and so the running daemon, follows the latest `up.sh`. A real-provider `up.sh` without
 `MODEL_API_KEY` deletes any stored key, for endpoints that take none, so export `MODEL_API_KEY`
@@ -151,8 +156,8 @@ not been run against a hosted provider.
   Changing them while sessions exist strands those sessions' actors in the old atespace. The tier is
   declared in the flag (`,memory` for `REQUIRES_MEMORY_SNAPSHOT`) and not checked against the image's
   `Describe`, so a stateful image declared without it loses its RAM state on fork. This demo's
-  harness is stateless and declared so. A memory-tier session with committed turns whose actor is
-  gone is refused (`FAILED_PRECONDITION`) rather than given a fresh actor. See
+  harness is stateless and declared so. A memory-tier session that has started a turn and lost its
+  actor is refused (`FAILED_PRECONDITION`) rather than given a fresh actor. See
   [Substrate placement binding](../../docs/substrate-conformance.md#substrate-placement-binding).
 - **The journal lives in an emptyDir.** It lasts as long as the `agentsessionsd` pod.
 - **The AgentSessionsBinding is a draft.** kaimahi does not define the kind yet. `binding.json`
@@ -161,13 +166,16 @@ not been run against a hosted provider.
 - **There is no build profile.** The image is the harness binary plus the agent layer on `scratch`.
   It is not built from the suite's build profile (`runtimeBase` and `harness` are placeholder
   digests), and nothing records that it came from the composition.
-- **The emitter is v0.** It accepts single tool-free agents only. No `durable_dir` volume is
-  rendered, since this agent writes nothing, and no EgressPolicy is rendered, since it calls nothing.
+- **The emitter is v0.** It accepts single tool-free agents only, whose model protocol is
+  `openai-compatible` (the protocol of `agentsessionsd -model`). The agent id becomes the harness
+  name, so `chat` and `echo`, which `agentsessionsd` serves itself, are refused. No `durable_dir`
+  volume is rendered, since this agent writes nothing, and no EgressPolicy is rendered, since it
+  calls nothing.
 - **gVisor, not micro-VM.** An arm64 Mac's kind node has no KVM. The adapter's micro-VM path is
   covered by the repo's substrate-e2e CI job, not by this demo.
 - **ate-api trust.** `agentsessionsd` verifies the ate-api certificate against the
   `servicedns.podcert.ate.dev` ClusterTrustBundle that substrate's kind install creates, through a
   projected volume. It authenticates with the pod's projected ServiceAccount token. Which identities
   the kind install's ate-api accepts was not examined beyond this working.
-- **Port-forwards.** `demo.sh` reaches agentsessionsd, the router (for the replay) and the fake model
-  through `port-forward`.
+- **Port-forwards.** `demo.sh` reaches agentsessionsd, the router (for the replay) and, with the
+  fake provider, the fake model through `port-forward`.

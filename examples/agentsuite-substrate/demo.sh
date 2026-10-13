@@ -6,8 +6,8 @@ source "$(dirname "$0")/common.sh"
 
 SERVER=127.0.0.1:18080 ROUTER=127.0.0.1:18081 MODEL=127.0.0.1:18082
 # With a real provider (up.sh with AGENTSUITE_MODEL_BASE_URL) the replies are not the fake's, so the
-# checks on reply text and on the fake's call counter are skipped; the replay still fails if the
-# controller sees a model call.
+# checks on reply text are skipped, and the fake model is neither port-forwarded nor asked for its
+# call counter; the replay still fails if the controller sees a model call.
 REAL="${AGENTSUITE_MODEL_BASE_URL:+1}"
 STATS_URL="http://${MODEL}/stats"
 if [[ -n "${REAL}" ]]; then STATS_URL=""; fi
@@ -47,14 +47,20 @@ say() { # session input -> prints the turn, sets REPLY to the assistant text
 (cd "${HERE}" && go build -o "${WORK}/bin/replay" ./cmd/replay)
 forward "${NS}" agentsessionsd 18080:8080
 forward ate-system atenet-router 18081:80
-forward "${NS}" fakemodel 18082:8080
+if [[ -z "${REAL}" ]]; then forward "${NS}" fakemodel 18082:8080; fi
+# ready reports whether every port-forward the demo reads through answers.
+ready() { agentctl list >/dev/null 2>&1 && { [[ -n "${REAL}" ]] || calls >/dev/null 2>&1; }; }
 for _ in $(seq 60); do
-	if calls >/dev/null 2>&1 && agentctl list >/dev/null 2>&1; then break; fi
+	if ready; then break; fi
 	sleep 1
 done
-TEMPLATE="$(cat "${WORK}/render/template-name")"
-BASE_CALLS="$(calls)"
-echo "agent ${AGENT} of suite support-desk -> ActorTemplate ${ATESPACE}/${TEMPLATE}; fake model calls so far: ${BASE_CALLS}"
+TEMPLATE="$(cat "${STATE}/render/template-name")"
+if [[ -n "${REAL}" ]]; then
+	echo "agent ${AGENT} of suite support-desk -> ActorTemplate ${ATESPACE}/${TEMPLATE}; model: a real provider"
+else
+	BASE_CALLS="$(calls)"
+	echo "agent ${AGENT} of suite support-desk -> ActorTemplate ${ATESPACE}/${TEMPLATE}; fake model calls so far: ${BASE_CALLS}"
+fi
 
 step "1. Create a session on the AgentSuite agent's harness"
 SID="$(agentctl create --harness "${AGENT}" --name support-demo)"
@@ -94,11 +100,15 @@ agentctl replay --session "${SID}"
 proves "inputs, model calls, outputs and the suspend/resume transitions (the two LIFECYCLE records) are one ordered, hash-chained log; step 6 verifies the chain"
 
 step "6. Replay: re-run every turn of the agent against the journal, zero model calls"
-BEFORE="$(calls)"
+if [[ -z "${REAL}" ]]; then BEFORE="$(calls)"; fi
 "${WORK}/bin/replay" -server "${SERVER}" -session "${SID}" -router "${ROUTER}" -atespace "${ATESPACE}" \
 	-model-base-url "http://${MODEL}/v1" -stats-url "${STATS_URL}"
-[[ "$(calls)" == "${BEFORE}" ]] || fail "replay called the model"
-proves "the chain verifies client-side, and the agent re-executed all 4 turns in its actor with every completion served from the journal: fake provider calls stayed at ${BEFORE}"
+if [[ -n "${REAL}" ]]; then
+	proves "the chain verifies client-side, and the agent re-executed all 4 turns in its actor with every completion served from the journal: the controller counted 0 model calls"
+else
+	[[ "$(calls)" == "${BEFORE}" ]] || fail "replay called the model"
+	proves "the chain verifies client-side, and the agent re-executed all 4 turns in its actor with every completion served from the journal: fake provider calls stayed at ${BEFORE}"
+fi
 
 step "7. Fork at the end of turn 1 and diverge"
 FORK_SEQ="$(agentctl replay --session "${SID}" | awk '/EVENT_END/ { sub("seq=", "", $1); print $1; exit }')"

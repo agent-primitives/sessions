@@ -124,7 +124,7 @@ func TestDescriptorIDCheckedOnTheTurnsConnection(t *testing.T) {
 	log := store.Session("s")
 	inner := local.New(echoagent.Harness{})
 	t.Cleanup(func() { _ = inner.Close() })
-	dial := placement.WithDialer(func(string) (api.Harness, func() error, error) {
+	dial := placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 		return idHarness{id: "impostor"}, func() error { return nil }, nil
 	})
 	p := placement.New(liveLocal{inner}, echoagent.Model, dial, placement.WithDescriptorID("echo"))

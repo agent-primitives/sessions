@@ -1,0 +1,25 @@
+# The control plane provisions the atespace-scoped chat ActorTemplate through ate-api.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ate-agentsessions
+---
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: chat-harness
+  namespace: ate-agentsessions
+  labels:
+    workload: agentsessions-chat-gvisor
+spec:
+  replicas: 2
+  sandboxClass: gvisor
+  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+  template:
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+      requests:
+        cpu: 100m
+        memory: 256Mi

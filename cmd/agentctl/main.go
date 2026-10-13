@@ -41,7 +41,6 @@ import (
 	"github.com/agent-primitives/sessions/runtime/local"
 	"github.com/agent-primitives/sessions/session"
 	"github.com/agent-primitives/sessions/sqlitelog"
-	"github.com/agent-primitives/sessions/wire"
 )
 
 func main() {
@@ -367,7 +366,7 @@ func verifyRecords(records []*v1.LogRecord, expectedLastSeq int64) error {
 		if record.GetPrevHash() != prev {
 			return fmt.Errorf("journal prev_hash mismatch at seq %d", record.GetSeq())
 		}
-		want, err := canon.HashRecord(prev, record.GetSeq(), wire.EventFromProto(record.GetEvent()))
+		want, err := canon.HashRecordProto(prev, record.GetSeq(), record.GetEvent())
 		if err != nil {
 			return fmt.Errorf("canonicalize seq %d: %w", record.GetSeq(), err)
 		}

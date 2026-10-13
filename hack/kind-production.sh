@@ -14,10 +14,12 @@ ACTION="${1:-}"
 CLUSTER="${CLUSTER:-agentsessions-production}"
 CONTEXT="kind-${CLUSTER}"
 NAMESPACE="ate-agentsessions"
-SUBSTRATE_REF="${SUBSTRATE_REF:-b1bd558aba3c}"
+SUBSTRATE_REF="${SUBSTRATE_REF:-fc0e3586a6de7cf1b896b948d05df7d5ef8b8870}"
 SUBSTRATE_DIR="${SUBSTRATE_DIR:-${ROOT}/_substrate}"
 KO_DOCKER_REPO="${KO_DOCKER_REPO:-localhost:5001}"
 KO_DEFAULTBASEIMAGE="${KO_DEFAULTBASEIMAGE:-gcr.io/distroless/static-debian13}"
+export ATE_CREDENTIAL_PROVIDER="${ATE_CREDENTIAL_PROVIDER:-{\"name\":\"k8s.io\"}}"
+export ATE_INSTALL_ROLLOUT_TIMEOUT="${ATE_INSTALL_ROLLOUT_TIMEOUT:-10m}"
 
 kubectl_kind() {
 	kubectl --context "${CONTEXT}" "$@"
@@ -81,7 +83,7 @@ setup() {
 
 	echo "==> create kind cluster ${CLUSTER} and install pinned ate-system"
 	(cd "${SUBSTRATE_DIR}" && KIND_CLUSTER_NAME="${CLUSTER}" hack/create-kind-cluster.sh)
-	(cd "${SUBSTRATE_DIR}" && hack/install-ate-kind.sh --deploy-ate-system --ateapi-client-auth=token)
+	(cd "${SUBSTRATE_DIR}" && KIND_CLUSTER_NAME="${CLUSTER}" KUBECTL_CONTEXT="${CONTEXT}" hack/install-ate-kind.sh --deploy-ate-system)
 
 	echo "==> build and publish control-plane, harness, and worker images"
 	export KO_DOCKER_REPO KO_DEFAULTBASEIMAGE
@@ -118,20 +120,18 @@ setup() {
 			--dry-run=client -o yaml | kubectl_kind apply -f -
 	fi
 
-	echo "==> deploy chat ActorTemplate and worker pool"
-	render "${ROOT}/deploy/substrate/kind/chat-actortemplate.yaml" \
-		"ghcr.io/aramase/agentsessions/harnessnode:latest" "${HARNESS_IMG}" \
-		"ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor" "${ATEOM_IMG}" \
-		"MODEL_NAME" "${MODEL_NAME}" |
+	echo "==> deploy chat worker pool"
+	render "${ROOT}/deploy/substrate/kind/chat-workerpool.yaml" \
+		"ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor" "${ATEOM_IMG}" |
 		kubectl_kind apply -f -
-	kubectl_kind wait --for=condition=Ready actortemplate/chat-harness -n "${NAMESPACE}" --timeout=600s
-	CLUSTER="${CLUSTER}" "${ROOT}/hack/wait-worker-pool.sh" chat-harness "${NAMESPACE}"
+	KIND_CLUSTER_NAME="${CLUSTER}" "${ROOT}/hack/wait-worker-pool.sh" chat-harness "${NAMESPACE}"
 
 	echo "==> deploy persistent Sessions control plane"
 	render "${ROOT}/deploy/substrate/kind/control-plane.yaml" \
-		"ghcr.io/aramase/agentsessions/controlplane:latest" "${CONTROL_IMG}" |
+		"ghcr.io/aramase/agentsessions/controlplane:latest" "${CONTROL_IMG}" \
+		"HARNESS_IMAGE" "${HARNESS_IMG}" |
 		kubectl_kind apply -f -
-	kubectl_kind rollout status deployment/agentsessions -n "${NAMESPACE}" --timeout=600s
+	kubectl_kind rollout status deployment/agentsessions -n "${NAMESPACE}" --timeout=660s
 
 	echo
 	echo "Deployment ready. In another terminal:"
@@ -150,16 +150,13 @@ smoke)
 	CLUSTER="${CLUSTER}" "${ROOT}/hack/smoke-production-kind.sh"
 	;;
 teardown)
-	if [[ -x "${SUBSTRATE_DIR}/hack/delete-kind-cluster.sh" ]]; then
-		(cd "${SUBSTRATE_DIR}" && KIND_CLUSTER_NAME="${CLUSTER}" hack/delete-kind-cluster.sh)
+	if [[ -x "${SUBSTRATE_DIR}/hack/kind.sh" ]]; then
+		(cd "${SUBSTRATE_DIR}" && hack/kind.sh delete cluster --name "${CLUSTER}")
 	else
 		require_command kind
-		require_command docker
 		kind delete cluster --name "${CLUSTER}"
-		if [[ "$(docker inspect --format '{{index .Config.Labels "created-by"}}' kind-registry 2>/dev/null || true)" == "agent-substrate" ]]; then
-			docker rm -f kind-registry
-		fi
 	fi
+	echo "Shared kind-registry left intact for other clusters."
 	;;
 *)
 	echo "usage: $0 <setup|port-forward|smoke|teardown>" >&2

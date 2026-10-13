@@ -21,9 +21,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/observability"
 	"github.com/aramase/agentsessions/wire"
 )
 
@@ -78,7 +84,18 @@ func (s *Server) Connect(stream v1.Harness_ConnectServer) error {
 	sink := &streamSink{stream: stream, results: results, executionID: executionID}
 	runStart := startFromProto(start)
 	runStart.ExecutionID = executionID
-	if err := s.harness.Run(stream.Context(), runStart, sink); err != nil {
+	// The harness-side root of the turn. It is a child of the host's Connect call (otelgrpc carries
+	// the traceparent on the stream), so a harness author who passes ctx to their own spans lands
+	// inside the same trace as the host's placement, controller, and model-call spans.
+	ctx, span := observability.Tracer().Start(stream.Context(), "harness.run", trace.WithAttributes(
+		attribute.String("agentsessions.execution_id", executionID),
+		attribute.Int("agentsessions.history_event_count", len(runStart.History)),
+		attribute.Int("agentsessions.input_count", len(runStart.Inputs)),
+		attribute.Int64("agentsessions.resume_from_seq", runStart.ResumeFromSeq),
+	))
+	defer span.End()
+	if err := s.harness.Run(ctx, runStart, sink); err != nil {
+		span.SetStatus(codes.Error, "harness_run_failed")
 		_ = stream.Send(&v1.Event{
 			ExecutionId: executionID,
 			Kind:        v1.EventKind_EVENT_END,
@@ -123,7 +140,24 @@ func (s *streamSink) awaitResult(ctx context.Context) (*v1.ControllerFrame, erro
 	}
 }
 
-func (s *streamSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+// sinkSpan opens a harness-side span around a blocking sink round trip. Its duration is what the
+// harness waited for the host, which the host-side controller span for the same call explains.
+func sinkSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, func(error)) {
+	ctx, span := observability.Tracer().Start(ctx, name, trace.WithAttributes(attrs...))
+	return ctx, func(err error) {
+		if err != nil {
+			span.SetStatus(codes.Error, "sink_failed")
+		}
+		span.End()
+	}
+}
+
+func (s *streamSink) Model(ctx context.Context, req api.ModelRequest) (_ api.ModelResponse, err error) {
+	ctx, end := sinkSpan(ctx, "harness.sink.model",
+		attribute.String("agentsessions.model", req.Model),
+		attribute.Int("agentsessions.message_count", len(req.Messages)),
+	)
+	defer func() { end(err) }()
 	choice, err := wire.ToolChoiceToProto(req.ToolChoice)
 	if err != nil {
 		return api.ModelResponse{}, fmt.Errorf("harnesswire: model call: %w", err)
@@ -176,7 +210,12 @@ func (s *streamSink) Output(_ context.Context, delta string) error {
 // EVENT_TOOL_CALL (carrying args + idempotency key) and blocks for the host's ToolResult frame. The
 // host — not the harness — executes and records the tool (record-before-effect, §3), exactly as it
 // mediates a model call, so the load-bearing rule holds across the process boundary.
-func (s *streamSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
+func (s *streamSink) ToolCall(ctx context.Context, tc api.ToolCall) (_ api.ToolResult, err error) {
+	ctx, end := sinkSpan(ctx, "harness.sink.tool_call",
+		attribute.String("agentsessions.tool", tc.Tool),
+		attribute.String("agentsessions.mediation", string(tc.Mediation)),
+	)
+	defer func() { end(err) }()
 	call := tc
 	if err := s.stream.Send(&v1.Event{
 		ExecutionId: s.executionID,
@@ -337,7 +376,27 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 				}
 			}
 		case v1.EventKind_EVENT_END:
-			return endError(ev.GetEnd())
+			err := endError(ev.GetEnd())
+			awaitClose(stream, cancel)
+			return err
+		}
+	}
+}
+
+// closeGrace bounds how long the host waits for the harness to finish the Connect RPC after END.
+const closeGrace = 2 * time.Second
+
+// awaitClose lets the harness finish the RPC after END instead of cancelling it mid-flight. The
+// harness gets to flush its telemetry before the host can suspend it, and the RPC ends with the
+// harness's own status rather than a host-side cancellation. A harness that never closes the
+// stream costs at most closeGrace.
+func awaitClose(stream v1.Harness_ConnectClient, cancel context.CancelFunc) {
+	_ = stream.CloseSend()
+	t := time.AfterFunc(closeGrace, cancel)
+	defer t.Stop()
+	for {
+		if _, err := stream.Recv(); err != nil {
+			return
 		}
 	}
 }

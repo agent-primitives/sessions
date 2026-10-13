@@ -54,7 +54,7 @@ func ResumeInvocation(log eventlog.Store) (*api.ExecutionStart, error) {
 func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var recordCount, recordedEffectCount int
-	finish := observability.StartDebug(ctx, c.logger, "controller", "resume", "session_uid", c.sessionUID)
+	ctx, finish := observability.BeginDebug(ctx, c.logger, "controller", "resume", "session_uid", c.sessionUID)
 	defer func() {
 		finish(err,
 			"error_kind", controllerErrorKind(err),

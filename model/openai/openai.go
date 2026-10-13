@@ -33,7 +33,11 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
+
 	"github.com/aramase/agentsessions/api"
+	"github.com/aramase/agentsessions/observability"
 )
 
 // DefaultBaseURL is the public OpenAI endpoint. Any compatible service works by overriding it.
@@ -141,7 +145,16 @@ func New(opts ...Option) (*Client, error) {
 		baseURL: DefaultBaseURL,
 		path:    DefaultPath,
 		headers: map[string]string{},
-		http:    &http.Client{Timeout: defaultTimeout},
+		http: &http.Client{
+			Timeout: defaultTimeout,
+			// A client span per completion request, so model latency shows up under the controller's
+			// model_call span. The empty propagator keeps the trace context off the wire: the model
+			// endpoint is usually a third party, and nothing it would do with a traceparent is ours.
+			// The redacting provider keeps query credentials and error text out of the span.
+			Transport: otelhttp.NewTransport(http.DefaultTransport,
+				otelhttp.WithPropagators(propagation.NewCompositeTextMapPropagator()),
+				otelhttp.WithTracerProvider(observability.ThirdPartyTracerProvider())),
+		},
 	}
 	for _, o := range opts {
 		o(c)

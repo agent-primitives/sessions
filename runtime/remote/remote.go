@@ -126,6 +126,7 @@ func (b *Backend) connect() (api.Harness, error) {
 	target, opts := b.addr, []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithConnectParams(reconnectBackoff),
+		observability.ClientTracing(),
 		grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
 		grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
 	}
@@ -165,7 +166,7 @@ func (b *Backend) Close() error {
 // Describe asks the harness what it is, so placement gates on the harness's own declaration rather
 // than on a tier assumed by configuration.
 func (b *Backend) Describe(ctx context.Context) (desc api.Descriptor, err error) {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.remote", "describe_harness", "address", b.addr)
+	ctx, finish := observability.BeginDebug(ctx, b.logger, "runtime.remote", "describe_harness", "address", b.addr)
 	defer func() { finish(err, "error_kind", remoteErrorKind(err), "harness_id", desc.ID) }()
 
 	h, err := b.connect()
@@ -193,7 +194,7 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	if s != nil {
 		sessionUID = s.SessionUID
 	}
-	finish := observability.StartDebug(ctx, b.logger, "runtime.remote", "create_compute", "session_uid", sessionUID)
+	_, finish := observability.BeginDebug(ctx, b.logger, "runtime.remote", "create_compute", "session_uid", sessionUID)
 	defer func() {
 		finish(err, "error_kind", remoteErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
@@ -213,7 +214,7 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 // Snapshot names the session so Restore can re-attach. Memory=false: this backend does not own the
 // harness process and cannot capture its memory.
 func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (ref api.SnapshotRef, err error) {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.remote", "snapshot",
+	_, finish := observability.BeginDebug(ctx, b.logger, "runtime.remote", "snapshot",
 		"incarnation_id", in.ID, "snapshot_kind", kind)
 	defer func() { finish(err, "error_kind", remoteErrorKind(err), "memory_snapshot", ref.Memory) }()
 
@@ -226,7 +227,7 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 // Restore re-attaches to the same harness. Harness-visible state is reconstructed by the host
 // replaying the journal, which is what STATELESS_REPLAY means.
 func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (inc api.Incarnation, err error) {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.remote", "restore_compute", "session_uid", ref.Local)
+	ctx, finish := observability.BeginDebug(ctx, b.logger, "runtime.remote", "restore_compute", "session_uid", ref.Local)
 	defer func() {
 		finish(err, "error_kind", remoteErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
@@ -240,7 +241,7 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (inc api.Inc
 // Fork is a replay-fork: the child attaches to the same harness and its copied log prefix is
 // replayed into it. There is no clone-from-memory path without owning the sandbox.
 func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOpts) (inc api.Incarnation, err error) {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.remote", "fork_compute",
+	ctx, finish := observability.BeginDebug(ctx, b.logger, "runtime.remote", "fork_compute",
 		"parent_session_uid", ref.Local, "child_session_uid", opts.ChildSessionUID, "strategy", "replay")
 	defer func() {
 		finish(err, "error_kind", remoteErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
@@ -255,7 +256,7 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 // Stop detaches the session. The harness process belongs to whoever started it, so stopping one
 // incarnation must not stop the harness; other sessions are using it.
 func (b *Backend) Stop(ctx context.Context, in api.Incarnation) error {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.remote", "stop_compute", "incarnation_id", in.ID)
+	_, finish := observability.BeginDebug(ctx, b.logger, "runtime.remote", "stop_compute", "incarnation_id", in.ID)
 	finish(nil)
 	return nil
 }
@@ -263,7 +264,7 @@ func (b *Backend) Stop(ctx context.Context, in api.Incarnation) error {
 // Status reports the compute-lifecycle state. The log and the placement layer are the lifecycle
 // authority, so a known incarnation is LIVE.
 func (b *Backend) Status(ctx context.Context, in api.Incarnation) (api.ComputeState, error) {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.remote", "get_compute_status", "incarnation_id", in.ID)
+	_, finish := observability.BeginDebug(ctx, b.logger, "runtime.remote", "get_compute_status", "incarnation_id", in.ID)
 	finish(nil, "compute_state", api.ComputeLive)
 	return api.ComputeLive, nil
 }

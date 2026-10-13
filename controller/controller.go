@@ -222,7 +222,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 	var finalSeq int64
 	modelCallsBefore := c.liveModelCalls
 	toolCallsBefore := c.liveToolCalls
-	finish := observability.StartDebug(ctx, c.logger, "controller", "exec",
+	ctx, finish := observability.BeginDebug(ctx, c.logger, "controller", "exec",
 		"session_uid", c.sessionUID,
 		"execution_id", executionID,
 		"expected_last_seq", expectedLastSeq,
@@ -296,7 +296,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		c.observe(rec)
 		last = rec.Seq
 	}
-	runFinished := observability.StartDebug(ctx, c.logger, "controller", "run_harness",
+	runCtx, runFinished := observability.BeginDebug(ctx, c.logger, "controller", "run_harness",
 		"session_uid", c.sessionUID,
 		"history_event_count", historyEvents,
 		"input_count", len(inputs),
@@ -308,7 +308,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		Config:        config,
 		ResumeFromSeq: c.startResumeFromSeq,
 	}
-	if err := har.Run(ctx, start, &liveSink{c: c, executionID: executionID}); err != nil {
+	if err := har.Run(runCtx, start, &liveSink{c: c, executionID: executionID}); err != nil {
 		runFinished(err, "error_kind", "harness_run_failed")
 		// Best-effort: record the failure. If this append itself fails we still surface the
 		// original harness error to the caller.
@@ -328,7 +328,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []string, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var recordCount, effectCount int
-	finish := observability.StartDebug(ctx, c.logger, "controller", "replay", "session_uid", c.sessionUID)
+	ctx, finish := observability.BeginDebug(ctx, c.logger, "controller", "replay", "session_uid", c.sessionUID)
 	defer func() {
 		finish(err,
 			"error_kind", controllerErrorKind(err),

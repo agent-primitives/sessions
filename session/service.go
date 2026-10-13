@@ -18,6 +18,8 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -83,6 +85,46 @@ func NewService(store *sqlitelog.Store, registry *placement.Registry, opts ...Op
 	return s
 }
 
+// chainTrace links the current operation's span to uid's previous operation and records this one
+// as the latest. One trace per operation keeps spans exportable as they finish; the links are what
+// stitch a session back together across idle gaps, suspensions, and process restarts.
+//
+// It is best effort and a no-op when tracing is off: a failed read or write only costs a link.
+func (s *Service) chainTrace(ctx context.Context, uid string) {
+	span := trace.SpanFromContext(ctx)
+	if !span.IsRecording() || !span.SpanContext().IsSampled() || uid == "" {
+		return
+	}
+	span.SetAttributes(attribute.String("agentsessions.session_uid", uid))
+	if prev, err := s.store.LastTraceParent(uid); err == nil {
+		observability.LinkTraceParent(ctx, prev,
+			attribute.String("agentsessions.link", "session.previous_operation"),
+			attribute.String("agentsessions.session_uid", uid),
+		)
+	}
+	s.recordTrace(ctx, uid)
+}
+
+// recordTrace makes the current operation uid's latest without linking back, which is how a fork
+// child starts its chain at the fork that created it.
+//
+// Only a sampled, recording span is recorded. With tracing off or the operation dropped by the
+// sampler, ctx can still carry a valid span context (the caller's, propagated in), but no span of
+// this operation will be exported to link to, so tracing off must mean no store writes.
+func (s *Service) recordTrace(ctx context.Context, uid string) {
+	span := trace.SpanFromContext(ctx)
+	if !span.IsRecording() || !span.SpanContext().IsSampled() {
+		return
+	}
+	tp := observability.TraceParent(ctx)
+	if tp == "" {
+		return
+	}
+	if err := s.store.SetLastTraceParent(uid, tp); err != nil {
+		observability.Logger(ctx, s.logger).Debug("record trace link failed", "session_uid", uid, "error_kind", "store_failed")
+	}
+}
+
 func newUID() string {
 	var b [12]byte
 	_, _ = rand.Read(b[:])
@@ -144,7 +186,7 @@ func execStateOf(info sqlitelog.SessionInfo) v1.ExecState {
 // survive a restart; compute is still provisioned lazily on first Exec.
 func (s *Service) CreateSession(ctx context.Context, req *v1.CreateSessionRequest) (session *v1.Session, err error) {
 	ctx = observability.EnsureRequestID(ctx)
-	finish := observability.Start(ctx, s.logger, "session", "create")
+	_, finish := observability.Begin(ctx, s.logger, "session", "create")
 	uid := newUID()
 	defer func() { finish(err, "error_kind", serviceErrorKind(err), "session_uid", uid) }()
 
@@ -203,7 +245,7 @@ func (s *Service) createSession(uid string, meta sqlitelog.SessionMeta) (*v1.Ses
 // GetSession returns the session's stored metadata and current log cursor.
 func (s *Service) GetSession(ctx context.Context, req *v1.GetSessionRequest) (session *v1.Session, err error) {
 	ctx = observability.EnsureRequestID(ctx)
-	finish := observability.Start(ctx, s.logger, "session", "get", "session_uid", req.GetUid())
+	_, finish := observability.Begin(ctx, s.logger, "session", "get", "session_uid", req.GetUid())
 	defer func() {
 		finish(err, "error_kind", serviceErrorKind(err))
 	}()
@@ -229,7 +271,7 @@ func (s *Service) GetSession(ctx context.Context, req *v1.GetSessionRequest) (se
 func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest) (resp *v1.ListSessionsResponse, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var returned int
-	finish := observability.Start(ctx, s.logger, "session", "list",
+	_, finish := observability.Begin(ctx, s.logger, "session", "list",
 		"project", req.GetProject(),
 		"page_size", req.GetPageSize(),
 	)
@@ -433,7 +475,7 @@ func sessionStoreError(err error, uid string) error {
 func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err error) {
 	ctx := observability.EnsureRequestID(stream.Context())
 	var recordsSent, deltasSent int
-	finish := observability.Start(ctx, s.logger, "session", "exec",
+	ctx, finish := observability.Begin(ctx, s.logger, "session", "exec",
 		"session_uid", req.GetSession(),
 		"cas_requested", req.ExpectedLastSeq != nil,
 		"input_count", len(req.GetInputs()),
@@ -460,6 +502,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	if err != nil {
 		return err
 	}
+	s.chainTrace(ctx, uid)
 	log := s.store.Session(uid)
 	headBefore, err := log.Head()
 	if err != nil {
@@ -564,7 +607,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 func (s *Service) Replay(req *v1.ReplayRequest, stream v1.Sessions_ReplayServer) (err error) {
 	ctx := observability.EnsureRequestID(stream.Context())
 	var recordsSent int
-	finish := observability.Start(ctx, s.logger, "session", "replay",
+	_, finish := observability.Begin(ctx, s.logger, "session", "replay",
 		"session_uid", req.GetSession(),
 		"from_seq", req.GetFromSeq(),
 		"to_seq", req.GetToSeq(),
@@ -605,7 +648,7 @@ const MaxForkChildren = 128
 func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.ForkResponse, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var childrenCreated int
-	finish := observability.Start(ctx, s.logger, "session", "fork",
+	ctx, finish := observability.Begin(ctx, s.logger, "session", "fork",
 		"parent_session_uid", req.GetSession(),
 		"requested_at_seq", req.GetAtSeq(),
 		"requested_child_count", req.GetCount(),
@@ -622,6 +665,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	if err != nil {
 		return nil, err
 	}
+	s.chainTrace(ctx, req.GetSession())
 	parent := s.store.Session(req.GetSession())
 	atSeq := req.GetAtSeq()
 	if atSeq <= 0 {
@@ -655,6 +699,9 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		return nil, forkError(err)
 	}
 	childrenCreated = len(children)
+	for _, child := range children {
+		s.recordTrace(ctx, child.UID)
+	}
 	// Child metadata is written only after the fan-out commits. Placer.forkSource refuses an
 	// unplaceable fork with no side effects at all, and registering children first would turn that
 	// into a listing full of phantom sessions the caller was never given UIDs for and cannot
@@ -733,13 +780,14 @@ func forkError(err error) error {
 // in a SUSPEND lifecycle event (§5.1) and frees the worker via the Runtime SPI.
 func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session *v1.Session, err error) {
 	ctx = observability.EnsureRequestID(ctx)
-	finish := observability.Start(ctx, s.logger, "session", "suspend", "session_uid", req.GetSession())
+	ctx, finish := observability.Begin(ctx, s.logger, "session", "suspend", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 
 	placer, _, err := s.placerFor(req.GetSession(), "")
 	if err != nil {
 		return nil, err
 	}
+	s.chainTrace(ctx, req.GetSession())
 	log := s.store.Session(req.GetSession())
 	if _, err := placer.Suspend(ctx, log, req.GetSession()); err != nil {
 		// A running turn, or a stateful Fork checkpointing the session, refuses the Suspend before
@@ -763,7 +811,7 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 // completed sessions retain the stored session default.
 func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v1.Session, err error) {
 	ctx = observability.EnsureRequestID(ctx)
-	finish := observability.Start(ctx, s.logger, "session", "resume", "session_uid", req.GetSession())
+	ctx, finish := observability.Begin(ctx, s.logger, "session", "resume", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 
 	uid := req.GetSession()
@@ -774,6 +822,7 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	if err != nil {
 		return nil, sessionStoreError(err, uid)
 	}
+	s.chainTrace(ctx, uid)
 	log := s.store.Session(uid)
 	stored := info.Harness
 	if stored == "" {

@@ -79,7 +79,13 @@ the registration is applied as `-substrate-harness=triage=<atespace>/<template>`
   [docs/substrate-conformance.md](../../docs/substrate-conformance.md) sets one for its own cluster).
   `up.sh` reuses a cluster that already has the name; `down.sh` deletes it only if `up.sh` created
   it, which it records in the work directory, and otherwise refuses and prints the `kind delete`
-  command.
+  command. Both scripts stop without changing anything when `kind get clusters` fails, and `up.sh`
+  refuses to create the cluster when kind does not list it but its `-control-plane` container
+  exists, since substrate's `create-kind-cluster.sh` deletes a cluster of that name first.
+- `up.sh` records its cluster as soon as the container exists, and how far its setup got. A rerun
+  after a failed first `up.sh` installs ate-system if only that step failed, or recreates the
+  cluster if `create-kind-cluster.sh` did not finish; it does not install into a cluster it did not
+  create.
 
 ## A real model
 
@@ -88,15 +94,16 @@ AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 AGENTSUITE_MODEL=<model> MOD
 AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 ./demo.sh
 ```
 
-`up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL` before it changes the cluster,
-so a misconfigured rerun leaves an existing key in place. It applies the key to the
+`up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL` before it changes the
+cluster, so a misconfigured rerun leaves an existing key in place. It applies the key to the
 `agentsessionsd-model` Secret through stdin, so it never appears in argv or a file, and a failed
-apply leaves the stored key unchanged. `agentsessionsd` reads the key only when it starts, so `up.sh`
-stamps the Secret's version into the Deployment's pod template: a new or deleted key restarts the
-pod, which also drops its emptyDir journal, and an unchanged key leaves it running. It points `agentsessionsd` at the endpoint, and the harness
-requests `AGENTSUITE_MODEL` instead of the fixture's `triage-model`: the ActorTemplate carries it as
-an env var, so each model gets its own template. `demo.sh` then skips the checks that depend on the
-fake's replies and counter. The replay still fails if the controller sees a model call.
+apply leaves the stored key unchanged. `agentsessionsd` reads the key only when it starts, so
+`up.sh` stamps the Secret's version into the Deployment's pod template: a new or deleted key
+restarts the pod, which also drops its emptyDir journal, and an unchanged key leaves it running. It
+points `agentsessionsd` at the endpoint, and the harness requests `AGENTSUITE_MODEL` instead of the
+fixture's `triage-model`: the ActorTemplate carries it as an env var, so each model gets its own
+template. `demo.sh` then skips the checks that depend on the fake's replies and counter. The replay
+still fails if the controller sees a model call.
 
 The Secret, and so the running daemon, follows the latest `up.sh`. A real-provider `up.sh` without
 `MODEL_API_KEY` deletes any stored key, for endpoints that take none, so export `MODEL_API_KEY`

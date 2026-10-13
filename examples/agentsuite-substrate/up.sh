@@ -48,18 +48,60 @@ if [[ "$(git -C "${SUBSTRATE}" rev-parse HEAD)" != "${SUBSTRATE_REF}" ]]; then
 	git -C "${SUBSTRATE}" checkout -q "${SUBSTRATE_REF}"
 fi
 
-if ! kind get clusters 2>/dev/null | grep -qx "${CLUSTER}"; then
-	step "kind cluster ${CLUSTER} and ate-system (substrate's kind lane: create-kind-cluster.sh, then install-ate-kind.sh, which runs ate-setup)"
-	(cd "${SUBSTRATE}" && hack/create-kind-cluster.sh)
-	node_id >"${OWNED}"
+# Where the cluster stands: absent; foreign (up.sh did not create it); incomplete (up.sh created it
+# but create-kind-cluster.sh did not finish); created (ate-system not installed yet); installed.
+if cluster_listed; then
+	id="$(node_id)"
+	if [[ -n "${id}" && "$(owned_id)" == "${id}" ]]; then
+		stage="$(setup_stage "${id}")"
+		stage="${stage:-incomplete}"
+	else
+		stage=foreign
+	fi
+elif [[ -n "$(node_id)" ]]; then
+	# create-kind-cluster.sh deletes a cluster of this name before it creates one.
+	echo "refusing to create kind cluster ${CLUSTER}: kind does not list it, but container ${CLUSTER}-control-plane exists." >&2
+	echo "Delete that container yourself, or set AGENTSUITE_DEMO_CLUSTER to another name." >&2
+	exit 1
+else
+	stage=absent
+fi
+
+if [[ "${stage}" == absent || "${stage}" == incomplete ]]; then
+	if [[ "${stage}" == incomplete ]]; then
+		step "kind cluster ${CLUSTER}: up.sh created it, but its setup did not finish; recreating it"
+	else
+		step "kind cluster ${CLUSTER} (substrate's kind lane: create-kind-cluster.sh)"
+	fi
+	rm -f "${SETUP}"
+	rc=0
+	(cd "${SUBSTRATE}" && hack/create-kind-cluster.sh) || rc=$?
+	# Record ownership as soon as the node exists, even when the script failed after creating it, so
+	# a rerun can finish the cluster and down.sh can delete it.
+	id="$(node_id)"
+	if [[ -n "${id}" ]]; then
+		echo "${id}" >"${OWNED}"
+	else
+		rm -f "${OWNED}"
+	fi
+	if ((rc != 0)); then
+		echo "create-kind-cluster.sh failed (exit ${rc}); rerun up.sh to recreate the cluster" >&2
+		exit "${rc}"
+	fi
+	echo "${id} created" >"${SETUP}"
+	stage=created
+fi
+kind export kubeconfig --name "${CLUSTER}" --kubeconfig "${KUBECONFIG}"
+if [[ "${stage}" == created ]]; then
+	step "ate-system (install-ate-kind.sh, which runs ate-setup)"
 	(cd "${SUBSTRATE}" && ATE_CREDENTIAL_PROVIDER='{"name":"k8s.io"}' ATE_INSTALL_ROLLOUT_TIMEOUT=10m \
 		hack/install-ate-kind.sh --deploy-ate-system)
+	echo "${id} installed" >"${SETUP}"
 else
 	step "reusing kind cluster ${CLUSTER}"
-	if [[ "$(owned_id)" != "$(node_id)" ]]; then
-		echo "note: up.sh did not create kind cluster ${CLUSTER}, so down.sh will not delete it"
+	if [[ "${stage}" == foreign ]]; then
+		echo "note: up.sh did not create kind cluster ${CLUSTER}, so it does not install into it and down.sh will not delete it"
 	fi
-	kind export kubeconfig --name "${CLUSTER}" --kubeconfig "${KUBECONFIG}"
 	"${K[@]}" -n ate-system rollout status deploy/ate-api-server --timeout=120s
 fi
 

@@ -5,9 +5,10 @@
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
-if ! kind get clusters 2>/dev/null | grep -qx "${CLUSTER}"; then
+# Only a successful listing that lacks the cluster shows it is gone; cluster_listed exits on a failed one.
+if ! cluster_listed; then
 	echo "no kind cluster ${CLUSTER}; nothing to delete"
-	rm -f "${OWNED}"
+	rm -f "${OWNED}" "${SETUP}"
 	exit 0
 fi
 id="$(node_id)"
@@ -18,4 +19,4 @@ if [[ -z "${id}" || "$(owned_id)" != "${id}" ]]; then
 fi
 echo "deleting kind cluster ${CLUSTER}, created by up.sh"
 kind delete cluster --name "${CLUSTER}"
-rm -f "${OWNED}"
+rm -f "${OWNED}" "${SETUP}"

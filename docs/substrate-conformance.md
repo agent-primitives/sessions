@@ -41,6 +41,31 @@ client without substrate's Tag APIs still satisfies the base interface.
 - `integrations/substrate` is a **separate Go module** with its own `go.mod` that adapts the real
   generated ate-api client to `ControlClient`. The core never imports it.
 - A CI gate asserts `go list -deps ./...` on the core contains **zero** `agent-substrate` packages.
+- The server is shared the same way. `internal/agentsessionsd` holds `agentsessionsd`, with no
+  substrate import; `cmd/agentsessionsd` is the neutral binary, and
+  `integrations/substrate/cmd/agentsessionsd` is the same server with the adapter passed in
+  (`agentsessionsd.WithSubstrate`), so only it offers the substrate flags below.
+
+### Running sessions on substrate with agentsessionsd
+
+The substrate build of `agentsessionsd` adds these flags:
+
+| Flag | Meaning |
+|---|---|
+| `-substrate-harness name=atespace/template[,memory]` | Serve harness `name` from that ActorTemplate, one actor per session. `,memory` declares `REQUIRES_MEMORY_SNAPSHOT`; the default is `STATELESS_REPLAY`. Repeatable. Requires `-model`, like `-harness`. |
+| `-substrate-atespace` | Atespace the session actors are created in (required). It must already exist. |
+| `-ateapi-addr` | ate-api Control address, TLS (default `api.ate-system.svc:443`). |
+| `-ateapi-token-file` | Bearer token file, re-read on every call, so a projected ServiceAccount token rotates. |
+| `-ateapi-ca-file`, `-ateapi-server-name` | Verify the ate-api certificate against this CA and name; the default is the system roots and the host of `-ateapi-addr`. |
+| `-ateapi-insecure-skip-verify` | Skip certificate verification (dev clusters; the conformance Job does the same). Exclusive with `-ateapi-ca-file`. |
+| `-atenet-router` | Router address harnesses are reached through (default `atenet-router.ate-system.svc:80`). |
+
+The other flags only configure `-substrate-harness` entries; given without one, the daemon refuses
+to start rather than ignore them.
+
+The tier is declared, not discovered: placement gates on it before an actor exists. Declaring a
+`REQUIRES_MEMORY_SNAPSHOT` harness as stateless would let a fork rebuild it by replay and lose its
+RAM state, so declare what the harness's own `Describe` reports.
 
 ## SPI → substrate mapping
 

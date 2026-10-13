@@ -63,6 +63,13 @@ provide.
   reclaims a socket file left behind by a crashed instance. It never removes a socket another
   process created, and it refuses a lock file that is a symlink, a hard link, or owned by another
   user.
+- `integrations/substrate/cmd/agentsessionsd` is `agentsessionsd` with the substrate backend linked
+  in. `-substrate-harness name=atespace/template[,memory]` serves a harness as one actor per session
+  in `-substrate-atespace`, controlled over the ate-api (`-ateapi-addr`, TLS, with
+  `-ateapi-token-file` re-read on every call, `-ateapi-ca-file` or `-ateapi-insecure-skip-verify`)
+  and reached through `-atenet-router`. It requires `-model`, and refuses the other substrate flags
+  without a `-substrate-harness`. The neutral `cmd/agentsessionsd` does not offer these flags; both
+  binaries are now built from `internal/agentsessionsd`.
 - `HarnessRegistry` API (`api/harness_registry.proto`): register, get, list and retire harnesses on a
   running host. A registration is immutable and identified by its name and `spec_digest`. Retiring a
   harness refuses new sessions while existing sessions keep running, resuming and forking;
@@ -90,6 +97,8 @@ provide.
   until this host restarts or loads it through `RegisterHarness` with the identical compatible spec.
   For a RETIRED row, restart this host to serve its existing sessions without reactivating it:
   `RegisterHarness` reactivates the row for every host sharing the journal.
+- `agentsessionsd` now refuses positional arguments, naming them, and exits with status 2. It used
+  to ignore them, along with every flag after the first one, since flag parsing stops there.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

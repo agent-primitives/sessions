@@ -126,8 +126,10 @@ cost, audit, and tool approval are first-class rather than parsed out of text af
 The same `Event` type is shared by the session log and the harness stream. Durable harness events
 become journal records alongside host-owned invocation and lifecycle records. `PARKED` is a
 transport-only acknowledgement in the declared approval protocol, never a durable log outcome.
-The reference controller and bridge reject approval-gated calls; `Sessions.Approve` is declared
-but returns `UNIMPLEMENTED`. Content is
+The bridge supports the approval exchange for protocol-aware host sinks, but the reference
+controller rejects live gates before recording their intent and refuses recorded gated recovery.
+`Sessions.Approve` is declared but returns `UNIMPLEMENTED`; transport closure alone is not a
+successful public Session pause. Content is
 carried as A2A-style `Message`s (a role plus a list of `Part`s: text, file, structured data, an opaque
 reasoning block, a model's tool call, or a tool's result).
 

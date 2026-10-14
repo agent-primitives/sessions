@@ -296,8 +296,20 @@ original receipt rather than repeat the effect. Keep that receipt/dedup state du
 restarts; an in-memory cache is insufficient. Direct controller users must configure
 `controller.WithSessionUID(uid)` with a nonempty UID; `controller.New` returns
 `controller.ErrMissingSessionUID` for an unscoped non-nil executor without advancing the log's fence.
-Journaling alone does not provide exactly-once external delivery. `REQUIRES_APPROVAL` still fails
-closed because its approval gate is unimplemented. The stock daemon does not configure a tool executor.
+Journaling alone does not provide exactly-once external delivery. Public `REQUIRES_APPROVAL`
+calls still fail before intent, and public controller Resume/Replay refuse recorded gated history
+before Describe, Run or repair: successful host park handoff is unavailable. The stock daemon does
+not configure a tool executor.
+
+The `Harness.Connect` bridge implements the stateless approval protocol for protocol-aware host
+sinks. The host commits a request before sending `park`; the harness checks the complete
+session/execution/call/request tuple, sends its matching `EVENT_PARKED` acknowledgement and closes
+without END. The host must receive both acknowledgement and actual closure. For a decided call,
+the host sends the committed decision before its correlated success, denial or executor-error
+receipt. Harnesses cannot forge host-owned requests, decisions or receipts. Sink callbacks are
+serialized and must not re-enter the same sink; catching a recorded mismatch cannot unlock effects.
+These transport rules do not enable public Session parking or the declared, unimplemented Approve
+RPC. The controller's decision-only Go primitive validates existing evidence but does not run a tool.
 
 For the same recorded call, re-emit the same `ToolCall.ID`, tool name, arguments, mediation and key.
 Replay and recorded-prefix recovery compare that identity before serving a result or re-driving an

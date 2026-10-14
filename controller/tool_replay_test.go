@@ -227,7 +227,7 @@ func TestRecoveryRejectsInvalidRecordedToolIntent(t *testing.T) {
 		{"unspecified", func(c *api.ToolCall) { c.Mediation = "" }, controller.ErrUnmediatedToolCall},
 		// Approval has no live sentinel on main. Invalid recorded approval evidence is classified
 		// as divergence, without inventing an error-string match or a new public approval API.
-		{"approval", func(c *api.ToolCall) { c.Mediation = api.MediationRequiresApproval }, controller.ErrReplayDiverged},
+		{"approval", func(c *api.ToolCall) { c.Mediation = api.MediationRequiresApproval }, controller.ErrApprovalUnavailable},
 	} {
 		for _, path := range []string{"replay", "resume result", "resume intent"} {
 			t.Run(path+"/"+change.name, func(t *testing.T) {
@@ -258,7 +258,7 @@ func TestRecoveryRejectsInvalidRecordedToolIntent(t *testing.T) {
 				} else {
 					_, err = c.Resume(t.Context(), h)
 				}
-				if !errors.Is(err, controller.ErrReplayDiverged) || !errors.Is(err, change.cause) || attempts != 0 || len(h.results) != 0 {
+				if (change.cause != controller.ErrApprovalUnavailable && !errors.Is(err, controller.ErrReplayDiverged)) || !errors.Is(err, change.cause) || attempts != 0 || len(h.results) != 0 {
 					t.Fatalf("want divergence and %v before results/effects: attempts=%d results=%d err=%v", change.cause, attempts, len(h.results), err)
 				}
 			})

@@ -27,9 +27,18 @@ provide.
 
 ### Added
 
+- Controller `InspectApproval` and decision-only `Approve` validate durable request/decision/receipt
+  evidence, including exact retries and session-owned versus inherited effects. The internal
+  approval engine supports captured-head repair and correlated denial/executor-error receipts.
+  Public live gate creation and recorded gated Resume/Replay remain unavailable before harness
+  or tool execution; the host does not yet support the park handoff.
+- `Harness.Connect` bridge supports the stateless approval exchange: full session/execution/call
+  correlation, park acknowledgement plus actual stream closure, and decision-before-receipt order.
+  This supports host sinks implementing the protocol; a transport park alone is not a successful
+  public Session pause. `Sessions.Approve` remains `UNIMPLEMENTED`.
 - Approval wire types: correlated request references, decision-only `Approve` messages, explicit
   receipt statuses/sequences and transport-only park acknowledgements. `Approve` remains
-  `UNIMPLEMENTED`; the reference controller/bridge still reject `REQUIRES_APPROVAL`, and Session
+  `UNIMPLEMENTED`; the reference controller still rejects `REQUIRES_APPROVAL`, and Session
   replies leave `pending_approval` unset. Go types/converters carry the contract without enabling
   a public approval workflow.
 - SQLite `SessionInfo` captures `last_seq` and a reporting-only `PendingApproval` with metadata,
@@ -69,6 +78,17 @@ provide.
 
 ### Compatibility
 
+- Controller Start now carries the session UID on live, replay and resumed invocations, and the
+  bridge includes it on host control frames. Hosts serving tool results must echo the Start
+  session as well as execution/call correlation; omitted or different tool-frame namespaces
+  are rejected, including for ordinary tools. Model reply namespace validation is unchanged.
+  Harness-emitted host-owned request/decision/execution-start records and unsolicited PARKED
+  acknowledgements are rejected by the bridge rather than forwarded to the host sink.
+- Controller and bridge sink methods are serialized per invocation and refuse use after Run
+  closes. A recorded-prefix identity/correlation mismatch remains fatal even if the harness
+  handles the error; it cannot enable later effects or successful completion. Callbacks must
+  not re-enter the same sink. Ordinary handled pre-intent rejections and operational executor
+  errors retain their continuation behavior.
 - SQLite schema version 3 adds the approval projection and captured cursor. Opening a version 2
   database backfills them atomically without changing event bytes or hashes. An undecodable v2
   session is isolated with no actionable reference; healthy sessions remain readable. SQL faults

@@ -747,9 +747,10 @@ implements it via a thin adapter. The host drives one execution per Connect stre
 the harness streams typed Events terminated by one EVENT_END, except a host-requested approval
 park, which ends with a correlated EVENT_PARKED acknowledgement and stream closure, not END.
 Beyond plain streaming, it adds tool-call / approval mediation, per-call usage, and capabilities.
-The approval/park protocol below supports STATELESS_REPLAY only. The reference controller
-and bridge do not implement it; unsupported peers and memory-snapshot harnesses must not
-execute REQUIRES_APPROVAL effects.
+The approval/park protocol below supports STATELESS_REPLAY only. The reference bridge
+implements this exchange; public controller dispatch remains unavailable until host park
+handoff is supported. Unsupported peers and memory-snapshot harnesses must not execute
+REQUIRES_APPROVAL effects.
 
 
 <a name="agentsessions-v1-Cancel"></a>
@@ -960,7 +961,7 @@ this against a runtime&#39;s RuntimeCapabilities.
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
 | Describe | [DescribeRequest](#agentsessions-v1-DescribeRequest) | [HarnessDescriptor](#agentsessions-v1-HarnessDescriptor) | Describe returns the static contract; used to match the harness to a runtime. |
-| Connect | [ControllerFrame](#agentsessions-v1-ControllerFrame) stream | [Event](#agentsessions-v1-Event) stream | Connect drives ONE execution. The host sends Start (and optional control frames). Normally the harness streams Events terminated by exactly one EVENT_END. An unresolved approval instead follows park -&gt; correlated EVENT_PARKED -&gt; stream closure, with no EVENT_END. Durable requests/decisions belong to the host; this protocol applies to STATELESS_REPLAY only. This defines a supported-peer exchange; the reference host/bridge reject approval gates. |
+| Connect | [ControllerFrame](#agentsessions-v1-ControllerFrame) stream | [Event](#agentsessions-v1-Event) stream | Connect drives ONE execution. The host sends Start (and optional control frames). Normally the harness streams Events terminated by exactly one EVENT_END. An unresolved approval instead follows park -&gt; correlated EVENT_PARKED -&gt; stream closure, with no EVENT_END. Durable requests/decisions belong to the host; this protocol applies to STATELESS_REPLAY only. The reference bridge supports this exchange. Public host approval dispatch remains unavailable; transport ACK and closure alone do not establish a successful host pause. |
 
  
 

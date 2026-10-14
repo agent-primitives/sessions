@@ -547,7 +547,7 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			env: func(*testing.T) []string {
 				return append(provider, "AGENTSUITE_MODEL_BASE_URL=api.example.com/v1")
 			},
-			wantOut: "AGENTSUITE_MODEL_BASE_URL 'api.example.com/v1' with AGENTSUITE_MODEL 'm' would not start agentsessionsd: emit: openai: base URL \"api.example.com/v1\" is not absolute (want scheme://host[/path]); nothing was changed",
+			wantOut: "AGENTSUITE_MODEL_BASE_URL with AGENTSUITE_MODEL 'm' would not start agentsessionsd: emit: check-model: the base URL is not http or https (the value is not shown, since it may hold a credential); nothing was changed",
 		},
 		{
 			// emit is built and run as a binary, so go run's own "exit status 1" line is not
@@ -556,7 +556,7 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			env: func(*testing.T) []string {
 				return append(provider, "AGENTSUITE_MODEL_BASE_URL=http://host:abc/v1")
 			},
-			wantOut: "would not start agentsessionsd: emit: openai: base URL: parse \"http://host:abc/v1\": invalid port \":abc\" after host; nothing was changed",
+			wantOut: "would not start agentsessionsd: emit: check-model: the base URL is not a valid URL (the value is not shown, since it may hold a credential); nothing was changed",
 		},
 		{
 			name:    "an emit that does not build",
@@ -585,35 +585,72 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			env: func(*testing.T) []string {
 				return append(provider, "AGENTSUITE_MODEL_BASE_URL=https:///v1")
 			},
-			wantOut: "is not absolute",
+			wantOut: "has no host",
+		},
+		{
+			// A credential in the URL would be printed and rendered into the Deployment, outside the
+			// Secret that holds MODEL_API_KEY; the refusal does not repeat it either.
+			name: "a base URL with userinfo",
+			env: func(*testing.T) []string {
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=https://user:secret@llm.example/v1")
+			},
+			wantOut: "carries userinfo",
 		},
 		{
 			name: "a base URL with only userinfo for a host",
 			env: func(*testing.T) []string {
-				return append(provider, "AGENTSUITE_MODEL_BASE_URL=https://user@/v1")
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=https://secret@/v1")
 			},
-			wantOut: "is not absolute",
+			wantOut: "carries userinfo",
+		},
+		{
+			name: "a base URL with userinfo and no scheme",
+			env: func(*testing.T) []string {
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=user:secret@llm.example/v1")
+			},
+			wantOut: "is not http or https",
+		},
+		{
+			name: "a base URL whose userinfo reads as a port",
+			env: func(*testing.T) []string {
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=https://user:secret/x@llm.example/v1")
+			},
+			wantOut: "is not a valid URL",
+		},
+		{
+			name: "a base URL with a query",
+			env: func(*testing.T) []string {
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=https://llm.example/v1?api-key=secret")
+			},
+			wantOut: "carries a query",
+		},
+		{
+			name: "a base URL with a fragment",
+			env: func(*testing.T) []string {
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=https://llm.example/v1#secret")
+			},
+			wantOut: "carries a fragment",
 		},
 		{
 			name: "a base URL with a port that is not a number",
 			env: func(*testing.T) []string {
 				return append(provider, "AGENTSUITE_MODEL_BASE_URL=http://host:abc/v1")
 			},
-			wantOut: "would not start agentsessionsd: emit: openai: base URL: parse \"http://host:abc/v1\": invalid port",
+			wantOut: "is not a valid URL",
 		},
 		{
 			name: "a base URL with a bad escape",
 			env: func(*testing.T) []string {
 				return append(provider, "AGENTSUITE_MODEL_BASE_URL=http://h%zz/v1")
 			},
-			wantOut: "invalid URL escape",
+			wantOut: "is not a valid URL",
 		},
 		{
 			name: "a base URL with another scheme",
 			env: func(*testing.T) []string {
 				return append(provider, "AGENTSUITE_MODEL_BASE_URL=ftp://llm.example/v1")
 			},
-			wantOut: "base URL \"ftp://llm.example/v1\" is not http or https; nothing was changed",
+			wantOut: "the base URL is not http or https (the value is not shown, since it may hold a credential); nothing was changed",
 		},
 		{
 			name:    "a binding for another atespace",
@@ -632,6 +669,9 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			}
 			if strings.Contains(out, "exit status") {
 				t.Errorf("output carries a go run exit status:\n%s", out)
+			}
+			if strings.Contains(out, "secret") {
+				t.Errorf("output repeats a credential from the base URL:\n%s", out)
 			}
 			for _, c := range []string{"git ", "kind ", "kubectl", "create-kind-cluster.sh", "ko "} {
 				if strings.Contains(calls, c) {
@@ -652,12 +692,12 @@ func stdin(t *testing.T, s *stubs) string {
 	return string(b)
 }
 
-// The model base URL is copied into the Deployment as written, query and fragment included.
-// model/openai joins the completions path to the URL's path and keeps its query, so such a URL
-// reaches the provider's completions endpoint (TestBaseURLWithAQueryOrFragmentKeepsTheCompletionsPath).
+// The model base URL and model are copied into the Deployment as written: '&', '#' and '\' are not
+// special to the substitution. up.sh refuses a URL with a query or fragment (it could carry a
+// credential), so the URL's '&' is in its path.
 func TestUpRendersTheDaemon(t *testing.T) {
 	const (
-		url   = "https://llm.example/v1?api-version=2&tenant=a#b"
+		url   = "https://llm.example/v1&tenant=a/b"
 		model = `gpt&x#1\1`
 	)
 	for _, tc := range []struct {

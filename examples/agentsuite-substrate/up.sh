@@ -75,6 +75,9 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 		fi
 	done
 	# agentsessionsd refuses a base URL or model its model client cannot be built from at startup.
+	# check-model also refuses a URL with userinfo, a query or a fragment: the URL is printed below
+	# and rendered into the Deployment's arguments and ${STATE}/agentsessionsd.yaml, so a credential
+	# in it would bypass the Secret that holds MODEL_API_KEY.
 	# The Deployment recreates its pod, and the journal is an emptyDir, so letting such a value
 	# through would delete the running daemon's sessions and leave a pod that never starts. emit
 	# check-model builds the client with the daemon's own constructor, and also requires http(s).
@@ -84,7 +87,9 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 		refuse "cannot build cmd/emit to check AGENTSUITE_MODEL_BASE_URL and AGENTSUITE_MODEL: ${reason}"
 	fi
 	if ! reason="$("${WORK}/bin/emit" check-model -base-url "${AGENTSUITE_MODEL_BASE_URL}" -model "${MODEL_ID}" 2>&1)"; then
-		refuse "AGENTSUITE_MODEL_BASE_URL '${AGENTSUITE_MODEL_BASE_URL}' with AGENTSUITE_MODEL '${MODEL_ID}' would not start agentsessionsd: ${reason}"
+		# The URL is not repeated here: check-model refuses one that carries a credential (userinfo,
+		# query or fragment) before anything prints it, and its reasons do not quote it either.
+		refuse "AGENTSUITE_MODEL_BASE_URL with AGENTSUITE_MODEL '${MODEL_ID}' would not start agentsessionsd: ${reason}"
 	fi
 else
 	MODEL_BASE_URL="http://fakemodel.${NS}.svc:8080/v1"

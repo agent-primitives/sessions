@@ -13,8 +13,9 @@
 #                          mode-0600 file under the work directory and the daemon's Secret, and never
 #                          printed
 #   DEMO_LOGS              directory for the per-step logs (default ${WORK}/demo-logs)
-#   DEMO_PAUSE             seconds to pause after each step's proof (default 8), and
-#   DEMO_RUN_PAUSE         after each command (default 1.5), for whoever watches; 0 for a quick run
+#   DEMO_PAUSE             seconds to pause after each step's proof (default 12), and
+#   DEMO_RUN_PAUSE         after each command (default 4), so a viewer can read the output; 0 for a
+#                          quick run
 #
 # Every line the script prints, on the terminal and in the logs, goes through redact first.
 set -euo pipefail
@@ -23,8 +24,8 @@ export AGENTSUITE_DEMO_SUITE=suites/kaimahi-minimal AGENTSUITE_DEMO_AGENT=writer
 source "${DEMO}/../common.sh"
 
 LOGS="${DEMO_LOGS:-${WORK}/demo-logs}"
-PAUSE="${DEMO_PAUSE:-8}"
-RUN_PAUSE="${DEMO_RUN_PAUSE:-1.5}"
+PAUSE="${DEMO_PAUSE:-12}"
+RUN_PAUSE="${DEMO_RUN_PAUSE:-4}"
 mkdir -p "${LOGS}"
 rm -f "${LOGS}"/step-*.log "${LOGS}/timeline.tsv"
 SERVER=127.0.0.1:18080 MEMSERVER=127.0.0.1:18083 ROUTER=127.0.0.1:18081
@@ -89,6 +90,7 @@ proves() {
 	sleep "${PAUSE}"
 }
 fail() {
+	FAILED=1
 	printf '%sDEMO FAILED: %s%s\n' "${R}" "$*" "${N}"
 	printf 'DEMO FAILED: %s\n' "$*" >>"${STEP_LOG}"
 	exit 1
@@ -97,6 +99,13 @@ fail() {
 PIDS=()
 TAILS=()
 cleanup() {
+	local rc=$?
+	# Any exit before the end (set -e included) is a failure the recording must show: demo.tape waits
+	# for DEMO COMPLETE or DEMO FAILED.
+	if ((rc != 0)) && [[ -z "${FAILED:-}" ]]; then
+		printf '%sDEMO FAILED: exit %d in step log %s%s\n' "${R}" "${rc}" "${STEP_LOG##*/}" "${N}"
+		printf 'DEMO FAILED: exit %d\n' "${rc}" >>"${STEP_LOG}"
+	fi
 	for p in "${TAILS[@]}" "${PIDS[@]}"; do kill "${p}" 2>/dev/null || true; done
 	rm -f "${TOKEN_FILE}"
 	# Let the redacting filter flush the last lines before the job ends.
@@ -374,12 +383,8 @@ for _ in $(seq 60); do
 	if ! "${ATE[@]}" get actor "${MSID}" -a "${ATESPACE}" >/dev/null 2>&1; then break; fi
 	sleep 2
 done
-run "${ATE[@]}" create actor "${MSID}" -a "${ATESPACE}" --template "${MEMORY_TEMPLATE}"
-run "${ATE[@]}" resume actor "${MSID}" -a "${ATESPACE}"
-for _ in $(seq 120); do
-	if [[ "$(actor_field "${MSID}" 'a["status"]["state"]')" == ACTOR_STATE_RUNNING ]]; then break; fi
-	sleep 2
-done
+run "${ATE[@]}" create actor "${MSID}" -a "${ATESPACE}" --template "${MEMORY_TEMPLATE}" || fail "could not create the replacement actor"
+note "The replacement is created SUSPENDED; the host's next placement resumes it from the template's golden snapshot."
 NEW_UID="$(actor_field "${MSID}" 'a["metadata"]["uid"]')"
 run "${ATE[@]}" get actor "${MSID}" -a "${ATESPACE}"
 run echo "actor uid the session's turns ran on: ${OLD_UID}   actor under the name now: ${NEW_UID}"

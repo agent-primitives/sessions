@@ -1,9 +1,21 @@
 # AgentSuite agent as an AgentSessions harness on agent-substrate
 
-A proof of concept. One AgentSuite agent is rendered into a substrate ActorTemplate and registered
+A proof of concept. One AgentSuite agent is rendered into substrate ActorTemplates and registered
 with `agentsessionsd` as a harness. Its session then runs in a substrate actor, and the demo
 suspends, resumes, verifies, replays and forks it. Everything runs on a local kind cluster with no
-credentials.
+credentials. The actors are micro-VMs (kata + cloud-hypervisor), which need `/dev/kvm` in the Docker
+host; where there is none, such as an arm64 Mac, set `AGENTSUITE_DEMO_SANDBOX=gvisor` for every
+script (`up.sh` refuses micro-VM without KVM rather than fall back).
+
+`up.sh` renders the agent twice, in two resumability tiers, and deploys one `agentsessionsd` per
+tier, since a daemon serves one substrate harness:
+
+| Harness | Deployment | Tier | The conversation lives in |
+|---|---|---|---|
+| `<agent>` | `agentsessionsd` | `STATELESS_REPLAY` | the journal; each turn is rebuilt from it |
+| `<agent>-memory` | `agentsessionsd-memory` | `REQUIRES_MEMORY_SNAPSHOT` | the actor's RAM (`AGENTSUITE_MEMORY=ram`); only a memory snapshot carries it |
+
+`demo.sh` uses the stateless tier. The [recorded demo](#the-recorded-demo) uses both.
 
 ```bash
 cd examples/agentsuite-substrate
@@ -33,37 +45,43 @@ The recipe is for a disposable kind cluster you trust: nothing in it authenticat
 
 | Path | What it is |
 |---|---|
-| `suite/` | An AgentSuite (`support-desk`) with one tool-free agent, `triage`, and compositions for `linux/amd64` and `linux/arm64`. |
-| `binding.json` | A draft `AgentSessionsBinding` (`kmx.kaimahi.dev/v1alpha1`) for kind: atespace, gVisor sandbox, MEMORY snapshots, worker selector. `up.sh` refuses an atespace other than `agentsuite-demo`, the one `deploy/` uses. |
-| `render/`, `cmd/emit` | `emit bundle` stages the agent layer (manifest and instructions) for the image. `emit render` writes the ActorTemplate, the harness registration and the daemon flag. `emit check-model` refuses model settings `agentsessionsd` would refuse at startup. |
-| `agent/`, `cmd/harness`, `Dockerfile.harness` | The harness image. It serves harnesswire on :80 and `/readyz` on :8081. The instructions are the system prompt, and the harness checks them against the digest in the agent manifest. Each model call is `sink.Model`. |
+| `suite/` | An AgentSuite (`support-desk`) with one tool-free agent, `triage`, and compositions for `linux/amd64` and `linux/arm64`. The default suite (`AGENTSUITE_DEMO_SUITE`, `AGENTSUITE_DEMO_AGENT`). |
+| `suites/kaimahi-minimal/` | kaimahi's `agentsuite/testdata/minimal` (agent `writer`, `linux/amd64` only), copied byte for byte from kaimahi `9c5c993`. `SOURCE` lists each file's git blob id at that commit and its sha256. |
+| `binding-microvm.json`, `binding.json` | Draft `AgentSessionsBinding`s (`kmx.kaimahi.dev/v1alpha1`) for kind: atespace, the micro-VM (`microvm`) or gVisor sandbox, MEMORY snapshots, worker selector. `up.sh` refuses an atespace other than `agentsuite-demo`, the one `deploy/` uses. |
+| `render/`, `cmd/emit` | `emit bundle` stages the agent layer (manifest and instructions) for the image. `emit render` writes the ActorTemplate, the harness registration and the daemon flag; `-tier memory` renders the memory tier. `emit check-model` refuses model settings `agentsessionsd` would refuse at startup. |
+| `agent/`, `cmd/harness`, `Dockerfile.harness` | The harness image. It serves harnesswire on :80 and `/readyz` on :8081. The instructions are the system prompt, and the harness checks them against the digest in the agent manifest. Each model call is `sink.Model`. With `AGENTSUITE_MEMORY=ram` it keeps the conversation in RAM, ignores the history the host sends, and describes itself as `REQUIRES_MEMORY_SNAPSHOT`. |
+| `demo/` | The recorded demo: `driver.sh`, `smoke-microvm.sh`, `demo.tape`, `record.sh` and the tools image (`Dockerfile.tools`). |
 | `fakemodel/`, `cmd/fakemodel` | A deterministic OpenAI-compatible endpoint. Its reply lists the user's issues so far, and `GET /stats` reports how many calls it has served. |
 | `cmd/replay` | Reads the journal over the Sessions API, verifies the chain, and runs the controller's replay against the session's actor through the router. |
-| `deploy/` | The gVisor WorkerPool, the fake model, and `agentsessionsd` (substrate build). |
+| `deploy/` | The micro-VM and gVisor WorkerPools, the fake model, and `agentsessionsd` (substrate build), rendered once per tier. |
 
 The suite is validated with kaimahi's `agentsuite` package, imported as a Go module at kaimahi
-`ccde3079`, not copied. `render` also loads kaimahi's own `testdata/minimal` suite (see the tests).
-The demo uses its own fixture because kaimahi's fixtures declare only `linux/amd64`, and a kind node
-on an arm64 Mac needs an arm64 image.
+`ccde3079`, not copied. `render` also loads kaimahi's own `testdata/minimal` suite (see the tests);
+its files are identical at `ccde3079` and `9c5c993`. `demo.sh` uses its own fixture by default
+because kaimahi's fixtures declare only `linux/amd64`, and a kind node on an arm64 Mac needs an arm64
+image. On amd64, `AGENTSUITE_DEMO_SUITE=suites/kaimahi-minimal AGENTSUITE_DEMO_AGENT=writer` selects
+kaimahi's.
 
 ### The mapping that `emit render` applies
 
 | ActorTemplate field | Value |
 |---|---|
-| `metadata.name` | `<suite>-<agent>-<hash8>`, where `hash8` is the first 8 hex of `sha256(image digest + "\n" + binding digest)`, with `"\n" + model` appended when `emit render -model` overrides the agent's model. The binding digest is the SHA-256 of its JCS form. The name is a DNS label of at most 63 characters, and only suite and agent are truncated. |
+| `metadata.name` | `<suite>-<agent>-<hash8>`, where `hash8` is the first 8 hex of `sha256(image digest + "\n" + binding digest)`, with `"\n" + model` appended when `emit render -model` overrides the agent's model and `"\nmemory"` for `-tier memory`. The binding digest is the SHA-256 of its JCS form. The name is a DNS label of at most 63 characters, and only suite and agent are truncated. |
 | `metadata.atespace` | `binding.atespace` |
 | `containers[0].image` | The harness image, which must be digest-pinned. |
-| `containers[0].env` | `HARNESS_ADDR=:80`, `HARNESS_READYZ=:8081`, `AGENT_DIR=/agent`, and `AGENTSUITE_MODEL` when `-model` is given. No model credentials: they stay with the host. |
+| `containers[0].env` | `HARNESS_ADDR=:80`, `HARNESS_READYZ=:8081`, `AGENT_DIR=/agent`, `AGENTSUITE_MODEL` when `-model` is given, and `AGENTSUITE_MEMORY=ram` for `-tier memory`. No model credentials: they stay with the host. |
 | `containers[0].wakeupProbe` | `GET /readyz` on 8081 |
 | `containers[0].securityContext` | `capabilities: {}`, adding none |
 | `containers[0].resources` | `binding.resources` |
-| `sandboxConfig` | `binding.sandbox`: `SANDBOX_CLASS_GVISOR`, `gvisor-default` |
+| `sandboxConfig` | `binding.sandbox`: `SANDBOX_CLASS_MICROVM`, `microvm` (or `SANDBOX_CLASS_GVISOR`, `gvisor-default`) |
 | `snapshotConfig` | `preferredFidelity` from `binding.snapshot.fidelity`. `storageLocation` is `binding.snapshot.storageLocation` + `<name>/`. |
 | `workerSelector` | `binding.workerSelector` |
 
 The harness registration is a `HarnessRegistration` with `spec.substrate {atespace, template}`,
 `STATELESS_REPLAY` and `descriptor_id: triage`. `agentsessionsd` does not serve the registry, so
-the registration is applied as `-substrate-harness=triage=<atespace>/<template>`.
+the registration is applied as `-substrate-harness=triage=<atespace>/<template>`. The memory tier's
+is named `triage-memory`, is `REQUIRES_MEMORY_SNAPSHOT`, and is applied as
+`-substrate-harness=triage-memory=<atespace>/<template>,memory`.
 
 ## Requirements
 
@@ -77,6 +95,11 @@ the registration is applied as `-substrate-harness=triage=<atespace>/<template>`
 - Docker must publish ports on this machine's loopback. A remote daemon (`DOCKER_HOST`) is not
   supported: the registry (`localhost:5001`) and the kind API server publish only on the Docker
   host's loopback, and `ko` pushes and `kubectl` connects from this machine.
+- For micro-VMs, `/dev/kvm` in the Docker host: `up.sh` probes it with
+  `docker run --device /dev/kvm`, as substrate's `create-kind-cluster.sh` does before it mounts it
+  into the node. The first micro-VM `up.sh` on a machine assembles the kata assets (downloads), then
+  stages them in the cluster's object store and applies the `microvm` SandboxConfig
+  (`hack/install-microvm-deps.sh`); later runs skip that while the SandboxConfig exists.
 - About 4 GiB free in the Docker VM. The recorded run used an 8 GiB VM with no other kind cluster
   running. The first `up.sh` on a machine also pulls the ate-system images, so it takes longer than
   the 2.5 minutes recorded.
@@ -127,9 +150,14 @@ the harness sends it as the request's `model`, and Azure routes by the deploymen
 path's only query parameter may be one date-shaped `api-version` (`2024-10-21`,
 `2025-04-01-preview`), and it may not contain `@` or a fragment, start with `//` or end with `:`.
 Unset, the path is `/chat/completions` and the header is `Authorization` (a bearer token), the
-daemon's defaults. This has not been run against a live Azure OpenAI deployment (the script tests
-stub it), and a resource with key authentication disabled (Microsoft Entra ID only) is out of
-reach, since the daemon sends a static key.
+daemon's defaults.
+
+A resource with key authentication disabled takes a Microsoft Entra token for the
+`https://cognitiveservices.azure.com` resource as a bearer token: leave
+`AGENTSUITE_MODEL_AUTH_HEADER` unset and pass the token as `MODEL_API_KEY`. The daemon reads it once
+at start and does not refresh it, so turns fail once the token expires (about 24 hours for a
+managed-identity token); rerun `up.sh` with a fresh one, which restarts the daemons and drops their
+journals. The [recorded demo](#the-recorded-demo) runs this way, with a managed identity's token.
 
 `up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL`; `AGENTSUITE_MODEL`,
 `AGENTSUITE_MODEL_PATH`, `AGENTSUITE_MODEL_AUTH_HEADER` or `MODEL_API_KEY` without
@@ -167,8 +195,10 @@ The Secret, and so the running daemon, follows the latest `up.sh`. A real-provid
 again on every real-provider run. A fake-provider `up.sh` deletes it too, so the fake never receives
 a key.
 
-This path was run against the in-cluster fake standing in as the endpoint, with a dummy key; it has
-not been run against a hosted provider.
+This path was run against the in-cluster fake standing in as the endpoint, with a dummy key, and by
+the recorded demo against an Azure OpenAI deployment (`gpt-5.4-mini`, `api-version`
+`2025-04-01-preview`) with an Entra token in the default `Authorization` header. The `api-key`
+header has not been run against a live deployment.
 
 ## Gaps this PoC works around
 
@@ -223,11 +253,58 @@ not been run against a hosted provider.
   name, so `chat` and `echo`, which `agentsessionsd` serves itself, are refused. No `durable_dir`
   volume is rendered, since this agent writes nothing, and no EgressPolicy is rendered, since it
   calls nothing.
-- **gVisor, not micro-VM.** An arm64 Mac's kind node has no KVM. The adapter's micro-VM path is
-  covered by the repo's substrate-e2e CI job, not by this demo.
+- **gVisor where there is no KVM.** An arm64 Mac's kind node has no KVM, so it runs the gVisor
+  class (`AGENTSUITE_DEMO_SANDBOX=gvisor`); micro-VM is the default and the class the recorded demo
+  ran on.
+- **One substrate harness per daemon.** `agentsessionsd` serves one `-substrate-harness`, since
+  actors are named by session UID alone, so each tier gets its own Deployment, journal and Service.
+- **The memory tier replays and forks less.** Its conversation is in RAM, so `cmd/replay` (which
+  re-runs turns on the session's live actor) is not run against it, and a fork can only be taken at
+  the log head, by cloning the parent's memory snapshot (the placer refuses an earlier seq). Fork at
+  an earlier turn, and replay, use the stateless tier.
+- **The model token is not refreshed.** With an Entra token as `MODEL_API_KEY`, the daemon sends the
+  token it started with until it expires; a token source in the daemon would close this.
 - **ate-api trust.** `agentsessionsd` verifies the ate-api certificate against the
   `servicedns.podcert.ate.dev` ClusterTrustBundle that substrate's kind install creates, through a
   projected volume. It authenticates with the pod's projected ServiceAccount token. Which identities
   the kind install's ate-api accepts was not examined beyond this working.
 - **Port-forwards.** `demo.sh` reaches agentsessionsd, the router (for the replay) and, with the
   fake provider, the fake model through `port-forward`.
+
+## The recorded demo
+
+`demo/driver.sh` is a longer demo for a recording: kaimahi's minimal suite (agent `writer`) on
+micro-VMs, with a real model on Azure OpenAI. It runs on a Linux host with KVM and Docker (all of it
+there: kind, the cluster, the port-forwards), and prints a banner, each command and its output for
+every step:
+
+| Step | What it shows |
+|---|---|
+| 0 | `/dev/kvm` in Docker, `up.sh --substrate-only`, then `smoke-microvm.sh`: substrate's counter-microvm actor boots, suspends to a MEMORY snapshot and resumes on another worker with its RAM count and UID |
+| 1 | Nodes, the `microvm` SandboxConfig, the WorkerPools |
+| 2 | The suite's files against `SOURCE` (git blob id and sha256), its manifests, `up.sh --templates-only`, both rendered ActorTemplates |
+| 3 | An Entra token from the instance metadata endpoint (never printed), `up.sh`, the daemons' arguments and env, the Secret with its data redacted |
+| 4 | A `writer` session: three turns with the daemon's and the actor's logs live; a `writer-memory` session told a codename |
+| 5 | `agentctl replay -v`: each record's hash and predecessor, model calls, token usage, and totals |
+| 6 | The memory session suspended (a MEMORY snapshot, the worker freed), resumed, and asked for the codename: same actor UID, answered from RAM |
+| 7 | `cmd/replay` of the `writer` session: chain verified, 3 turns re-run in the actor, 0 model calls, the journal's model-call count unchanged |
+| 8 | A fork at the end of turn 1, driven another way; both histories |
+| 9 | The memory session's actor deleted and recreated under its name out of band: the next turn is refused with `FAILED_PRECONDITION`, and no turn completes |
+| 10 | `down.sh`; no cluster or container left |
+
+```bash
+# On the KVM host, in a checkout, with the tools Dockerfile.tools installs:
+export AGENTSUITE_MODEL_BASE_URL=https://<resource>.openai.azure.com AGENTSUITE_MODEL=<deployment> \
+  AGENTSUITE_MODEL_PATH='/openai/deployments/<deployment>/chat/completions?api-version=2025-04-01-preview' \
+  AZURE_MI_CLIENT_ID=<client id of a managed identity on the host with access to the resource>
+examples/agentsuite-substrate/demo/driver.sh
+```
+
+The token comes from the host's instance metadata endpoint, so the driver needs an Azure VM with
+that user-assigned identity. Every line it prints, and every per-step log (`DEMO_LOGS`), passes
+through a filter that redacts bearer tokens, JWTs and the metadata response's token field.
+
+`demo/record.sh` records it with vhs (`demo.tape`) from a Mac that drives the host through
+`hq remote-test` (a private tool; `DEMO_REMOTE=local` runs the driver on the machine vhs runs on),
+then writes the video, the logs, a README with each step's offset in the video and the video's
+sha256 to `DEMO_OUT`.

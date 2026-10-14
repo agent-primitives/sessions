@@ -27,6 +27,15 @@ provide.
 
 ### Added
 
+- Approval wire types: correlated request references, decision-only `Approve` messages, explicit
+  receipt statuses/sequences and transport-only park acknowledgements. `Approve` remains
+  `UNIMPLEMENTED`; the reference controller/bridge still reject `REQUIRES_APPROVAL`, and Session
+  replies leave `pending_approval` unset. Go types/converters carry the contract without enabling
+  a public approval workflow.
+- SQLite `SessionInfo` captures `last_seq` and a reporting-only `PendingApproval` with metadata,
+  using an incremental projection in the append transaction instead of event aggregation.
+  The reference excludes inherited first-seen executions and invalid approval-bearing history;
+  it is not command authority or a runtime/integrity probe.
 - Go SDK callers can pass opaque per-execution config through `client.ExecOptions.Config`.
   Omitting it keeps the existing empty-config behavior. Config is durable journal content exposed
   by Replay; do not include credentials. No wire or journal schema change.
@@ -60,6 +69,16 @@ provide.
 
 ### Compatibility
 
+- SQLite schema version 3 adds the approval projection and captured cursor. Opening a version 2
+  database backfills them atomically without changing event bytes or hashes. An undecodable v2
+  session is isolated with no actionable reference; healthy sessions remain readable. SQL faults
+  roll back the migration, and the older version 1 namespace migration still fails closed.
+  Builds supporting at most version 2 refuse the upgraded database; back it up before upgrading
+  if rollback may be needed. Direct out-of-band journal changes do not refresh the projection.
+- Approval additions preserve old field numbers, default receipt/decision bytes and model-input
+  hashes. New durable receipt status/correlation fields are hash-bound; transient Go approval
+  carriers are excluded from wire receipts and model-input hashing. Low-level Append remains
+  permissive; projection suppression does not replace validation at command boundaries.
 - An unsupported stored harness registration (unknown spec fields or enum values, or a local
   placement/factory failure) no longer prevents other harnesses from starting. Its name stays
   reserved, and Get/List/Retire retain its metadata, original digest and ACTIVE/RETIRED state.

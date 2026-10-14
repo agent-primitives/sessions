@@ -73,6 +73,14 @@ message Session {
   reserved 4; // retired: a flattened lifecycle phase, replaced by the two axes below
   ExecState exec_state = 13;       // execution/turn axis
   ComputeState compute_state = 14; // incarnation axis
+  // Output-only unresolved host-owned APPROVAL_REQUEST for hosts supporting approval reporting;
+  // the reference Sessions service leaves this field unset. It is not caller-writable metadata.
+  // Requests/decisions match execution_id, tool_call_id and request_seq. Supporting hosts exclude
+  // executions first seen before the child's latest FORK, including later calls in those turns,
+  // and suppress the reference for invalid approval-bearing evidence in the captured history.
+  // Metadata, correlation and cursor describe one captured prefix, not current runtime state.
+  // Clearing a reference after a decision does not prove a receipt or execution completion.
+  ApprovalRef pending_approval = 15;
   int64 last_seq = 5;              // event-log cursor
 
   string parent_uid = 6; // fork lineage
@@ -148,6 +156,31 @@ message ReplayRequest {
   string session = 1;
   int64 from_seq = 2;
   int64 to_seq = 3; // 0 = to head
+}
+
+// Approve supplies an explicit decision for one unresolved request in a stateless execution.
+// All tuple fields are required and request_seq must be positive. A decision resolves only a
+// request owned by this session, not an inherited parent request. Identity is recorded on the
+// decision's Event.actor as provenance, never checked as authorization. No policy hook, expiry,
+// automatic decision, or Cancel semantics are implied by this API.
+message ApproveRequest {
+  string session = 1;
+  string execution_id = 2;
+  string tool_call_id = 3;
+  int64 request_seq = 4;
+  // Required presence: false means deny; absent is INVALID_ARGUMENT. Unlike this request, the
+  // journal's ApprovalResult.approved remains a non-optional bool for compatibility.
+  optional bool approved = 5;
+  string reason = 6;
+  IdentityRef identity = 7;
+}
+
+// A successful Approve commits the decision only, never resumes compute or executes a tool.
+// The caller invokes Resume separately. decision is the committed APPROVAL_RESULT LogRecord;
+// an exact retry returns that same record, not a new decision or receipt.
+message ApproveResponse {
+  Session session = 1;
+  LogRecord decision = 2;
 }
 
 message SuspendRequest { string session = 1; }
@@ -233,6 +266,11 @@ service Sessions {
   // ephemeral Deltas; Replay re-delivers committed records only (read-only).
   rpc Exec(ExecRequest) returns (stream ExecUpdate);
   rpc Replay(ReplayRequest) returns (stream LogRecord);
+
+  // Not implemented: the reference server returns UNIMPLEMENTED.
+  // Supporting hosts commit durable decisions only, never implicitly Resume or execute a tool;
+  // exact retries return the existing decision. Identity is provenance, not authorization.
+  rpc Approve(ApproveRequest) returns (ApproveResponse);
 
   // In-flight control: cancel the running execution. Not implemented: the server returns
   // UNIMPLEMENTED.

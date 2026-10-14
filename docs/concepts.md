@@ -123,10 +123,29 @@ cost, audit, and tool approval are first-class rather than parsed out of text af
 | `END` | The terminal state of one execution (`COMPLETED` / `FAILED` / `CANCELED`). |
 | `ERROR` | An error, mirroring a gRPC status. |
 
-The same `Event` type is shared by the session log and the harness stream, so what a harness emits is
-exactly what gets journaled; the host additionally owns invocation and lifecycle records. Content is
+The same `Event` type is shared by the session log and the harness stream. Durable harness events
+become journal records alongside host-owned invocation and lifecycle records. `PARKED` is a
+transport-only acknowledgement in the declared approval protocol, never a durable log outcome.
+The reference controller and bridge reject approval-gated calls; `Sessions.Approve` is declared
+but returns `UNIMPLEMENTED`. Content is
 carried as A2A-style `Message`s (a role plus a list of `Part`s: text, file, structured data, an opaque
 reasoning block, a model's tool call, or a tool's result).
+
+### Captured storage approval projection
+
+SQLite schema 3 reduces approval evidence while appending each persisted protobuf event, in the
+same transaction as metadata and `last_seq`. `sqlitelog.SessionInfo.PendingApproval` is a value
+snapshot of that prefix, not command authority. It selects an unanswered request in the latest
+first-seen execution, matching execution ID, tool-call ID and request sequence. Executions first
+seen before the child's latest FORK are excluded even if their calls arrive later. Invalid
+approval-bearing evidence suppresses references; malformed nongated history does not.
+
+This store-level projection does not enable the public approval workflow: Session replies still
+leave `pending_approval` unset. Host-only approval requests/decisions do not make cold compute live.
+The captured values remain valid after later appends, but are not an integrity check for direct
+out-of-band database edits. The v2 backfill preserves journal bytes/hashes and isolates undecodable
+sessions without exposing actionable references; SQL errors roll back. Schema 3 is not readable by
+older binaries, so keep a backup if downgrade may be needed.
 
 ### Durable execution invocation
 

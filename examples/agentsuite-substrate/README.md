@@ -113,18 +113,20 @@ AGENTSUITE_MODEL=<deployment> \
 ./demo.sh
 ```
 
-Quote the path, since `?` is a shell glob character. `AGENTSUITE_MODEL` is the deployment name; the
-harness sends it as the request's `model`, and Azure routes by the deployment in the path. The path's only query parameter
-may be one date-shaped `api-version` (`2024-10-21`, `2025-04-01-preview`), and it may not contain
-`@` or a fragment or start with `//`. Unset, the path is `/chat/completions` and the header is
-`Authorization` (a bearer token), the daemon's defaults. This has not been run against a live Azure
-OpenAI deployment (the script tests stub it), and a resource with key authentication disabled
-(Microsoft Entra ID only) is out of reach, since the daemon sends a static key.
+Quote the path, since `?` is a shell glob character. `AGENTSUITE_MODEL` is the deployment name;
+the harness sends it as the request's `model`, and Azure routes by the deployment in the path. The
+path's only query parameter may be one date-shaped `api-version` (`2024-10-21`,
+`2025-04-01-preview`), and it may not contain `@` or a fragment, start with `//` or end with `:`.
+Unset, the path is `/chat/completions` and the header is `Authorization` (a bearer token), the
+daemon's defaults. This has not been run against a live Azure OpenAI deployment (the script tests
+stub it), and a resource with key authentication disabled (Microsoft Entra ID only) is out of
+reach, since the daemon sends a static key.
 
 `up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL`; `AGENTSUITE_MODEL`,
 `AGENTSUITE_MODEL_PATH`, `AGENTSUITE_MODEL_AUTH_HEADER` or `MODEL_API_KEY` without
 `AGENTSUITE_MODEL_BASE_URL` (only the URL selects a real provider, so the run would otherwise switch
-to the fake model); any of the four settings with whitespace or a control character in it; a URL
+to the fake model); any of the four settings with whitespace or a control character in it, or
+ending with `:` (the manifest would read it as a YAML map key); a URL
 that is not `http` or `https` or that carries userinfo, a query or a fragment; a path that carries
 anything but a date-shaped `api-version`; a header that is not a header name; and any combination
 `agentsessionsd` would refuse at startup. It does so before it changes the cluster, so a

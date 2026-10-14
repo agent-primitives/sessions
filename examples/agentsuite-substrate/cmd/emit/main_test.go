@@ -87,6 +87,7 @@ func TestCheckModelPathAndAuthHeader(t *testing.T) {
 		{name: "an authority", path: "//secret.example/chat", wantErr: "single '/'"},
 		{name: "a relative path", path: "secret/chat", wantErr: "single '/'"},
 		{name: "a bad escape", path: "/secret%zz", wantErr: "not a valid URL path"},
+		{name: "a trailing colon", path: "/openai/deployments/secret:", wantErr: "ends with ':'"},
 		{name: "a header with a space", path: "", header: "api key", wantErr: "not an HTTP header name"},
 		{name: "a header with a colon", path: "", header: "api-key:", wantErr: "not an HTTP header name"},
 		{name: "x-api-key", path: "", header: "x-api-key"},

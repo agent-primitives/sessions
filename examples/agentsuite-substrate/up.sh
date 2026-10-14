@@ -69,12 +69,18 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	MODEL_AUTH_HEADER="${AGENTSUITE_MODEL_AUTH_HEADER:-Authorization}"
 	# The harness requests the provider's model, not the fixture's.
 	HARNESS_MODEL="${MODEL_ID}"
-	# Each lands in a YAML plain scalar: whitespace or a control character would change the YAML
-	# around it, and a placeholder name would be replaced again further down.
+	# Each lands in a YAML plain scalar ("- -model=VALUE"): whitespace or a control character would
+	# change the YAML around it, a trailing ':' would turn the item into a map that kubectl refuses
+	# only after the Secret has changed, and a placeholder name would be replaced again further down.
+	# With no whitespace allowed, a trailing ':' is the one remaining way to end a plain scalar
+	# early (": " and " #" both need a space).
 	unsafe='[[:space:][:cntrl:]]'
 	for var in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH AGENTSUITE_MODEL_AUTH_HEADER; do
 		if [[ "${!var:-}" =~ ${unsafe} ]]; then
 			refuse "${var} contains whitespace or a control character"
+		fi
+		if [[ "${!var:-}" == *: ]]; then
+			refuse "${var} ends with ':', which deploy/agentsessionsd.yaml would read as a map key"
 		fi
 		if [[ -n "$(unfilled "${!var:-}")" ]]; then
 			refuse "${var} contains $(unfilled "${!var:-}"), a placeholder of deploy/agentsessionsd.yaml"

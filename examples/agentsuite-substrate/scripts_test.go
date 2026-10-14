@@ -141,11 +141,14 @@ if [ "$1 $2 $4" = "build -o ./cmd/emit" ]; then
 fi
 [ -n "${STUB_FULL:-}" ] || exit 97
 if [ "$1 $2 $3" = "run ./cmd/emit render" ]; then
-	prev=
+	prev= model=unset
 	for a; do
 		[ "$prev" = -out ] && out=$a
+		[ "$prev" = -model ] && model=$a
 		prev=$a
 	done
+	# The -model up.sh forwards to the harness, kept verbatim (the call log's echo is not).
+	printf '%s' "$model" >"$STUB_DIR/render-model"
 	mkdir -p "$out"
 	echo tmpl-1 >"$out/template-name"
 	echo '{}' >"$out/harness-registration.json"
@@ -705,9 +708,31 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 		{
 			name: "an auth header that is not a header name",
 			env: func(*testing.T) []string {
-				return append(azure, "AGENTSUITE_MODEL_AUTH_HEADER=api-key:")
+				return append(azure, "AGENTSUITE_MODEL_AUTH_HEADER=api_key")
 			},
 			wantOut: "the auth header is not an HTTP header name",
+		},
+		{
+			// "- -model=gpt:" is a YAML map, not a string; the Deployment would fail to apply
+			// only after the Secret had changed.
+			name:    "a model ending with ':'",
+			env:     func(*testing.T) []string { return append(azure, "AGENTSUITE_MODEL=gpt:") },
+			wantOut: "AGENTSUITE_MODEL ends with ':', which deploy/agentsessionsd.yaml would read as a map key; nothing was changed",
+		},
+		{
+			name:    "a base URL ending with ':'",
+			env:     func(*testing.T) []string { return append(provider, "AGENTSUITE_MODEL_BASE_URL=https://llm.example:") },
+			wantOut: "AGENTSUITE_MODEL_BASE_URL ends with ':', which deploy/agentsessionsd.yaml would read as a map key; nothing was changed",
+		},
+		{
+			name:    "a path ending with ':'",
+			env:     func(*testing.T) []string { return append(azure, "AGENTSUITE_MODEL_PATH=/openai/deployments/dep:") },
+			wantOut: "AGENTSUITE_MODEL_PATH ends with ':', which deploy/agentsessionsd.yaml would read as a map key; nothing was changed",
+		},
+		{
+			name:    "an auth header ending with ':'",
+			env:     func(*testing.T) []string { return append(azure, "AGENTSUITE_MODEL_AUTH_HEADER=x:") },
+			wantOut: "AGENTSUITE_MODEL_AUTH_HEADER ends with ':', which deploy/agentsessionsd.yaml would read as a map key; nothing was changed",
 		},
 		{
 			name: "a path without a base URL",
@@ -775,6 +800,7 @@ func TestUpRendersTheDaemon(t *testing.T) {
 		wantLines   []string
 		wantSecret  string // the Secret call that precedes the apply
 		wantVersion string
+		wantModel   string // the -model emit render gives the harness; "" keeps the fixture's
 	}{
 		{
 			name: "fake provider",
@@ -790,6 +816,7 @@ func TestUpRendersTheDaemon(t *testing.T) {
 				"- -model-path=/chat/completions", "- -model-auth-header=Authorization"},
 			wantSecret:  "apply --server-side",
 			wantVersion: "7",
+			wantModel:   model,
 		},
 		{
 			// An Azure OpenAI deployment: the api-version rides in the path, the key in the api-key
@@ -804,6 +831,7 @@ func TestUpRendersTheDaemon(t *testing.T) {
 				"- -model-path=/openai/deployments/dep/chat/completions?api-version=2024-10-21", "- -model-auth-header=api-key"},
 			wantSecret:  "apply --server-side",
 			wantVersion: "8",
+			wantModel:   "dep",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -814,6 +842,11 @@ func TestUpRendersTheDaemon(t *testing.T) {
 			code, out, calls := s.run(t, "up.sh", append(tc.env, "STUB_CLUSTERS="+cluster, "STUB_FULL=1")...)
 			if code != 0 {
 				t.Fatalf("up.sh exit %d, want 0\noutput:\n%s\ncalls:\n%s", code, out, calls)
+			}
+			// The harness requests the provider's model (an Azure deployment name), or the
+			// fixture's own with the fake model.
+			if got, err := os.ReadFile(filepath.Join(s.dir, "render-model")); err != nil || string(got) != tc.wantModel {
+				t.Errorf("emit render -model = %q (err %v), want %q", got, err, tc.wantModel)
 			}
 			path := filepath.Join(s.work, "cluster-"+cluster, "agentsessionsd.yaml")
 			b, err := os.ReadFile(path)
@@ -904,7 +937,8 @@ get) echo "session $sess" ;;
 exec)
 	turn=$(($(grep -c EVENT_END "$j") + 1))
 	[ "$STUB_FAULT $turn" = "lost-input 2" ] || rec "EVENT_INPUT  user: $input"
-	[ "$STUB_FAULT $turn" = "no-model-call 2" ] || rec "EVENT_MODEL_CALL"
+	[ "$STUB_FAULT $turn" = "no-model-call 2" ] || [ "$STUB_FAULT $turn" = "no-model-call-4 4" ] ||
+		[ "$STUB_FAULT $sess" = "no-child-model-call child-1" ] || rec "EVENT_MODEL_CALL"
 	rec "EVENT_OUTPUT  assistant: a real reply $turn"
 	rec "EVENT_END"
 	echo ACTOR_STATE_RUNNING >"$STUB_DIR/state-$sess"
@@ -984,6 +1018,8 @@ func TestDemoRealProviderJournalChecks(t *testing.T) {
 		{fault: "lost-input", wantOut: "DEMO FAILED: journal inputs are not the 3 turns: my laptop will not boot|I was billed twice this month"},
 		{fault: "no-model-call", wantOut: "DEMO FAILED: journal does not record 3 model calls"},
 		{fault: "no-lifecycle", wantOut: "DEMO FAILED: journal does not record the suspend and the resume"},
+		{fault: "no-model-call-4", wantOut: "DEMO FAILED: journal does not record a model call for the 4th turn"},
+		{fault: "no-child-model-call", wantOut: "DEMO FAILED: child journal does not record turn 1's model call plus its own"},
 		{fault: "replay-skips-a-turn", wantOut: "DEMO FAILED: replay did not re-execute the 4 turns"},
 		{fault: "whole-parent-fork", wantOut: "DEMO FAILED: child journal inputs are not turn 1 plus its own"},
 		{fault: "fork-writes-parent", wantOut: "DEMO FAILED: parent journal changed"},
@@ -1006,7 +1042,7 @@ func TestDemoRealProviderJournalChecks(t *testing.T) {
 					"the journal records the 3 inputs in order and 3 model calls the host made",
 					"child child-1 forked at seq 4",
 					"Done in",
-					"5 turns called the provider; the replay called it 0 times (controller count)",
+					"5 turns called the provider (each journaled a model call); the replay called it 0 times (controller count)",
 				} {
 					if !strings.Contains(out, want) {
 						t.Errorf("output has no %q:\n%s", want, out)

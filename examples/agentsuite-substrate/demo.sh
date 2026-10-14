@@ -110,6 +110,7 @@ say "${SID}" "also, my password expired"
 [[ "$(actor_state "${SID}")" == ACTOR_STATE_RUNNING ]] || fail "actor is not running after resume"
 [[ "$(inputs "${SID}")" == "${TURNS3}|also, my password expired" ]] || fail "journal inputs after resume: $(inputs "${SID}")"
 [[ "$(records "${SID}" EVENT_LIFECYCLE)" == 2 ]] || fail "journal does not record the suspend and the resume"
+[[ "$(records "${SID}" EVENT_MODEL_CALL)" == 4 ]] || fail "journal does not record a model call for the 4th turn"
 if [[ -n "${REAL}" ]]; then
 	proves "resume brought the same actor back (substrate ResumeActor restores its snapshot), and the journal, the history the host hands the agent, holds all 4 inputs in order around the suspend and resume (whether the provider's reply uses them is not checked)"
 else
@@ -145,14 +146,16 @@ PARENT_LAST="$(agentctl replay --session "${SID}" | sed -n 's/^seq=[0-9]* *EVENT
 [[ "$(inputs "${CHILD}")" == "my laptop will not boot|actually, the printer is on fire" ]] ||
 	fail "child journal inputs are not turn 1 plus its own: $(inputs "${CHILD}")"
 [[ "$(inputs "${SID}")" == "${TURNS3}|also, my password expired" ]] || fail "parent journal changed: $(inputs "${SID}")"
+# The child inherits turn 1's model call and records its own.
+[[ "$(records "${CHILD}" EVENT_MODEL_CALL)" == 2 ]] || fail "child journal does not record turn 1's model call plus its own"
 if [[ -n "${REAL}" ]]; then
-	proves "the child is its own actor whose journal holds only turn 1 of the parent's history plus its own turn; the parent's 4 inputs are untouched (reply content is not checked)"
+	proves "the child is its own actor whose journal holds only turn 1 of the parent's history plus its own turn, each with its model call; the parent's 4 inputs are untouched (reply content is not checked)"
 else
 	proves "the child is its own actor with only turn 1 of history; the parent's 4 turns are untouched"
 fi
 
 if [[ -n "${REAL}" ]]; then
-	step "Done in ${SECONDS}s: 5 turns called the provider; the replay called it 0 times (controller count)"
+	step "Done in ${SECONDS}s: 5 turns called the provider (each journaled a model call); the replay called it 0 times (controller count)"
 else
 	step "Done in ${SECONDS}s: fake model calls during the demo: $(($(calls) - BASE_CALLS)) (3 turns + 1 after resume + 1 on the fork; 0 for replay)"
 fi

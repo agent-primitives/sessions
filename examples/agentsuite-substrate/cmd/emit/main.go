@@ -222,6 +222,9 @@ func checkPath(raw string) error {
 		return errors.New("check-model: the model path carries a fragment, which the model client drops" + hidden)
 	case strings.Contains(raw, "@"):
 		return errors.New("check-model: the model path contains '@', which could be read as userinfo" + hidden)
+	case strings.HasSuffix(raw, ":"):
+		// up.sh renders the path into a YAML plain scalar, where a trailing ':' makes a map key.
+		return errors.New("check-model: the model path ends with ':'" + hidden)
 	}
 	u, err := url.Parse(raw)
 	if err != nil {

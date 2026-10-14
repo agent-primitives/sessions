@@ -9,6 +9,10 @@ provide.
 
 ### Fixed
 
+- `model/openai` no longer sends configured headers (`WithHeader`, `WithAPIKey`) to another host on
+  a redirect. net/http copied custom headers such as `api-key` to any redirect target, so a provider
+  or proxy answering with a cross-host redirect received the credential. A redirect that changes
+  scheme, host or port is now refused; same-origin redirects are followed as before.
 - Session-level suspend no longer destroys the Substrate actor needed by resume. Both replay-based
   and memory-snapshot sessions retain their restore handle after `Placer.Suspend`; explicit `Stop`
   remains destructive teardown.
@@ -60,6 +64,9 @@ provide.
 
 ### Compatibility
 
+- `model/openai` refuses a redirect to another origin instead of following it. Set the base URL
+  to the endpoint that serves the request. A client passed to `WithHTTPClient` is copied, not
+  modified; its own `CheckRedirect` still runs for same-origin redirects.
 - An unsupported stored harness registration (unknown spec fields or enum values, or a local
   placement/factory failure) no longer prevents other harnesses from starting. Its name stays
   reserved, and Get/List/Retire retain its metadata, original digest and ACTIVE/RETIRED state.

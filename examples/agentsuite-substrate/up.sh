@@ -61,6 +61,13 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 			refuse "${var} contains $(unfilled "${!var}"), a placeholder of deploy/agentsessionsd.yaml"
 		fi
 	done
+	# agentsessionsd refuses a base URL without a scheme and host at startup (model/openai). The
+	# Deployment recreates its pod, and the journal is an emptyDir, so letting such a URL through
+	# would delete the running daemon's sessions and leave a pod that never starts.
+	absolute='^[Hh][Tt][Tt][Pp][Ss]?://([^/?#@]*@)?[^/?#@]+([/?#].*)?$'
+	if [[ ! "${AGENTSUITE_MODEL_BASE_URL}" =~ ${absolute} ]]; then
+		refuse "AGENTSUITE_MODEL_BASE_URL '${AGENTSUITE_MODEL_BASE_URL}' is not an absolute http(s) URL (want http[s]://host[/path])"
+	fi
 else
 	MODEL_BASE_URL="http://fakemodel.${NS}.svc:8080/v1"
 	MODEL_ID=triage-model

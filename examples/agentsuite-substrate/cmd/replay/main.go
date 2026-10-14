@@ -94,8 +94,9 @@ func run(server, uid, router, atespace, modelURL, statsURL string) error {
 		return err
 	}
 	for i, o := range outputs {
-		fmt.Printf("replayed turn %d: %s\n", i+1, o)
+		fmt.Printf("replayed output %d: %s\n", i+1, o)
 	}
+	fmt.Printf("re-executed %d completed turns\n", completedTurns(recs))
 	if statsURL != "" {
 		fmt.Printf("model calls: controller=%d, fake provider %d -> %d (delta %d)\n", ctl.ModelInvocations(), before, after, after-before)
 	} else {
@@ -107,7 +108,7 @@ func run(server, uid, router, atespace, modelURL, statsURL string) error {
 	if err := log.Verify(); err != nil {
 		return fmt.Errorf("journal does not verify after replay: %w", err)
 	}
-	fmt.Println("REPLAY OK: the agent re-ran every turn in its substrate actor with zero model calls")
+	fmt.Println("REPLAY OK: the agent re-ran every completed turn in its substrate actor with zero model calls")
 	return nil
 }
 
@@ -139,8 +140,9 @@ func modelCalls(ctx context.Context, statsURL string) (int64, error) {
 }
 
 // loadJournal turns the session's records into a verified log and returns the harness its last turn
-// ran on (empty for a journal written before EXECUTION_START named it). A session with no records
-// has nothing to replay and is refused.
+// ran on (empty for a journal written before EXECUTION_START named it). A session with no records,
+// or with no completed turn, has nothing to replay and is refused: the controller re-executes only
+// completed turns, so reporting such a replay as OK would claim a re-execution that never ran.
 func loadJournal(uid string, protos []*v1.LogRecord) (*eventlog.Log, []eventlog.Record, string, error) {
 	if len(protos) == 0 {
 		return nil, nil, "", fmt.Errorf("session %s has no journal records: nothing to replay", uid)
@@ -158,5 +160,20 @@ func loadJournal(uid string, protos []*v1.LogRecord) (*eventlog.Log, []eventlog.
 	if err := log.Verify(); err != nil {
 		return nil, nil, "", fmt.Errorf("journal does not verify: %w", err)
 	}
+	if completedTurns(recs) == 0 {
+		return nil, nil, "", fmt.Errorf("session %s has no completed turn (no END record in %d records): nothing to re-execute", uid, len(recs))
+	}
 	return log, recs, harness, nil
+}
+
+// completedTurns counts the turns the controller's Replay re-executes: each one that reached an END
+// record, whatever its state.
+func completedTurns(recs []eventlog.Record) int {
+	n := 0
+	for _, r := range recs {
+		if r.Event.Kind == api.EventEnd {
+			n++
+		}
+	}
+	return n
 }

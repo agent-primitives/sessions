@@ -98,9 +98,10 @@ AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 AGENTSUITE_MODEL=<model> MOD
 AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 ./demo.sh
 ```
 
-`up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL`, or either one with
-whitespace or a control character in it, before it changes the cluster, so a misconfigured rerun
-leaves an existing key in place. Both are copied into the Deployment as written. A query in the URL
+`up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL`, either one with
+whitespace or a control character in it, or a URL that is not an absolute `http[s]://host[/path]`
+(which `agentsessionsd` would refuse at startup), before it changes the cluster, so a misconfigured
+rerun leaves the running daemon, its journal and an existing key in place. Both are copied into the Deployment as written. A query in the URL
 (an `api-version`, say) is sent with every completion request, after `/chat/completions` is joined
 to the URL's path; a fragment is dropped. It applies the key to the `agentsessionsd-model` Secret
 through stdin, so it never appears in argv or a file, and a failed apply leaves the stored key
@@ -110,8 +111,10 @@ its emptyDir journal, and an unchanged key leaves it running. It does not build 
 model. It points `agentsessionsd` at the endpoint, and the harness requests `AGENTSUITE_MODEL`
 instead of the fixture's `triage-model`: the ActorTemplate carries it as an env var, so each model
 gets its own template. `demo.sh` then skips the checks that depend on the fake's replies and
-counter, and does not port-forward the fake. The replay still fails if the controller sees a model
-call.
+counter, and does not port-forward the fake. It still checks the journal in both modes: the inputs
+in order, one model call per turn, the suspend and resume records, the fork child's prefix, and that
+the replay re-executed every completed turn; in real-provider mode it claims only those, not what
+the replies say. The replay still fails if the controller sees a model call.
 
 The Secret, and so the running daemon, follows the latest `up.sh`. A real-provider `up.sh` without
 `MODEL_API_KEY` deletes any stored key, for endpoints that take none, so export `MODEL_API_KEY`

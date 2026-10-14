@@ -31,21 +31,33 @@ func journal(t *testing.T, evs ...api.Event) []*v1.LogRecord {
 
 func TestLoadJournal(t *testing.T) {
 	count := int64(1)
-	turn := func(harness string) []api.Event {
+	started := func(harness string) []api.Event {
 		return []api.Event{
 			{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: &count, Harness: harness}},
 			{Kind: api.EventInput, Message: &api.Message{Role: "user", Parts: []api.Part{{Text: &api.TextPart{Text: "hi"}}}}},
 		}
 	}
+	turn := func(harness string) []api.Event {
+		return append(started(harness), api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
+	}
 
 	t.Run("last turn's harness", func(t *testing.T) {
-		protos := journal(t, append(turn("first"), turn("triage")...)...)
+		protos := journal(t, append(turn("first"), started("triage")...)...)
 		_, recs, harness, err := loadJournal("s", protos)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(recs) != 4 || harness != "triage" {
-			t.Fatalf("got %d records on harness %q, want 4 on %q", len(recs), harness, "triage")
+		if len(recs) != 5 || harness != "triage" || completedTurns(recs) != 1 {
+			t.Fatalf("got %d records, %d completed, on harness %q, want 5, 1 on %q", len(recs), completedTurns(recs), harness, "triage")
+		}
+	})
+
+	// A turn that started but never ended is skipped by the controller's Replay, so a journal with
+	// no completed turn would re-execute nothing; it is refused rather than reported as replayed.
+	t.Run("no completed turn", func(t *testing.T) {
+		protos := journal(t, started("triage")...)
+		if _, _, _, err := loadJournal("s", protos); err == nil || !strings.Contains(err.Error(), "no completed turn") {
+			t.Fatalf("error = %v, want a no-completed-turn error", err)
 		}
 	})
 

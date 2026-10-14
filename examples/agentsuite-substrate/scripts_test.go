@@ -497,6 +497,34 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			wantOut: "AGENTSUITE_MODEL_BASE_URL contains DAEMON_IMAGE, a placeholder of deploy/agentsessionsd.yaml",
 		},
 		{
+			name: "a base URL with no scheme",
+			env: func(*testing.T) []string {
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=api.example.com/v1")
+			},
+			wantOut: "AGENTSUITE_MODEL_BASE_URL 'api.example.com/v1' is not an absolute http(s) URL (want http[s]://host[/path]); nothing was changed",
+		},
+		{
+			name: "a base URL with no host",
+			env: func(*testing.T) []string {
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=https:///v1")
+			},
+			wantOut: "AGENTSUITE_MODEL_BASE_URL 'https:///v1' is not an absolute http(s) URL",
+		},
+		{
+			name: "a base URL with only userinfo for a host",
+			env: func(*testing.T) []string {
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=https://user@/v1")
+			},
+			wantOut: "AGENTSUITE_MODEL_BASE_URL 'https://user@/v1' is not an absolute http(s) URL",
+		},
+		{
+			name: "a base URL with another scheme",
+			env: func(*testing.T) []string {
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=ftp://llm.example/v1")
+			},
+			wantOut: "AGENTSUITE_MODEL_BASE_URL 'ftp://llm.example/v1' is not an absolute http(s) URL",
+		},
+		{
 			name:    "a binding for another atespace",
 			env:     func(t *testing.T) []string { return []string{"STUB_BINDING=" + binding(t, "other")} },
 			wantOut: "binding.json names atespace 'other', but the demo deploys into atespace agentsuite-demo; nothing was changed",

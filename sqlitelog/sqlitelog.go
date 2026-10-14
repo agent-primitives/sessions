@@ -445,7 +445,8 @@ func (l *Log) Append(expectedLastSeq, fence int64, ev api.Event) (eventlog.Recor
 	if err != nil {
 		return eventlog.Record{}, fmt.Errorf("sqlitelog: canonicalize seq %d: %w", seq, err)
 	}
-	blob, err := proto.Marshal(wire.EventToProto(ev))
+	pb := wire.EventToProto(ev)
+	blob, err := proto.Marshal(pb)
 	if err != nil {
 		return eventlog.Record{}, fmt.Errorf("sqlitelog: marshal seq %d: %w", seq, err)
 	}
@@ -465,7 +466,8 @@ func (l *Log) Append(expectedLastSeq, fence int64, ev api.Event) (eventlog.Recor
 	if err := touchSession(tx, l.session, l.store.defaultProject, ev); err != nil {
 		return eventlog.Record{}, err
 	}
-	if err := projectApproval(tx, l.session, seq, ev); err != nil {
+	// Report only the selected wire body and normalized enums that strict journal reads see.
+	if err := projectApproval(tx, l.session, seq, wire.EventFromProto(pb)); err != nil {
 		return eventlog.Record{}, fmt.Errorf("sqlitelog: project approval seq %d: %w", seq, err)
 	}
 	if err := tx.Commit(); err != nil {

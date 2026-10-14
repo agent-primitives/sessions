@@ -71,8 +71,9 @@ provide.
   without a `-substrate-harness`. It takes one `-substrate-harness` and exits with status 2 on a
   second: actors are named by session UID in the one atespace, so two substrate harnesses would
   share a session's actor. The rule is per daemon: two hosts sharing a journal and an atespace with
-  different `-substrate-harness` names share it too (see `docs/substrate-conformance.md`). The neutral `cmd/agentsessionsd`
-  does not offer these flags; both binaries are now built from `internal/agentsessionsd`.
+  different `-substrate-harness` names share it too (see `docs/substrate-conformance.md`). The
+  neutral `cmd/agentsessionsd` does not offer these flags; both binaries are now built from
+  `internal/agentsessionsd`.
 - `HarnessRegistry` API (`api/harness_registry.proto`): register, get, list and retire harnesses on a
   running host. A registration is immutable and identified by its name and `spec_digest`. Retiring a
   harness refuses new sessions while existing sessions keep running, resuming and forking;
@@ -108,7 +109,7 @@ provide.
   `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and nothing is created, where it used to continue
   the journal on a fresh harness that had lost the session's RAM state. `Runtime.Create` gets a
   journal counter in the new `api.SessionSpec.StartedTurns`, which `runtime/substrate` calls only
-  after it finds the actor missing, so a turn another host recorded meanwhile is counted; other
+  after it finds the actor missing, so a turn another host journaled before then is counted; other
   backends ignore it. The count is per harness: a turn an `ExecRequest.harness` override ran
   elsewhere does not count, while a turn with no recorded harness name, or one this host does not
   serve, does. Two substrate backends on one atespace share each session's actor, so the count
@@ -118,6 +119,19 @@ provide.
   memory-tier session whose actor is gone, whatever its journal records, is `FAILED_PRECONDITION`
   (`api.ErrMemoryStateLost`) too, where it used to be `INTERNAL`; a stateless session's `Resume`
   keeps its error.
+- A memory-tier turn on substrate records its actor's UID in the new
+  `EXECUTION_START.compute_instance` (`api.Incarnation.ComputeInstance`, set by
+  `runtime/substrate` from the new `substrate.ActorInfo.UID`). `Exec` or `Resume` placed on an actor
+  whose UID differs from the latest one recorded for that harness since the session's `FORK` marker
+  is `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and journals nothing. This catches an actor
+  another host created under the session's name after it counted no turns, while the actor the
+  first turn ran on was lost; the count alone let later turns attach to it. `runtime/substrate`
+  refuses a memory-tier actor that reports no UID, so a custom `ControlClient` must report one.
+  When `CreateActor` finds the name taken (`substrate.ErrActorExists`, which a `ControlClient`
+  must return for it), `Create` attaches to that actor where it used to fail the turn with
+  `INTERNAL`. Stateless turns record no UID and their canonical bytes are unchanged; turns recorded
+  before this change are not compared. The router reaches an actor by name, so a turn already
+  placed when its actor is replaced still runs; the next one is refused.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

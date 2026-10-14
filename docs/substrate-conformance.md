@@ -101,23 +101,51 @@ What is enforced today: `runtime/substrate` refuses to cold-create an actor for 
 `REQUIRES_MEMORY_SNAPSHOT` session whose journal already has a started turn (an `EXECUTION_START`)
 on that harness, whether that turn completed, failed or was interrupted, since any of them may have
 changed the actor's RAM. The Placer hands `Create` a counter in `api.SessionSpec.StartedTurns`, and
-`Create` calls it only after `GetActor` reports the actor missing. A turn is journaled before it
-runs, so every turn that ran on the lost actor is counted then, including one another host sharing
-the journal ran while this `Exec` was being placed. The Placer attributes a turn by the harness name
+`Create` calls it only after `GetActor` reports the actor missing, so a turn journaled before that
+point is counted, including one another host ran. The Placer attributes a turn by the harness name
 its `EXECUTION_START` recorded: a turn an `ExecRequest.harness` override sent to another harness is
 not counted, a name that aliases the same Placer in the registry is, and so is a turn it cannot
 attribute (no recorded name, a name this host does not serve, or a legacy turn with no
 `EXECUTION_START`), so an unknown history refuses rather than cold-creates. A journal that cannot be
 read refuses too. `Create` returns `substrate.ErrMemoryStateLost` (wrapping
 `api.ErrMemoryStateLost`, `FAILED_PRECONDITION` at the Sessions API), names the session, and creates
-nothing. An existing actor, running or suspended, is attached or resumed as before; a stateless
-session, or a memory-tier session with no started turn, is created as before. `Restore`
-(`Sessions.Resume`) returns the same error for every memory-tier session whose actor is gone,
+nothing. A stateless session, or a memory-tier session with no started turn, is created as before.
+
+The count cannot see a turn journaled after it. Host A finds no actor and counts no turn; host B
+then creates the actor, runs the session's first turn, and loses the actor; A's `CreateActor` then
+creates a replacement under the session's name, which every later `GetActor` finds. The actor's
+identity covers that case. A memory-tier incarnation carries the actor's UID
+(`ResourceMetadata.uid`, which substrate assigns at create and keeps across suspend and resume) as
+`api.Incarnation.ComputeInstance`, and each turn records it in `EXECUTION_START.compute_instance`.
+Before `Exec` journals a turn, the controller compares the UID of the actor it was placed on with the
+latest UID recorded for that harness since the session's `FORK` marker (attributed as above), reading
+the history its compare-and-swap append extends, so a turn another host journaled first is either
+compared or makes the append fail. `Resume` makes the same comparison before it re-drives a turn or
+records the resume. A different UID is `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`), names the
+session, and journals nothing; so is every later turn on either host. `runtime/substrate` refuses to
+place a memory-tier session on an actor that reports no UID. When `CreateActor` finds the name taken
+(`substrate.ErrActorExists`), `Create` attaches to that actor, so two hosts racing a session's first
+turn share one actor. The loser's turn fails at worst, never the session: `ABORTED` when its append
+loses, or `INTERNAL` naming the actor's state when it finds the actor mid-resume, and a retry
+attaches. `Restore`
+(`Sessions.Resume`) returns `ErrMemoryStateLost` for every memory-tier session whose actor is gone,
 whatever its journal records (a session interrupted on its first turn included), since the snapshot
-it would resume went with the actor; `GetActor` confirms the absence after the resume fails. The
-check only sees the tier the daemon is configured with, so it does not cover a mis-declared tier.
+it would resume went with the actor; `GetActor` confirms the absence after the resume fails.
+
+Limits of these checks:
+
+- The check only sees the tier the daemon is configured with, so it does not cover a mis-declared
+  tier.
+- The router reaches an actor by name, and the backend reads the UID when it looks. A turn that is
+  already placed when its actor is replaced runs on the replacement and records the old UID; the
+  next turn is refused, so one turn's output can come from a harness without the session's state.
+- Turns journaled before `compute_instance` existed recorded no UID and are not compared.
+- The refused replacement actor is not deleted: it keeps its name and any worker it holds until an
+  operator deletes it.
 
 Open questions, not implemented:
+
+TODO(spike): can the atenet-router target an actor by UID (or reject a request whose expected UID differs), so a turn already placed never reaches a replacement actor?
 
 TODO(spike): should the session store persist each session's substrate binding (atespace, template, declared tier) at its first placement, and refuse a turn when the daemon's configured binding differs?
 

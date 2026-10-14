@@ -224,6 +224,16 @@ func (p *Placer) controllerOpts(fence int64, sessionUID string, observer control
 	return opts
 }
 
+// computeInstance binds the controller to the compute instance inc was placed on, attributing a
+// recorded turn to this Placer as startedTurns does (ranHere), so the controller refuses compute that
+// replaced the instance this harness's earlier turns ran on. current is the registry name this
+// execution runs under.
+func (p *Placer) computeInstance(inc api.Incarnation, current string) controller.Option {
+	return controller.WithComputeInstance(inc.ComputeInstance, func(recorded string) bool {
+		return p.ranHere(recorded, current)
+	})
+}
+
 // WithStreamingModel supplies a model that reports partial output, which the controller relays as
 // ephemeral deltas. Without it a turn still runs; the caller just sees the finalized output only.
 func WithStreamingModel(fn controller.StreamFunc) Option { return func(p *Placer) { p.stream = fn } }
@@ -368,7 +378,8 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}
 	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer),
 		controller.WithStart(cfg.config, cfg.resumeFromSeq),
-		controller.WithHarness(cfg.harness))
+		controller.WithHarness(cfg.harness),
+		p.computeInstance(inc, cfg.harness))
 	c, err := controller.New(log, p.model, copts...)
 	if err != nil {
 		return inc, err
@@ -925,7 +936,8 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	if err := live.checkSuperseded(ctx); err != nil {
 		return err
 	}
-	copts := append(p.controllerOpts(fence, sessionUID, controller.Observer{}), controller.WithHarness(cfg.harness))
+	copts := append(p.controllerOpts(fence, sessionUID, controller.Observer{}), controller.WithHarness(cfg.harness),
+		p.computeInstance(inc, cfg.harness))
 	c, err := controller.New(log, p.model, copts...)
 	if err != nil {
 		return err

@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // lifecycleControl is a stateful ate-api Control double for the stateful fork path: it keeps one
@@ -34,6 +35,7 @@ type lifecycleControl struct {
 	completed         map[string]string // actor name -> uri of its most recent COMPLETED durable copy
 	calls             []string
 	completeOnSuspend bool
+	created           int // actors created so far, for server-assigned UIDs
 }
 
 func newLifecycleControl() *lifecycleControl {
@@ -62,7 +64,11 @@ func (l *lifecycleControl) CreateActor(_ context.Context, in *atepb.CreateActorR
 		st.LastAssignedGeneration = 1
 		l.completed[name] = uri
 	}
-	a := &atepb.Actor{Metadata: in.GetActor().GetMetadata(), ActorTemplate: in.GetActor().GetActorTemplate(), Status: st}
+	// Substrate assigns the UID at create; an actor created again under the name gets a new one.
+	md := proto.Clone(in.GetActor().GetMetadata()).(*atepb.ResourceMetadata)
+	l.created++
+	md.Uid = fmt.Sprintf("uid-%d", l.created)
+	a := &atepb.Actor{Metadata: md, ActorTemplate: in.GetActor().GetActorTemplate(), Status: st}
 	l.actors[name] = a
 	return a, nil
 }

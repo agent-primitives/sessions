@@ -52,7 +52,8 @@ func tagRef(t substrate.SnapshotID) *atepb.ObjectRef {
 }
 
 // CreateActor creates an actor from an ActorTemplate (atespace + name). With no source tag, substrate
-// seeds it from the template's golden snapshot when one is built.
+// seeds it from the template's golden snapshot when one is built. A name already taken is reported as
+// substrate.ErrActorExists, so the backend can attach to the actor another host just created.
 func (ad *Adapter) CreateActor(ctx context.Context, actor substrate.ActorRef, template substrate.ObjectRef) error {
 	_, err := ad.ctl.CreateActor(ctx, &atepb.CreateActorRequest{
 		Actor: &atepb.Actor{
@@ -60,6 +61,9 @@ func (ad *Adapter) CreateActor(ctx context.Context, actor substrate.ActorRef, te
 			ActorTemplate: templateRef(template),
 		},
 	})
+	if status.Code(err) == codes.AlreadyExists {
+		return fmt.Errorf("%w: %s/%s: %w", substrate.ErrActorExists, actor.Atespace, actor.Name, err)
+	}
 	return err
 }
 
@@ -150,12 +154,17 @@ func (ad *Adapter) DeleteTag(ctx context.Context, tag substrate.SnapshotID) erro
 // reported for diagnostics only: the backend reaches the harness through the atenet-router, which
 // resolves the actor's worker on every request, so nothing here is dialed. Substrate clears the
 // worker assignment whenever the actor holds no worker (SUSPENDED, PAUSED, CRASHED).
+//
+// UID is ResourceMetadata.uid, which substrate assigns when the actor is created and keeps across
+// every later update (suspend and resume included), so an actor created again under the same name
+// reports a different one.
 func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 	st := a.GetStatus()
 	return substrate.ActorInfo{
 		Status:   actorStatus(st.GetState()),
 		Worker:   st.GetWorkerAssignment().GetWorkerPod(),
 		Snapshot: heldSnapshot(st),
+		UID:      a.GetMetadata().GetUid(),
 	}
 }
 

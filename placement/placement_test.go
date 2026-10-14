@@ -419,14 +419,14 @@ func (c *cloningControl) SuspendActor(ctx context.Context, a substrate.ActorRef)
 
 func (c *cloningControl) ResumeActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	c.calls = append(c.calls, "resume:"+a.Name)
-	return substrate.ActorInfo{Status: substrate.StatusRunning}, nil
+	return substrate.ActorInfo{Status: substrate.StatusRunning, UID: "uid-" + a.Name}, nil
 }
 
 // GetActor reports every actor SUSPENDED holding the snapshot the last suspend produced, which is
 // what a stateful fork checks the parent against around its tag. It is not recorded in calls: the
 // backend's own tests pin that bracket, and these tests are about the Placer's ordering.
-func (c *cloningControl) GetActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot}, nil
+func (c *cloningControl) GetActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot, UID: "uid-" + a.Name}, nil
 }
 
 func (c *cloningControl) TagActor(_ context.Context, source substrate.ActorRef, tag substrate.SnapshotID) error {

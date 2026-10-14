@@ -373,3 +373,197 @@ func TestTurnRecordedByAnotherHostBeforeTheActorIsLostIsCounted(t *testing.T) {
 		t.Error("host A created an actor over the state host B's turn built")
 	}
 }
+
+// completedTurns counts the END events in a session's journal.
+func completedTurns(t *testing.T, store *sqlitelog.Store, sess string) int {
+	t.Helper()
+	recs, err := store.Session(sess).Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, r := range recs {
+		if r.Event.Kind == api.EventEnd {
+			n++
+		}
+	}
+	return n
+}
+
+// The interleaving the started-turn count cannot see. Host A's Create finds no actor and counts no
+// started turn. Before A's CreateActor, host B creates the actor, journals and runs the session's
+// first turn, and that actor is deleted out of band. A's CreateActor then succeeds, so an actor holding
+// none of B's state now sits under the session's name. Nothing deletes it, and every later Create
+// attaches to it without counting. B's turn recorded its actor's UID in EXECUTION_START, so A's turn and
+// every later one, on either host, is refused with FAILED_PRECONDITION and journals nothing.
+func TestActorCreatedAfterTheCountOverALostActorIsRefused(t *testing.T) {
+	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	hostA := newMemoryHost(t, ctl, store, echoagent.Harness{})
+	hostB := newMemoryHost(t, ctl, store, echoagent.Harness{})
+	sess := mustCreate(t, hostA)
+
+	var fired atomic.Bool
+	var hostBErr error
+	ctl.onCreate = func(actor string) {
+		// Only host A's CreateActor runs this: A has looked for the actor and counted no started turn.
+		if actor != sess || !fired.CompareAndSwap(false, true) {
+			return
+		}
+		hostBErr = errors.Join(execHi(hostB, sess),
+			ctl.DeleteActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: sess}))
+	}
+	errA := execHi(hostA, sess)
+	ctl.onCreate = nil
+	if hostBErr != nil {
+		t.Fatalf("host B's first turn: %v", hostBErr)
+	}
+	if !fired.Load() {
+		t.Fatal("host A never reached CreateActor")
+	}
+	ctl.mu.Lock()
+	_, replaced := ctl.status[sess]
+	ctl.mu.Unlock()
+	if !replaced {
+		t.Fatal("host A did not create the replacement actor this test is about")
+	}
+	if status.Code(errA) != codes.FailedPrecondition {
+		t.Fatalf("host A's turn on the replacement actor: want FailedPrecondition, got %v", errA)
+	}
+	head, err := store.Session(sess).Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, host := range map[string]v1.SessionsClient{"host A": hostA, "host B": hostB} {
+		err := execHi(host, sess)
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("%s's next turn on the replacement actor: want FailedPrecondition, got %v", name, err)
+		}
+		if msg := status.Convert(err).Message(); !strings.Contains(msg, sess) || !strings.Contains(msg, "replaced") {
+			t.Errorf("%s: error %q does not name the session and the replaced instance", name, msg)
+		}
+	}
+	if got, err := store.Session(sess).Head(); err != nil || got != head {
+		t.Errorf("journal head after the refused turns = %d (err %v), want %d: nothing may be journaled", got, err, head)
+	}
+	if n := completedTurns(t, store, sess); n != 1 {
+		t.Errorf("completed turns = %d, want only host B's", n)
+	}
+}
+
+// Two hosts racing a session's first turn on a healthy actor is ordinary, and the loser must be able
+// to retry: it gets OK or a retryable ABORTED, never FAILED_PRECONDITION, and afterwards both hosts
+// keep running turns on the one actor.
+func TestTwoHostsRacingTheFirstTurnKeepTheSessionHealthy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// arm installs the hook through which host B's first turn runs inside host A's placement.
+		arm func(ctl *actorControl, hook func(actor string))
+	}{
+		{
+			// B creates the actor and finishes its turn after A found no actor and before A's
+			// CreateActor, which then finds the name taken and attaches to B's actor.
+			name: "B creates the actor before A does",
+			arm:  func(ctl *actorControl, hook func(string)) { ctl.onCreate = hook },
+		},
+		{
+			// A creates the actor; B finds it, resumes it and finishes its turn before A's own
+			// resume returns and before A's turn is journaled.
+			name: "B runs on the actor A created",
+			arm:  func(ctl *actorControl, hook func(string)) { ctl.onResume = hook },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			hostA := newMemoryHost(t, ctl, store, echoagent.Harness{})
+			hostB := newMemoryHost(t, ctl, store, echoagent.Harness{})
+			sess := mustCreate(t, hostA)
+
+			var fired atomic.Bool
+			var hostBErr error
+			tc.arm(ctl, func(actor string) {
+				if actor != sess || !fired.CompareAndSwap(false, true) {
+					return
+				}
+				hostBErr = execHi(hostB, sess)
+			})
+			errA := execHi(hostA, sess)
+			ctl.onCreate, ctl.onResume = nil, nil
+			if !fired.Load() {
+				t.Fatal("host B's turn never ran inside host A's placement")
+			}
+			if hostBErr != nil {
+				t.Fatalf("host B's first turn: %v", hostBErr)
+			}
+			if code := status.Code(errA); code != codes.OK && code != codes.Aborted {
+				t.Fatalf("host A's racing first turn: want OK or Aborted, got %v", errA)
+			}
+			if status.Code(errA) == codes.Aborted {
+				if err := execHi(hostA, sess); err != nil {
+					t.Fatalf("host A's retry: %v", err)
+				}
+			}
+			if err := execHi(hostB, sess); err != nil {
+				t.Fatalf("host B's next turn: %v", err)
+			}
+			if n := completedTurns(t, store, sess); n != 3 {
+				t.Errorf("completed turns = %d, want 3 (B's, A's and B's next)", n)
+			}
+			ctl.mu.Lock()
+			created := ctl.created
+			ctl.mu.Unlock()
+			if created != 1 {
+				t.Errorf("actors created = %d, want 1: both hosts must share the session's actor", created)
+			}
+		})
+	}
+}
+
+// Resume of a suspended memory-tier session must not hand the session to an actor created under its
+// name after its own actor was lost: the snapshot it would restore went with the lost actor, and the
+// replacement holds none of the state. The recorded UID differs, so Resume is refused with
+// FAILED_PRECONDITION and journals nothing.
+func TestResumeOntoAReplacementActorIsRefused(t *testing.T) {
+	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	c := newMemoryHost(t, ctl, store, echoagent.Harness{})
+	ctx := context.Background()
+	sess := mustCreate(t, c)
+	if err := execHi(c, sess); err != nil {
+		t.Fatalf("first turn: %v", err)
+	}
+	if _, err := c.Suspend(ctx, &v1.SuspendRequest{Session: sess}); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	ref := substrate.ActorRef{Atespace: "space", Name: sess}
+	if err := ctl.DeleteActor(ctx, ref); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctl.CreateActor(ctx, ref, substrate.ObjectRef{Atespace: "space", Name: "mem"}); err != nil {
+		t.Fatal(err)
+	}
+	head, err := store.Session(sess).Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Resume(ctx, &v1.ResumeRequest{Session: sess})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("resume onto a replacement actor: want FailedPrecondition, got %v", err)
+	}
+	if got, err := store.Session(sess).Head(); err != nil || got != head {
+		t.Errorf("journal head after the refused resume = %d (err %v), want %d", got, err, head)
+	}
+}

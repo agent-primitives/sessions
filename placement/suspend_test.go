@@ -32,6 +32,7 @@ type suspendControl struct {
 	snapshotErr  error
 	afterSuspend func()
 	afterResume  func()
+	created      int // actors created so far, for server-assigned UIDs
 }
 
 type suspendActor struct {
@@ -41,6 +42,7 @@ type suspendActor struct {
 	snapshot  substrate.SnapshotID
 	sourceTag substrate.SnapshotID
 	template  substrate.ObjectRef
+	uid       string
 }
 
 type suspendSnapshot struct {
@@ -62,9 +64,9 @@ func newSuspendControl() *suspendControl {
 func (c *suspendControl) CreateActor(_ context.Context, ref substrate.ActorRef, template substrate.ObjectRef) error {
 	c.calls = append(c.calls, "create:"+ref.Name)
 	if _, exists := c.actors[ref]; exists {
-		return status.Error(codes.AlreadyExists, "actor exists")
+		return fmt.Errorf("%w: %s", substrate.ErrActorExists, ref.Name)
 	}
-	c.actors[ref] = &suspendActor{status: substrate.StatusSuspended, template: template}
+	c.actors[ref] = &suspendActor{status: substrate.StatusSuspended, template: template, uid: c.newUID()}
 	return nil
 }
 
@@ -134,6 +136,12 @@ func (c *suspendControl) DeleteActor(_ context.Context, ref substrate.ActorRef) 
 	return nil
 }
 
+// newUID mints the UID substrate assigns an actor at creation.
+func (c *suspendControl) newUID() string {
+	c.created++
+	return fmt.Sprintf("uid-%d", c.created)
+}
+
 func (c *suspendControl) GetActor(_ context.Context, ref substrate.ActorRef) (substrate.ActorInfo, error) {
 	a, exists := c.actors[ref]
 	if !exists {
@@ -143,7 +151,7 @@ func (c *suspendControl) GetActor(_ context.Context, ref substrate.ActorRef) (su
 }
 
 func (c *suspendControl) info(ref substrate.ActorRef, a *suspendActor) substrate.ActorInfo {
-	info := substrate.ActorInfo{Status: a.status, Snapshot: a.snapshot.Name}
+	info := substrate.ActorInfo{Status: a.status, Snapshot: a.snapshot.Name, UID: a.uid}
 	if a.worker {
 		info.Worker = ref.Name
 	}
@@ -187,7 +195,7 @@ func (c *suspendControl) CreateActorFromTag(_ context.Context, ref substrate.Act
 		return status.Error(codes.AlreadyExists, "actor exists")
 	}
 	c.actors[ref] = &suspendActor{
-		status: substrate.StatusSuspended, snapshot: source, sourceTag: tag, template: template,
+		status: substrate.StatusSuspended, snapshot: source, sourceTag: tag, template: template, uid: c.newUID(),
 	}
 	return nil
 }

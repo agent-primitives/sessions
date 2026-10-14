@@ -16,7 +16,9 @@ var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was supers
 // Create returns it rather than create fresh compute when the journal already records a started turn
 // on that harness (SessionSpec.StartedTurns). Restore returns it for any such session whose compute
 // no longer exists, whatever the journal records, since the snapshot it would restore went with the
-// compute. The journal cannot rebuild the state (I4), so fresh compute would continue the journal with
+// compute. The host returns it when the compute a turn or a Resume was placed on reports another
+// Incarnation.ComputeInstance than the journal recorded: the compute was replaced under the same
+// name. The journal cannot rebuild the state (I4), so fresh compute would continue the journal with
 // a harness that has forgotten it. The caller cannot fix this by retrying; the session service
 // reports it as FAILED_PRECONDITION.
 var ErrMemoryStateLost = errors.New("runtime: session's in-memory harness state is lost")
@@ -100,6 +102,14 @@ type Incarnation struct {
 	// sandbox (substrate: ate-target-actor); a backend that hands out a direct address leaves it
 	// empty. It is routing, not authentication: nothing here proves the caller's identity.
 	CallMetadata map[string]string
+	// ComputeInstance is an opaque identity of the compute instance behind ID that differs between two
+	// instances reusing one ID (substrate: the actor's server-assigned UID, while ID is the actor
+	// name). A backend sets it only when the harness keeps its state in that instance's memory
+	// (REQUIRES_MEMORY_SNAPSHOT). The host records it in the turn's EXECUTION_START and refuses a turn
+	// or a Resume placed on an instance other than the latest one the journal recorded for that
+	// harness since the session's FORK marker (ErrMemoryStateLost): a replacement holds none of the
+	// state. Empty records nothing and skips the check.
+	ComputeInstance string
 }
 
 // SessionSpec is what a Runtime needs to create an incarnation.

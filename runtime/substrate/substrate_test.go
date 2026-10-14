@@ -36,6 +36,10 @@ type mockControl struct {
 	// resumeErr, when set, fails ResumeActor; getErr fails GetActor.
 	resumeErr error
 	getErr    error
+	// uids is each actor's server-assigned UID, minted the first time the actor exists and dropped
+	// when it is deleted, so an actor created again under a name reports a new one.
+	uids    map[string]string
+	created int
 }
 
 // exists records an actor at a status, so GetActor reports it as already placed.
@@ -44,12 +48,25 @@ func (m *mockControl) exists(name string, st substrate.ActorStatus) {
 		m.actors = map[string]substrate.ActorStatus{}
 	}
 	m.actors[name] = st
+	m.uid(name)
+}
+
+// uid returns the actor's UID, minting one for an actor that has none yet.
+func (m *mockControl) uid(name string) string {
+	if m.uids == nil {
+		m.uids = map[string]string{}
+	}
+	if _, ok := m.uids[name]; !ok {
+		m.created++
+		m.uids[name] = fmt.Sprintf("uid-%s-%d", name, m.created)
+	}
+	return m.uids[name]
 }
 
 func (m *mockControl) CreateActor(ctx context.Context, a substrate.ActorRef, _ substrate.ObjectRef) error {
 	m.calls = append(m.calls, "create:"+a.Name)
 	if _, ok := m.actors[a.Name]; ok {
-		return fmt.Errorf("actor %q already exists", a.Name)
+		return fmt.Errorf("%w: %q", substrate.ErrActorExists, a.Name)
 	}
 	m.exists(a.Name, substrate.StatusRunning)
 	return nil
@@ -60,7 +77,11 @@ func (m *mockControl) ResumeActor(ctx context.Context, a substrate.ActorRef) (su
 		return substrate.ActorInfo{}, m.resumeErr
 	}
 	m.exists(a.Name, substrate.StatusRunning)
-	return m.info, nil
+	info := m.info
+	if info.UID == "" {
+		info.UID = m.uid(a.Name)
+	}
+	return info, nil
 }
 func (m *mockControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (string, error) {
 	if err := ctx.Err(); err != nil {
@@ -86,6 +107,7 @@ func (m *mockControl) DeleteActor(ctx context.Context, a substrate.ActorRef) err
 	}
 	m.calls = append(m.calls, "delete:"+a.Name)
 	delete(m.actors, a.Name)
+	delete(m.uids, a.Name)
 	return nil
 }
 func (m *mockControl) GetActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -97,10 +119,10 @@ func (m *mockControl) GetActor(ctx context.Context, a substrate.ActorRef) (subst
 		return substrate.ActorInfo{}, m.getErr
 	}
 	if st, ok := m.actors[a.Name]; ok {
-		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name]}, nil
+		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], UID: m.uid(a.Name)}, nil
 	}
 	if m.status != substrate.StatusUnknown { // canned state for the suspend/restore cases
-		return substrate.ActorInfo{Status: m.status, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name]}, nil
+		return substrate.ActorInfo{Status: m.status, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], UID: m.uid(a.Name)}, nil
 	}
 	return substrate.ActorInfo{}, substrate.ErrActorNotFound
 }
@@ -707,4 +729,120 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 			}
 		})
 	}
+}
+
+// For a REQUIRES_MEMORY_SNAPSHOT harness the incarnation carries the actor's UID as ComputeInstance on
+// every path that hands one out (create, attach, resume of a suspended actor, Restore), so the host can
+// tell the actor apart from one created later under the same name. A stateless harness's state is in
+// the journal, so its incarnation carries none.
+func TestIncarnationCarriesTheActorUIDForAMemoryHarness(t *testing.T) {
+	ctx := context.Background()
+	m := &mockControl{info: running("worker-a")}
+	mem := newMemoryBackend(m)
+	created, err := mem.Create(ctx, &api.SessionSpec{SessionUID: "sess-x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := m.uids["sess-x"]
+	if uid == "" || created.ComputeInstance != uid {
+		t.Fatalf("created incarnation ComputeInstance=%q, want the actor's UID %q", created.ComputeInstance, uid)
+	}
+	attached, err := mem.Create(ctx, &api.SessionSpec{SessionUID: "sess-x"})
+	if err != nil || attached.ComputeInstance != uid {
+		t.Fatalf("attach: ComputeInstance=%q err=%v, want %q", attached.ComputeInstance, err, uid)
+	}
+	m.exists("sess-x", substrate.StatusSuspended)
+	resumed, err := mem.Create(ctx, &api.SessionSpec{SessionUID: "sess-x"})
+	if err != nil || resumed.ComputeInstance != uid {
+		t.Fatalf("resume of a suspended actor: ComputeInstance=%q err=%v, want %q", resumed.ComputeInstance, err, uid)
+	}
+	restored, err := mem.Restore(ctx, api.SnapshotRef{Local: "sess-x", Memory: true})
+	if err != nil || restored.ComputeInstance != uid {
+		t.Fatalf("restore: ComputeInstance=%q err=%v, want %q", restored.ComputeInstance, err, uid)
+	}
+
+	stateless, err := newBackend(&mockControl{info: running("worker-a")}).Create(ctx, &api.SessionSpec{SessionUID: "sess-y"})
+	if err != nil || stateless.ComputeInstance != "" {
+		t.Fatalf("stateless incarnation ComputeInstance=%q err=%v, want none", stateless.ComputeInstance, err)
+	}
+}
+
+// uidless reports every actor without a UID, as a control client that does not read it would.
+type uidless struct{ *mockControl }
+
+func (u uidless) ResumeActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
+	info, err := u.mockControl.ResumeActor(ctx, a)
+	info.UID = ""
+	return info, err
+}
+
+func (u uidless) GetActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
+	info, err := u.mockControl.GetActor(ctx, a)
+	info.UID = ""
+	return info, err
+}
+
+// A memory-tier session is never placed on an actor that reports no UID: the host could not tell it
+// from a replacement, so the guard against continuing on lost state would be off without anyone
+// noticing. A stateless harness does not need the UID and is placed as before.
+func TestMemoryHarnessRefusesAnActorWithoutAUID(t *testing.T) {
+	ctx := context.Background()
+	_, err := newMemoryBackend(uidless{&mockControl{info: running("worker-a")}}).Create(ctx, &api.SessionSpec{SessionUID: "sess-x"})
+	if err == nil || !strings.Contains(err.Error(), "reported no UID") {
+		t.Fatalf("memory harness on a UID-less actor: err=%v, want a refusal naming the missing UID", err)
+	}
+	stateless := substrate.New(uidless{&mockControl{info: running("worker-a")}}, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "echo"},
+		api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}})
+	if _, err := stateless.Create(ctx, &api.SessionSpec{SessionUID: "sess-x"}); err != nil {
+		t.Fatalf("stateless harness on a UID-less actor: %v", err)
+	}
+}
+
+// Two hosts place a new session's first turn at once. Both find no actor; the other host's
+// CreateActor wins, so this one's reports ErrActorExists. Create attaches to the winner's actor
+// instead of failing the turn, and reports that actor's UID.
+func TestCreateAttachesWhenAnotherHostCreatedTheActorFirst(t *testing.T) {
+	m := &mockControl{info: running("worker-a")}
+	var once bool
+	m.afterGet = func(name string) {
+		if !once {
+			once = true
+			m.exists(name, substrate.StatusRunning) // the other host's CreateActor and ResumeActor
+		}
+	}
+	inc, err := newMemoryBackend(m).Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x"})
+	if err != nil {
+		t.Fatalf("Create after losing the create race: %v", err)
+	}
+	if want := []string{"get:sess-x", "create:sess-x", "get:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("calls=%v want %v", m.calls, want)
+	}
+	if inc.ComputeInstance != m.uids["sess-x"] {
+		t.Fatalf("ComputeInstance=%q, want the winner's actor UID %q", inc.ComputeInstance, m.uids["sess-x"])
+	}
+
+	// The winner's actor can be gone again by the time this host looks; that is reported, not retried.
+	m = &mockControl{info: running("worker-a")}
+	once = false
+	m.afterGet = func(name string) {
+		if !once {
+			once = true
+			m.exists(name, substrate.StatusRunning)
+		}
+	}
+	_, err = newMemoryBackend(goneOnReread{m}).Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x"})
+	if !errors.Is(err, substrate.ErrActorExists) {
+		t.Fatalf("taken then gone: err=%v, want ErrActorExists", err)
+	}
+}
+
+// goneOnReread deletes the actor just before a GetActor that follows a CreateActor answers, so
+// Create's re-read after ErrActorExists finds nothing.
+type goneOnReread struct{ *mockControl }
+
+func (g goneOnReread) GetActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
+	if slices.Contains(g.calls, "create:"+a.Name) {
+		delete(g.actors, a.Name)
+	}
+	return g.mockControl.GetActor(ctx, a)
 }

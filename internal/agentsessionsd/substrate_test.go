@@ -420,7 +420,7 @@ func (f *fakeControl) ResumeActor(_ context.Context, a substrate.ActorRef) (subs
 		return substrate.ActorInfo{}, substrate.ErrActorNotFound
 	}
 	f.actors[a.Name] = substrate.StatusRunning
-	return substrate.ActorInfo{Status: substrate.StatusRunning, Worker: "worker-0"}, nil
+	return substrate.ActorInfo{Status: substrate.StatusRunning, Worker: "worker-0", UID: "uid-" + a.Name}, nil
 }
 
 func (f *fakeControl) SuspendActor(_ context.Context, a substrate.ActorRef) (string, error) {
@@ -446,7 +446,7 @@ func (f *fakeControl) GetActor(_ context.Context, a substrate.ActorRef) (substra
 	if !ok {
 		return substrate.ActorInfo{}, substrate.ErrActorNotFound
 	}
-	return substrate.ActorInfo{Status: st}, nil
+	return substrate.ActorInfo{Status: st, UID: "uid-" + a.Name}, nil
 }
 
 func selfSignedCert(t *testing.T, host string) (certPEM, keyPEM []byte) {

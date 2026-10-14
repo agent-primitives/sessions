@@ -63,12 +63,19 @@ type ActorInfo struct {
 	// changes on every suspend, so comparing it against a recorded handle tells whether the actor
 	// still holds the snapshot a caller took.
 	Snapshot string
+	// UID is the actor's server-assigned identity (substrate ResourceMetadata.uid). It is fixed for the
+	// actor's lifetime, suspends and resumes included, and differs for an actor created later under the
+	// same name, which is how the backend tells a replacement apart. A REQUIRES_MEMORY_SNAPSHOT harness
+	// is placed only on an actor that reports one.
+	UID string
 }
 
 // ControlClient is the subset of agent-substrate's ateapi.Control gRPC that the backend uses. A
 // real substrate deployment implements this over pkg/proto/ateapipb; keeping it an interface here
 // is what keeps agentsessions free of a substrate dependency.
 type ControlClient interface {
+	// CreateActor creates a SUSPENDED actor holding no snapshot of its own. A name that is already
+	// taken must be reported as (or wrap) ErrActorExists.
 	CreateActor(ctx context.Context, actor ActorRef, template ObjectRef) error
 	// ResumeActor schedules the actor onto a worker. Substrate picks the source itself: the actor's
 	// own snapshot if it has one, else the template's golden snapshot (a freshly started harness),
@@ -85,6 +92,11 @@ type ControlClient interface {
 // not exist. It is a sentinel rather than a transport code so the seam stays neutral: the backend
 // decides "create it" vs "attach to it" without knowing that the client underneath speaks gRPC.
 var ErrActorNotFound = errors.New("substrate: actor not found")
+
+// ErrActorExists is what a ControlClient must return (or wrap) from CreateActor when an actor of that
+// name already exists. Create treats it as another host having placed the session first, and
+// attaches to that actor instead of failing the turn.
+var ErrActorExists = errors.New("substrate: actor already exists")
 
 // ErrTagExists is what a SnapshotCloner must return (or wrap) from TagActor when a tag of that name
 // already exists, finished or left pending by an earlier attempt. It tells the backend the tag is
@@ -197,6 +209,15 @@ func (b *Backend) ref(name string) ActorRef { return ActorRef{Atespace: b.atespa
 //     from the parent's snapshot and resumed before it was ever handed out.
 //   - SUSPENDED — resume, which restores the actor's own snapshot, so its RAM is what comes back.
 //
+// When CreateActor finds the name taken (ErrActorExists), another host placed the session between
+// this call's GetActor and its CreateActor, so Create attaches to or resumes that actor as above.
+//
+// For a REQUIRES_MEMORY_SNAPSHOT harness the incarnation carries the actor's UID as ComputeInstance,
+// and the host refuses the turn if an earlier turn recorded another one (api.ErrMemoryStateLost).
+// That catches an actor created under the session's name after the actor its turns ran on was lost:
+// a host that counted no started turns can create one before another host's first turn is journaled,
+// and the count above cannot see that turn.
+//
 // The distinction matters most for a REQUIRES_MEMORY_SNAPSHOT harness: recreating an actor that
 // already holds live state would silently discard exactly the state fork and suspend exist to carry,
 // and the harness never rebuilds it from Start.History (I4).
@@ -221,19 +242,8 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	}
 
 	ref := b.ref(sessionUID)
-	switch info, err := b.ctl.GetActor(ctx, ref); {
-	case err == nil && info.Status == StatusRunning:
-		return b.incarnation(sessionUID, info)
-	case err == nil && info.Status == StatusSuspended:
-		info, err := b.ctl.ResumeActor(ctx, ref) // restores the actor's own snapshot
-		if err != nil {
-			return api.Incarnation{}, fmt.Errorf("substrate: resume suspended actor: %w", err)
-		}
-		return b.incarnation(sessionUID, info)
-	case err == nil:
-		return api.Incarnation{}, fmt.Errorf("substrate: actor %q is in state %v, not placeable", ref.Name, info.Status)
-	case !errors.Is(err, ErrActorNotFound):
-		return api.Incarnation{}, fmt.Errorf("substrate: get actor: %w", err)
+	if inc, found, err := b.attach(ctx, ref); found || err != nil {
+		return inc, err
 	}
 
 	// The actor is gone (deleted out of band, or the backend now points at another atespace) and no
@@ -258,6 +268,16 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 		"atespace", ref.Atespace,
 	)
 	if err := b.ctl.CreateActor(ctx, ref, b.template); err != nil {
+		if errors.Is(err, ErrActorExists) {
+			// Another host created the actor after this call looked. Use it as that host does; the
+			// host's compute-instance check still refuses it if it replaced a lost actor.
+			createFinished(nil, "actor_exists", true)
+			inc, found, aerr := b.attach(ctx, ref)
+			if !found && aerr == nil {
+				aerr = fmt.Errorf("substrate: actor %s/%s already existed at create and is now gone: %w", ref.Atespace, ref.Name, err)
+			}
+			return inc, aerr
+		}
 		createFinished(err, "error_kind", "create_actor_failed")
 		return api.Incarnation{}, fmt.Errorf("substrate: create actor: %w", err)
 	}
@@ -275,6 +295,28 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	resumeFinished(nil, "actor_status", info.Status)
 	inc, err = b.incarnation(sessionUID, info)
 	return inc, err
+}
+
+// attach returns the incarnation of the session's existing actor: a RUNNING actor as it is, a
+// SUSPENDED one after resuming it, which restores its own snapshot. found is false, with no error,
+// when the actor does not exist.
+func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation, found bool, err error) {
+	info, err := b.ctl.GetActor(ctx, ref)
+	switch {
+	case errors.Is(err, ErrActorNotFound):
+		return api.Incarnation{}, false, nil
+	case err != nil:
+		return api.Incarnation{}, false, fmt.Errorf("substrate: get actor: %w", err)
+	case info.Status == StatusRunning:
+	case info.Status == StatusSuspended:
+		if info, err = b.ctl.ResumeActor(ctx, ref); err != nil {
+			return api.Incarnation{}, true, fmt.Errorf("substrate: resume suspended actor: %w", err)
+		}
+	default:
+		return api.Incarnation{}, true, fmt.Errorf("substrate: actor %q is in state %v, not placeable", ref.Name, info.Status)
+	}
+	inc, err = b.incarnation(ref.Name, info)
+	return inc, true, err
 }
 
 // Snapshot suspends the actor: RAM+disk snapshot to external storage, worker freed. Only the
@@ -625,9 +667,22 @@ const TargetActorHeader = "ate-target-actor"
 // and CallMetadata names the actor: substrate removed the direct pod-IP ingress, so the router is the
 // only path to the harness. An actor that is not RUNNING after a resume is a loud error rather than a
 // handle the Placer would dial only to have the router resume it behind the backend's back.
+//
+// For a REQUIRES_MEMORY_SNAPSHOT harness the actor's UID becomes the incarnation's ComputeInstance,
+// which the host records and compares per turn; an actor that reports no UID is refused, since the
+// host could not tell it from a replacement. A stateless harness's state is in the journal, so a
+// replaced actor is fine and no instance is set.
 func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, error) {
 	if info.Status != StatusRunning {
 		return api.Incarnation{}, fmt.Errorf("substrate: actor %q is %v after resume, want running", uid, info.Status)
+	}
+	instance := ""
+	if b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
+		if info.UID == "" {
+			return api.Incarnation{}, fmt.Errorf("substrate: actor %s/%s reported no UID, so a replacement could not be told apart "+
+				"from the actor that holds the session's in-RAM state", b.atespace, uid)
+		}
+		instance = info.UID
 	}
 	return api.Incarnation{
 		ID:           uid,
@@ -635,6 +690,9 @@ func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, erro
 		Address:      b.router,
 		CallMetadata: map[string]string{TargetActorHeader: b.atespace + "/" + uid},
 		Runtime:      "substrate",
+		// The router reaches the actor by name, so this records which actor the name resolved to
+		// when the backend looked, not which one the router reaches later.
+		ComputeInstance: instance,
 	}, nil
 }
 

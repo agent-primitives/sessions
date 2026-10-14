@@ -28,6 +28,7 @@ type fakeControl struct {
 	resumed    *atepb.Actor // returned by ResumeActor when set; actor otherwise
 	getErr     error
 	tagErr     error
+	createErr  error
 }
 
 func (f *fakeControl) CreateActor(_ context.Context, in *atepb.CreateActorRequest, _ ...grpc.CallOption) (*atepb.Actor, error) {
@@ -35,6 +36,9 @@ func (f *fakeControl) CreateActor(_ context.Context, in *atepb.CreateActorReques
 	f.calls = append(f.calls, "create:"+a.GetMetadata().GetAtespace()+"/"+a.GetMetadata().GetName()+
 		":tmpl="+a.GetActorTemplate().GetAtespace()+"/"+a.GetActorTemplate().GetName())
 	f.lastCreate = a
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 	return a, nil
 }
 func (f *fakeControl) ResumeActor(_ context.Context, in *atepb.ResumeActorRequest, _ ...grpc.CallOption) (*atepb.ResumeActorResponse, error) {
@@ -76,7 +80,7 @@ func (f *fakeControl) DeleteTag(_ context.Context, in *atepb.DeleteTagRequest, _
 
 func runningActor() *atepb.Actor {
 	return &atepb.Actor{
-		Metadata: &atepb.ResourceMetadata{Atespace: "space", Name: "sess-x"},
+		Metadata: &atepb.ResourceMetadata{Atespace: "space", Name: "sess-x", Uid: "0b5c3c56-6d5e-4f0e-9b1a-2f4d8c1e7a90"},
 		Status: &atepb.ActorStatus{
 			State: atepb.ActorState_ACTOR_STATE_RUNNING,
 			WorkerAssignment: &atepb.WorkerAssignment{
@@ -119,6 +123,43 @@ func TestCreateMapsTemplate(t *testing.T) {
 	}
 }
 
+// A name another caller already took is reported as substrate.ErrActorExists, keeping the gRPC
+// error, so the backend can attach to that actor; any other create error is returned unchanged.
+func TestCreateReportsATakenName(t *testing.T) {
+	ref := substrate.ActorRef{Atespace: "space", Name: "sess-x"}
+	tmpl := substrate.ObjectRef{Atespace: "space", Name: "echo"}
+	taken := status.Error(codes.AlreadyExists, "actor space/sess-x already exists")
+	err := FromClient(&fakeControl{createErr: taken}).CreateActor(context.Background(), ref, tmpl)
+	if !errors.Is(err, substrate.ErrActorExists) || !errors.Is(err, taken) {
+		t.Fatalf("taken name: err=%v, want ErrActorExists wrapping the AlreadyExists error", err)
+	}
+	other := status.Error(codes.FailedPrecondition, "template has no golden snapshot")
+	err = FromClient(&fakeControl{createErr: other}).CreateActor(context.Background(), ref, tmpl)
+	if errors.Is(err, substrate.ErrActorExists) || !errors.Is(err, other) {
+		t.Fatalf("other create error: err=%v, want it unchanged", err)
+	}
+}
+
+// GetActor reports the actor's server-assigned UID, which an actor created again under the same name
+// does not share.
+func TestGetReportsTheActorUID(t *testing.T) {
+	first := runningActor()
+	again := runningActor()
+	again.Metadata.Uid = "7f1e2d3c-4b5a-4968-8776-655443322110"
+	ref := substrate.ActorRef{Atespace: "space", Name: "sess-x"}
+	a, err := FromClient(&fakeControl{actor: first}).GetActor(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := FromClient(&fakeControl{actor: again}).GetActor(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.UID != first.GetMetadata().GetUid() || b.UID != again.GetMetadata().GetUid() || a.UID == b.UID {
+		t.Fatalf("UIDs = %q and %q, want the two actors' distinct metadata UIDs", a.UID, b.UID)
+	}
+}
+
 // ResumeActor reports the actor's state, its worker (diagnostics only) and the snapshot it holds.
 func TestResumeMapsActorState(t *testing.T) {
 	f := &fakeControl{actor: runningActor()}
@@ -130,6 +171,7 @@ func TestResumeMapsActorState(t *testing.T) {
 		Status:   substrate.StatusRunning,
 		Worker:   "echo-harness-7d9f-abcde",
 		Snapshot: "gs://b/atespaces/space/actors/u1/snapshots/s1",
+		UID:      "0b5c3c56-6d5e-4f0e-9b1a-2f4d8c1e7a90",
 	}
 	if info != want {
 		t.Fatalf("info=%+v want %+v", info, want)

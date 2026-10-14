@@ -47,6 +47,8 @@ spec:
               value: "atenet-router.ate-system.svc:80"
             - name: HARNESS_IMAGE # digest-pinned harnessnode image under test
               value: "HARNESS_IMAGE_PLACEHOLDER"
+            - name: APPROVAL_HARNESS_IMAGE # test-only fixture image under test
+              value: "APPROVAL_HARNESS_IMAGE_PLACEHOLDER"
             - name: ECHO_SANDBOX_CLASS # microvm (default, CI) or gvisor (hosts without KVM)
               value: "ECHO_SANDBOX_CLASS_PLACEHOLDER"
             - name: COUNTER_SANDBOX_CLASS # microvm (default, CI) or gvisor (hosts without KVM)

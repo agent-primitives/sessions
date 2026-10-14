@@ -45,6 +45,7 @@ echo "=== running conformance tests matching /${TEST_RUN}/ (echo: ${ECHO_SANDBOX
 "${KUBECTL[@]}" delete job "${JOB}" -n "${NAMESPACE}" --ignore-not-found --wait=true
 
 sed -e "s#E2E_IMAGE#${IMAGE}#" -e "s#E2E_RUN_PLACEHOLDER#${TEST_RUN}#" \
+	-e "s#APPROVAL_HARNESS_IMAGE_PLACEHOLDER#${APPROVAL_HARNESS_IMAGE:-}#" \
 	-e "s#HARNESS_IMAGE_PLACEHOLDER#${HARNESS_IMAGE}#" \
 	-e "s#ECHO_SANDBOX_CLASS_PLACEHOLDER#${ECHO_SANDBOX_CLASS}#" \
 	-e "s#COUNTER_SANDBOX_CLASS_PLACEHOLDER#${COUNTER_SANDBOX_CLASS}#" \

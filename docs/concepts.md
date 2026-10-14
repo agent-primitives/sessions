@@ -71,20 +71,47 @@ enumerate a tenant it did not ask for. Results are newest first and paged with a
 the last `(create time, uid)` seen, so a session created while a caller walks pages neither skips
 nor duplicates a row.
 
-Status fields reflect journal evidence:
+The cursor and lifecycle status are derived rather than caller-writable:
 
-- `last_seq` is `MAX(seq)` over the log, so the cursor a listing reports is always the log's own.
-- `exec_state` reports unanswered approvals on `GetSession` and `ListSessions`; otherwise it is
-  `PENDING` for an empty history and `COMPLETED` for a nonempty one. It is not a live probe.
-  See [How exec_state is derived](#how-exec_state-is-derived) for the rules.
+- `last_seq` is maintained with each append and backfilled from the existing log, so the cursor
+  a listing reports is always the log's own.
 - `compute_state` is a projection maintained in the same transaction that appends an event, since an
   event body is an opaque blob no query can filter on. It records **what the log implies about
-  compute**, not a live probe of the backend. Any ordinary event moves a session to `LIVE`, because
-  something had to be running to produce it; `SUSPEND` and `FORK` land it `COLD`, and `RESUME`
+  compute**, not a live probe of the backend. Execution activity implies `LIVE`; `SUSPEND` and
+  `FORK` land it `COLD`, and `RESUME`
   returns it to `LIVE`. A session that has been created but never run stays `NONE`, which is what
   makes it visible in a listing before it has any compute. `LIVE` goes stale if the process behind
   it later died. A backend that can enumerate its own incarnations is the thing that would make this
-  exact; reconciling against the runtime is not implemented.
+  exact; reconciling against the runtime is not implemented. Approval requests/decisions do not
+  themselves move compute: a request repair or pending query cannot prove that a snapshot committed.
+- `pending_approval` is an output-only tuple projected inside the append transaction. Metadata,
+  correlation and `last_seq` are read atomically; rendering does not decode the journal. Later
+  appends do not change an earlier captured response, including one with a zero cursor.
+
+### How exec_state is derived
+
+Every Session reply — Create, Get, List, Fork, Resume, Suspend, Approve and Exec frames — uses the
+same captured projection. No events reports `PENDING`. A valid owned unanswered host request in
+the latest execution (ordered by first-seen non-lifecycle identity) reports `AWAITING` and exposes
+`pending_approval`. Requests and decisions match execution ID, call ID and the request's journal
+sequence. Errors and ordinary lifecycle markers do not resolve it; a decision, END, or newer
+execution removes the pending reference.
+
+Executions first seen before a child's latest FORK marker are inherited and excluded from reporting,
+even if their gated call/request arrives after the marker. A genuinely new child execution can
+report its own request. This ownership filter is reporting only; controller admission, decisions
+and recovery continue to validate the journal independently.
+
+Malformed approval-bearing evidence anywhere in the captured history suppresses actionable references,
+matching strict inspection. Malformed nongated histories do not. A v2→v3 backfill isolates an
+undecodable session, preserving its cursor/metadata but permanently withholding references while
+healthy neighbors remain readable. SQL faults abort the migration. Queries are not integrity checks:
+raw journal reads/Verify and strict commands still detect undecodable evidence.
+
+Other histories retain the compatibility `COMPLETED` fallback, including ordinary/legacy interrupted
+turns and decided calls without receipts. That status does not prove completion or admission: an
+unreceipted owned call still blocks new input. Execution and compute axes are independent; recovery
+uses the journal rather than trusting an enum.
 
 A fork inherits the parent's `project`, `harness` and `model`, because those define the workload and
 a branch of a run is still that run. It does **not** inherit the parent's name. A name is a label the
@@ -107,29 +134,6 @@ provisioning, or journal mutation. Leave it unset to fork; children do not inher
 identity. This does not change `Session.identity`, which remains recorded provenance rather than
 authorization (see [security posture](security.md)).
 
-### How exec_state is derived
-
-- `GetSession` and `ListSessions` use only committed records through the returned `last_seq`,
-  never a live worker probe. Poll these RPCs for approval state.
-- The latest execution is the last nonempty `execution_id` first seen on a non-`LIFECYCLE` event.
-  Later records for older IDs do not select them again.
-- `EXEC_AWAITING` means that latest execution is unfinished and has an unanswered
-  `APPROVAL_REQUEST`. A request needs an approval body and nonempty execution and tool-call IDs;
-  missing IDs or bodies do not count.
-- A later `APPROVAL_RESULT` with a result body and matching `execution_id` and `tool_call_id`
-  answers the request, whether approved or denied. A decision before the request does not.
-- `END` finishes the execution. `ERROR` and `LIFECYCLE` neither answer requests nor finish it.
-- Histories with execution IDs but no `EXECUTION_START` marker follow the same rules. Otherwise,
-  empty histories report `EXEC_PENDING` and nonempty ones `EXEC_COMPLETED`, including ID-less
-  histories and interrupted turns without unanswered approvals.
-- `CreateSession`, `Fork`, `Suspend`, `Resume` and Exec's initial session frame use only that
-  empty/nonempty fallback, without reading approval evidence.
-- Copied fork requests are reporting evidence in the child, not permission to execute inherited
-  intent. Reporting implements neither an approval gate nor a decision RPC; `REQUIRES_APPROVAL`
-  tool execution remains unsupported.
-- There is no unique request ID. If a `tool_call_id` is reused within one execution, a stale
-  duplicate decision cannot be distinguished from an answer to the new request.
-
 ## Event and the typed log
 
 The session log is a sequence of `Event`s. An event is not an opaque blob: it is typed, so provenance,
@@ -143,7 +147,7 @@ cost, audit, and tool approval are first-class rather than parsed out of text af
 | `MODEL_CALL` | A call to a model was made (records the model, params, and an input hash for the replay check). |
 | `OUTPUT` | Assistant output (a delta or a full message). |
 | `TOOL_CALL` / `TOOL_RESULT` | A tool invocation and its outcome. Aligned with an MCP tool call. |
-| `APPROVAL_REQUEST` / `APPROVAL_RESULT` | A human or policy approval gate around a tool. |
+| `APPROVAL_REQUEST` / `APPROVAL_RESULT` | A host-owned request and explicit caller decision around a stateless tool call. |
 | `USAGE` | Per-call token and cost accounting. |
 | `LIFECYCLE` | A compute or session transition (`SUSPEND`, `RESUME`, `FORK`, `BASELINE`, `CANCEL`). |
 | `END` | The terminal state of one execution (`COMPLETED` / `FAILED` / `CANCELED`). |
@@ -182,9 +186,12 @@ fails closed. `Sessions.Replay` still streams stored records without running or 
 `Sessions.Resume` routes an interrupted turn to its recorded registry entry, including that entry's
 backend, model and tool executor. An unserved recorded name or mismatched version is
 `FAILED_PRECONDITION`, never fallback to another harness. Restore the recorded entry/version before
-retrying. A new Exec can supersede an interrupted turn and records its own invocation identity.
+retrying. A new Exec can supersede an ordinary interrupted turn and records its own invocation
+identity; an owned approval call blocks new inputs until its receipt commits.
 An override is still per-turn: session metadata is unchanged and a later Exec with no override uses
-the stored default. Completed Resume, Suspend and Fork retain their existing session-default routing.
+the stored default. Completed Resume, ordinary Suspend and Fork retain their existing session-default
+routing. An unreceipted approval's Suspend uses its recorded invocation route, including retry after
+a failed automatic snapshot or append.
 
 Older start markers without a name fall back to the session's stored harness; those without a
 version retain unversioned behavior. These rules apply independently if only one field is missing,

@@ -115,6 +115,13 @@ jobs:
         # the digest-pinned reference, which substrate requires of an ActorTemplate image.
         run: echo "HARNESS_IMAGE=$(ko build ./cmd/harnessnode)" >> "$GITHUB_ENV"
 
+      - name: Build the test-only approval harness image
+        working-directory: integrations/substrate
+        # ko otherwise misses the root's substrate-compatible base image in the nested module.
+        env:
+          KO_CONFIG_PATH: ../../.ko.yaml
+        run: echo "APPROVAL_HARNESS_IMAGE=$(ko build ./e2e/testdata/approval-harness)" >> "$GITHUB_ENV"
+
       - name: Deploy the micro-VM sandbox class
         # Before any tier: both run on it. run-microvm-demo-kind stages the (cached) kata assets into
         # the in-cluster object store and installs the cluster-scoped `microvm` SandboxConfig our
@@ -133,6 +140,10 @@ jobs:
           sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-microvm#${ATEOM_MV_IMG}#" \
               deploy/substrate/echo-microvm-workerpool.yaml | kubectl --context kind-kind apply -f -
           hack/wait-worker-pool.sh echo-microvm
+          ATEOM_IMG="$(cd _substrate && ko build ./cmd/ateom-gvisor)"
+          sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor#${ATEOM_IMG}#" \
+              deploy/substrate/approval-actortemplate.yaml | kubectl --context kind-kind apply -f -
+          hack/wait-worker-pool.sh approval-harness
 
       - name: Build the conformance test binary image
         # `go test -c` rather than ko: this is a test binary, and ko builds main packages. Static
@@ -150,7 +161,7 @@ jobs:
         # session while the turn runs and succeed promptly once it returns.
         env:
           ECHO_SANDBOX_CLASS: microvm
-        run: hack/run-e2e-job.sh '^(TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream)$' "${E2E_IMAGE}" 900
+        run: hack/run-e2e-job.sh '^(TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestApprovalOnGVisor)$' "${E2E_IMAGE}" 900
 
       - name: Idle harness stream across the router's route timeout (in-cluster Job)
         # A turn parked on a slow model call holds its Connect stream idle. The router bounds streams
@@ -169,6 +180,9 @@ jobs:
           sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-microvm#${ATEOM_MV_IMG}#" \
               deploy/substrate/counter-microvm-workerpool.yaml | kubectl --context kind-kind apply -f -
           hack/wait-worker-pool.sh counter-microvm
+          sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-microvm#${ATEOM_MV_IMG}#" \
+              deploy/substrate/approval-memory-actortemplate.yaml | kubectl --context kind-kind apply -f -
+          hack/wait-worker-pool.sh approval-memory
 
       - name: Stateful-tier + fork conformance (in-cluster Job)
         # Memory continuity across suspend/restore (the differentiator a plain pod cannot do), and
@@ -177,7 +191,7 @@ jobs:
         # Then two sessions' calls through the router at once, each of which must reach its own actor.
         env:
           COUNTER_SANDBOX_CLASS: microvm
-        run: hack/run-e2e-job.sh 'TestMemorySnapshotSuspendResume|TestFork|TestConcurrentSessionsReachTheirOwnActors' "${E2E_IMAGE}" 1500
+        run: hack/run-e2e-job.sh 'TestMemorySnapshotSuspendResume|TestFork|TestConcurrentSessionsReachTheirOwnActors|TestApprovalMemoryRefusalOnMicroVM' "${E2E_IMAGE}" 1500
 
       - name: Dump diagnostics on failure
         if: failure()

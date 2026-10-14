@@ -1,0 +1,15 @@
+# Test-only memory approval refusal WorkerPool.
+# The legacy filename is retained; ActorTemplates are created through Control by
+# integrations/substrate/e2e/approval_test.go using APPROVAL_HARNESS_IMAGE.
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: approval-memory
+  namespace: ate-agentsessions
+  labels:
+    workload: agentsessions-approval-memory
+spec:
+  # Leave room for the golden build and concurrently restored actors.
+  replicas: 3
+  sandboxClass: microvm
+  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-microvm

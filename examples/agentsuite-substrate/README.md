@@ -70,9 +70,13 @@ the registration is applied as `-substrate-harness=triage=<atespace>/<template>`
 - docker, kind, kubectl, ko, go 1.27, git, python3 and curl.
 - The kind lane of agent-substrate at the commit `.github/workflows/substrate-e2e.yml` pins. `up.sh`
   clones it into the work directory, `$TMPDIR/agentsuite-demo` (set `AGENTSUITE_DEMO_WORK` to move it).
-- Every image is built for the architecture `docker info` reports, not the host's, so a Mac can
-  drive a remote amd64 Docker. For this, `up.sh` runs substrate's `ate-setup` itself with
-  `--ko-default-platforms`; `hack/install-ate-kind.sh` would build ate-system for the host.
+- Every image is built for the architecture `docker info` reports, not the host's, so an amd64
+  Docker VM on an arm64 Mac gets amd64 images (not tested). For this, `up.sh` runs substrate's
+  `ate-setup` itself with `--ko-default-platforms`; `hack/install-ate-kind.sh` would build
+  ate-system for the host.
+- Docker must publish ports on this machine's loopback. A remote daemon (`DOCKER_HOST`) is not
+  supported: the registry (`localhost:5001`) and the kind API server publish only on the Docker
+  host's loopback, and `ko` pushes and `kubectl` connects from this machine.
 - About 4 GiB free in the Docker VM. The recorded run used an 8 GiB VM with no other kind cluster
   running. The first `up.sh` on a machine also pulls the ate-system images, so it takes longer than
   the 2.5 minutes recorded.

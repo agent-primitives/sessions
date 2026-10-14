@@ -215,7 +215,7 @@ if [[ "${stage}" == created ]]; then
 	step "ate-system (ate-setup deploy ate-system, the command install-ate-kind.sh runs)"
 	# ate-setup is called directly, not through hack/install-ate-kind.sh: on Kind it builds the
 	# control-plane images for linux/<its own GOARCH> unless --ko-default-platforms is given (the
-	# wrapper's KO_DEFAULTPLATFORMS is ambient and ignored), so a Mac driving a remote amd64 Docker
+	# wrapper's KO_DEFAULTPLATFORMS is ambient and ignored), so an arm64 Mac with an amd64 Docker VM
 	# would push arm64 images to an amd64 node. The flags below are the wrapper's settings plus the
 	# platform Docker reports; the GCP variables it unsets are unset here too.
 	(cd "${SUBSTRATE}" && env -u GCE_REGION -u CLUSTER_LOCATION -u NETWORK -u SUBNETWORK \

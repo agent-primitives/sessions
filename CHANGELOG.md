@@ -16,6 +16,10 @@ provide.
 
 ### Fixed
 
+- `model/openai` joins the completions path to the base URL's path instead of appending it to the
+  string, so a base URL with a query (`-model-base-url 'https://h/v1?api-version=2'`) reaches
+  `/v1/chat/completions` with the query kept, ahead of any query `-model-path` carries. A fragment
+  is dropped. Before, the path landed inside the query or fragment and every turn went to `/v1`.
 - The substrate adapter (`integrations/substrate`) builds against agent-substrate `96dffb28`, which
   replaced `ActorStatus.external_snapshot` with a `snapshots` list (substrate `f03327bd`) and
   `SnapshotConfig.on_commit` with `preferred_fidelity`. The held snapshot is now the
@@ -101,6 +105,8 @@ provide.
   until this host restarts or loads it through `RegisterHarness` with the identical compatible spec.
   For a RETIRED row, restart this host to serve its existing sessions without reactivating it:
   `RegisterHarness` reactivates the row for every host sharing the journal.
+- `openai.New` refuses a base URL that is not absolute (no scheme or host), so `agentsessionsd`
+  exits at startup with `-model-base-url` set to one. Such a URL used to fail every request.
 - `agentsessionsd` now refuses positional arguments, naming them, and exits with status 2. It used
   to ignore them, along with every flag after the first one, since flag parsing stops there.
 - `runtime/substrate` no longer cold-creates an actor for a `REQUIRES_MEMORY_SNAPSHOT` session that

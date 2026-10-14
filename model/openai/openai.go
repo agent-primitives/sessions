@@ -57,17 +57,20 @@ var ErrUnsupportedPart = errors.New("openai: unsupported content part")
 
 // Client calls an OpenAI-compatible Chat Completions endpoint.
 type Client struct {
-	baseURL string
-	path    string
-	headers map[string]string
-	model   string
-	http    *http.Client
+	baseURL  string
+	path     string
+	endpoint string // baseURL joined with path by New
+	headers  map[string]string
+	model    string
+	http     *http.Client
 }
 
 // Option configures a Client.
 type Option func(*Client)
 
-// WithBaseURL points the client at a compatible endpoint other than the default.
+// WithBaseURL points the client at a compatible endpoint other than the default. It must be an
+// absolute URL. Its query string is kept and sent with every request, ahead of any query the path
+// carries; a fragment is dropped, as HTTP never sends one.
 func WithBaseURL(u string) Option {
 	return func(c *Client) {
 		if u != "" {
@@ -140,7 +143,8 @@ func WithHTTPClient(h *http.Client) Option {
 
 // New builds a Client. A default model is required: the model id ends up on every recorded
 // MODEL_CALL event, so a client that cannot name one would write a journal that does not say what
-// produced the completion.
+// produced the completion. A base URL that is not absolute, or a path that does not parse, is an
+// error.
 func New(opts ...Option) (*Client, error) {
 	c := &Client{
 		baseURL: DefaultBaseURL,
@@ -154,8 +158,42 @@ func New(opts ...Option) (*Client, error) {
 	if c.model == "" {
 		return nil, errors.New("openai: a default model is required (WithModel)")
 	}
+	endpoint, err := joinEndpoint(c.baseURL, c.path)
+	if err != nil {
+		return nil, err
+	}
+	c.endpoint = endpoint
 	c.http = sameOriginClient(c.http)
 	return c, nil
+}
+
+// joinEndpoint appends path to base's path and keeps both query strings, base's first. Joining the
+// strings instead would put the path after a query or fragment in base, sending
+// https://h/v1?api-version=2#x/chat/completions to /v1 with the path lost in the fragment.
+func joinEndpoint(base, path string) (string, error) {
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("openai: base URL: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("openai: base URL %q is not absolute (want scheme://host[/path])", base)
+	}
+	p, err := url.Parse(path)
+	if err != nil {
+		return "", fmt.Errorf("openai: path: %w", err)
+	}
+	joined := *u
+	joined.Path = strings.TrimSuffix(u.Path, "/") + p.Path
+	joined.RawPath = strings.TrimSuffix(u.EscapedPath(), "/") + p.EscapedPath()
+	switch {
+	case u.RawQuery == "":
+		joined.RawQuery = p.RawQuery
+	case p.RawQuery != "":
+		joined.RawQuery = u.RawQuery + "&" + p.RawQuery
+	}
+	joined.ForceQuery = false
+	joined.Fragment, joined.RawFragment = "", ""
+	return joined.String(), nil
 }
 
 // maxRedirects is net/http's default redirect limit, which setting CheckRedirect replaces.
@@ -355,7 +393,7 @@ func (c *Client) buildRequest(req api.ModelRequest, stream bool) (string, []byte
 
 // post sends the encoded body with the configured path and headers.
 func (c *Client) post(ctx context.Context, body []byte) (*http.Response, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+c.path, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("openai: build request: %w", err)
 	}

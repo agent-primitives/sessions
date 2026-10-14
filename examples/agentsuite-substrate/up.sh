@@ -147,11 +147,21 @@ fi
 
 # Where the cluster stands: absent; foreign (up.sh did not create it); incomplete (up.sh created it
 # but create-kind-cluster.sh did not finish); created (ate-system not installed yet); installed.
+# An owned cluster with no setup record for its node is refused: it may be installed and serving,
+# and recreating it would delete the daemon's emptyDir session journal.
 if cluster_listed; then
 	id="$(node_id)"
 	if [[ -n "${id}" && "$(owned_id)" == "${id}" ]]; then
 		stage="$(setup_stage "${id}")"
-		stage="${stage:-incomplete}"
+		case "${stage}" in
+		creating) stage=incomplete ;;
+		created | installed) ;;
+		*)
+			echo "refusing to reuse or recreate kind cluster ${CLUSTER}: up.sh created it, but ${SETUP} does not record how far its setup got." >&2
+			echo "Recreating it would delete agentsessionsd's session journal if it is installed. Run ./down.sh to delete it, then rerun up.sh." >&2
+			exit 1
+			;;
+		esac
 	else
 		stage=foreign
 	fi
@@ -173,13 +183,16 @@ if [[ "${stage}" == absent || "${stage}" == incomplete ]]; then
 	rm -f "${SETUP}"
 	# Record ownership as soon as the node exists, even when the script fails, or up.sh is
 	# interrupted, after kind created it, so a rerun can finish the cluster and down.sh can delete it.
+	# The "creating" stage is what lets a rerun recreate it; "created" replaces it once the script
+	# succeeds.
 	record_owner() {
 		local id
 		id="$(node_id)"
 		if [[ -n "${id}" ]]; then
 			echo "${id}" >"${OWNED}"
+			echo "${id} creating" >"${SETUP}"
 		else
-			rm -f "${OWNED}"
+			rm -f "${OWNED}" "${SETUP}"
 		fi
 	}
 	trap record_owner EXIT

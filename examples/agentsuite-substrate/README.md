@@ -89,7 +89,9 @@ the registration is applied as `-substrate-harness=triage=<atespace>/<template>`
   fails or `up.sh` is interrupted (`INT`, `TERM`) after kind created it, and how far its setup got.
   A rerun after a failed first `up.sh` installs ate-system if only that step failed, or recreates
   the cluster if `create-kind-cluster.sh` did not finish; it does not install into a cluster it did
-  not create.
+  not create. A cluster it created whose setup record is missing or unreadable is refused rather
+  than recreated, since recreating an installed cluster would delete the daemon's session journal:
+  run `./down.sh`, then `up.sh` again.
 
 ## A real model
 

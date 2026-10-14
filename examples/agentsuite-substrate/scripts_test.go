@@ -337,7 +337,7 @@ func TestUpClusterPhase(t *testing.T) {
 			wantCode: 3, wantOut: "rerun up.sh to recreate the cluster",
 			wantCalls: []string{"create-kind-cluster.sh"},
 			noCalls:   []string{"install-ate-kind.sh"},
-			wantOwned: "node-1", wantSetup: "<absent>",
+			wantOwned: "node-1", wantSetup: "node-1 creating",
 		},
 		{
 			// A Ctrl-C reaches kind and up.sh; up.sh still records the node kind created.
@@ -345,30 +345,54 @@ func TestUpClusterPhase(t *testing.T) {
 			wantCode:  130,
 			wantCalls: []string{"create-kind-cluster.sh"},
 			noCalls:   []string{"kind export", "install-ate-kind.sh"},
-			wantOwned: "node-1", wantSetup: "<absent>",
+			wantOwned: "node-1", wantSetup: "node-1 creating",
 		},
 		{
 			name: "a TERM after the node exists records ownership", env: []string{"STUB_CREATE_SIGNAL=TERM"},
 			wantCode:  143,
 			wantCalls: []string{"create-kind-cluster.sh"},
 			noCalls:   []string{"kind export", "install-ate-kind.sh"},
-			wantOwned: "node-1", wantSetup: "<absent>",
+			wantOwned: "node-1", wantSetup: "node-1 creating",
 		},
 		{
 			// The rerun after the interrupt recreates the cluster up.sh recorded.
 			name: "an interrupted rerun records the new node", env: []string{"STUB_CLUSTERS=" + cluster, "STUB_NEW_NODE_ID=node-2", "STUB_CREATE_SIGNAL=TERM"},
-			node: "node-1", owned: "node-1",
+			node: "node-1", owned: "node-1", setup: "node-1 creating",
 			wantCode: 143, wantOut: "its setup did not finish; recreating it",
 			wantCalls: []string{"create-kind-cluster.sh"},
 			noCalls:   []string{"install-ate-kind.sh"},
-			wantOwned: "node-2", wantSetup: "<absent>",
+			wantOwned: "node-2", wantSetup: "node-2 creating",
 		},
 		{
 			name: "an owned cluster whose create did not finish is recreated", env: []string{"STUB_CLUSTERS=" + cluster, "STUB_NEW_NODE_ID=node-2"},
-			node: "node-1", owned: "node-1",
+			node: "node-1", owned: "node-1", setup: "node-1 creating",
 			wantCode: pastClusterPhase, wantOut: "its setup did not finish; recreating it",
 			wantCalls: []string{"create-kind-cluster.sh", "install-ate-kind.sh"},
 			wantOwned: "node-2", wantSetup: "node-2 installed",
+		},
+		{
+			// An installed cluster whose setup record was lost looks the same as one whose create
+			// was cut before the record: recreating it would delete the daemon's journal, so it is
+			// refused and both records are kept for down.sh.
+			name: "an owned cluster with no setup record is refused", env: []string{"STUB_CLUSTERS=" + cluster},
+			node: "node-1", owned: "node-1",
+			wantCode: 1, wantOut: "does not record how far its setup got",
+			noCalls:   []string{"create-kind-cluster.sh", "install-ate-kind.sh", "kind delete", "kind export", "kubectl"},
+			wantOwned: "node-1", wantSetup: "<absent>",
+		},
+		{
+			name: "an owned cluster whose setup record names another node is refused", env: []string{"STUB_CLUSTERS=" + cluster},
+			node: "node-1", owned: "node-1", setup: "node-0 installed",
+			wantCode: 1, wantOut: "Run ./down.sh to delete it",
+			noCalls:   []string{"create-kind-cluster.sh", "install-ate-kind.sh", "kind delete", "kind export", "kubectl"},
+			wantOwned: "node-1", wantSetup: "node-0 installed",
+		},
+		{
+			name: "an owned cluster whose setup record holds an unknown stage is refused", env: []string{"STUB_CLUSTERS=" + cluster},
+			node: "node-1", owned: "node-1", setup: "node-1 bogus",
+			wantCode: 1, wantOut: "does not record how far its setup got",
+			noCalls:   []string{"create-kind-cluster.sh", "install-ate-kind.sh", "kind delete", "kind export", "kubectl"},
+			wantOwned: "node-1", wantSetup: "node-1 bogus",
 		},
 		{
 			name: "an owned cluster whose install did not finish is installed", env: []string{"STUB_CLUSTERS=" + cluster},

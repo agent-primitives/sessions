@@ -18,9 +18,10 @@ fi
 export KIND_CLUSTER_NAME="${CLUSTER}"
 # up.sh records the control-plane container ID of a cluster it creates as soon as the container
 # exists; down.sh deletes a cluster only when its container still has that ID, so it never deletes a
-# cluster up.sh only reused. SETUP records how far up.sh got with that cluster ("<id> created" once
-# substrate's create-kind-cluster.sh finished, "<id> installed" once ate-system is installed), so a
-# rerun after a failed first setup finishes it instead of reusing a half-built cluster.
+# cluster up.sh only reused. SETUP records how far up.sh got with that cluster ("<id> creating" while
+# substrate's create-kind-cluster.sh runs, "<id> created" once it finished, "<id> installed" once
+# ate-system is installed), so a rerun after a failed first setup finishes it instead of reusing a
+# half-built cluster. up.sh refuses an owned cluster with no record for its node.
 OWNED="${WORK}/created-cluster-${CLUSTER}"
 SETUP="${WORK}/setup-cluster-${CLUSTER}"
 # What up.sh generates for one cluster (its kubeconfig, the rendered composition and manifests)

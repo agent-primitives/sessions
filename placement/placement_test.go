@@ -270,8 +270,10 @@ func (stubControl) CreateActor(context.Context, substrate.ActorRef, substrate.Ob
 func (stubControl) ResumeActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
 	return substrate.ActorInfo{}, nil
 }
-func (stubControl) SuspendActor(context.Context, substrate.ActorRef) (string, error) { return "", nil }
-func (stubControl) DeleteActor(context.Context, substrate.ActorRef) error            { return nil }
+func (stubControl) SuspendActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
+	return substrate.ActorInfo{}, nil
+}
+func (stubControl) DeleteActor(context.Context, substrate.ActorRef) error { return nil }
 func (stubControl) GetActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
 	return substrate.ActorInfo{}, nil
 }
@@ -390,9 +392,9 @@ type cloningControl struct {
 	budgets     []time.Duration
 }
 
-func (c *cloningControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (string, error) {
+func (c *cloningControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return substrate.ActorInfo{}, err
 	}
 	// Teardown runs under its own deadline; the caller's context carries none. Recording the budget
 	// each teardown actually sees is what distinguishes a per-child budget from a shared one.
@@ -405,7 +407,7 @@ func (c *cloningControl) SuspendActor(ctx context.Context, a substrate.ActorRef)
 		select {
 		case <-time.After(c.suspendCost):
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return substrate.ActorInfo{}, ctx.Err()
 		}
 	}
 	if c.beforeSuspend != nil {
@@ -414,7 +416,7 @@ func (c *cloningControl) SuspendActor(ctx context.Context, a substrate.ActorRef)
 		race()
 	}
 	c.calls = append(c.calls, "suspend:"+a.Name)
-	return c.snapshot, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot, UID: "uid-" + a.Name}, nil
 }
 
 func (c *cloningControl) ResumeActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {

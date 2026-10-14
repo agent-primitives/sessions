@@ -39,6 +39,10 @@ const (
 	StatusRunning
 	StatusSuspended
 	StatusTerminated
+	// StatusTransitioning is an actor on its way between states (resuming, suspending, pausing),
+	// usually because another host or the router is acting on it. It settles on its own, so the
+	// backend reports it as ErrActorBusy rather than as a permanent failure.
+	StatusTransitioning
 )
 
 // ActorRef identifies an actor within an atespace (substrate's tenant/namespace).
@@ -81,9 +85,10 @@ type ControlClient interface {
 	// own snapshot if it has one, else the template's golden snapshot (a freshly started harness),
 	// else a cold boot from the template spec. There is no per-call boot flag.
 	ResumeActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
-	// SuspendActor snapshots the actor to durable storage and frees the worker, returning the handle
-	// of the external snapshot it now holds (ActorInfo.Snapshot).
-	SuspendActor(ctx context.Context, actor ActorRef) (snapshot string, err error)
+	// SuspendActor snapshots the actor to durable storage and frees the worker, returning the actor
+	// as the suspend left it: ActorInfo.Snapshot is the external snapshot it now holds, and
+	// ActorInfo.UID tells which actor under the name was suspended.
+	SuspendActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 	DeleteActor(ctx context.Context, actor ActorRef) error
 	GetActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 }
@@ -97,6 +102,13 @@ var ErrActorNotFound = errors.New("substrate: actor not found")
 // name already exists. Create treats it as another host having placed the session first, and
 // attaches to that actor instead of failing the turn.
 var ErrActorExists = errors.New("substrate: actor already exists")
+
+// ErrActorBusy is what a ControlClient must return (or wrap) when substrate refuses an operation
+// because another one holds the actor (substrate reports ABORTED: another host is resuming or
+// suspending it). The backend also returns it for an actor it finds mid-transition. It wraps
+// api.ErrComputeBusy, which the session service reports as ABORTED, so the caller retries once the
+// actor settles.
+var ErrActorBusy = fmt.Errorf("substrate: actor is busy with another operation: %w", api.ErrComputeBusy)
 
 // ErrTagExists is what a SnapshotCloner must return (or wrap) from TagActor when a tag of that name
 // already exists, finished or left pending by an earlier attempt. It tells the backend the tag is
@@ -300,7 +312,9 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 
 // attach returns the incarnation of the session's existing actor: a RUNNING actor as it is, a
 // SUSPENDED one after resuming it, which restores its own snapshot. found is false, with no error,
-// when the actor does not exist.
+// when the actor does not exist. An actor mid-transition is ErrActorBusy, as is a resume substrate
+// refuses because another operation holds the actor (the ControlClient wraps it), so a host that
+// lost a race for a session's first turn gets a retryable error, not a permanent one.
 func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation, found bool, err error) {
 	info, err := b.ctl.GetActor(ctx, ref)
 	switch {
@@ -313,6 +327,10 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation
 		if info, err = b.ctl.ResumeActor(ctx, ref); err != nil {
 			return api.Incarnation{}, true, fmt.Errorf("substrate: resume suspended actor: %w", err)
 		}
+	case info.Status == StatusTransitioning:
+		// Usually another host's Create is resuming the actor it just made. Retrying finds it
+		// RUNNING (or SUSPENDED); placing onto it now would race that operation.
+		return api.Incarnation{}, true, fmt.Errorf("%w: actor %q is mid-transition", ErrActorBusy, ref.Name)
 	default:
 		return api.Incarnation{}, true, fmt.Errorf("substrate: actor %q is in state %v, not placeable", ref.Name, info.Status)
 	}
@@ -322,6 +340,13 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation
 
 // Snapshot suspends the actor: RAM+disk snapshot to external storage, worker freed. Only the
 // external (cold/suspend) kind is supported; substrate has no node-local warm checkpoint API today.
+//
+// When in.ComputeInstance is set (a stateful fork passes the UID the journal last recorded), the
+// actor under the name must be that one. Snapshot checks it before suspending, so a replacement is
+// refused with api.ErrMemoryStateLost untouched, and again on the actor the suspend reports, since
+// the actor can be replaced between the look and the suspend; substrate's SuspendActor has no UID
+// precondition to close that window. In the second case the replacement is left suspended, which
+// costs nothing: it holds none of the session's state and the host refuses it on every later turn.
 func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (snapshot api.SnapshotRef, err error) {
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "snapshot_compute",
 		"actor", in.ID,
@@ -340,17 +365,44 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 		"atespace", b.atespace,
 		"reason", "snapshot",
 	)
-	uri, err := b.ctl.SuspendActor(ctx, b.ref(in.ID))
+	if in.ComputeInstance != "" {
+		info, err := b.ctl.GetActor(ctx, b.ref(in.ID))
+		if err != nil {
+			suspendFinished(err, "error_kind", "get_actor_failed")
+			return api.SnapshotRef{}, fmt.Errorf("substrate: get actor before snapshot: %w", err)
+		}
+		if err := b.requireInstance(in, info.UID); err != nil {
+			suspendFinished(err, "error_kind", "memory_state_lost")
+			return api.SnapshotRef{}, err
+		}
+	}
+	info, err := b.ctl.SuspendActor(ctx, b.ref(in.ID))
 	if err != nil {
 		suspendFinished(err, "error_kind", "suspend_actor_failed")
 		return api.SnapshotRef{}, fmt.Errorf("substrate: suspend actor: %w", err)
 	}
+	if err := b.requireInstance(in, info.UID); err != nil {
+		suspendFinished(err, "error_kind", "memory_state_lost")
+		return api.SnapshotRef{}, err
+	}
 	suspendFinished(nil)
+	uri := info.Snapshot
 	// Local carries the actor name (the handle Restore/ResumeActor needs); ExternalURI carries the
 	// external snapshot the suspend produced. Fork clones by tagging the ACTOR, not this handle, and
 	// uses the handle to check that the actor still holds this exact snapshot when it is tagged.
 	snapshot = api.SnapshotRef{Local: in.ID, ExternalURI: uri, Memory: true}
 	return snapshot, nil
+}
+
+// requireInstance returns an error wrapping api.ErrMemoryStateLost when in requires a compute
+// instance and the actor under in.ID reports another UID.
+func (b *Backend) requireInstance(in api.Incarnation, uid string) error {
+	if in.ComputeInstance == "" || uid == in.ComputeInstance {
+		return nil
+	}
+	return fmt.Errorf("%w: actor %s/%s is instance %q, but the session's turns ran on instance %q, which has been replaced, "+
+		"so its in-RAM state cannot be captured; nothing was snapshotted for the session",
+		api.ErrMemoryStateLost, b.atespace, in.ID, uid, in.ComputeInstance)
 }
 
 // Restore brings the actor back from its snapshot onto a (possibly different) worker.
@@ -709,8 +761,10 @@ func substrateErrorKind(err error) string {
 		return "invalid_spec"
 	case errors.Is(err, ErrSnapshotSuperseded):
 		return "snapshot_superseded"
-	case errors.Is(err, ErrMemoryStateLost):
+	case errors.Is(err, api.ErrMemoryStateLost):
 		return "memory_state_lost"
+	case errors.Is(err, api.ErrComputeBusy):
+		return "actor_busy"
 	default:
 		return "runtime_operation_failed"
 	}

@@ -100,17 +100,17 @@ func (c *suspendControl) ResumeActor(_ context.Context, ref substrate.ActorRef) 
 	return c.info(ref, a), nil
 }
 
-func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef) (string, error) {
+func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef) (substrate.ActorInfo, error) {
 	c.calls = append(c.calls, "suspend:"+ref.Name)
 	if c.snapshotErr != nil {
-		return "", c.snapshotErr
+		return substrate.ActorInfo{}, c.snapshotErr
 	}
 	a, exists := c.actors[ref]
 	if !exists {
-		return "", status.Error(codes.NotFound, "actor does not exist")
+		return substrate.ActorInfo{}, status.Error(codes.NotFound, "actor does not exist")
 	}
 	if a.status == substrate.StatusSuspended && a.snapshot.Name != "" {
-		return a.snapshot.Name, nil
+		return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, UID: a.uid}, nil
 	}
 	a.snapshot = substrate.SnapshotID{Atespace: ref.Atespace, Name: fmt.Sprintf("snap-%s-%d", ref.Name, len(c.snapshots)+1)}
 	c.snapshots[a.snapshot] = suspendSnapshot{turns: a.turns, template: a.template}
@@ -120,7 +120,7 @@ func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef)
 		c.afterSuspend = nil
 		hook()
 	}
-	return a.snapshot.Name, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, UID: a.uid}, nil
 }
 
 func (c *suspendControl) DeleteActor(_ context.Context, ref substrate.ActorRef) error {

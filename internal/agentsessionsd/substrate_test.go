@@ -423,12 +423,12 @@ func (f *fakeControl) ResumeActor(_ context.Context, a substrate.ActorRef) (subs
 	return substrate.ActorInfo{Status: substrate.StatusRunning, Worker: "worker-0", UID: "uid-" + a.Name}, nil
 }
 
-func (f *fakeControl) SuspendActor(_ context.Context, a substrate.ActorRef) (string, error) {
+func (f *fakeControl) SuspendActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "suspend:"+a.Atespace+"/"+a.Name)
 	f.actors[a.Name] = substrate.StatusSuspended
-	return "mem://" + a.Name, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: "mem://" + a.Name, UID: "uid-" + a.Name}, nil
 }
 
 func (f *fakeControl) DeleteActor(_ context.Context, a substrate.ActorRef) error {

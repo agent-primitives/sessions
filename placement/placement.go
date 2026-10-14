@@ -1176,7 +1176,18 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if atSeq != head {
 		return api.SnapshotRef{}, nil, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
 	}
-	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID}, api.SnapshotExternal)
+	// The snapshot must capture the compute the parent's turns ran on. If that was replaced under
+	// the same name, the replacement holds none of the parent's state, and every child cloned from
+	// it would run without it: a child's own compute is a clone with its own instance, and the FORK
+	// marker resets the comparison its turns make. Pass the instance the journal last recorded so
+	// the backend refuses a replacement (api.ErrMemoryStateLost). The records read here are the
+	// history the SUSPEND append below extends under its CAS on atSeq.
+	recs, err := parent.Read(1)
+	if err != nil {
+		return api.SnapshotRef{}, nil, fmt.Errorf("placement: read parent journal: %w", err)
+	}
+	instance, _ := controller.LatestComputeInstance(recs, func(recorded string) bool { return p.ranHere(recorded, "") })
+	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID, ComputeInstance: instance}, api.SnapshotExternal)
 	if err != nil {
 		return api.SnapshotRef{}, nil, err
 	}

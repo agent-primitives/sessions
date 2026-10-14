@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/aramase/agentsessions/api"
 	"github.com/aramase/agentsessions/runtime/substrate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -29,6 +31,8 @@ type fakeControl struct {
 	getErr     error
 	tagErr     error
 	createErr  error
+	resumeErr  error
+	suspendErr error
 }
 
 func (f *fakeControl) CreateActor(_ context.Context, in *atepb.CreateActorRequest, _ ...grpc.CallOption) (*atepb.Actor, error) {
@@ -43,6 +47,9 @@ func (f *fakeControl) CreateActor(_ context.Context, in *atepb.CreateActorReques
 }
 func (f *fakeControl) ResumeActor(_ context.Context, in *atepb.ResumeActorRequest, _ ...grpc.CallOption) (*atepb.ResumeActorResponse, error) {
 	f.calls = append(f.calls, "resume:"+in.GetActor().GetAtespace()+"/"+in.GetActor().GetName())
+	if f.resumeErr != nil {
+		return nil, f.resumeErr
+	}
 	if f.resumed != nil {
 		return &atepb.ResumeActorResponse{Actor: f.resumed, Resumed: true}, nil
 	}
@@ -50,6 +57,9 @@ func (f *fakeControl) ResumeActor(_ context.Context, in *atepb.ResumeActorReques
 }
 func (f *fakeControl) SuspendActor(_ context.Context, in *atepb.SuspendActorRequest, _ ...grpc.CallOption) (*atepb.SuspendActorResponse, error) {
 	f.calls = append(f.calls, "suspend:"+in.GetActor().GetName())
+	if f.suspendErr != nil {
+		return nil, f.suspendErr
+	}
 	return &atepb.SuspendActorResponse{Actor: f.actor}, nil
 }
 func (f *fakeControl) DeleteActor(_ context.Context, in *atepb.DeleteActorRequest, _ ...grpc.CallOption) (*atepb.Actor, error) {
@@ -314,7 +324,8 @@ func TestGetActorReportsNotFoundAsSentinel(t *testing.T) {
 }
 
 // A suspend yields the URI of the external snapshot the actor now holds, the handle the backend
-// records and later compares against GetActor to detect a superseded snapshot.
+// records and later compares against GetActor to detect a superseded snapshot, and the UID of the
+// actor it suspended, which a stateful fork compares with the one the journal recorded.
 func TestSuspendReturnsTheHeldSnapshot(t *testing.T) {
 	a := runningActor()
 	a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
@@ -324,8 +335,11 @@ func TestSuspendReturnsTheHeldSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "gs://b/atespaces/space/actors/u1/snapshots/s1"; got != want {
-		t.Fatalf("snapshot=%q want %q", got, want)
+	if want := "gs://b/atespaces/space/actors/u1/snapshots/s1"; got.Snapshot != want {
+		t.Fatalf("snapshot=%q want %q", got.Snapshot, want)
+	}
+	if want := a.GetMetadata().GetUid(); got.UID != want {
+		t.Fatalf("uid=%q want %q", got.UID, want)
 	}
 }
 
@@ -344,8 +358,8 @@ func TestSuspendWithoutCompletedSnapshotReturnsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "" {
-		t.Fatalf("snapshot=%q want empty: an in-progress snapshot is not one the actor holds", got)
+	if got.Snapshot != "" {
+		t.Fatalf("snapshot=%q want empty: an in-progress snapshot is not one the actor holds", got.Snapshot)
 	}
 }
 
@@ -391,9 +405,12 @@ func TestStatusMapping(t *testing.T) {
 		{atepb.ActorState_ACTOR_STATE_SUSPENDED, substrate.StatusSuspended},
 		{atepb.ActorState_ACTOR_STATE_PAUSED, substrate.StatusSuspended},
 		{atepb.ActorState_ACTOR_STATE_CRASHED, substrate.StatusTerminated},
-		{atepb.ActorState_ACTOR_STATE_RESUMING, substrate.StatusUnknown},
-		{atepb.ActorState_ACTOR_STATE_SUSPENDING, substrate.StatusUnknown},
+		{atepb.ActorState_ACTOR_STATE_RESUMING, substrate.StatusTransitioning},
+		{atepb.ActorState_ACTOR_STATE_SUSPENDING, substrate.StatusTransitioning},
+		{atepb.ActorState_ACTOR_STATE_PAUSING, substrate.StatusTransitioning},
+		{atepb.ActorState_ACTOR_STATE_DELETING, substrate.StatusUnknown},
 		{atepb.ActorState_ACTOR_STATE_REVERTING, substrate.StatusUnknown},
+		{atepb.ActorState_ACTOR_STATE_UNSPECIFIED, substrate.StatusUnknown},
 	} {
 		f := &fakeControl{actor: &atepb.Actor{
 			Metadata: &atepb.ResourceMetadata{Name: "a", Atespace: "s"},
@@ -406,5 +423,37 @@ func TestStatusMapping(t *testing.T) {
 		if info.Status != tc.want {
 			t.Fatalf("state %v -> %v, want %v", tc.s, info.Status, tc.want)
 		}
+	}
+}
+
+// Substrate refuses a resume or suspend while another operation holds the actor's lease with
+// ABORTED (another host resuming the actor it just created, say). The adapter reports that as
+// substrate.ErrActorBusy, which the session service maps to a retryable ABORTED; any other failure
+// keeps its own error.
+func TestAbortedResumeAndSuspendAreBusy(t *testing.T) {
+	ref := substrate.ActorRef{Atespace: "space", Name: "sess-x"}
+	aborted := status.Error(codes.Aborted, "another operation is in progress for this actor")
+	ops := map[string]func(*fakeControl) error{
+		"resume": func(f *fakeControl) error {
+			_, err := FromClient(f).ResumeActor(context.Background(), ref)
+			return err
+		},
+		"suspend": func(f *fakeControl) error {
+			_, err := FromClient(f).SuspendActor(context.Background(), ref)
+			return err
+		},
+	}
+	for name, op := range ops {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeControl{actor: runningActor(), resumeErr: aborted, suspendErr: aborted}
+			if err := op(f); !errors.Is(err, substrate.ErrActorBusy) || !errors.Is(err, api.ErrComputeBusy) || !strings.Contains(err.Error(), "in progress") {
+				t.Fatalf("aborted %s: err=%v, want ErrActorBusy carrying substrate's reason", name, err)
+			}
+			unavailable := status.Error(codes.Unavailable, "ate-api unavailable")
+			f = &fakeControl{actor: runningActor(), resumeErr: unavailable, suspendErr: unavailable}
+			if err := op(f); err == nil || errors.Is(err, substrate.ErrActorBusy) {
+				t.Fatalf("unavailable %s: err=%v, want a failure that is not ErrActorBusy", name, err)
+			}
+		})
 	}
 }

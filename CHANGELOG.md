@@ -131,13 +131,26 @@ provide.
   whose UID differs from the latest one recorded for that harness since the session's `FORK` marker
   is `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and journals nothing. This catches an actor
   another host created under the session's name after it counted no turns, while the actor the
-  first turn ran on was lost; the count alone let later turns attach to it. `runtime/substrate`
-  refuses a memory-tier actor that reports no UID, so a custom `ControlClient` must report one.
-  When `CreateActor` finds the name taken (`substrate.ErrActorExists`, which a `ControlClient`
-  must return for it), `Create` attaches to that actor where it used to fail the turn with
-  `INTERNAL`. Stateless turns record no UID and their canonical bytes are unchanged; turns recorded
-  before this change are not compared. The router reaches an actor by name, so a turn already
-  placed when its actor is replaced still runs; the next one is refused.
+  first turn ran on was lost; the count alone let later turns attach to it. A stateful `Fork` of
+  such a session is `FAILED_PRECONDITION` too, and suspends, clones and journals nothing: the
+  Placer passes the recorded UID to `Runtime.Snapshot` in `api.Incarnation.ComputeInstance`, and
+  `runtime/substrate` refuses another actor, checking the UID before it suspends and the one the
+  suspend reports. `runtime/substrate` refuses a memory-tier actor that reports no UID, so a custom
+  `ControlClient` must report one. `ControlClient.SuspendActor` now returns the suspended actor's
+  `substrate.ActorInfo` (snapshot handle and UID) instead of the snapshot handle alone. When
+  `CreateActor` finds the name taken (`substrate.ErrActorExists`, which a `ControlClient` must
+  return for it), `Create` attaches to that actor where it used to fail the turn with `INTERNAL`.
+  Stateless turns record no UID and their canonical bytes are unchanged; turns recorded before this
+  change are not compared. The router reaches an actor by name, so a turn already placed when its
+  actor is replaced still runs; the next one is refused.
+- An actor another operation holds is now retryable: `Exec`, `Resume`, `Suspend` and `Fork` are
+  `ABORTED` (new `api.ErrComputeBusy`) where they used to be `INTERNAL` when `runtime/substrate`
+  finds the session's actor `RESUMING`, `SUSPENDING` or `PAUSING` (new
+  `substrate.StatusTransitioning`), or when substrate refuses a resume or suspend with `ABORTED`
+  because another operation holds the actor's lease. The adapter reports the latter as the new
+  `substrate.ErrActorBusy`; a `ControlClient` that returns a raw transport status still gets
+  `INTERNAL`. This is the usual outcome for the host that loses a race for a session's first turn
+  while the winner's actor is still resuming.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

@@ -83,15 +83,15 @@ func (m *mockControl) ResumeActor(ctx context.Context, a substrate.ActorRef) (su
 	}
 	return info, nil
 }
-func (m *mockControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (string, error) {
+func (m *mockControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return substrate.ActorInfo{}, err
 	}
 	m.calls = append(m.calls, "suspend:"+a.Name)
 	m.exists(a.Name, substrate.StatusSuspended)
 	snap := "gs://snap/" + a.Name
 	m.holds(a.Name, snap)
-	return snap, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: m.info.Worker, Snapshot: snap, UID: m.uid(a.Name)}, nil
 }
 
 // holds records the external snapshot an actor currently holds.
@@ -845,4 +845,101 @@ func (g goneOnReread) GetActor(ctx context.Context, a substrate.ActorRef) (subst
 		delete(g.actors, a.Name)
 	}
 	return g.mockControl.GetActor(ctx, a)
+}
+
+// A stateful fork passes the compute instance the journal last recorded, and Snapshot refuses an
+// actor that replaced it (api.ErrMemoryStateLost): before suspending when it can see the
+// replacement, and after, on the UID the suspend reports, when the actor was replaced between the
+// look and the suspend. With no instance required, Snapshot suspends whatever actor the name holds,
+// as before.
+func TestSnapshotRefusesAReplacedActor(t *testing.T) {
+	ctx := context.Background()
+	newRunning := func() *mockControl {
+		m := &mockControl{info: running("worker-a")}
+		m.exists("sess-x", substrate.StatusRunning)
+		return m
+	}
+
+	m := newRunning()
+	uid := m.uids["sess-x"]
+	ref, err := newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x", ComputeInstance: uid}, api.SnapshotExternal)
+	if err != nil || ref.ExternalURI == "" {
+		t.Fatalf("snapshot of the recorded actor: ref=%+v err=%v, want a snapshot", ref, err)
+	}
+
+	m = newRunning()
+	_, err = newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x", ComputeInstance: "uid-recorded"}, api.SnapshotExternal)
+	if !errors.Is(err, api.ErrMemoryStateLost) || !strings.Contains(err.Error(), "uid-recorded") {
+		t.Fatalf("snapshot of a replacement: err=%v, want ErrMemoryStateLost naming the recorded instance", err)
+	}
+	if want := []string{"get:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("calls=%v want %v: a replacement seen before the suspend is not suspended", m.calls, want)
+	}
+
+	m = newRunning()
+	uid = m.uids["sess-x"]
+	m.afterGet = func(name string) {
+		// The actor is deleted and created again under its name between the look and the suspend.
+		delete(m.actors, name)
+		delete(m.uids, name)
+		m.exists(name, substrate.StatusRunning)
+		m.afterGet = nil
+	}
+	_, err = newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x", ComputeInstance: uid}, api.SnapshotExternal)
+	if !errors.Is(err, api.ErrMemoryStateLost) {
+		t.Fatalf("actor replaced between the look and the suspend: err=%v, want ErrMemoryStateLost", err)
+	}
+
+	m = newRunning()
+	if _, err := newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x"}, api.SnapshotExternal); err != nil {
+		t.Fatalf("snapshot with no instance required: %v", err)
+	}
+	if want := []string{"suspend:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("calls=%v want %v", m.calls, want)
+	}
+}
+
+// An actor in the middle of another operation (usually another host resuming the actor it just
+// created) settles on its own, so Create reports it as ErrActorBusy, which wraps api.ErrComputeBusy
+// and is retryable, whether Create finds it on its first look, after losing the CreateActor race,
+// or when substrate refuses the resume of a suspended actor because another operation holds it.
+func TestCreateOnABusyActorIsRetryable(t *testing.T) {
+	ctx := context.Background()
+	check := func(name string, err error) {
+		t.Helper()
+		if !errors.Is(err, substrate.ErrActorBusy) || !errors.Is(err, api.ErrComputeBusy) {
+			t.Fatalf("%s: err=%v, want ErrActorBusy wrapping api.ErrComputeBusy", name, err)
+		}
+	}
+
+	m := &mockControl{info: running("worker-a")}
+	m.exists("sess-x", substrate.StatusTransitioning)
+	_, err := newMemoryBackend(m).Create(ctx, &api.SessionSpec{SessionUID: "sess-x"})
+	check("actor mid-transition", err)
+
+	m = &mockControl{info: running("worker-a")}
+	once := false
+	m.afterGet = func(name string) {
+		if !once {
+			once = true
+			m.exists(name, substrate.StatusTransitioning) // the other host created it and is resuming it
+		}
+	}
+	_, err = newMemoryBackend(m).Create(ctx, &api.SessionSpec{SessionUID: "sess-x"})
+	check("lost the create race to an actor mid-resume", err)
+	if want := []string{"get:sess-x", "create:sess-x", "get:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("calls=%v want %v", m.calls, want)
+	}
+
+	m = &mockControl{info: running("worker-a"), resumeErr: fmt.Errorf("%w: another operation is in progress", substrate.ErrActorBusy)}
+	m.exists("sess-x", substrate.StatusSuspended)
+	_, err = newMemoryBackend(m).Create(ctx, &api.SessionSpec{SessionUID: "sess-x"})
+	check("resume refused while another operation holds the actor", err)
+
+	m = &mockControl{info: running("worker-a")}
+	m.exists("sess-x", substrate.StatusUnknown)
+	_, err = newMemoryBackend(m).Create(ctx, &api.SessionSpec{SessionUID: "sess-x"})
+	if err == nil || errors.Is(err, api.ErrComputeBusy) {
+		t.Fatalf("actor in an unknown state: err=%v, want a failure that is not retryable", err)
+	}
 }

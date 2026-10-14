@@ -11,17 +11,24 @@ import (
 // caller can retry the fork at the parent's new head.
 var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was superseded")
 
-// ErrMemoryStateLost reports that a backend cannot give a session whose harness keeps its state only
-// in RAM (REQUIRES_MEMORY_SNAPSHOT) the compute that held that state, because the compute is gone.
-// Create returns it rather than create fresh compute when the journal already records a started turn
-// on that harness (SessionSpec.StartedTurns). Restore returns it for any such session whose compute
-// no longer exists, whatever the journal records, since the snapshot it would restore went with the
-// compute. The host returns it when the compute a turn or a Resume was placed on reports another
-// Incarnation.ComputeInstance than the journal recorded: the compute was replaced under the same
-// name. The journal cannot rebuild the state (I4), so fresh compute would continue the journal with
-// a harness that has forgotten it. The caller cannot fix this by retrying; the session service
-// reports it as FAILED_PRECONDITION.
+// ErrMemoryStateLost reports that a backend cannot give a session whose harness keeps its state
+// only in RAM (REQUIRES_MEMORY_SNAPSHOT) the compute that held that state, because the compute is
+// gone. Create returns it rather than create fresh compute when the journal already records a
+// started turn on that harness (SessionSpec.StartedTurns). Restore returns it for any such session
+// whose compute no longer exists, whatever the journal records, since the snapshot it would restore
+// went with the compute. The host returns it when the compute a turn or a Resume was placed on
+// reports another Incarnation.ComputeInstance than the journal recorded: the compute was replaced
+// under the same name. Snapshot returns it when the compute behind Incarnation.ID is not the
+// instance the caller required (a stateful fork). The journal cannot rebuild the state (I4), so
+// fresh compute would continue the journal with a harness that has forgotten it. The caller cannot
+// fix this by retrying; the session service reports it as FAILED_PRECONDITION.
 var ErrMemoryStateLost = errors.New("runtime: session's in-memory harness state is lost")
+
+// ErrComputeBusy reports that the session's compute is in the middle of another operation (another
+// host resuming or suspending it, say), so the backend could not place onto it or act on it right
+// now. Nothing was journaled, and the state settles on its own, so the session service reports it
+// as ABORTED and the caller retries.
+var ErrComputeBusy = errors.New("runtime: compute is busy with another operation")
 
 // Runtime is the compute/sandbox SPI. Pod, Kata Pod Sandboxing, Cloud Hypervisor,
 // Dragonball, Hyperlight, and agent-substrate all implement it. There is no gVisor
@@ -41,6 +48,12 @@ type Runtime interface {
 	// and any backend handles Restore needs. A backend without memory snapshots may return
 	// a filesystem/journal handle; without dedicated per-session compute, its shared harness
 	// server may remain running.
+	//
+	// A non-empty in.ComputeInstance is the instance the caller requires behind in.ID (the
+	// latest one the journal recorded). A backend that sets ComputeInstance refuses with
+	// ErrMemoryStateLost when another instance is there, before it captures anything if it can
+	// tell, and in any case before returning a ref: a snapshot of a replacement would hand
+	// its callers compute that holds none of the session's state.
 	Snapshot(ctx context.Context, in Incarnation, kind SnapshotKind) (SnapshotRef, error)
 
 	// Restore brings an incarnation back from a snapshot. Sub-second on memory-capable
@@ -108,7 +121,8 @@ type Incarnation struct {
 	// (REQUIRES_MEMORY_SNAPSHOT). The host records it in the turn's EXECUTION_START and refuses a turn
 	// or a Resume placed on an instance other than the latest one the journal recorded for that
 	// harness since the session's FORK marker (ErrMemoryStateLost): a replacement holds none of the
-	// state. Empty records nothing and skips the check.
+	// state. A stateful fork passes that recorded instance to Snapshot, which refuses another one.
+	// Empty records nothing and skips the check.
 	ComputeInstance string
 }
 

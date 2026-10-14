@@ -75,11 +75,11 @@ func (c *actorControl) ResumeActor(_ context.Context, a substrate.ActorRef) (sub
 	return substrate.ActorInfo{Status: substrate.StatusRunning, Worker: "w", UID: c.uids[a.Name]}, nil
 }
 
-func (c *actorControl) SuspendActor(_ context.Context, a substrate.ActorRef) (string, error) {
+func (c *actorControl) SuspendActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	c.mu.Lock()
 	if _, ok := c.status[a.Name]; !ok {
 		c.mu.Unlock()
-		return "", substrate.ErrActorNotFound
+		return substrate.ActorInfo{}, substrate.ErrActorNotFound
 	}
 	// Substrate's suspend is a no-op on an actor that is already SUSPENDED holding a snapshot.
 	snap := c.snapshots[a.Name]
@@ -88,11 +88,12 @@ func (c *actorControl) SuspendActor(_ context.Context, a substrate.ActorRef) (st
 		snap = fmt.Sprintf("snap-%s-%d", a.Name, c.suspends)
 		c.status[a.Name], c.snapshots[a.Name] = substrate.StatusSuspended, snap
 	}
+	uid := c.uids[a.Name]
 	c.mu.Unlock()
 	if c.onSuspend != nil {
 		c.onSuspend(a.Name)
 	}
-	return snap, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: "w", Snapshot: snap, UID: uid}, nil
 }
 
 func (c *actorControl) DeleteActor(_ context.Context, a substrate.ActorRef) error {

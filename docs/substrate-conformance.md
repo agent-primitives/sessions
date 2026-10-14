@@ -122,15 +122,24 @@ latest UID recorded for that harness since the session's `FORK` marker (attribut
 the history its compare-and-swap append extends, so a turn another host journaled first is either
 compared or makes the append fail. `Resume` makes the same comparison before it re-drives a turn or
 records the resume. A different UID is `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`), names the
-session, and journals nothing; so is every later turn on either host. `runtime/substrate` refuses to
-place a memory-tier session on an actor that reports no UID. When `CreateActor` finds the name taken
-(`substrate.ErrActorExists`), `Create` attaches to that actor, so two hosts racing a session's first
-turn share one actor. The loser's turn fails at worst, never the session: `ABORTED` when its append
-loses, or `INTERNAL` naming the actor's state when it finds the actor mid-resume, and a retry
-attaches. `Restore`
-(`Sessions.Resume`) returns `ErrMemoryStateLost` for every memory-tier session whose actor is gone,
-whatever its journal records (a session interrupted on its first turn included), since the snapshot
-it would resume went with the actor; `GetActor` confirms the absence after the resume fails.
+session, and journals nothing; so is every later turn on either host. A stateful `Fork` makes the
+same comparison against the parent's actor: the Placer reads the parent's journal at the fork point
+and passes the latest recorded UID to `Runtime.Snapshot`, and `runtime/substrate` refuses another
+actor with `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) before it suspends it, and again on the
+UID the suspend reports, since substrate's `SuspendActor` takes no UID precondition. The fork then
+appends no `SUSPEND`, clones nothing and records no child, where it would otherwise have cloned the
+replacement into children whose own turns never compare against the parent's UID.
+`runtime/substrate` refuses to place a memory-tier session on an actor that reports no UID. When
+`CreateActor` finds the name taken (`substrate.ErrActorExists`), `Create` attaches to that actor, so
+two hosts racing a session's first turn share one actor. The loser's turn fails at worst, never the
+session, and a retry attaches: `ABORTED` when its append loses, and `ABORTED` (`api.ErrComputeBusy`)
+when it finds the winner's actor `RESUMING`, `SUSPENDING` or `PAUSING`, or substrate refuses its
+resume because another operation holds the actor (substrate's `ABORTED`, reported as
+`substrate.ErrActorBusy`). An actor that is `CRASHED`, `DELETING`, `REVERTING` or in a state the
+adapter does not know is `INTERNAL`. `Restore` (`Sessions.Resume`) returns `ErrMemoryStateLost` for
+every memory-tier session whose actor is gone, whatever its journal records (a session interrupted
+on its first turn included), since the snapshot it would resume went with the actor; `GetActor`
+confirms the absence after the resume fails.
 
 Limits of these checks:
 
@@ -140,6 +149,12 @@ Limits of these checks:
   already placed when its actor is replaced runs on the replacement and records the old UID; the
   next turn is refused, so one turn's output can come from a harness without the session's state.
 - Turns journaled before `compute_instance` existed recorded no UID and are not compared.
+- A fork child's comparison starts at its `FORK` marker, and the child records no UID until its own
+  first turn. If the child's actor is replaced out of band before that turn, the replacement is not
+  compared: the started-turn count refuses to cold-create a missing child actor, since it includes
+  the inherited prefix, but it cannot see an actor someone else created under the child's name.
+- `Placer.Suspend` does not compare: it suspends whatever actor the name holds and records its
+  snapshot, and the next `Exec` or `Resume` on the session is refused.
 - The refused replacement actor is not deleted: it keeps its name and any worker it holds until an
   operator deletes it.
 
@@ -230,6 +245,11 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
 - A memory clone reflects the parent's RAM **now**, so it can only realize a fork at the log head.
   Forking a stateful session at a historical seq is refused with `ErrUnplaceable` →
   `FailedPrecondition` instead of pairing an old prefix with present-day RAM.
+- A memory clone must come from the actor the parent's turns ran on. When the actor under the
+  parent's name has another UID than the parent's journal last recorded, the fork is refused with
+  `api.ErrMemoryStateLost` → `FailedPrecondition` before the backend suspends it, or, if it was
+  replaced between that look and the suspend, after: the replacement is then left suspended, with
+  no SUSPEND event on the parent's chain and no child.
 - A control client without the Tag APIs does not satisfy the optional `SnapshotCloner` interface; a
   stateful fork there fails loudly rather than degrading to a lossy replay-fork.
 - The child fan-out is all-or-nothing. If a child fails to provision, the ones already created are

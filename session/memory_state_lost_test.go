@@ -3,6 +3,7 @@ package session_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -455,26 +456,62 @@ func TestActorCreatedAfterTheCountOverALostActorIsRefused(t *testing.T) {
 	}
 }
 
-// Two hosts racing a session's first turn on a healthy actor is ordinary, and the loser must be able
-// to retry: it gets OK or a retryable ABORTED, never FAILED_PRECONDITION, and afterwards both hosts
-// keep running turns on the one actor.
+// Two hosts racing a session's first turn on a healthy actor is ordinary, and the loser must be
+// able to retry: it gets OK or a retryable ABORTED, never FAILED_PRECONDITION or INTERNAL, and
+// afterwards both hosts keep running turns on the one actor.
 func TestTwoHostsRacingTheFirstTurnKeepTheSessionHealthy(t *testing.T) {
+	runB := func(hostB v1.SessionsClient, sess string) func(*actorControl) error {
+		return func(*actorControl) error { return execHi(hostB, sess) }
+	}
 	for _, tc := range []struct {
 		name string
-		// arm installs the hook through which host B's first turn runs inside host A's placement.
+		// arm installs the hook through which host B acts inside host A's placement.
 		arm func(ctl *actorControl, hook func(actor string))
+		// during is what host B does inside that hook; after, when set, is what it does once host
+		// A's turn has returned.
+		during, after func(hostB v1.SessionsClient, sess string) func(*actorControl) error
+		wantA         []codes.Code
 	}{
 		{
 			// B creates the actor and finishes its turn after A found no actor and before A's
 			// CreateActor, which then finds the name taken and attaches to B's actor.
-			name: "B creates the actor before A does",
-			arm:  func(ctl *actorControl, hook func(string)) { ctl.onCreate = hook },
+			name:   "B creates the actor before A does",
+			arm:    func(ctl *actorControl, hook func(string)) { ctl.onCreate = hook },
+			during: runB,
+			wantA:  []codes.Code{codes.OK, codes.Aborted},
 		},
 		{
 			// A creates the actor; B finds it, resumes it and finishes its turn before A's own
 			// resume returns and before A's turn is journaled.
-			name: "B runs on the actor A created",
-			arm:  func(ctl *actorControl, hook func(string)) { ctl.onResume = hook },
+			name:   "B runs on the actor A created",
+			arm:    func(ctl *actorControl, hook func(string)) { ctl.onResume = hook },
+			during: runB,
+			wantA:  []codes.Code{codes.OK, codes.Aborted},
+		},
+		{
+			// B has created the actor and is still resuming it when A's CreateActor finds the name
+			// taken, so A finds the actor RESUMING. That settles on its own: A's turn is ABORTED,
+			// not INTERNAL, and A's retry runs once B's resume and turn are done.
+			name: "A finds B's actor mid-resume",
+			arm:  func(ctl *actorControl, hook func(string)) { ctl.onCreate = hook },
+			during: func(_ v1.SessionsClient, sess string) func(*actorControl) error {
+				return func(ctl *actorControl) error {
+					ctl.mu.Lock()
+					defer ctl.mu.Unlock()
+					ctl.status[sess] = substrate.StatusTransitioning
+					ctl.newUID(sess)
+					return nil
+				}
+			},
+			after: func(hostB v1.SessionsClient, sess string) func(*actorControl) error {
+				return func(ctl *actorControl) error {
+					if _, err := ctl.ResumeActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: sess}); err != nil {
+						return err
+					}
+					return execHi(hostB, sess)
+				}
+			},
+			wantA: []codes.Code{codes.Aborted},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -494,18 +531,21 @@ func TestTwoHostsRacingTheFirstTurnKeepTheSessionHealthy(t *testing.T) {
 				if actor != sess || !fired.CompareAndSwap(false, true) {
 					return
 				}
-				hostBErr = execHi(hostB, sess)
+				hostBErr = tc.during(hostB, sess)(ctl)
 			})
 			errA := execHi(hostA, sess)
 			ctl.onCreate, ctl.onResume = nil, nil
 			if !fired.Load() {
-				t.Fatal("host B's turn never ran inside host A's placement")
+				t.Fatal("host B never acted inside host A's placement")
+			}
+			if hostBErr == nil && tc.after != nil {
+				hostBErr = tc.after(hostB, sess)(ctl)
 			}
 			if hostBErr != nil {
 				t.Fatalf("host B's first turn: %v", hostBErr)
 			}
-			if code := status.Code(errA); code != codes.OK && code != codes.Aborted {
-				t.Fatalf("host A's racing first turn: want OK or Aborted, got %v", errA)
+			if code := status.Code(errA); !slices.Contains(tc.wantA, code) {
+				t.Fatalf("host A's racing first turn: want one of %v, got %v", tc.wantA, errA)
 			}
 			if status.Code(errA) == codes.Aborted {
 				if err := execHi(hostA, sess); err != nil {
@@ -525,6 +565,88 @@ func TestTwoHostsRacingTheFirstTurnKeepTheSessionHealthy(t *testing.T) {
 				t.Errorf("actors created = %d, want 1: both hosts must share the session's actor", created)
 			}
 		})
+	}
+}
+
+// A Fork of a memory-tier session whose actor was replaced must not clone the replacement: every
+// child would run without the parent's state, and nothing would refuse it later, since a child's
+// own actor has a new UID and the FORK marker resets the comparison its turns make. After the
+// arbitration's interleaving (host B's turn recorded on the lost actor, host A's replacement
+// RUNNING under the name), Fork is refused with FAILED_PRECONDITION before it suspends anything,
+// creates no child actor and no child session, and journals nothing on the parent.
+func TestForkOfASessionWhoseActorWasReplacedIsRefused(t *testing.T) {
+	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	hostA := newMemoryHost(t, ctl, store, echoagent.Harness{})
+	hostB := newMemoryHost(t, ctl, store, echoagent.Harness{})
+	ctx := context.Background()
+	sess := mustCreate(t, hostA)
+
+	var fired atomic.Bool
+	var hostBErr error
+	ctl.onCreate = func(actor string) {
+		if actor != sess || !fired.CompareAndSwap(false, true) {
+			return
+		}
+		hostBErr = errors.Join(execHi(hostB, sess),
+			ctl.DeleteActor(ctx, substrate.ActorRef{Atespace: "space", Name: sess}))
+	}
+	errA := execHi(hostA, sess)
+	ctl.onCreate = nil
+	if hostBErr != nil || !fired.Load() {
+		t.Fatalf("host B's first turn inside host A's create: fired=%v err=%v", fired.Load(), hostBErr)
+	}
+	if status.Code(errA) != codes.FailedPrecondition {
+		t.Fatalf("host A's turn on the replacement actor: want FailedPrecondition, got %v", errA)
+	}
+	ctl.mu.Lock()
+	created, suspends, replacement := ctl.created, ctl.suspends, ctl.status[sess]
+	ctl.mu.Unlock()
+	if replacement != substrate.StatusRunning {
+		t.Fatalf("replacement actor is %v, want running: the fork must find it under the session's name", replacement)
+	}
+	head, err := store.Session(sess).Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := hostA.ListSessions(ctx, &v1.ListSessionsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, host := range map[string]v1.SessionsClient{"host A": hostA, "host B": hostB} {
+		_, err = host.Fork(ctx, &v1.ForkRequest{Session: sess, Count: 2})
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("%s: fork of a session whose actor was replaced: want FailedPrecondition, got %v", name, err)
+		}
+		if msg := status.Convert(err).Message(); !strings.Contains(msg, "replaced") {
+			t.Errorf("%s: error %q does not say the instance was replaced", name, msg)
+		}
+	}
+	ctl.mu.Lock()
+	gotCreated, gotSuspends, gotStatus := ctl.created, ctl.suspends, ctl.status[sess]
+	ctl.mu.Unlock()
+	if gotCreated != created {
+		t.Errorf("actors created = %d after the refused forks, want %d: no child actor may be created", gotCreated, created)
+	}
+	if gotSuspends != suspends || gotStatus != substrate.StatusRunning {
+		t.Errorf("suspends = %d, replacement %v after the refused forks, want %d and running: nothing may be snapshotted",
+			gotSuspends, gotStatus, suspends)
+	}
+	if got, err := store.Session(sess).Head(); err != nil || got != head {
+		t.Errorf("parent journal head after the refused forks = %d (err %v), want %d", got, err, head)
+	}
+	after, err := hostA.ListSessions(ctx, &v1.ListSessionsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.GetSessions()) != len(before.GetSessions()) {
+		t.Errorf("sessions = %d after the refused forks, want %d: no child session may be recorded",
+			len(after.GetSessions()), len(before.GetSessions()))
 	}
 }
 

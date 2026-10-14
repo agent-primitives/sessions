@@ -712,19 +712,21 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 // forkError surfaces a refused fork as FailedPrecondition rather than Internal. A fork is refused
 // when the harness's capabilities cannot realize it — e.g. a REQUIRES_MEMORY_SNAPSHOT session forked
 // at a historical seq, which no memory snapshot can reproduce — which is a caller-visible
-// precondition, not a host fault. A concurrent writer that invalidated the fork point, a parent that
-// no longer holds the snapshot the fork took (api.ErrSnapshotSuperseded), or another stateful fork
-// that is checkpointing the parent is Aborted, so the caller knows a retry is meaningful.
+// precondition, not a host fault, and so is a parent whose compute was replaced and no longer holds
+// its in-RAM state (api.ErrMemoryStateLost). A concurrent writer that invalidated the fork point, a
+// parent that no longer holds the snapshot the fork took (api.ErrSnapshotSuperseded), compute busy
+// with another operation (api.ErrComputeBusy), or another stateful fork that is checkpointing the
+// parent is Aborted, so the caller knows a retry is meaningful.
 func forkError(err error) error {
 	switch {
-	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch):
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, api.ErrMemoryStateLost):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return status.Error(codes.Unavailable, err.Error())
 	case errors.Is(err, placement.ErrAdmissionInterrupted):
 		return status.Error(admissionInterruptedCode(err), err.Error())
 	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing),
-		errors.Is(err, api.ErrSnapshotSuperseded):
+		errors.Is(err, api.ErrSnapshotSuperseded), errors.Is(err, api.ErrComputeBusy):
 		return status.Error(codes.Aborted, err.Error())
 	default:
 		return status.Errorf(codes.Internal, "fork: %v", err)
@@ -746,7 +748,7 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 	if _, err := placer.Suspend(ctx, log, req.GetSession()); err != nil {
 		// A running turn, or a stateful Fork checkpointing the session, refuses the Suspend before
 		// it touches compute or the journal; retry once that returns.
-		if errors.Is(err, placement.ErrSessionBusy) || errors.Is(err, placement.ErrCheckpointing) {
+		if errors.Is(err, placement.ErrSessionBusy) || errors.Is(err, placement.ErrCheckpointing) || errors.Is(err, api.ErrComputeBusy) {
 			return nil, status.Error(codes.Aborted, err.Error())
 		}
 		return nil, status.Errorf(codes.Internal, "suspend: %v", err)
@@ -821,8 +823,9 @@ func resumeError(err error) error {
 		return status.Errorf(codes.Unavailable, "resume: %v", err)
 	case errors.Is(err, placement.ErrAdmissionInterrupted):
 		return status.Errorf(admissionInterruptedCode(err), "resume: %v", err)
-	case errors.Is(err, placement.ErrCheckpointing):
-		// A stateful Fork of this session superseded this Resume's turn; retry once it completes.
+	case errors.Is(err, placement.ErrCheckpointing), errors.Is(err, api.ErrComputeBusy):
+		// A stateful Fork of this session superseded this Resume's turn, or the session's compute
+		// is in the middle of another operation; retry once it completes.
 		return status.Errorf(codes.Aborted, "resume: %v", err)
 	default:
 		return status.Errorf(codes.Internal, "resume: %v", err)
@@ -850,7 +853,8 @@ func execError(err error) error {
 		return status.Error(codes.Unavailable, err.Error())
 	case errors.Is(err, placement.ErrAdmissionInterrupted):
 		return status.Error(admissionInterruptedCode(err), err.Error())
-	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing):
+	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing),
+		errors.Is(err, api.ErrComputeBusy):
 		return status.Error(codes.Aborted, err.Error())
 	default:
 		return status.Error(codes.Internal, err.Error())

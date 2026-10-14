@@ -69,23 +69,36 @@ func (ad *Adapter) CreateActor(ctx context.Context, actor substrate.ActorRef, te
 
 // ResumeActor schedules the actor onto a worker. Substrate restores the actor's own external
 // snapshot when it holds one (including a tag's, borrowed at creation) and cold-boots the template
-// spec otherwise; the request carries no boot flag.
+// spec otherwise; the request carries no boot flag. Substrate refuses a resume while another
+// operation holds the actor's lease with ABORTED, reported as substrate.ErrActorBusy.
 func (ad *Adapter) ResumeActor(ctx context.Context, actor substrate.ActorRef) (substrate.ActorInfo, error) {
 	resp, err := ad.ctl.ResumeActor(ctx, &atepb.ResumeActorRequest{Actor: objectRef(actor)})
 	if err != nil {
-		return substrate.ActorInfo{}, err
+		return substrate.ActorInfo{}, busy(actor, err)
 	}
 	return actorInfo(resp.GetActor()), nil
 }
 
-// SuspendActor snapshots the actor to durable storage and frees the worker, returning the URI of the
-// external snapshot the actor now holds (see heldSnapshot).
-func (ad *Adapter) SuspendActor(ctx context.Context, actor substrate.ActorRef) (string, error) {
+// SuspendActor snapshots the actor to durable storage and frees the worker, returning the actor as
+// the suspend left it: the external snapshot it now holds (see heldSnapshot) and its UID. Substrate
+// refuses a suspend while another operation holds the actor's lease with ABORTED, reported as
+// substrate.ErrActorBusy.
+func (ad *Adapter) SuspendActor(ctx context.Context, actor substrate.ActorRef) (substrate.ActorInfo, error) {
 	resp, err := ad.ctl.SuspendActor(ctx, &atepb.SuspendActorRequest{Actor: objectRef(actor)})
 	if err != nil {
-		return "", err
+		return substrate.ActorInfo{}, busy(actor, err)
 	}
-	return heldSnapshot(resp.GetActor().GetStatus()), nil
+	return actorInfo(resp.GetActor()), nil
+}
+
+// busy wraps err in substrate.ErrActorBusy when substrate reported ABORTED, which it does when
+// another operation holds the actor's lease (acquireLease in substrate's controlapi/workflow.go) or
+// a concurrent update conflicted. Both settle on their own, so the caller can retry.
+func busy(actor substrate.ActorRef, err error) error {
+	if status.Code(err) == codes.Aborted {
+		return fmt.Errorf("%w: %s/%s: %w", substrate.ErrActorBusy, actor.Atespace, actor.Name, err)
+	}
+	return err
 }
 
 // DeleteActor deletes a suspended actor.
@@ -196,9 +209,11 @@ func heldSnapshot(st *atepb.ActorStatus) string {
 	return held.GetDurableSnapshot().GetObject().GetSnapshotUri()
 }
 
-// actorStatus narrows substrate's lifecycle onto the states the backend acts on. Transitional states
-// (RESUMING, SUSPENDING, PAUSING, DELETING, REVERTING) map to StatusUnknown, so the backend refuses
-// to place onto an actor that is mid-transition instead of guessing which side it will land on.
+// actorStatus narrows substrate's lifecycle onto the states the backend acts on. RESUMING,
+// SUSPENDING and PAUSING map to StatusTransitioning: they settle into RUNNING, SUSPENDED or PAUSED
+// on their own (often another host's resume), so the backend reports them as retryable. DELETING,
+// REVERTING and any state this client does not know map to StatusUnknown, which the backend refuses
+// to place onto rather than guess which side it will land on.
 func actorStatus(s atepb.ActorState) substrate.ActorStatus {
 	switch s {
 	case atepb.ActorState_ACTOR_STATE_RUNNING:
@@ -207,6 +222,8 @@ func actorStatus(s atepb.ActorState) substrate.ActorStatus {
 		return substrate.StatusSuspended
 	case atepb.ActorState_ACTOR_STATE_CRASHED:
 		return substrate.StatusTerminated
+	case atepb.ActorState_ACTOR_STATE_RESUMING, atepb.ActorState_ACTOR_STATE_SUSPENDING, atepb.ActorState_ACTOR_STATE_PAUSING:
+		return substrate.StatusTransitioning
 	default:
 		return substrate.StatusUnknown
 	}

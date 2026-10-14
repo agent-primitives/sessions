@@ -689,3 +689,69 @@ func TestResumeOntoAReplacementActorIsRefused(t *testing.T) {
 		t.Errorf("journal head after the refused resume = %d (err %v), want %d", got, err, head)
 	}
 }
+
+// Suspend and a stateful Fork check the actor they snapshot against the instance the journal last
+// recorded, as Exec and Resume do. When the session's actor is gone, or another one has been created
+// under its name, its in-RAM state cannot be captured: both are refused with FAILED_PRECONDITION
+// (not a retryable INTERNAL), snapshot nothing, create no actor and journal nothing, so no SUSPEND
+// records a checkpoint without the session's state.
+func TestSuspendAndForkOfALostOrReplacedActorAreRefused(t *testing.T) {
+	ctx := context.Background()
+	for _, actor := range []string{"gone", "replaced"} {
+		for _, op := range []string{"suspend", "fork"} {
+			t.Run(actor+"/"+op, func(t *testing.T) {
+				ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+				store, err := sqlitelog.Open(":memory:")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = store.Close() })
+				c := newMemoryHost(t, ctl, store, echoagent.Harness{})
+				sess := mustCreate(t, c)
+				if err := execHi(c, sess); err != nil {
+					t.Fatalf("first turn: %v", err)
+				}
+				ref := substrate.ActorRef{Atespace: "space", Name: sess}
+				if err := ctl.DeleteActor(ctx, ref); err != nil {
+					t.Fatal(err)
+				}
+				wantMsg := "no longer exists"
+				if actor == "replaced" {
+					if err := ctl.CreateActor(ctx, ref, substrate.ObjectRef{Atespace: "space", Name: "mem"}); err != nil {
+						t.Fatal(err)
+					}
+					wantMsg = "replaced"
+				}
+				ctl.mu.Lock()
+				created, suspends := ctl.created, ctl.suspends
+				ctl.mu.Unlock()
+				head, err := store.Session(sess).Head()
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if op == "suspend" {
+					_, err = c.Suspend(ctx, &v1.SuspendRequest{Session: sess})
+				} else {
+					_, err = c.Fork(ctx, &v1.ForkRequest{Session: sess, Count: 1})
+				}
+				if status.Code(err) != codes.FailedPrecondition {
+					t.Fatalf("%s of a session whose actor is %s: want FailedPrecondition, got %v", op, actor, err)
+				}
+				if msg := status.Convert(err).Message(); !strings.Contains(msg, wantMsg) {
+					t.Errorf("error %q does not contain %q", msg, wantMsg)
+				}
+				ctl.mu.Lock()
+				gotCreated, gotSuspends := ctl.created, ctl.suspends
+				ctl.mu.Unlock()
+				if gotCreated != created || gotSuspends != suspends {
+					t.Errorf("actors created %d->%d, suspends %d->%d: the refused %s may create or snapshot nothing",
+						created, gotCreated, suspends, gotSuspends, op)
+				}
+				if got, err := store.Session(sess).Head(); err != nil || got != head {
+					t.Errorf("journal head after the refused %s = %d (err %v), want %d", op, got, err, head)
+				}
+			})
+		}
+	}
+}

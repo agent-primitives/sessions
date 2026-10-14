@@ -617,6 +617,13 @@ func (s suspendFailStore) Head() (int64, error) {
 	return s.Store.Head()
 }
 
+func (s suspendFailStore) Read(from int64) ([]eventlog.Record, error) {
+	if s.operation == "read" {
+		return nil, s.err
+	}
+	return s.Store.Read(from)
+}
+
 func (s suspendFailStore) Append(seq, fence int64, ev api.Event) (eventlog.Record, error) {
 	if s.operation == "append" {
 		return eventlog.Record{}, s.err
@@ -625,7 +632,7 @@ func (s suspendFailStore) Append(seq, fence int64, ev api.Event) (eventlog.Recor
 }
 
 func TestSuspendFailuresPreserveActorAndJournal(t *testing.T) {
-	for _, operation := range []string{"snapshot", "fence", "head", "append"} {
+	for _, operation := range []string{"read", "snapshot", "fence", "head", "append"} {
 		t.Run(operation, func(t *testing.T) {
 			ctx := context.Background()
 			ctl := newSuspendControl()
@@ -648,14 +655,19 @@ func TestSuspendFailuresPreserveActorAndJournal(t *testing.T) {
 			if after := suspendRecords(t, log); !reflect.DeepEqual(after, before) {
 				t.Fatal("failed suspend changed the journal or invented a SUSPEND record")
 			}
-			if !reflect.DeepEqual(ctl.calls, []string{"suspend:session"}) {
-				t.Fatalf("failure must not invoke destructive teardown: calls=%v", ctl.calls)
+			// A journal that cannot be read gives no instance to check, so compute is not touched.
+			wantCalls := []string{"suspend:session"}
+			if operation == "read" {
+				wantCalls = nil
+			}
+			if !reflect.DeepEqual(ctl.calls, wantCalls) {
+				t.Fatalf("failure must not invoke destructive teardown: calls=%v want %v", ctl.calls, wantCalls)
 			}
 			a, exists := ctl.actors[substrate.ActorRef{Atespace: "space", Name: "session"}]
 			if !exists {
 				t.Fatal("failed suspend destroyed the actor")
 			}
-			if operation == "snapshot" {
+			if operation == "snapshot" || operation == "read" {
 				if !a.worker || a.status != substrate.StatusRunning || len(ctl.snapshots) != 0 {
 					t.Fatal("failed snapshot changed compute or captured a false snapshot")
 				}

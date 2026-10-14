@@ -818,7 +818,9 @@ func (p *Placer) endHarnesses(ctx context.Context, sessionUID string, open []*li
 // Suspend transitions the incarnation to cold via SnapshotExternal, then records the SnapshotRef
 // in a SUSPEND lifecycle event so Resume can recover it from the tamper-evident chain (§5.1).
 // Snapshot owns dedicated compute release and retains the handles Restore needs; Stop would
-// destructively tear them down. Snapshot keys on the session id, so a minimal incarnation suffices.
+// destructively tear them down. Snapshot keys on the session id plus the compute instance the
+// journal last recorded, so a backend can refuse to checkpoint compute that replaced the one the
+// session's turns ran on (api.ErrMemoryStateLost); nothing is journaled then.
 //
 // Suspend does not interrupt a running turn. While an Exec or Resume of the session runs through
 // this Placer or its Registry, Suspend fails with ErrSessionBusy without touching compute or the
@@ -848,7 +850,17 @@ func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	}
 	defer p.endCheckpoint(sessionUID)
 
-	inc := api.Incarnation{ID: sessionUID}
+	// The snapshot must capture the compute the session's turns ran on, exactly as a stateful fork's
+	// does (forkSource): a SUSPEND recording a replacement's snapshot would put a checkpoint without
+	// the session's state on the chain. Pass the instance the journal last recorded for this
+	// Placer's harness so the backend refuses another actor (api.ErrMemoryStateLost); the session
+	// guard held above keeps any turn of this Registry from recording a newer one meanwhile.
+	recs, err := log.Read(1)
+	if err != nil {
+		return api.SnapshotRef{}, fmt.Errorf("placement: read session journal: %w", err)
+	}
+	instance, _ := controller.LatestComputeInstance(recs, func(recorded string) bool { return p.ranHere(recorded, "") })
+	inc := api.Incarnation{ID: sessionUID, ComputeInstance: instance}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
 	if err != nil {
 		return api.SnapshotRef{}, err

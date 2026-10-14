@@ -51,9 +51,9 @@ type Runtime interface {
 	//
 	// A non-empty in.ComputeInstance is the instance the caller requires behind in.ID (the
 	// latest one the journal recorded). A backend that sets ComputeInstance refuses with
-	// ErrMemoryStateLost when another instance is there, before it captures anything if it can
-	// tell, and in any case before returning a ref: a snapshot of a replacement would hand
-	// its callers compute that holds none of the session's state.
+	// ErrMemoryStateLost when another instance is there, or none is, before it captures anything
+	// if it can tell, and in any case before returning a ref: a snapshot of a replacement would
+	// hand its callers compute that holds none of the session's state.
 	Snapshot(ctx context.Context, in Incarnation, kind SnapshotKind) (SnapshotRef, error)
 
 	// Restore brings an incarnation back from a snapshot. Sub-second on memory-capable

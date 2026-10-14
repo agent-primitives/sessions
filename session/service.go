@@ -751,6 +751,10 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 		if errors.Is(err, placement.ErrSessionBusy) || errors.Is(err, placement.ErrCheckpointing) || errors.Is(err, api.ErrComputeBusy) {
 			return nil, status.Error(codes.Aborted, err.Error())
 		}
+		// The compute the session's turns ran on is gone or replaced; retrying cannot help.
+		if errors.Is(err, api.ErrMemoryStateLost) {
+			return nil, status.Errorf(codes.FailedPrecondition, "suspend: %v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "suspend: %v", err)
 	}
 	// The SUSPEND append already moved the stored compute_state projection, so re-reading is

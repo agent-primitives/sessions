@@ -122,14 +122,17 @@ latest UID recorded for that harness since the session's `FORK` marker (attribut
 the history its compare-and-swap append extends, so a turn another host journaled first is either
 compared or makes the append fail. `Resume` makes the same comparison before it re-drives a turn or
 records the resume. A different UID is `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`), names the
-session, and journals nothing; so is every later turn on either host. A stateful `Fork` makes the
-same comparison against the parent's actor: the Placer reads the parent's journal at the fork point
-and passes the latest recorded UID to `Runtime.Snapshot`, and `runtime/substrate` refuses another
-actor with `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) before it suspends it, and again on the
-UID the suspend reports, since substrate's `SuspendActor` takes no UID precondition. The fork then
-appends no `SUSPEND`, clones nothing and records no child, where it would otherwise have cloned the
-replacement into children whose own turns never compare against the parent's UID.
-`runtime/substrate` refuses to place a memory-tier session on an actor that reports no UID. When
+session, and journals nothing; so is every later turn on either host. `Suspend` and a stateful
+`Fork` make the same comparison against the session's actor: the Placer reads the session's journal
+(at the fork point, for a fork) and passes the latest recorded UID to `Runtime.Snapshot`, and
+`runtime/substrate` refuses another actor, or a missing one, with `api.ErrMemoryStateLost`
+(`FAILED_PRECONDITION`) before it suspends it, and again on the UID the suspend reports, since
+substrate's `SuspendActor` takes no UID precondition. Neither then appends a `SUSPEND`, so the
+journal never records a replacement's snapshot as the session's checkpoint, and the fork clones
+nothing and records no child, where it would otherwise have cloned the replacement into children
+whose own turns never compare against the parent's UID. `runtime/substrate` refuses to place a
+memory-tier session on an actor that reports no UID, and refuses to snapshot one with a plain error
+(`INTERNAL`), since a `ControlClient` that reports no UID breaks its contract. When
 `CreateActor` finds the name taken (`substrate.ErrActorExists`), `Create` attaches to that actor, so
 two hosts racing a session's first turn share one actor. The loser's turn fails at worst, never the
 session, and a retry attaches: `ABORTED` when its append loses, and `ABORTED` (`api.ErrComputeBusy`)
@@ -153,12 +156,12 @@ Limits of these checks:
   first turn. If the child's actor is replaced out of band before that turn, the replacement is not
   compared: the started-turn count refuses to cold-create a missing child actor, since it includes
   the inherited prefix, but it cannot see an actor someone else created under the child's name.
-- `Placer.Suspend` does not compare: it suspends whatever actor the name holds and records its
-  snapshot, and the next `Exec` or `Resume` on the session is refused.
 - The refused replacement actor is not deleted: it keeps its name and any worker it holds until an
   operator deletes it.
 
 Open questions, not implemented:
+
+TODO(spike): should the `FORK` marker record each child's actor UID (the clone `CreateActorFromTag` made), so `LatestComputeInstance` starts a child's comparison from that UID instead of `""` and an actor created under the child's name before its first turn is refused? It is a new journal field, so it needs a canonical-bytes and replay story.
 
 TODO(spike): can the atenet-router target an actor by UID (or reject a request whose expected UID differs), so a turn already placed never reaches a replacement actor?
 

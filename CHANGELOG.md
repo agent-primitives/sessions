@@ -131,12 +131,14 @@ provide.
   whose UID differs from the latest one recorded for that harness since the session's `FORK` marker
   is `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and journals nothing. This catches an actor
   another host created under the session's name after it counted no turns, while the actor the
-  first turn ran on was lost; the count alone let later turns attach to it. A stateful `Fork` of
-  such a session is `FAILED_PRECONDITION` too, and suspends, clones and journals nothing: the
-  Placer passes the recorded UID to `Runtime.Snapshot` in `api.Incarnation.ComputeInstance`, and
-  `runtime/substrate` refuses another actor, checking the UID before it suspends and the one the
-  suspend reports. `runtime/substrate` refuses a memory-tier actor that reports no UID, so a custom
-  `ControlClient` must report one. `ControlClient.SuspendActor` now returns the suspended actor's
+  first turn ran on was lost; the count alone let later turns attach to it. `Suspend` and a
+  stateful `Fork` of such a session, or of one whose actor is gone, are `FAILED_PRECONDITION` too
+  (they were `INTERNAL`, and `Suspend` of a replaced actor succeeded), and suspend, clone and
+  journal nothing: the Placer passes the recorded UID to `Runtime.Snapshot` in
+  `api.Incarnation.ComputeInstance`, and `runtime/substrate` refuses another actor or a missing
+  one, checking the UID before it suspends and the one the suspend reports. `runtime/substrate`
+  refuses a memory-tier actor that reports no UID (`INTERNAL` from `Snapshot`), so a custom
+  `ControlClient` must report one from `GetActor`, `ResumeActor` and `SuspendActor`. `ControlClient.SuspendActor` now returns the suspended actor's
   `substrate.ActorInfo` (snapshot handle and UID) instead of the snapshot handle alone. When
   `CreateActor` finds the name taken (`substrate.ErrActorExists`, which a `ControlClient` must
   return for it), `Create` attaches to that actor where it used to fail the turn with `INTERNAL`.

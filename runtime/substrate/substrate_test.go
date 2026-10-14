@@ -40,6 +40,11 @@ type mockControl struct {
 	// when it is deleted, so an actor created again under a name reports a new one.
 	uids    map[string]string
 	created int
+	// suspendErr fails SuspendActor; getNoUID and suspendNoUID make GetActor and SuspendActor report
+	// no UID, as a ControlClient that breaks its contract would.
+	suspendErr   error
+	getNoUID     bool
+	suspendNoUID bool
 }
 
 // exists records an actor at a status, so GetActor reports it as already placed.
@@ -88,10 +93,17 @@ func (m *mockControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (s
 		return substrate.ActorInfo{}, err
 	}
 	m.calls = append(m.calls, "suspend:"+a.Name)
+	if m.suspendErr != nil {
+		return substrate.ActorInfo{}, m.suspendErr
+	}
 	m.exists(a.Name, substrate.StatusSuspended)
 	snap := "gs://snap/" + a.Name
 	m.holds(a.Name, snap)
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: m.info.Worker, Snapshot: snap, UID: m.uid(a.Name)}, nil
+	uid := m.uid(a.Name)
+	if m.suspendNoUID {
+		uid = ""
+	}
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: m.info.Worker, Snapshot: snap, UID: uid}, nil
 }
 
 // holds records the external snapshot an actor currently holds.
@@ -119,7 +131,11 @@ func (m *mockControl) GetActor(ctx context.Context, a substrate.ActorRef) (subst
 		return substrate.ActorInfo{}, m.getErr
 	}
 	if st, ok := m.actors[a.Name]; ok {
-		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], UID: m.uid(a.Name)}, nil
+		uid := m.uid(a.Name)
+		if m.getNoUID {
+			uid = ""
+		}
+		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], UID: uid}, nil
 	}
 	if m.status != substrate.StatusUnknown { // canned state for the suspend/restore cases
 		return substrate.ActorInfo{Status: m.status, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], UID: m.uid(a.Name)}, nil
@@ -888,6 +904,61 @@ func TestSnapshotRefusesAReplacedActor(t *testing.T) {
 	_, err = newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x", ComputeInstance: uid}, api.SnapshotExternal)
 	if !errors.Is(err, api.ErrMemoryStateLost) {
 		t.Fatalf("actor replaced between the look and the suspend: err=%v, want ErrMemoryStateLost", err)
+	}
+
+	// An actor that is gone took the session's state with it: that is ErrMemoryStateLost, as Exec and
+	// Resume report it, whether it is missing at the look or by the time of the suspend.
+	m = &mockControl{info: running("worker-a")}
+	_, err = newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x", ComputeInstance: "uid-recorded"}, api.SnapshotExternal)
+	if !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound) || !strings.Contains(err.Error(), "uid-recorded") {
+		t.Fatalf("snapshot of a missing actor: err=%v, want ErrMemoryStateLost wrapping ErrActorNotFound and naming the instance", err)
+	}
+	if want := []string{"get:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("calls=%v want %v: a missing actor is not suspended", m.calls, want)
+	}
+	m = newRunning()
+	uid = m.uids["sess-x"]
+	m.suspendErr = fmt.Errorf("deleted after the look: %w", substrate.ErrActorNotFound)
+	_, err = newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x", ComputeInstance: uid}, api.SnapshotExternal)
+	if !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound) {
+		t.Fatalf("actor deleted between the look and the suspend: err=%v, want ErrMemoryStateLost wrapping ErrActorNotFound", err)
+	}
+	// Any other control error stays what it was.
+	m = newRunning()
+	uid = m.uids["sess-x"]
+	m.suspendErr = errors.New("control plane down")
+	_, err = newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x", ComputeInstance: uid}, api.SnapshotExternal)
+	if err == nil || errors.Is(err, api.ErrMemoryStateLost) {
+		t.Fatalf("suspend failure: err=%v, want a plain error", err)
+	}
+	// Nor is a stateless snapshot of a missing actor memory-state loss: it requires no instance.
+	m = &mockControl{info: running("worker-a"), suspendErr: substrate.ErrActorNotFound}
+	_, err = newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+	if !errors.Is(err, substrate.ErrActorNotFound) || errors.Is(err, api.ErrMemoryStateLost) {
+		t.Fatalf("snapshot of a missing actor with no instance required: err=%v, want ErrActorNotFound only", err)
+	}
+
+	// An actor that reports no UID cannot be compared. That is a ControlClient fault, not a
+	// replacement, so it is a plain error that does not claim the actor was replaced.
+	for _, tc := range []struct {
+		name      string
+		set       func(*mockControl)
+		wantCalls []string
+	}{
+		{"look", func(m *mockControl) { m.getNoUID = true }, []string{"get:sess-x"}},
+		{"suspend", func(m *mockControl) { m.suspendNoUID = true }, []string{"get:sess-x", "suspend:sess-x"}},
+	} {
+		m = newRunning()
+		uid = m.uids["sess-x"]
+		tc.set(m)
+		_, err = newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x", ComputeInstance: uid}, api.SnapshotExternal)
+		if err == nil || errors.Is(err, api.ErrMemoryStateLost) || !strings.Contains(err.Error(), "reported no UID") ||
+			strings.Contains(err.Error(), "replaced") {
+			t.Fatalf("no UID at the %s: err=%v, want a plain error saying the actor reported no UID", tc.name, err)
+		}
+		if !reflect.DeepEqual(m.calls, tc.wantCalls) {
+			t.Fatalf("no UID at the %s: calls=%v want %v", tc.name, m.calls, tc.wantCalls)
+		}
 	}
 
 	m = newRunning()

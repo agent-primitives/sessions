@@ -87,7 +87,9 @@ type ControlClient interface {
 	ResumeActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 	// SuspendActor snapshots the actor to durable storage and frees the worker, returning the actor
 	// as the suspend left it: ActorInfo.Snapshot is the external snapshot it now holds, and
-	// ActorInfo.UID tells which actor under the name was suspended.
+	// ActorInfo.UID tells which actor under the name was suspended. UID must be set: a memory-tier
+	// Snapshot refuses a suspend that reports none, since it cannot tell which actor it captured.
+	// An actor that does not exist must be reported as (or wrap) ErrActorNotFound.
 	SuspendActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 	DeleteActor(ctx context.Context, actor ActorRef) error
 	GetActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
@@ -341,12 +343,15 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation
 // Snapshot suspends the actor: RAM+disk snapshot to external storage, worker freed. Only the
 // external (cold/suspend) kind is supported; substrate has no node-local warm checkpoint API today.
 //
-// When in.ComputeInstance is set (a stateful fork passes the UID the journal last recorded), the
-// actor under the name must be that one. Snapshot checks it before suspending, so a replacement is
-// refused with api.ErrMemoryStateLost untouched, and again on the actor the suspend reports, since
-// the actor can be replaced between the look and the suspend; substrate's SuspendActor has no UID
-// precondition to close that window. In the second case the replacement is left suspended, which
-// costs nothing: it holds none of the session's state and the host refuses it on every later turn.
+// When in.ComputeInstance is set (Placer.Suspend and a stateful fork pass the UID the journal last
+// recorded), the actor under the name must be that one. Snapshot checks it before suspending, so a
+// replacement is refused with api.ErrMemoryStateLost untouched, and again on the actor the suspend
+// reports, since the actor can be replaced between the look and the suspend; substrate's
+// SuspendActor has no UID precondition to close that window. In the second case the replacement is
+// left suspended, which costs nothing: it holds none of the session's state and the host refuses it
+// on every later turn. An actor that is gone is refused with api.ErrMemoryStateLost as well, since
+// the state it held went with it. An actor that reports no UID is refused with a plain error: it
+// cannot be compared, and that is a ControlClient fault, not evidence of a replacement.
 func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (snapshot api.SnapshotRef, err error) {
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "snapshot_compute",
 		"actor", in.ID,
@@ -368,21 +373,23 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 	if in.ComputeInstance != "" {
 		info, err := b.ctl.GetActor(ctx, b.ref(in.ID))
 		if err != nil {
-			suspendFinished(err, "error_kind", "get_actor_failed")
-			return api.SnapshotRef{}, fmt.Errorf("substrate: get actor before snapshot: %w", err)
+			err = b.instanceGone(in, "get actor before snapshot", err)
+			suspendFinished(err, "error_kind", snapshotErrorKind(err, "get_actor_failed"))
+			return api.SnapshotRef{}, err
 		}
 		if err := b.requireInstance(in, info.UID); err != nil {
-			suspendFinished(err, "error_kind", "memory_state_lost")
+			suspendFinished(err, "error_kind", snapshotErrorKind(err, "actor_uid_missing"))
 			return api.SnapshotRef{}, err
 		}
 	}
 	info, err := b.ctl.SuspendActor(ctx, b.ref(in.ID))
 	if err != nil {
-		suspendFinished(err, "error_kind", "suspend_actor_failed")
-		return api.SnapshotRef{}, fmt.Errorf("substrate: suspend actor: %w", err)
+		err = b.instanceGone(in, "suspend actor", err)
+		suspendFinished(err, "error_kind", snapshotErrorKind(err, "suspend_actor_failed"))
+		return api.SnapshotRef{}, err
 	}
 	if err := b.requireInstance(in, info.UID); err != nil {
-		suspendFinished(err, "error_kind", "memory_state_lost")
+		suspendFinished(err, "error_kind", snapshotErrorKind(err, "actor_uid_missing"))
 		return api.SnapshotRef{}, err
 	}
 	suspendFinished(nil)
@@ -394,11 +401,40 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 	return snapshot, nil
 }
 
+// instanceGone wraps err, from the control call op, for Snapshot. When in requires a compute
+// instance and the actor is not found, the instance that holds the session's in-RAM state is gone
+// for good, so the result wraps api.ErrMemoryStateLost as well as err, the way Restore reports a
+// missing memory-tier actor; any other error is only wrapped.
+func (b *Backend) instanceGone(in api.Incarnation, op string, err error) error {
+	if in.ComputeInstance == "" || !errors.Is(err, ErrActorNotFound) {
+		return fmt.Errorf("substrate: %s: %w", op, err)
+	}
+	return fmt.Errorf("%w: actor %s/%s, instance %q, which held the session's in-RAM state, no longer exists, "+
+		"so that state cannot be captured; nothing was snapshotted for the session: %s: %w",
+		api.ErrMemoryStateLost, b.atespace, in.ID, in.ComputeInstance, op, err)
+}
+
+// snapshotErrorKind is the debug error_kind for a failed step of Snapshot: memory_state_lost when
+// err wraps api.ErrMemoryStateLost, else the step's own kind.
+func snapshotErrorKind(err error, step string) string {
+	if errors.Is(err, api.ErrMemoryStateLost) {
+		return "memory_state_lost"
+	}
+	return step
+}
+
 // requireInstance returns an error wrapping api.ErrMemoryStateLost when in requires a compute
-// instance and the actor under in.ID reports another UID.
+// instance and the actor under in.ID reports another UID. An actor that reports no UID cannot be
+// compared at all, which is a ControlClient that breaks its contract rather than a replacement, so
+// that is a plain error.
 func (b *Backend) requireInstance(in api.Incarnation, uid string) error {
 	if in.ComputeInstance == "" || uid == in.ComputeInstance {
 		return nil
+	}
+	if uid == "" {
+		return fmt.Errorf("substrate: actor %s/%s reported no UID, so it could not be checked against instance %q, "+
+			"which holds the session's in-RAM state; no checkpoint was recorded for the session",
+			b.atespace, in.ID, in.ComputeInstance)
 	}
 	return fmt.Errorf("%w: actor %s/%s is instance %q, but the session's turns ran on instance %q, which has been replaced, "+
 		"so its in-RAM state cannot be captured; nothing was snapshotted for the session",

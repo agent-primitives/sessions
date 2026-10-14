@@ -73,7 +73,8 @@ nor duplicates a row.
 
 The cursor and lifecycle status are derived rather than caller-writable:
 
-- `last_seq` is `MAX(seq)` over the log, so the cursor a listing reports is always the log's own.
+- `last_seq` is maintained with each append and backfilled from the existing log, so the cursor
+  a listing reports is always the log's own.
 - `compute_state` is a projection maintained in the same transaction that appends an event, since an
   event body is an opaque blob no query can filter on. It records **what the log implies about
   compute**, not a live probe of the backend. Execution activity implies `LIVE`; `SUSPEND` and
@@ -83,13 +84,34 @@ The cursor and lifecycle status are derived rather than caller-writable:
   it later died. A backend that can enumerate its own incarnations is the thing that would make this
   exact; reconciling against the runtime is not implemented. Approval requests/decisions do not
   themselves move compute: a request repair or pending query cannot prove that a snapshot committed.
-- `pending_approval` is the tuple of an owned, unresolved host request in a stateless execution,
-  inspected through this response's positive `last_seq`. Later decisions do not change an earlier
-  captured response. It is output-only, not a metadata-table flag. Such a pending host request is
-  narrowly reported `EXEC_AWAITING`; a decision clears the reference, but an unreceipted owned call
-  still blocks new input. Ordinary/legacy interrupted turns retain the metadata-only `COMPLETED`
-  fallback, so that status is not proof of completion or admission. Execution and compute axes are
-  independent; recovery uses the journal rather than trusting an enum.
+- `pending_approval` is an output-only tuple projected inside the append transaction. Metadata,
+  correlation and `last_seq` are read atomically; rendering does not decode the journal. Later
+  appends do not change an earlier captured response, including one with a zero cursor.
+
+### How exec_state is derived
+
+Every Session reply — Create, Get, List, Fork, Resume, Suspend, Approve and Exec frames — uses the
+same captured projection. No events reports `PENDING`. A valid owned unanswered host request in
+the latest execution (ordered by first-seen non-lifecycle identity) reports `AWAITING` and exposes
+`pending_approval`. Requests and decisions match execution ID, call ID and the request's journal
+sequence. Errors and ordinary lifecycle markers do not resolve it; a decision, END, or newer
+execution removes the pending reference.
+
+Executions first seen before a child's latest FORK marker are inherited and excluded from reporting,
+even if their gated call/request arrives after the marker. A genuinely new child execution can
+report its own request. This ownership filter is reporting only; controller admission, decisions
+and recovery continue to validate the journal independently.
+
+Malformed approval-bearing evidence anywhere in the captured history suppresses actionable references,
+matching strict inspection. Malformed nongated histories do not. A v2→v3 backfill isolates an
+undecodable session, preserving its cursor/metadata but permanently withholding references while
+healthy neighbors remain readable. SQL faults abort the migration. Queries are not integrity checks:
+raw journal reads/Verify and strict commands still detect undecodable evidence.
+
+Other histories retain the compatibility `COMPLETED` fallback, including ordinary/legacy interrupted
+turns and decided calls without receipts. That status does not prove completion or admission: an
+unreceipted owned call still blocks new input. Execution and compute axes are independent; recovery
+uses the journal rather than trusting an enum.
 
 A fork inherits the parent's `project`, `harness` and `model`, because those define the workload and
 a branch of a run is still that run. It does **not** inherit the parent's name. A name is a label the

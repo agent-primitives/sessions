@@ -85,16 +85,13 @@ provide.
   Approval handoffs and recorded-route Suspend hold the Registry's shared checkpoint mark through
   snapshot and journal append, excluding stateful forks on other routes. A checkpoint-superseded
   approval turn reports `ABORTED` without starting a second approval snapshot.
-- `EXEC_AWAITING` is a narrow valid owned-host-request projection, not a general ordinary/legacy
-  query reducer. A decided call without a receipt has no pending reference; the existing metadata
-  `COMPLETED` fallback does not prove completion or allow new input. Compute status independently
-  reflects durable lifecycle metadata, not a live backend probe. Host approval request/decision
-  writes alone do not imply LIVE compute: NONE/COLD remains unchanged. Raw Replay is unchanged.
-- Decodable legacy/handwritten or malformed approval evidence remains readable through Get/List
-  and Fork response metadata, but confers no actionable `pending_approval` reference. Strict
-  approval validation can withhold even a valid latest reference when historical approval evidence
-  is malformed. Database/read failures and undecodable journal or metadata values still return
-  `INTERNAL`; rendering tolerance does not relax Approve, Exec, Resume or Suspend validation.
+- All Session replies project `EXEC_AWAITING` for valid owned unanswered host approval requests;
+  inherited executions are excluded. [Reporting and compatibility states](docs/concepts.md#how-exec_state-is-derived).
+- SQLite schema v3 backfills approval reporting without rewriting events/hashes; older builds refuse
+  the database (no downgrade). Undecodable v2 journals are isolated per session without actionable
+  references. Malformed approval evidence stays appendable/readable, but strict commands still refuse
+  it; invalid gated history suppresses references while malformed nongated history does not. SQL
+  migration/append failures roll back; database and metadata decode failures remain `INTERNAL`.
 - Approval requests and suspended snapshots/handles are retained indefinitely, without expiry,
   automatic decision or reclamation. Cancel and DeleteSession remain `UNIMPLEMENTED`; decisions
   provide no cancellation/teardown, policy hook, approval timeout or authorization. Identity is
@@ -114,7 +111,7 @@ provide.
   not a successful pause or final Session frame. Wrapped or joined matching parks still hand off.
   Ordinary mediation defaults and argument normalization are unchanged. Populated approval
   request/decision sequences and receipt fields require a verifier that understands them; zero-valued
-  legacy canonical forms and literal digest vectors are preserved, with no SQLite migration or rewrite.
+  legacy canonical forms and literal digest vectors are preserved without journal rewrites.
 - An unsupported stored harness registration (unknown spec fields or enum values, or a local
   placement/factory failure) no longer prevents other harnesses from starting. Its name stays
   reserved, and Get/List/Retire retain its metadata, original digest and ACTIVE/RETIRED state.

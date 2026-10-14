@@ -115,6 +115,9 @@ func sessionProto(info sqlitelog.SessionInfo) (*v1.Session, error) {
 		ParentUid:    info.ParentUID,
 		ForkSeq:      info.ForkSeq,
 	}
+	if ref := info.PendingApproval; ref.RequestSeq > 0 {
+		out.PendingApproval = &v1.ApprovalRef{ExecutionId: ref.ExecutionID, ToolCallId: ref.ToolCallID, RequestSeq: ref.RequestSeq}
+	}
 	if err := applyMetadata(out, info); err != nil {
 		return nil, status.Errorf(codes.Internal, "session %q: %v", info.UID, err)
 	}
@@ -124,11 +127,14 @@ func sessionProto(info sqlitelog.SessionInfo) (*v1.Session, error) {
 // execStateOf reports the execution axis from the metadata row.
 //
 // A session with no events is PENDING; otherwise this metadata-only fallback is COMPLETED.
-// pendingSession separately decorates valid owned unresolved host approval requests as AWAITING.
+// A valid owned unresolved host approval request reports AWAITING from the same row snapshot.
 // This helper is not a general journal reducer: ordinary/legacy interrupted turns, and decided
 // approval calls without receipts, retain the fallback. Recovery and admission therefore key off
 // the journal, not this enum; COMPLETED here is not proof of a receipt or a terminal END.
 func execStateOf(info sqlitelog.SessionInfo) v1.ExecState {
+	if info.PendingApproval.RequestSeq > 0 {
+		return v1.ExecState_EXEC_AWAITING
+	}
 	if info.LastSeq == 0 {
 		return v1.ExecState_EXEC_PENDING
 	}
@@ -193,7 +199,7 @@ func (s *Service) createSession(uid string, meta sqlitelog.SessionMeta) (*v1.Ses
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "create session: %v", err)
 	}
-	return s.pendingSession(info)
+	return sessionProto(info)
 }
 
 // GetSession returns the session's stored metadata and current log cursor.
@@ -211,7 +217,7 @@ func (s *Service) GetSession(ctx context.Context, req *v1.GetSessionRequest) (se
 	if err != nil {
 		return nil, sessionStoreError(err, req.GetUid())
 	}
-	return s.pendingSession(info)
+	return sessionProto(info)
 }
 
 // ListSessions enumerates sessions in a project, newest first, from the store rather than from any
@@ -250,7 +256,7 @@ func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest)
 	}
 	out := make([]*v1.Session, 0, len(page.Sessions))
 	for _, info := range page.Sessions {
-		sess, err := s.pendingSession(info)
+		sess, err := sessionProto(info)
 		if err != nil {
 			return nil, err
 		}
@@ -504,7 +510,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		if err != nil {
 			return sessionStoreError(err, uid)
 		}
-		sess, err = s.pendingSession(info)
+		sess, err = sessionProto(info)
 		if err != nil {
 			return err
 		}
@@ -628,7 +634,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		if err != nil {
 			return sessionStoreError(err, uid)
 		}
-		current, err := s.pendingSession(info)
+		current, err := sessionProto(info)
 		if err != nil {
 			return err
 		}
@@ -775,7 +781,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		if err != nil {
 			return nil, sessionStoreError(err, child.UID)
 		}
-		childProto, err := s.pendingSession(info)
+		childProto, err := sessionProto(info)
 		if err != nil {
 			return nil, err
 		}
@@ -843,7 +849,7 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 	if err != nil {
 		return nil, sessionStoreError(err, uid)
 	}
-	return s.pendingSession(info)
+	return sessionProto(info)
 }
 
 // Resume restores the incarnation via the Runtime SPI, re-drives any interrupted turn, and records a
@@ -887,7 +893,7 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	if err != nil {
 		return nil, sessionStoreError(err, uid)
 	}
-	return s.pendingSession(info)
+	return sessionProto(info)
 }
 
 // A park is a successful public pause only when every joined cause unwinds the same request.

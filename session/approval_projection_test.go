@@ -66,12 +66,14 @@ func TestPendingSessionCapturedPrefixAndZero(t *testing.T) {
 	if _, err := log.Append(decision.Seq, decision.Fence, api.Event{Kind: api.EventOutput, ExecutionID: "execution", Message: api.TextMessage("assistant", "illegal before receipt")}); err != nil {
 		t.Fatal(err)
 	}
-	svc := NewService(store, nil)
-	pending, err := svc.pendingSession(captured)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := sessionProto(captured)
 	if err != nil || pending.LastSeq != 3 || pending.ExecState != v1.ExecState_EXEC_AWAITING || !proto.Equal(pending.PendingApproval, &v1.ApprovalRef{ExecutionId: "execution", ToolCallId: "call", RequestSeq: 3}) {
 		t.Fatalf("captured prefix=%v %v", pending, err)
 	}
-	neverRun, err := svc.pendingSession(empty)
+	neverRun, err := sessionProto(empty)
 	if err != nil || neverRun.LastSeq != 0 || neverRun.PendingApproval != nil || neverRun.ExecState != v1.ExecState_EXEC_PENDING {
 		t.Fatalf("zero prefix=%v %v", neverRun, err)
 	}
@@ -262,51 +264,8 @@ func TestPendingSessionCompatibilityReadOnlyAndStrictCommands(t *testing.T) {
 	}
 }
 
-// A future query renderer may already report AWAITING without gate authority. Invalid
-// evidence must preserve that rendered base, not erase it or fabricate a pending tuple.
-func TestWithPendingApprovalPreservesRenderedBase(t *testing.T) {
-	for _, wrongTuple := range []bool{false, true} {
-		t.Run(fmt.Sprintf("wrong-tuple=%v", wrongTuple), func(t *testing.T) {
-			store, err := sqlitelog.Open(":memory:")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer store.Close()
-			log := store.Session("rendered")
-			fence, err := log.NewFence()
-			if err != nil {
-				t.Fatal(err)
-			}
-			events := []api.Event{{ExecutionID: "e", Kind: api.EventApprovalRequest, Approval: &api.ApprovalRequest{ToolCallID: "wrong"}}}
-			cause := controller.ErrInvalidExecutionLog
-			if wrongTuple {
-				events = append([]api.Event{{ExecutionID: "e", Kind: api.EventToolCall, ToolCall: &api.ToolCall{ID: "call", IdempotencyKey: "key", Mediation: api.MediationRequiresApproval}}}, events...)
-				cause = controller.ErrReplayDiverged
-			}
-			for i, ev := range events {
-				if _, err := log.Append(int64(i), fence, ev); err != nil {
-					t.Fatal(err)
-				}
-			}
-			info, err := store.SessionInfo("rendered")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := controller.InspectApproval(log, info.LastSeq); !errors.Is(err, cause) {
-				t.Fatalf("fixture cause=%v want=%v", err, cause)
-			}
-			base := &v1.Session{Metadata: &v1.ResourceMetadata{Uid: "rendered", Name: "preserved"}, LastSeq: info.LastSeq, ExecState: v1.ExecState_EXEC_AWAITING, ComputeState: v1.ComputeState_COMPUTE_COLD, Labels: map[string]string{"view": "base"}}
-			want := proto.Clone(base)
-			got, err := NewService(store, nil).withPendingApproval(info, base)
-			if err != nil || got != base || !proto.Equal(got, want) || got.PendingApproval != nil {
-				t.Fatalf("rendered base changed: got=%v err=%v want=%v", got, err, want)
-			}
-		})
-	}
-}
-
-// Broad error swallowing would hide a broken database or undecodable records. A zero
-// captured cursor must still avoid reading even when the store can no longer be used.
+// Rendering a captured metadata row never reads the store, even at a positive cursor.
+// Query errors still surface at lookup, while undecodable events cannot fail Get/List.
 func TestPendingSessionOperationalAndDecodeErrors(t *testing.T) {
 	store, err := sqlitelog.Open(":memory:")
 	if err != nil {
@@ -317,22 +276,18 @@ func TestPendingSessionOperationalAndDecodeErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	info := sqlitelog.SessionInfo{SessionMeta: sqlitelog.SessionMeta{UID: "closed"}, LastSeq: 1}
-	if got, err := svc.pendingSession(info); got != nil || status.Code(err) != codes.Internal {
-		t.Fatalf("closed positive cursor=%v %v", got, err)
+	if got, err := sessionProto(info); err != nil || got.LastSeq != 1 || got.ExecState != v1.ExecState_EXEC_COMPLETED {
+		t.Fatalf("closed positive cursor reread store=%v %v", got, err)
 	}
-	base := &v1.Session{LastSeq: 1, ExecState: v1.ExecState_EXEC_AWAITING}
-	if got, err := svc.withPendingApproval(info, base); got != nil || status.Code(err) != codes.Internal {
-		t.Fatalf("closed direct decoration=%v %v", got, err)
+	if _, err := svc.GetSession(t.Context(), &v1.GetSessionRequest{Uid: "closed"}); status.Code(err) != codes.Internal {
+		t.Fatalf("closed query=%v", err)
 	}
 	info.LastSeq = 0
-	if got, err := svc.pendingSession(info); err != nil || got.LastSeq != 0 || got.ExecState != v1.ExecState_EXEC_PENDING || got.PendingApproval != nil {
+	if got, err := sessionProto(info); err != nil || got.LastSeq != 0 || got.ExecState != v1.ExecState_EXEC_PENDING || got.PendingApproval != nil {
 		t.Fatalf("closed zero cursor read the store: %v %v", got, err)
 	}
-	if got, err := svc.withPendingApproval(info, base); err != nil || got != base {
-		t.Fatalf("closed zero decoration read the store: %v %v", got, err)
-	}
 	info.Labels = "{"
-	if got, err := svc.pendingSession(info); got != nil || status.Code(err) != codes.Internal {
+	if got, err := sessionProto(info); got != nil || status.Code(err) != codes.Internal {
 		t.Fatalf("invalid metadata decode=%v %v", got, err)
 	}
 
@@ -362,10 +317,10 @@ func TestPendingSessionOperationalAndDecodeErrors(t *testing.T) {
 	if _, err := controller.InspectApproval(log, 1); err == nil || errors.Is(err, controller.ErrInvalidExecutionLog) || errors.Is(err, controller.ErrReplayDiverged) {
 		t.Fatalf("decode must be operational, not typed invalid evidence: %v", err)
 	}
-	if got, err := svc.GetSession(t.Context(), &v1.GetSessionRequest{Uid: "decode"}); got != nil || status.Code(err) != codes.Internal {
+	if got, err := svc.GetSession(t.Context(), &v1.GetSessionRequest{Uid: "decode"}); err != nil || got.LastSeq != 1 || got.PendingApproval != nil {
 		t.Fatalf("undecodable Get=%v %v", got, err)
 	}
-	if got, err := svc.ListSessions(t.Context(), &v1.ListSessionsRequest{}); got != nil || status.Code(err) != codes.Internal {
+	if got, err := svc.ListSessions(t.Context(), &v1.ListSessionsRequest{}); err != nil || len(got.GetSessions()) != 1 {
 		t.Fatalf("undecodable List=%v %v", got, err)
 	}
 }

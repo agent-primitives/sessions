@@ -152,14 +152,19 @@ it snapshots externally and commits `SUSPEND`. The Exec stream ends successfully
 A handoff/snapshot/append failure remains an RPC error with the durable request available for recovery;
 use `Suspend` to retry the recorded route's cold transition when needed.
 
-`GetSession` and `ListSessions` expose valid owned pending decision tuples after a restart. Each tuple
-is derived only through that response's `last_seq`, not a mutable flag or a local SDK cache.
-Decodable legacy/handwritten or malformed approval evidence remains readable in Get/List and Fork
-response metadata, but confers no actionable `pending_approval` reference. Malformed historical
-approval evidence can withhold a reference even for a valid latest request: strict inspection
-validates all approval-bearing executions through the captured cursor. Database/read failures and
-undecodable journal or metadata values still return `INTERNAL`. This rendering tolerance does not
-relax command validation or grant admission authority.
+All Session replies use the same durable append-transaction projection, read atomically with
+metadata and `last_seq`; no query decodes journal events. An owned unanswered request in the latest
+first-seen execution exposes `pending_approval` and `EXEC_AWAITING`. Requests/decisions match
+execution ID, call ID and request sequence. A child's FORK excludes executions first seen before
+that marker, including their later calls/requests; a new child execution can own a request.
+
+Malformed approval-bearing history withholds references even for a valid latest request, matching
+strict command inspection; malformed nongated history does not. Undecodable v2 journals are isolated
+during migration: that session stays readable but has no actionable reference, and healthy neighbors
+continue normally. SQL faults abort migration, and database/metadata decode failures still return
+`INTERNAL`. Journal queries are not integrity verification; strict commands and raw journal reads
+still fail on undecodable evidence. Rendering tolerance never grants admission authority. See
+[how exec_state is derived](concepts.md#how-exec_state-is-derived) for the compatibility fallback.
 
 Host `APPROVAL_REQUEST` and `APPROVAL_RESULT` writes alone do not imply live compute. They preserve
 NONE/COLD; only actual execution or lifecycle evidence moves that independent durable projection.

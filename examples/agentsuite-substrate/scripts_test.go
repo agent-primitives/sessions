@@ -866,3 +866,164 @@ func TestUpRendersTheDaemon(t *testing.T) {
 		})
 	}
 }
+
+// demoStubs prepares s for demo.sh in real-provider mode: an agentctl that keeps each session's
+// journal in $STUB_DIR/j-<session> and prints records the way agentctl does, a kubectl-ate that
+// reports the actor states agentctl left, a replay that counts the completed turns in the journal,
+// and the template name up.sh would have rendered. STUB_FAULT makes agentctl or replay misbehave in
+// one way, so a test can show demo.sh's journal checks catch it.
+func demoStubs(t *testing.T, s *stubs) {
+	t.Helper()
+	bin := filepath.Join(s.work, "bin")
+	log := `echo "$(basename "$0") $*" >>"$STUB_DIR/calls"` + "\n"
+	stub(t, bin, "agentctl", log+`
+cmd=$1
+shift
+sess= input= at=
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--session) sess=$2; shift ;;
+	--input) input=$2; shift ;;
+	--at) at=$2; shift ;;
+	esac
+	shift
+done
+j="$STUB_DIR/j-$sess"
+rec() {
+	n=$(($(wc -l <"$j") + 1))
+	printf 'seq=%-3d %s\n' "$n" "$*" >>"$j"
+	printf 'seq=%-3d %s\n' "$n" "$*"
+}
+case "$cmd" in
+list) ;;
+create)
+	: >"$STUB_DIR/j-sess-1"
+	echo sess-1
+	;;
+get) echo "session $sess" ;;
+exec)
+	turn=$(($(grep -c EVENT_END "$j") + 1))
+	[ "$STUB_FAULT $turn" = "lost-input 2" ] || rec "EVENT_INPUT  user: $input"
+	[ "$STUB_FAULT $turn" = "no-model-call 2" ] || rec "EVENT_MODEL_CALL"
+	rec "EVENT_OUTPUT  assistant: a real reply $turn"
+	rec "EVENT_END"
+	echo ACTOR_STATE_RUNNING >"$STUB_DIR/state-$sess"
+	;;
+suspend)
+	[ "$STUB_FAULT" = no-lifecycle ] || rec "EVENT_LIFECYCLE"
+	echo ACTOR_STATE_SUSPENDED >"$STUB_DIR/state-$sess"
+	: >"$STUB_DIR/snap-$sess"
+	;;
+resume)
+	rec "EVENT_LIFECYCLE"
+	echo ACTOR_STATE_RUNNING >"$STUB_DIR/state-$sess"
+	;;
+replay) cat "$j" ;;
+fork)
+	if [ "$STUB_FAULT" = whole-parent-fork ]; then
+		cp "$j" "$STUB_DIR/j-child-1"
+	else
+		awk -v at="$at" '{ s = $1; sub("seq=", "", s); if (s + 0 <= at + 0) print }' "$j" >"$STUB_DIR/j-child-1"
+	fi
+	if [ "$STUB_FAULT" = fork-writes-parent ]; then
+		printf 'seq=%-3d %s\n' 99 "EVENT_INPUT  user: stray" >>"$j"
+	fi
+	echo "child child-1 parent=$sess fork_seq=$at name=after-turn-1"
+	;;
+*) exit 2 ;;
+esac
+`)
+	stub(t, bin, "kubectl-ate", log+`
+prev= name= json=
+for a; do
+	[ "$prev" = actor ] && name=$a
+	[ "$a" = json ] && json=1
+	prev=$a
+done
+st=$(cat "$STUB_DIR/state-$name" 2>/dev/null || echo ACTOR_STATE_SUSPENDED)
+if [ -z "$json" ]; then
+	echo "$name $st"
+	exit 0
+fi
+snaps='[]'
+if [ -f "$STUB_DIR/snap-$name" ]; then
+	snaps='[{"generation": 1, "fidelity": "FULL", "durableSnapshot": {"status": "SNAPSHOT_STORAGE_STATUS_COMPLETED", "object": {"snapshotUri": "gs://snap/1"}}}]'
+fi
+echo "{\"status\": {\"state\": \"$st\", \"snapshots\": $snaps}}"
+`)
+	stub(t, bin, "replay", log+`
+prev= sess=
+for a; do
+	[ "$prev" = -session ] && sess=$a
+	prev=$a
+done
+n=$(grep -c EVENT_END "$STUB_DIR/j-$sess")
+[ "$STUB_FAULT" != replay-skips-a-turn ] || n=$((n - 1))
+echo "journal: hash chain verifies locally"
+echo "re-executed $n completed turns"
+`)
+	render := filepath.Join(s.work, "cluster-"+cluster, "render")
+	if err := os.MkdirAll(render, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(render, "template-name"), []byte("tmpl-1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// With a real provider demo.sh cannot check reply text, so its claims rest on the journal: the
+// inputs in order, one model call per turn, the suspend and resume records, the fork child's prefix,
+// an untouched parent, and the turns the replay re-ran. Each check must fail the demo when the
+// journal does not hold what it claims, and the fake model must be neither port-forwarded nor asked.
+func TestDemoRealProviderJournalChecks(t *testing.T) {
+	for _, tc := range []struct {
+		fault   string
+		wantOut string // "" passes
+	}{
+		{fault: ""},
+		{fault: "lost-input", wantOut: "DEMO FAILED: journal inputs are not the 3 turns: my laptop will not boot|I was billed twice this month"},
+		{fault: "no-model-call", wantOut: "DEMO FAILED: journal does not record 3 model calls"},
+		{fault: "no-lifecycle", wantOut: "DEMO FAILED: journal does not record the suspend and the resume"},
+		{fault: "replay-skips-a-turn", wantOut: "DEMO FAILED: replay did not re-execute the 4 turns"},
+		{fault: "whole-parent-fork", wantOut: "DEMO FAILED: child journal inputs are not turn 1 plus its own"},
+		{fault: "fork-writes-parent", wantOut: "DEMO FAILED: parent journal changed"},
+	} {
+		name := tc.fault
+		if name == "" {
+			name = "a journal that holds every claim"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := newStubs(t)
+			demoStubs(t, s)
+			code, out, calls := s.run(t, "demo.sh", "STUB_FULL=1", "STUB_FAULT="+tc.fault,
+				"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com")
+			if tc.wantOut == "" {
+				if code != 0 {
+					t.Fatalf("demo.sh exit %d, want 0\noutput:\n%s\ncalls:\n%s", code, out, calls)
+				}
+				for _, want := range []string{
+					"model: a real provider",
+					"the journal records the 3 inputs in order and 3 model calls the host made",
+					"child child-1 forked at seq 4",
+					"Done in",
+					"5 turns called the provider; the replay called it 0 times (controller count)",
+				} {
+					if !strings.Contains(out, want) {
+						t.Errorf("output has no %q:\n%s", want, out)
+					}
+				}
+				// The replay relies on the controller's count, not the fake's counter.
+				if !strings.Contains(calls, "-stats-url \n") && !strings.Contains(calls, "-stats-url\n") {
+					t.Errorf("replay was not run with an empty -stats-url:\n%s", calls)
+				}
+			} else if code != 1 || !strings.Contains(out, tc.wantOut) {
+				t.Fatalf("demo.sh exit %d, want 1 with %q\noutput:\n%s", code, tc.wantOut, out)
+			}
+			for _, c := range []string{"svc/fakemodel", "curl "} {
+				if strings.Contains(calls, c) {
+					t.Errorf("real-provider demo called %q:\n%s", c, calls)
+				}
+			}
+		})
+	}
+}

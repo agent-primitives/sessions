@@ -285,8 +285,8 @@ every step:
 | 2 | The suite's files against `SOURCE` (git blob id and sha256), its manifests, `up.sh --templates-only`, both rendered ActorTemplates |
 | 3 | An Entra token from the instance metadata endpoint (never printed), `up.sh`, the daemons' arguments and env, the Secret with its data redacted |
 | 4 | A `writer` session: three turns with the daemon's and the actor's logs live; a `writer-memory` session told a codename |
-| 5 | `agentctl replay -v`: each record's hash and predecessor, model calls, token usage, and totals |
-| 6 | The memory session suspended (a MEMORY snapshot, the worker freed), resumed, and asked for the codename: same actor UID, answered from RAM |
+| 5 | `agentctl replay -v`: each record's hash and predecessor, model calls, the provider's token usage per call (`EVENT_USAGE`, which the harness reports), and totals; the step fails unless every turn has one model call and one usage record with tokens |
+| 6 | The memory session suspended (a MEMORY snapshot, the worker freed) and resumed, with the ateom workers' and atelet's logs live, then asked for the codename: same actor UID, answered from RAM |
 | 7 | `cmd/replay` of the `writer` session: chain verified, 3 turns re-run in the actor, 0 model calls, the journal's model-call count unchanged |
 | 8 | A fork at the end of turn 1, driven another way; both histories |
 | 9 | The memory session's actor deleted and recreated under its name out of band: the next turn is refused with `FAILED_PRECONDITION`, and no turn completes |
@@ -304,7 +304,10 @@ The token comes from the host's instance metadata endpoint, so the driver needs 
 that user-assigned identity. Every line it prints, and every per-step log (`DEMO_LOGS`), passes
 through a filter that redacts bearer tokens, JWTs and the metadata response's token field.
 
-`demo/record.sh` records it with vhs (`demo.tape`) from a Mac that drives the host through
-`hq remote-test` (a private tool; `DEMO_REMOTE=local` runs the driver on the machine vhs runs on),
-then writes the video, the logs, a README with each step's offset in the video and the video's
-sha256 to `DEMO_OUT`.
+`demo/record.sh` records it with vhs (`demo.tape`), then writes the video, the logs, a README with
+each step's offset in the video and the video's sha256 to `DEMO_OUT`. By default it runs the driver
+on the machine vhs runs on (`DEMO_REMOTE=local`); `DEMO_REMOTE=hq DEMO_HOST=<host>` drives a remote
+host through `hq remote-test`, a private tool, in the image `Dockerfile.tools` builds there. It
+paces the run with `DEMO_PAUSE=25` and `DEMO_RUN_PAUSE=8` (about 25 minutes). The tape waits with
+`Wait+Line` for the marker `record.sh run` prints once the driver returns: vhs 0.12.1's
+`Wait+Screen` stops the terminal drawing output that streams in over time.

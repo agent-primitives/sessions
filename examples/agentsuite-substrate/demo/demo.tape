@@ -16,5 +16,8 @@ Show
 Type "examples/agentsuite-substrate/demo/record.sh run"
 Sleep 1s
 Enter
-Wait+Screen@120m /DEMO (COMPLETE|FAILED)/
+# record.sh run prints the marker on the cursor's line once the driver has returned and its logs are
+# fetched. Wait+Screen is not used: in vhs 0.12.1 it stops the terminal drawing streamed output.
+# The bound is record.sh's driver deadline plus the setup before it.
+Wait+Line@55m /RECORDING (COMPLETE|FAILED)/
 Sleep 15s

@@ -265,7 +265,7 @@ if [[ "${SANDBOX}" == microvm ]] && ! "${K[@]}" get sandboxconfig microvm >/dev/
 	step "micro-VM sandbox class: kata assets and the microvm SandboxConfig (substrate's install-microvm-deps.sh)"
 	# Run once per cluster: assets already assembled in the substrate checkout are reused. ARCH is
 	# passed, since the script otherwise builds for its own GOARCH.
-	(cd "${SUBSTRATE}" && ARCH="${ARCH}" KO_DEFAULTPLATFORMS="linux/${ARCH}" KUBECTL_CONTEXT="kind-${CLUSTER}" \
+	(cd "${SUBSTRATE}" && export ARCH && KO_DEFAULTPLATFORMS="linux/${ARCH}" KUBECTL_CONTEXT="kind-${CLUSTER}" \
 		ATE_INSTALL_KIND=true NO_DEV_ENV=true hack/install-microvm-deps.sh --install)
 fi
 

@@ -15,7 +15,7 @@
 #   DEMO_LOGS              directory for the per-step logs (default ${WORK}/demo-logs)
 #   DEMO_PAUSE             seconds to pause after each step's proof (default 12), and
 #   DEMO_RUN_PAUSE         after each command (default 4), so a viewer can read the output; 0 for a
-#                          quick run
+#                          quick run (record.sh sets 25 and 8)
 #
 # Every line the script prints, on the terminal and in the logs, goes through redact first.
 set -euo pipefail
@@ -108,9 +108,13 @@ cleanup() {
 	fi
 	for p in "${TAILS[@]}" "${PIDS[@]}"; do kill "${p}" 2>/dev/null || true; done
 	rm -f "${TOKEN_FILE}"
-	# Let the redacting filter flush the last lines before the job ends.
+	# Let the redacting filter flush the last lines, for at most 10 seconds: a process that inherited
+	# stdout and outlived its step must not keep the job, and the recording, from ending.
 	exec 1>&- 2>&-
-	wait "${REDACT_PID}" 2>/dev/null || true
+	for _ in $(seq 100); do
+		kill -0 "${REDACT_PID}" 2>/dev/null || break
+		sleep 0.1
+	done
 }
 trap cleanup EXIT
 forward() { # namespace service local:remote
@@ -124,6 +128,13 @@ tail_logs() {
 	shift
 	"$@" > >(redact | sed -u "s/^/${D}  [${label}]${N} /" | tee -a "${log}") 2>&1 &
 	TAILS+=($!)
+}
+# tail_actor SESSION: follow the session's actor output from the moment it runs (the host creates it
+# on the first turn and resumes it after a suspend), so the first turn's lines are in frame too.
+tail_actor() {
+	# shellcheck disable=SC2016 # the inner script expands its own arguments
+	tail_logs actor bash -c 'until "${@:3}" get actor "$1" -a "$2" -o json 2>/dev/null | grep -q ACTOR_STATE_RUNNING; do sleep 1; done
+exec "${@:3}" logs actor "$1" -a "$2" -f --source containers' _ "$1" "${ATESPACE}" "${ATE[@]}"
 }
 untail() {
 	sleep 3
@@ -155,10 +166,10 @@ say() {
 	printf '%s$ %s%s\n' "${Y}" "$(shown "$1" exec --session "$2" --input "$(printf '%q' "$3")")" "${N}"
 	printf '$ %s\n' "$(shown "$1" exec --session "$2" --input "$(printf '%q' "$3")")" >>"${STEP_LOG}"
 	out="$("$1" exec --session "$2" --input "$3" 2>&1)" || {
-		printf '%s\n' "${out}" | tee -a "${STEP_LOG}"
+		printf '%s\n' "${out}" | redact | tee -a "${STEP_LOG}"
 		fail "turn failed: $3"
 	}
-	printf '%s\n' "${out}" | tee -a "${STEP_LOG}"
+	printf '%s\n' "${out}" | redact | tee -a "${STEP_LOG}"
 	REPLY="$(sed -n 's/^seq=[0-9]* *EVENT_OUTPUT  assistant: //p' <<<"${out}" | tail -1)"
 	[[ -n "${REPLY}" ]] || fail "turn produced no assistant output: $3"
 }
@@ -220,7 +231,6 @@ run sha256sum "${SUITE}/instructions/writer.md"
 note "The manifest pins the instructions at the digest above; the harness refuses instructions that differ. kaimahi's agentsuite package validates every manifest digest when emit loads the suite."
 note "up.sh --templates-only: harness image (harness binary + agent layer), then emit render twice, once per tier, and each ActorTemplate's golden snapshot."
 run "${DEMO}/../up.sh" --templates-only || fail "up.sh --templates-only"
-TEMPLATE="$(cat "${STATE}/render/template-name")"
 MEMORY_TEMPLATE="$(cat "${STATE}/render-memory/template-name")"
 run cat "${STATE}/render/actortemplate.json"
 run cat "${STATE}/render/harness-registration.json"
@@ -275,11 +285,11 @@ SID="$(sed -n '$p' "${STEP_LOG}" | tr -d '[:space:]')"
 run agentctl get --session "${SID}"
 note "Live: agentsessionsd's log and the actor's own output, as the turns run."
 tail_logs agentsessionsd "${K[@]}" -n "${NS}" logs -f --since=1s deploy/agentsessionsd
+tail_actor "${SID}"
 T1="Write a two-sentence product blurb for Ledger, an open API that keeps AI agent sessions durable across crashes, suspends and forks."
 T2="Make it punchier and add a one-line tagline."
 T3="Now give me just the tagline, translated into French."
 say agentctl "${SID}" "${T1}"
-tail_logs actor "${ATE[@]}" logs actor "${SID}" -a "${ATESPACE}" -f --source containers
 say agentctl "${SID}" "${T2}"
 say agentctl "${SID}" "${T3}"
 untail
@@ -305,23 +315,40 @@ proves "the memory-tier harness builds each request from its RAM transcript (its
 # ----------------------------------------------------------------------------------------------
 step 5 "the journal: turns, model calls, hashes and token usage (agentctl replay -v)"
 run agentctl replay -v --session "${SID}"
+# summarize SERVER SESSION: totals over the journal's records (the seq= lines; an assistant message
+# can span several lines), including the usage records' token counts.
 summarize() {
 	"${WORK}/bin/agentctl" replay -v --server "$1" --session "$2" | awk '
+		!/^seq=/ { next }
+		{ n++; head = $3 }
 		$2 == "EVENT_END" { turns++ }
 		$2 == "EVENT_MODEL_CALL" { calls++ }
-		$2 == "EVENT_USAGE" { for (i = 3; i <= NF; i++) { split($i, kv, "="); if (kv[1] == "input_tokens") in_ += kv[2]; if (kv[1] == "output_tokens") out += kv[2] } }
-		{ n++; head = $3 }
-		END { printf "records=%d turns=%d model_calls=%d input_tokens=%d output_tokens=%d head_%s\n", n, turns, calls, in_, out, head }'
+		$2 == "EVENT_USAGE" { usage++; for (i = 3; i <= NF; i++) { split($i, kv, "="); if (kv[1] == "input_tokens") in_ += kv[2]; if (kv[1] == "output_tokens") out += kv[2] } }
+		END { printf "records=%d turns=%d model_calls=%d usage_records=%d input_tokens=%d output_tokens=%d head_%s\n", n, turns, calls, usage, in_, out, head }'
+}
+# check_summary SUMMARY: every turn made one model call and journaled one usage record with tokens.
+check_summary() {
+	local turns calls usage in_ out
+	read -r turns calls usage in_ out < <(tr ' ' '\n' <<<"$1" | awk -F= '
+		{ v[$1] = $2 } END { print v["turns"], v["model_calls"], v["usage_records"], v["input_tokens"], v["output_tokens"] }')
+	((turns > 0 && calls == turns && usage == turns && in_ > 0 && out > 0)) ||
+		fail "the journal does not hold one model call and one usage record with tokens per turn: $1"
 }
 run summarize "${SERVER}" "${SID}"
+check_summary "$(summarize "${SERVER}" "${SID}")"
 run memctl replay -v --session "${MSID}"
 run summarize "${MEMSERVER}" "${MSID}"
-proves "every input, model call (model + input hash), output and its token usage is one hash-chained record; each record names its predecessor's hash"
+check_summary "$(summarize "${MEMSERVER}" "${MSID}")"
+proves "every input, model call (model + input hash), output and the provider's token usage for that call is one hash-chained record; each record names its predecessor's hash, and each turn journaled one usage record"
 
 # ----------------------------------------------------------------------------------------------
 step 6 "suspend to a memory snapshot, resume, and continue from RAM"
 UID_BEFORE="$(actor_field "${MSID}" 'a["metadata"]["uid"]')"
+note "Live: the micro-VM workers (ateom) and atelet, as the actor is snapshotted and later restored."
+tail_logs ateom "${K[@]}" -n "${NS}" logs -f --since=1s --prefix --all-containers --max-log-requests=20 -l "ate.dev/worker-pool=${POOL}"
+tail_logs atelet "${K[@]}" -n ate-system logs -f --since=1s --prefix --all-containers -l app=atelet
 run memctl suspend --session "${MSID}"
+untail
 run "${ATE[@]}" get actor "${MSID}" -a "${ATESPACE}"
 [[ "$(actor_field "${MSID}" 'a["status"]["state"]')" == ACTOR_STATE_SUSPENDED ]] || fail "the actor is not suspended"
 SNAP="$(held_snapshot "${MSID}")"
@@ -330,9 +357,11 @@ run echo "held snapshot: ${SNAP}"
 actor_json "${MSID}" >"${WORK}/actor.json"
 run python3 -c 'import json, sys; print(json.dumps(json.load(open(sys.argv[1]))["status"].get("snapshots", []), indent=2))' "${WORK}/actor.json"
 run "${K[@]}" -n "${NS}" get pods -o wide
+tail_logs ateom "${K[@]}" -n "${NS}" logs -f --since=1s --prefix --all-containers --max-log-requests=20 -l "ate.dev/worker-pool=${POOL}"
+tail_logs atelet "${K[@]}" -n ate-system logs -f --since=1s --prefix --all-containers -l app=atelet
 run memctl resume --session "${MSID}"
 M3="What release codename did I give you earlier? Answer with the codename only."
-tail_logs actor "${ATE[@]}" logs actor "${MSID}" -a "${ATESPACE}" -f --source containers
+tail_actor "${MSID}"
 say memctl "${MSID}" "${M3}"
 untail
 UID_AFTER="$(actor_field "${MSID}" 'a["metadata"]["uid"]')"
@@ -394,10 +423,10 @@ M4="And what was the codename again?"
 printf '%s$ %s%s\n' "${Y}" "$(shown memctl exec --session "${MSID}" --input "$(printf '%q' "${M4}")")" "${N}"
 printf '$ %s\n' "$(shown memctl exec --session "${MSID}" --input "$(printf '%q' "${M4}")")" >>"${STEP_LOG}"
 if out="$(memctl exec --session "${MSID}" --input "${M4}" 2>&1)"; then
-	printf '%s\n' "${out}" | tee -a "${STEP_LOG}"
+	printf '%s\n' "${out}" | redact | tee -a "${STEP_LOG}"
 	fail "the turn ran on the replaced actor"
 fi
-printf '%s\n' "${out}" | tee -a "${STEP_LOG}"
+printf '%s\n' "${out}" | redact | tee -a "${STEP_LOG}"
 [[ "${out}" == *FailedPrecondition* ]] || fail "the refusal is not FAILED_PRECONDITION"
 run sh -c "$(printf '%q ' "${K[@]}") -n ${NS} logs deploy/agentsessionsd-memory | grep -iE 'memory_state_lost|replaced|FailedPrecondition' | tail -5" || true
 TURNS_AFTER="$(records memctl "${MSID}" EVENT_END)"

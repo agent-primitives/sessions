@@ -12,6 +12,9 @@ COPY --from=docker:28-cli /usr/local/libexec/docker/cli-plugins/docker-buildx /u
 RUN GOBIN=/usr/local/bin go install sigs.k8s.io/kind@v0.33.0 \
 	&& GOBIN=/usr/local/bin go install github.com/google/ko@v0.19.1 \
 	&& rm -rf /root/go /root/.cache
-RUN v="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" \
-	&& curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${v}/bin/linux/amd64/kubectl" \
+# The client at the kind node image's Kubernetes version, checked against its published sha256.
+ARG KUBECTL_VERSION=v1.37.0
+ARG KUBECTL_SHA256=6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f
+RUN curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+	&& echo "${KUBECTL_SHA256}  /usr/local/bin/kubectl" | sha256sum -c - \
 	&& chmod 0755 /usr/local/bin/kubectl

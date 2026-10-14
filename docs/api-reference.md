@@ -978,7 +978,10 @@ refused. Retiring a harness refuses new sessions on it while every existing sess
 running, resuming and forking. Registering the identical spec again reactivates it.
 
 This service decides what the host dials and pays model calls for, so it is an operator
-surface, not a client one. agentsessionsd does not serve it; see docs/security.md.
+surface, not a client one. agentsessionsd serves it only on a separate optional literal-loopback
+listener (-registry-addr); Sessions never serves this API. Both listeners are plaintext and
+unauthenticated. Every local or same-pod process that can reach the operator port can administer
+registrations. See docs/security.md.
 
 
 <a name="agentsessions-v1-GetHarnessRequest"></a>
@@ -1205,7 +1208,8 @@ returns FAILED_PRECONDITION.
 ### HarnessRegistry
 HarnessRegistry manages the harnesses a host can place sessions on. It is an admin API: a caller
 that can register a harness decides where the host sends session history and whose model calls it
-pays for.
+pays for. Keep it off the Sessions listener and control access to it.
+See docs/security.md#operator-access for operator setup and CLI usage.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|

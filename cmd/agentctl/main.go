@@ -289,8 +289,10 @@ func cmdReplay(args []string) error {
 	cfg := commonFlags(fs)
 	var sess string
 	var from int64
+	var verbose bool
 	fs.StringVar(&sess, "session", "", "session UID")
 	fs.Int64Var(&from, "from", 1, "replay from this seq")
+	fs.BoolVar(&verbose, "v", false, "also print each record's hash and previous hash, a model call's model and input hash, and token usage")
 	_ = fs.Parse(args)
 	c, cleanup, err := dial(cfg)
 	if err != nil {
@@ -302,7 +304,11 @@ func cmdReplay(args []string) error {
 		return err
 	}
 	for _, r := range records {
-		printRecord(r)
+		if verbose {
+			fmt.Println(formatRecordVerbose(r))
+		} else {
+			printRecord(r)
+		}
 	}
 	return nil
 }
@@ -375,6 +381,41 @@ func printRecord(r *v1.LogRecord) {
 		line += "  " + partsText(msg)
 	}
 	fmt.Println(line)
+}
+
+// formatRecordVerbose is printRecord's line plus the record's chain links (content_hash and
+// prev_hash, shortened to 16 hex) and the body fields replay checks: a model call's model and input
+// hash, and a usage record's tokens.
+func formatRecordVerbose(r *v1.LogRecord) string {
+	ev := r.GetEvent()
+	line := fmt.Sprintf("seq=%-3d %-20s hash=%s prev=%s", r.GetSeq(), ev.GetKind(), short(r.GetContentHash()), short(r.GetPrevHash()))
+	if exec := ev.GetExecutionId(); exec != "" {
+		line += " exec=" + exec
+	}
+	if m := ev.GetModel(); m != nil {
+		line += fmt.Sprintf("  model=%s input_hash=%s", m.GetModel(), short(m.GetInputHash()))
+	}
+	if u := ev.GetUsage(); u != nil {
+		line += fmt.Sprintf("  model=%s input_tokens=%d output_tokens=%d reasoning_tokens=%d",
+			u.GetModel(), u.GetInputTokens(), u.GetOutputTokens(), u.GetReasoningTokens())
+	}
+	if msg := ev.GetMessage(); msg != nil {
+		line += "  " + partsText(msg)
+	}
+	return line
+}
+
+// short keeps a hash readable in a line: its first 16 characters after any "sha256:" prefix, or "-"
+// when it is empty (the first record has no previous hash).
+func short(h string) string {
+	h = strings.TrimPrefix(h, "sha256:")
+	if h == "" {
+		return "-"
+	}
+	if len(h) > 16 {
+		return h[:16]
+	}
+	return h
 }
 
 func partsText(m *v1.Message) string {

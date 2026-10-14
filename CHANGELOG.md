@@ -53,6 +53,9 @@ provide.
 
 ### Added
 
+- `agentctl replay -v` also prints each record's content hash and previous hash (16 hex), the
+  execution id, a model call's model and input hash, and a usage record's token counts. Without
+  `-v` the output is unchanged.
 - Go SDK callers can pass opaque per-execution config through `client.ExecOptions.Config`.
   Omitting it keeps the existing empty-config behavior. Config is durable journal content exposed
   by Replay; do not include credentials. No wire or journal schema change.

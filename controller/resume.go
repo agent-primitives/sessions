@@ -219,7 +219,13 @@ func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 		if out.Message != nil {
 			msg = *out.Message
 		}
-		return api.ModelResponse{Message: msg}, nil // served — model NOT re-invoked
+		// served — model NOT re-invoked. The recorded usage rides along as it does on replay;
+		// v0.1.2 did not serve usage, so a legacy recovery serves none.
+		var usage api.Usage
+		if !s.live.legacyRecovery {
+			usage = usageAt(s.stream, s.i)
+		}
+		return api.ModelResponse{Message: msg, Usage: usage}, nil
 	}
 	return s.live.Model(ctx, req) // past the crash point: first-ever execution
 }

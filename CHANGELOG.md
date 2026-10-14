@@ -23,6 +23,16 @@ provide.
 
 ### Fixed
 
+- A harness can now journal the usage of a host-mediated model call. `harnesswire` dropped
+  `ModelResponse.Usage` in both directions, so a remote harness always saw zero usage, and Replay
+  and Resume served a recorded completion with no usage, so a harness reporting the usage it was
+  given diverged from its record. The host now sends `ModelResult.usage` (already in the proto) and
+  the harness side reads it; Replay and Resume serve the `USAGE` recorded directly after the
+  completion. A harness built against an older `harnesswire` ignores the field, and an older host
+  sends none, which reads as zero usage. If a turn is cut between its `OUTPUT` and its `USAGE`,
+  Resume serves zero usage and that call's usage is not journaled; the model is not re-invoked.
+  v0.1.2 journals replay as before, with no usage served.
+
 - `model/openai` joins the completions path to the base URL's path instead of appending it to the
   string, so a base URL with a query (`-model-base-url 'https://h/v1?api-version=2'`) reaches
   `/v1/chat/completions` with the query kept, ahead of any query `-model-path` carries. A fragment

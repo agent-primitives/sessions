@@ -152,10 +152,15 @@ Limits of these checks:
   already placed when its actor is replaced runs on the replacement and records the old UID; the
   next turn is refused, so one turn's output can come from a harness without the session's state.
 - Turns journaled before `compute_instance` existed recorded no UID and are not compared.
+- `compute_instance` is in the record's canonical bytes. A binary built before it drops the field on
+  read and fails chain verification (`content_hash` mismatch) on a session with a memory-tier turn,
+  so every host sharing a journal must be upgraded before any of them runs one, and rollback is not
+  supported for such sessions.
 - A fork child's comparison starts at its `FORK` marker, and the child records no UID until its own
   first turn. If the child's actor is replaced out of band before that turn, the replacement is not
   compared: the started-turn count refuses to cold-create a missing child actor, since it includes
-  the inherited prefix, but it cannot see an actor someone else created under the child's name.
+  the inherited prefix, and `Suspend` or a stateful `Fork` of a child whose actor is missing is
+  `FAILED_PRECONDITION`, but neither can see an actor someone else created under the child's name.
 - The refused replacement actor is not deleted: it keeps its name and any worker it holds until an
   operator deletes it.
 

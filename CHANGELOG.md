@@ -136,7 +136,10 @@ provide.
   (they were `INTERNAL`, and `Suspend` of a replaced actor succeeded), and suspend, clone and
   journal nothing: the Placer passes the recorded UID to `Runtime.Snapshot` in
   `api.Incarnation.ComputeInstance`, and `runtime/substrate` refuses another actor or a missing
-  one, checking the UID before it suspends and the one the suspend reports. `runtime/substrate`
+  one, checking the UID before it suspends and the one the suspend reports. A memory-tier fork
+  child whose cloned actor is gone before its first turn (no UID recorded yet), and a stateful
+  `Fork` whose parent actor is deleted around the tag, are `FAILED_PRECONDITION` the same way.
+  `runtime/substrate`
   refuses a memory-tier actor that reports no UID (`INTERNAL` from `Snapshot`), so a custom
   `ControlClient` must report one from `GetActor`, `ResumeActor` and `SuspendActor`, and must
   report a missing actor as `substrate.ErrActorNotFound` from `SuspendActor` as well as `GetActor`
@@ -148,7 +151,19 @@ provide.
   return for it), `Create` attaches to that actor where it used to fail the turn with `INTERNAL`.
   Stateless turns record no UID and their canonical bytes are unchanged; turns recorded before this
   change are not compared. The router reaches an actor by name, so a turn already placed when its
-  actor is replaced still runs; the next one is refused.
+  actor is replaced still runs; the next one is refused. `compute_instance` is part of the record's
+  canonical bytes. A binary built before this change drops the field when it reads the record, so
+  it fails chain verification with a `content_hash` mismatch on any session with a memory-tier
+  substrate turn, as older binaries do for `EXECUTION_START` itself. Rollback is not supported for
+  such sessions, and every host sharing a journal must run this release before any of them runs a
+  memory-tier substrate turn. There is no SQLite schema migration (`user_version` stays 2), so an
+  older binary still opens the journal and reports only those sessions as tampered.
+- `ExecRequest.harness` can no longer override a session's harness with a different
+  `REQUIRES_MEMORY_SNAPSHOT` harness: the turn is `FAILED_PRECONDITION`
+  (`placement.ErrStatefulOverride`) before any compute is provisioned, and so is
+  `Sessions.Resume` of a pending turn recorded that way. Suspend and Fork follow the session's own
+  harness, so they would neither checkpoint nor clone the state that turn left in RAM. An override
+  onto a name that aliases the session's own Placer is not an override and still runs.
 - An actor another operation holds is now retryable: `Exec`, `Resume`, `Suspend` and `Fork` are
   `ABORTED` (new `api.ErrComputeBusy`) where they used to be `INTERNAL` when `runtime/substrate`
   finds the session's actor `RESUMING`, `SUSPENDING` or `PAUSING` (new

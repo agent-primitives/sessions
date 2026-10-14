@@ -27,6 +27,9 @@ provide.
 
 ### Added
 
+- Go SDK callers can pass opaque per-execution config through `client.ExecOptions.Config`.
+  Omitting it keeps the existing empty-config behavior. Config is durable journal content exposed
+  by Replay; do not include credentials. No wire or journal schema change.
 - The chat harness accepts a per-execution `system_prompt` in its JSON config, prepended before
   conversation history and current inputs.
 - `agentsessionsd --harness name=address` registers a harness that is already running, over TCP
@@ -67,6 +70,18 @@ provide.
   `REQUIRES_APPROVAL` execution remains unsupported. Reused call IDs within one execution cannot
   distinguish stale duplicate decisions from answers to a new request. No wire/schema change,
   journal rewrite or live worker probe is required.
+- An unsupported stored harness registration (unknown spec fields or enum values, or a local
+  placement/factory failure) no longer prevents other harnesses from starting. Its name stays
+  reserved, and Get/List/Retire retain its metadata, original digest and ACTIVE/RETIRED state.
+  `HarnessRegistration.unservable_reason` explains this host's inability to run it; an undecodable
+  spec is unset, not partially returned. Existing sessions on a registration isolated during this
+  host's startup load and new attempts to use it fail `FAILED_PRECONDITION` until this host restarts
+  on a compatible version. A registration added to a shared journal after this host started remains
+  visible but is unknown to this host's Sessions routing: Create and auto-create Exec selecting it
+  remain `INVALID_ARGUMENT` (a pending recorded Resume retains its `FAILED_PRECONDITION` recovery rule)
+  until this host restarts or loads it through `RegisterHarness` with the identical compatible spec.
+  For a RETIRED row, restart this host to serve its existing sessions without reactivating it:
+  `RegisterHarness` reactivates the row for every host sharing the journal.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is
@@ -180,6 +195,75 @@ provide.
   harness lost mid-turn is still `INTERNAL` and leaves an interrupted turn to `Resume`. Forking a
   `REQUIRES_MEMORY_SNAPSHOT` harness on a backend without memory snapshots is refused before the
   parent is checkpointed, so it no longer leaves a `SUSPEND` event on the parent.
+- `ResumeRequest.boot` is deprecated. The service never read it, and substrate no longer has a
+  per-resume boot flag; the backend decides how a resumed session comes back. The field keeps its
+  number, so existing clients still encode. `client.Client.Resume` still sends its `boot` argument
+  in the field; the reference service ignores it.
+- The substrate backend now targets current agent-substrate (`fc0e3586`) instead of the `b1bd558a`
+  pin, and the two are not wire-compatible: the old client decodes a current `Actor` without an
+  error but with the wrong state and garbage for the worker address. Upgrade the backend and the
+  substrate cluster together. `integrations/substrate` now requires Go 1.27, following substrate.
+- The substrate backend reaches the harness through `atenet-router` (h2c, `ate-target-actor`
+  metadata) instead of dialing the worker pod's IP on port 80, which current substrate no longer
+  serves. The host must be able to reach `atenet-router.ate-system.svc:80`
+  (`substrate.WithRouter` overrides it). The router does not authenticate callers; see
+  [docs/security.md](docs/security.md) before running it outside a fully trusted cluster.
+- `api.Incarnation` gains `CallMetadata`, which the host attaches to every harness call.
+  `placement.Dialer` now takes the `api.Incarnation` instead of its address, so custom dialers
+  passed to `placement.WithDialer` must change signature; `placement.DefaultDial` is the stock one.
+- A stateful `Placer.Fork` now fences the parent's log and closes its open harness streams before
+  checkpointing it, and refuses new turns on the parent until every child is cloned from the
+  checkpoint, so nothing holds the checkpoint up or replaces it before the last clone; on kind, a
+  checkpoint under an idle stream took 5m30s. A fan-out that fails partway releases the parent
+  before it tears the cloned children down. This holds across every Placer of a
+  `placement.Registry`, so a turn that `ExecRequest.harness` routed to another harness is covered:
+  `placement.NewRegistry` gives its Placers one shared per-session state and session guard, and
+  `placement.Registry.Add` gives a registered harness's Placer the same, so a fork through a static
+  harness covers a turn on a registered one and the reverse. Both now fail if a Placer already
+  belongs to another registry or has an operation in progress. Five behavior changes follow:
+  - Before it snapshots, the fork waits until every turn whose stream it closed has minted its
+    fence or returned, bounded by the caller's context. If the context ends first, the fork fails
+    before snapshotting and records nothing.
+  - A fork that reaches its checkpoint supersedes the parent's in-flight turn even if the checkpoint
+    then fails. The turn stops as an incomplete execution (no `ERROR` event), the parent stays live,
+    and the caller runs the next turn or retries the fork at the new head.
+  - A turn superseded by a fork's checkpoint, or started while one runs, returns an error wrapping
+    the new `placement.ErrCheckpointing` (the superseded turn also wraps `eventlog.ErrFenced`).
+    `Exec` and `Resume` report it as `ABORTED`, which callers retry.
+  - Stateful forks and `Suspend` of one session do not overlap; they hold the same checkpoint
+    mark. A fork or `Suspend` that arrives while a fork checkpoints the parent or clones its
+    children, or a fork that arrives while a `Suspend` runs, is refused before it fences or
+    snapshots anything, with an error wrapping `placement.ErrCheckpointing`, which `Fork` and
+    `Suspend` report as `ABORTED`.
+  - The hold starts when the fork installs its checkpoint mark and covers the turns this
+    `placement.Registry` drives. A turn whose `Runtime.Create` or `Runtime.Restore` was already in
+    flight when the mark was installed, or a request from outside this Registry, can still wake the
+    parent before a child is cloned. A runtime that finds the fork source superseded returns an
+    error wrapping the new `api.ErrSnapshotSuperseded`, which `Fork` reports as `ABORTED`; callers
+    retry at the parent's new head.
+- The substrate conformance suite (`integrations/substrate/e2e`) runs both tiers on the micro-VM
+  sandbox class by default; the stateless tier used gVisor before. A host without KVM opts each
+  tier back into gVisor with `ECHO_SANDBOX_CLASS=gvisor` and `COUNTER_SANDBOX_CLASS=gvisor`, after
+  applying `deploy/substrate/namespace.yaml`, `echo-gvisor-workerpool.yaml` (formerly
+  `echo-workerpool.yaml`, which also created the Namespace) and `counter-gvisor-workerpool.yaml`
+  with the worker image resolved, as `docs/substrate-conformance.md` shows.
+  `TestStatelessReplayOnGVisor` is now `TestStatelessReplay`, and `TestSessionSuspendResumeOnGVisor`
+  is now `TestSessionSuspendResume`.
+- Through `atenet-router`, a harness stream that stays idle for about 5m30s (the router's default
+  5m route timeout plus 30s) is reset with `RST_STREAM` (gRPC `Internal`; measured on kind at
+  substrate `fc0e3586` with the stream held idle for 6m30s), so a turn parked on a slower model
+  call fails. Raise the router's `--route-timeout` if turns can run that long.
+- `runtime/substrate.ControlClient.ResumeActor` drops its `boot` argument (substrate removed
+  `ResumeActorRequest.boot`); a new actor starts from its template's golden snapshot, or cold-boots
+  if none is built. `SnapshotCloner` follows substrate's Tag API (`TagActor`,
+  `CreateActorFromTag`, `DeleteTag`); `TagActor` must report a name already taken as the new
+  `ErrTagExists`, so a fork whose tag create fails deletes only a tag it reserved.
+  `ObjectRef.Namespace` is now `ObjectRef.Atespace`, and
+  `ActorInfo` reports `Worker` and `Snapshot` instead of `PodIP` and `MeshDNS`.
+  `integrations/substrate`'s `New` and `FromClient` drop their `dnsSuffix` argument, since nothing
+  dials an actor's mesh DNS name any more. A stateful fork now checks on both sides of the tag that
+  the parent still holds the checkpoint the fork took, and otherwise fails with
+  `ErrSnapshotSuperseded`, which wraps `api.ErrSnapshotSuperseded`.
 
 ## v0.1.2
 

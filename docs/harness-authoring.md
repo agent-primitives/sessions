@@ -438,26 +438,21 @@ conversation INPUT/OUTPUT event and is not accumulated from earlier turns. Calle
 messages in prior inputs or current inputs remain in place: this option does not replace or remove
 them, or establish a trusted instruction boundary.
 
-The convenience `client.ExecOptions` and `agentctl` have no config option. Use the existing generated
-Sessions stub (`v1` is `github.com/aramase/agentsessions/api/genpb`) to set the bytes directly:
+The Go SDK accepts these bytes through `client.ExecOptions.Config` (`client` is
+`github.com/aramase/agentsessions/client`). `agentctl` has no config flag yet.
 
 ```go
-req := &v1.ExecRequest{
+opts := client.ExecOptions{
     Session: "<session-uid>", // omit to create a session for this turn
     Harness: "chat",
     Config:  []byte(`{"system_prompt":"Answer concisely."}`),
-    Inputs: []*v1.Message{{
-        Role: "user",
-        Parts: []*v1.Part{{
-            Part: &v1.Part_Text{Text: &v1.TextPart{Text: "What is a prime number?"}},
-        }},
-    }},
+    Inputs:  []string{"What is a prime number?"},
 }
 ```
 
-Pass `req` to `SessionsClient.Exec` (or `client.Client.Sessions().Exec`) and drain the stream to
-completion, as for any execution. Supply config through the generated `ExecRequest.Config` field,
-not `client.ExecOptions`; no additional environment variable or session setting is needed.
+Pass `opts` to `client.Client.Exec`, which drains the stream to completion. The generated
+`ExecRequest.Config` field is also available for direct stub callers; no additional environment
+variable or session setting is needed.
 
 **Config is journaled in plaintext for deterministic replay.** Treat prompts as recorded
 instructions, not credentials; keep provider keys on the host. A system prompt grants no

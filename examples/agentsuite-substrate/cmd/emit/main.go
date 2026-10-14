@@ -4,11 +4,15 @@
 //	    stage the agent manifest and instructions for the harness image (the image's agent layer)
 //	emit render -suite DIR -agent ID -platform os/arch -binding FILE -image REF@sha256:... [-model ID] -out DIR
 //	    write actortemplate.json, harness-registration.json, agentsessionsd.args and template-name
+//	emit check-model -base-url URL -model ID
+//	    refuse model settings agentsessionsd would refuse at startup, or a URL that is not http(s)
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 
@@ -16,11 +20,12 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/aramase/agentsessions/examples/agentsuite-substrate/render"
+	"github.com/aramase/agentsessions/internal/modelconfig"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render|check-model> [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -29,8 +34,10 @@ func main() {
 		err = bundle(os.Args[2:])
 	case "render":
 		err = renderCmd(os.Args[2:])
+	case "check-model":
+		err = checkModel(os.Args[2:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render|check-model> [flags]")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -114,5 +121,38 @@ func renderCmd(args []string) error {
 	}
 	fmt.Printf("ActorTemplate %s/%s (image %s, binding %s)\nharness %s -> -substrate-harness=%s\n",
 		out.Template.GetMetadata().GetAtespace(), name, *image, b.Digest(), comp.Agent.ID, out.DaemonFlag)
+	return nil
+}
+
+// checkModel refuses model settings agentsessionsd would refuse at startup, so up.sh can stop before
+// the Deployment replaces the running pod and its emptyDir journal with one that never starts. It
+// builds the client with the constructor the daemon uses (internal/modelconfig), with the daemon's
+// default -model-path, which deploy/agentsessionsd.yaml does not override, so it refuses exactly the
+// base URLs and models the daemon would. The demo also requires an http or https URL, which the
+// client itself does not.
+func checkModel(args []string) error {
+	fs := flag.NewFlagSet("check-model", flag.ContinueOnError)
+	baseURL := fs.String("base-url", "", "the -model-base-url agentsessionsd will be given")
+	model := fs.String("model", "", "the -model agentsessionsd will be given")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("check-model: unexpected arguments %q", fs.Args())
+	}
+	if *baseURL == "" {
+		return errors.New("check-model: -base-url is required")
+	}
+	if _, err := modelconfig.New(modelconfig.Config{Model: *model, BaseURL: *baseURL}); err != nil {
+		return err
+	}
+	// modelconfig.New parsed it, so this cannot fail; url.Parse lowercases the scheme.
+	u, err := url.Parse(*baseURL)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("check-model: base URL %q is not http or https", *baseURL)
+	}
 	return nil
 }

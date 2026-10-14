@@ -61,12 +61,12 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 			refuse "${var} contains $(unfilled "${!var}"), a placeholder of deploy/agentsessionsd.yaml"
 		fi
 	done
-	# agentsessionsd refuses a base URL without a scheme and host at startup (model/openai). The
-	# Deployment recreates its pod, and the journal is an emptyDir, so letting such a URL through
-	# would delete the running daemon's sessions and leave a pod that never starts.
-	absolute='^[Hh][Tt][Tt][Pp][Ss]?://([^/?#@]*@)?[^/?#@]+([/?#].*)?$'
-	if [[ ! "${AGENTSUITE_MODEL_BASE_URL}" =~ ${absolute} ]]; then
-		refuse "AGENTSUITE_MODEL_BASE_URL '${AGENTSUITE_MODEL_BASE_URL}' is not an absolute http(s) URL (want http[s]://host[/path])"
+	# agentsessionsd refuses a base URL or model its model client cannot be built from at startup.
+	# The Deployment recreates its pod, and the journal is an emptyDir, so letting such a value
+	# through would delete the running daemon's sessions and leave a pod that never starts. emit
+	# check-model builds the client with the daemon's own constructor, and also requires http(s).
+	if ! reason="$(cd "${HERE}" && go run ./cmd/emit check-model -base-url "${AGENTSUITE_MODEL_BASE_URL}" -model "${MODEL_ID}" 2>&1)"; then
+		refuse "AGENTSUITE_MODEL_BASE_URL '${AGENTSUITE_MODEL_BASE_URL}' with AGENTSUITE_MODEL '${MODEL_ID}' would not start agentsessionsd: ${reason}"
 	fi
 else
 	MODEL_BASE_URL="http://fakemodel.${NS}.svc:8080/v1"

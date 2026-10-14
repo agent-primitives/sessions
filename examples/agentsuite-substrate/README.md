@@ -35,7 +35,7 @@ The recipe is for a disposable kind cluster you trust: nothing in it authenticat
 |---|---|
 | `suite/` | An AgentSuite (`support-desk`) with one tool-free agent, `triage`, and compositions for `linux/amd64` and `linux/arm64`. |
 | `binding.json` | A draft `AgentSessionsBinding` (`kmx.kaimahi.dev/v1alpha1`) for kind: atespace, gVisor sandbox, MEMORY snapshots, worker selector. `up.sh` refuses an atespace other than `agentsuite-demo`, the one `deploy/` uses. |
-| `render/`, `cmd/emit` | `emit bundle` stages the agent layer (manifest and instructions) for the image. `emit render` writes the ActorTemplate, the harness registration and the daemon flag. |
+| `render/`, `cmd/emit` | `emit bundle` stages the agent layer (manifest and instructions) for the image. `emit render` writes the ActorTemplate, the harness registration and the daemon flag. `emit check-model` refuses model settings `agentsessionsd` would refuse at startup. |
 | `agent/`, `cmd/harness`, `Dockerfile.harness` | The harness image. It serves harnesswire on :80 and `/readyz` on :8081. The instructions are the system prompt, and the harness checks them against the digest in the agent manifest. Each model call is `sink.Model`. |
 | `fakemodel/`, `cmd/fakemodel` | A deterministic OpenAI-compatible endpoint. Its reply lists the user's issues so far, and `GET /stats` reports how many calls it has served. |
 | `cmd/replay` | Reads the journal over the Sessions API, verifies the chain, and runs the controller's replay against the session's actor through the router. |
@@ -99,13 +99,15 @@ AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 ./demo.sh
 ```
 
 `up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL`, either one with
-whitespace or a control character in it, or a URL that is not an absolute `http[s]://host[/path]`
-(which `agentsessionsd` would refuse at startup), before it changes the cluster, so a misconfigured
-rerun leaves the running daemon, its journal and an existing key in place. Both are copied into the Deployment as written. A query in the URL
-(an `api-version`, say) is sent with every completion request, after `/chat/completions` is joined
-to the URL's path; a fragment is dropped. It applies the key to the `agentsessionsd-model` Secret
-through stdin, so it never appears in argv or a file, and a failed apply leaves the stored key
-unchanged. `agentsessionsd` reads the key only when it starts, so `up.sh` stamps the Secret's
+whitespace or a control character in it, a URL that is not `http` or `https`, and any pair
+`agentsessionsd` would refuse at startup, before it changes the cluster, so a misconfigured rerun
+leaves the running daemon, its journal and an existing key in place. `emit check-model` makes the
+last check: it builds the model client with the daemon's own constructor (`internal/modelconfig`),
+so it refuses the same URLs (no scheme or host, a bad port or `%` escape). Both values are copied
+into the Deployment as written. A query in the URL (an `api-version`, say) is sent with every
+completion request, after `/chat/completions` is joined to the URL's path; a fragment is dropped.
+It applies the key to the `agentsessionsd-model` Secret through stdin, so it never appears in argv
+or a file, and a failed apply leaves the stored key unchanged. `agentsessionsd` reads the key only when it starts, so `up.sh` stamps the Secret's
 version into the Deployment's pod template: a new or deleted key restarts the pod, which also drops
 its emptyDir journal, and an unchanged key leaves it running. It does not build or deploy the fake
 model. It points `agentsessionsd` at the endpoint, and the harness requests `AGENTSUITE_MODEL`

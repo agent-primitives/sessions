@@ -3,12 +3,14 @@ package scripts_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -29,6 +31,42 @@ type stubs struct {
 
 // digest is the image digest the ko and docker stubs report.
 const digest = "sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// emit is cmd/emit, built once for the run, which the go stub runs for up.sh's `go run ./cmd/emit
+// check-model`, so the tests exercise the real check rather than a stand-in.
+var emit struct {
+	once sync.Once
+	dir  string
+	path string
+	err  error
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if emit.dir != "" {
+		_ = os.RemoveAll(emit.dir)
+	}
+	os.Exit(code)
+}
+
+// emitBinary returns the path of the built cmd/emit.
+func emitBinary(t *testing.T) string {
+	t.Helper()
+	emit.once.Do(func() {
+		if emit.dir, emit.err = os.MkdirTemp("", "emit-"); emit.err != nil {
+			return
+		}
+		emit.path = filepath.Join(emit.dir, "emit")
+		out, err := exec.Command("go", "build", "-o", emit.path, "./cmd/emit").CombinedOutput()
+		if err != nil {
+			emit.err = fmt.Errorf("go build ./cmd/emit: %v\n%s", err, out)
+		}
+	})
+	if emit.err != nil {
+		t.Fatal(emit.err)
+	}
+	return emit.path
+}
 
 // stub writes an executable shell script named name into bin.
 func stub(t *testing.T, bin, name, body string) {
@@ -89,10 +127,15 @@ inspect)
 	;;
 esac
 `)
-	// go stands in for the first step after the cluster phase (building kubectl-ate) and stops the
-	// run there with a status the tests recognize, unless STUB_FULL is set: then it succeeds, and
-	// emit render writes the files up.sh reads.
+	// go runs the real emit check-model. Otherwise it stands in for the first step after the
+	// cluster phase (building kubectl-ate) and stops the run there with a status the tests
+	// recognize, unless STUB_FULL is set: then it succeeds, and emit render writes the files up.sh
+	// reads.
 	stub(t, bin, "go", log+`
+if [ "$1 $2 $3" = "run ./cmd/emit check-model" ]; then
+	shift 2
+	exec "`+emitBinary(t)+`" "$@"
+fi
 [ -n "${STUB_FULL:-}" ] || exit 97
 if [ "$1 $2 $3" = "run ./cmd/emit render" ]; then
 	prev=
@@ -501,28 +544,42 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			env: func(*testing.T) []string {
 				return append(provider, "AGENTSUITE_MODEL_BASE_URL=api.example.com/v1")
 			},
-			wantOut: "AGENTSUITE_MODEL_BASE_URL 'api.example.com/v1' is not an absolute http(s) URL (want http[s]://host[/path]); nothing was changed",
+			wantOut: "AGENTSUITE_MODEL_BASE_URL 'api.example.com/v1' with AGENTSUITE_MODEL 'm' would not start agentsessionsd: emit: openai: base URL \"api.example.com/v1\" is not absolute (want scheme://host[/path]); nothing was changed",
 		},
 		{
 			name: "a base URL with no host",
 			env: func(*testing.T) []string {
 				return append(provider, "AGENTSUITE_MODEL_BASE_URL=https:///v1")
 			},
-			wantOut: "AGENTSUITE_MODEL_BASE_URL 'https:///v1' is not an absolute http(s) URL",
+			wantOut: "is not absolute",
 		},
 		{
 			name: "a base URL with only userinfo for a host",
 			env: func(*testing.T) []string {
 				return append(provider, "AGENTSUITE_MODEL_BASE_URL=https://user@/v1")
 			},
-			wantOut: "AGENTSUITE_MODEL_BASE_URL 'https://user@/v1' is not an absolute http(s) URL",
+			wantOut: "is not absolute",
+		},
+		{
+			name: "a base URL with a port that is not a number",
+			env: func(*testing.T) []string {
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=http://host:abc/v1")
+			},
+			wantOut: "would not start agentsessionsd: emit: openai: base URL: parse \"http://host:abc/v1\": invalid port",
+		},
+		{
+			name: "a base URL with a bad escape",
+			env: func(*testing.T) []string {
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=http://h%zz/v1")
+			},
+			wantOut: "invalid URL escape",
 		},
 		{
 			name: "a base URL with another scheme",
 			env: func(*testing.T) []string {
 				return append(provider, "AGENTSUITE_MODEL_BASE_URL=ftp://llm.example/v1")
 			},
-			wantOut: "AGENTSUITE_MODEL_BASE_URL 'ftp://llm.example/v1' is not an absolute http(s) URL",
+			wantOut: "base URL \"ftp://llm.example/v1\" is not http or https; nothing was changed",
 		},
 		{
 			name:    "a binding for another atespace",

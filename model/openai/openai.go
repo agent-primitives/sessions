@@ -165,11 +165,11 @@ const maxRedirects = 10
 // leaves the origin of the original request.
 //
 // net/http copies a request's headers onto every redirect it follows and strips only
-// Authorization, WWW-Authenticate and Cookie, and only when the target is another domain (another
-// port on the same host keeps even those), so a custom credential header (api-key, x-api-key)
-// would otherwise reach whatever host a provider or proxy redirects to. A 307 or 308 also resends
-// the body. Refusing the hop is the only policy that keeps every configured header on the
-// configured origin.
+// Authorization, WWW-Authenticate and Cookie, and only when the target is neither the same host nor
+// a subdomain of it (another port, or a subdomain, keeps even those), so a custom credential header
+// (api-key, x-api-key) would otherwise reach whatever host a provider or proxy redirects to. A 307
+// or 308 also resends the body. Refusing the hop is the only policy that keeps every configured
+// header on the configured origin.
 //
 // h is copied rather than modified because the caller may share it with other code. A policy h
 // already has runs after this one allows the redirect, and replaces the default limit, as it would

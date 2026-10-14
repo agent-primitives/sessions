@@ -7,12 +7,15 @@ provide.
 
 ## Unreleased
 
-### Fixed
+### Security
 
 - `model/openai` no longer sends configured headers (`WithHeader`, `WithAPIKey`) to another host on
   a redirect. net/http copied custom headers such as `api-key` to any redirect target, so a provider
   or proxy answering with a cross-host redirect received the credential. A redirect that changes
   scheme, host or port is now refused; same-origin redirects are followed as before.
+
+### Fixed
+
 - Session-level suspend no longer destroys the Substrate actor needed by resume. Both replay-based
   and memory-snapshot sessions retain their restore handle after `Placer.Suspend`; explicit `Stop`
   remains destructive teardown.

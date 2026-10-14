@@ -23,6 +23,11 @@ All of it runs in the `substrate-conformance` job (`.github/workflows/substrate-
 run on the micro-VM sandbox class, so the suite exercises the same isolation class in both and covers
 the micro-VM path end to end.
 
+The same workflow also exercises the long-running, PVC-backed Sessions composition described in
+[`production-shaped-kind.md`](production-shaped-kind.md): `agentctl --server` drives a chat harness
+inside a gVisor actor, the control-plane pod is replaced, and the session continues from the durable
+journal.
+
 ## Neutrality by construction
 
 The core must not depend on substrate. The seam is a `ControlClient` interface **defined in the core**

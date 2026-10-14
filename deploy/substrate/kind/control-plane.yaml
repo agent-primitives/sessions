@@ -1,0 +1,200 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentsessions
+  namespace: ate-agentsessions
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: agentsessions-journal
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: agentsessions-local
+  hostPath:
+    path: /var/lib/agentsessions
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentsessions-journal
+  namespace: ate-agentsessions
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: agentsessions-local
+  volumeName: agentsessions-journal
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentsessions
+  namespace: ate-agentsessions
+  labels:
+    app: agentsessions
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: agentsessions
+  template:
+    metadata:
+      labels:
+        app: agentsessions
+    spec:
+      serviceAccountName: agentsessions
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: journal-permissions
+          image: busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+          command:
+            - sh
+            - -c
+            - chown -R 65532:65532 /data
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN]
+          volumeMounts:
+            - name: journal
+              mountPath: /data
+      containers:
+        - name: controlplane
+          image: ghcr.io/aramase/agentsessions/controlplane:latest
+          args:
+            - --addr=:8080
+            - --journal=/data/agentsessions.db
+            - --project=$(PROJECT)
+            - --model=$(MODEL_NAME)
+            - --model-base-url=$(MODEL_BASE_URL)
+            - --model-path=$(MODEL_PATH)
+            - --model-auth-header=$(MODEL_AUTH_HEADER)
+            - --log-level=debug
+            - --ateapi-addr=api.ate-system.svc:443
+            - --ateapi-server-name=api.ate-system.svc
+            - --ateapi-token-file=/var/run/secrets/tokens/ateapi-token
+            - --ateapi-ca-file=/var/run/secrets/ateapi-ca/trust-bundle.pem
+            - --atespace=agentsessions
+            - --actor-template-atespace=agentsessions
+            - --actor-template=chat-harness
+            - --harness-image=HARNESS_IMAGE
+          env:
+            - name: PROJECT
+              valueFrom:
+                configMapKeyRef:
+                  name: agentsessions-model
+                  key: project
+            - name: MODEL_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: agentsessions-model
+                  key: model
+            - name: MODEL_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agentsessions-model
+                  key: base-url
+            - name: MODEL_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: agentsessions-model
+                  key: path
+            - name: MODEL_AUTH_HEADER
+              valueFrom:
+                configMapKeyRef:
+                  name: agentsessions-model
+                  key: auth-header
+            - name: MODEL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agentsessions-model
+                  key: api-key
+                  optional: true
+          ports:
+            - name: grpc
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          volumeMounts:
+            - name: journal
+              mountPath: /data
+            - name: ateapi-token
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+            - name: ateapi-ca
+              mountPath: /var/run/secrets/ateapi-ca
+              readOnly: true
+      volumes:
+        - name: journal
+          persistentVolumeClaim:
+            claimName: agentsessions-journal
+        - name: ateapi-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: api.ate-system.svc
+                  expirationSeconds: 3600
+                  path: ateapi-token
+        - name: ateapi-ca
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: trust-bundle.pem
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentsessions
+  namespace: ate-agentsessions
+spec:
+  selector:
+    app: agentsessions
+  ports:
+    - name: grpc
+      port: 8080
+      targetPort: grpc
+---
+# Access through kubectl port-forward does not require pod-network ingress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-sessions-ingress
+  namespace: ate-agentsessions
+spec:
+  podSelector:
+    matchLabels:
+      app: agentsessions
+  policyTypes: [Ingress]
+  ingress: []

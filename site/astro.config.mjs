@@ -52,6 +52,7 @@ export default defineConfig({
           items: [
             { label: "Security posture", slug: "security" },
             { label: "Observability", slug: "observability" },
+            { label: "Production-shaped kind deployment", slug: "production-shaped-kind" },
           ],
         },
         {

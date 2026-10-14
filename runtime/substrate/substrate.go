@@ -95,9 +95,10 @@ type ControlClient interface {
 	GetActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 }
 
-// ErrActorNotFound is what a ControlClient must return (or wrap) from GetActor when the actor does
-// not exist. It is a sentinel rather than a transport code so the seam stays neutral: the backend
-// decides "create it" vs "attach to it" without knowing that the client underneath speaks gRPC.
+// ErrActorNotFound is what a ControlClient must return (or wrap) from GetActor and SuspendActor when
+// the actor does not exist. It is a sentinel rather than a transport code so the seam stays neutral:
+// the backend decides "create it" vs "attach to it", and whether a memory-tier session's in-RAM state
+// is gone, without knowing that the client underneath speaks gRPC.
 var ErrActorNotFound = errors.New("substrate: actor not found")
 
 // ErrActorExists is what a ControlClient must return (or wrap) from CreateActor when an actor of that

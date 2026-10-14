@@ -36,6 +36,9 @@ type lifecycleControl struct {
 	calls             []string
 	completeOnSuspend bool
 	created           int // actors created so far, for server-assigned UIDs
+	// vanishOnSuspend deletes the actor as SuspendActor starts, as a delete landing between the
+	// backend's GetActor and its SuspendActor would.
+	vanishOnSuspend bool
 }
 
 func newLifecycleControl() *lifecycleControl {
@@ -92,6 +95,10 @@ func (l *lifecycleControl) SuspendActor(_ context.Context, in *atepb.SuspendActo
 	defer l.mu.Unlock()
 	name := in.GetActor().GetName()
 	l.record("suspend:" + name)
+	if l.vanishOnSuspend {
+		delete(l.actors, name)
+		delete(l.completed, name)
+	}
 	a, ok := l.actors[name]
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "Actor %s not found", name)
@@ -272,5 +279,32 @@ func TestStatefulForkDetectsNewerGeneration(t *testing.T) {
 	}
 	if _, ok := ctl.actors["child"]; ok {
 		t.Fatal("a superseded fork must not create the child")
+	}
+}
+
+// An actor deleted after the memory-tier Snapshot checked it, and before it suspends, is refused as
+// lost state over the real adapter, not INTERNAL: substrate's NOT_FOUND from SuspendActor reaches the
+// backend as ErrActorNotFound, which Snapshot maps to api.ErrMemoryStateLost. A fork's snapshot of
+// the parent takes the same path.
+func TestSnapshotOfAnActorDeletedBeforeTheSuspendIsLostState(t *testing.T) {
+	ctx := context.Background()
+	ctl := newLifecycleControl()
+	b := memoryBackend(ctl)
+
+	parent, err := b.Create(ctx, &api.SessionSpec{SessionUID: "parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parent.ComputeInstance == "" {
+		t.Fatalf("incarnation=%+v, want the actor's UID in ComputeInstance", parent)
+	}
+	ctl.vanishOnSuspend = true
+	ctl.calls = nil
+	_, err = b.Snapshot(ctx, parent, api.SnapshotExternal)
+	if !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound) {
+		t.Fatalf("snapshot err=%v, want ErrMemoryStateLost wrapping ErrActorNotFound", err)
+	}
+	if want := []string{"suspend:parent"}; !reflect.DeepEqual(ctl.calls, want) {
+		t.Fatalf("calls=%v want %v: the check before the suspend (GetActor, not recorded) passes", ctl.calls, want)
 	}
 }

@@ -138,8 +138,12 @@ provide.
   `api.Incarnation.ComputeInstance`, and `runtime/substrate` refuses another actor or a missing
   one, checking the UID before it suspends and the one the suspend reports. `runtime/substrate`
   refuses a memory-tier actor that reports no UID (`INTERNAL` from `Snapshot`), so a custom
-  `ControlClient` must report one from `GetActor`, `ResumeActor` and `SuspendActor`. `ControlClient.SuspendActor` now returns the suspended actor's
-  `substrate.ActorInfo` (snapshot handle and UID) instead of the snapshot handle alone. When
+  `ControlClient` must report one from `GetActor`, `ResumeActor` and `SuspendActor`, and must
+  report a missing actor as `substrate.ErrActorNotFound` from `SuspendActor` as well as `GetActor`
+  (the `integrations/substrate` adapter now maps substrate's `NOT_FOUND` from both), or a Suspend
+  or Fork whose actor is deleted between the check and the suspend is `INTERNAL`.
+  `ControlClient.SuspendActor` now returns the suspended actor's `substrate.ActorInfo` (snapshot
+  handle and UID) instead of the snapshot handle alone. When
   `CreateActor` finds the name taken (`substrate.ErrActorExists`, which a `ControlClient` must
   return for it), `Create` attaches to that actor where it used to fail the turn with `INTERNAL`.
   Stateless turns record no UID and their canonical bytes are unchanged; turns recorded before this

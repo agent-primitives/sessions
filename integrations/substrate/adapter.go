@@ -82,9 +82,14 @@ func (ad *Adapter) ResumeActor(ctx context.Context, actor substrate.ActorRef) (s
 // SuspendActor snapshots the actor to durable storage and frees the worker, returning the actor as
 // the suspend left it: the external snapshot it now holds (see heldSnapshot) and its UID. Substrate
 // refuses a suspend while another operation holds the actor's lease with ABORTED, reported as
-// substrate.ErrActorBusy.
+// substrate.ErrActorBusy, and a missing actor with NOT_FOUND (controlapi/suspend_actor.go), reported
+// as substrate.ErrActorNotFound, which the ControlClient contract requires: a memory-tier Snapshot
+// reads it as the session's in-RAM state being gone, not as a transport failure.
 func (ad *Adapter) SuspendActor(ctx context.Context, actor substrate.ActorRef) (substrate.ActorInfo, error) {
 	resp, err := ad.ctl.SuspendActor(ctx, &atepb.SuspendActorRequest{Actor: objectRef(actor)})
+	if status.Code(err) == codes.NotFound {
+		return substrate.ActorInfo{}, fmt.Errorf("%w: %s/%s: %w", substrate.ErrActorNotFound, actor.Atespace, actor.Name, err)
+	}
 	if err != nil {
 		return substrate.ActorInfo{}, busy(actor, err)
 	}

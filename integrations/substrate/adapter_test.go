@@ -323,6 +323,18 @@ func TestGetActorReportsNotFoundAsSentinel(t *testing.T) {
 	}
 }
 
+// Substrate refuses SuspendActor of a missing actor with NOT_FOUND (controlapi/suspend_actor.go). The
+// ControlClient contract requires ErrActorNotFound for it, as from GetActor, so a memory-tier Snapshot
+// can report the session's in-RAM state as lost; it is not ErrActorBusy, and substrate's reason is
+// kept.
+func TestSuspendActorReportsNotFoundAsSentinel(t *testing.T) {
+	f := &fakeControl{suspendErr: status.Error(codes.NotFound, "Actor gone not found")}
+	_, err := FromClient(f).SuspendActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: "gone"})
+	if !errors.Is(err, substrate.ErrActorNotFound) || errors.Is(err, substrate.ErrActorBusy) || !strings.Contains(err.Error(), "Actor gone not found") {
+		t.Fatalf("err=%v want ErrActorNotFound carrying substrate's reason", err)
+	}
+}
+
 // A suspend yields the URI of the external snapshot the actor now holds, the handle the backend
 // records and later compares against GetActor to detect a superseded snapshot, and the UID of the
 // actor it suspended, which a stateful fork compares with the one the journal recorded.

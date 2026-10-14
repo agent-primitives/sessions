@@ -96,6 +96,7 @@ func run() error {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(logger)
 
 	store, err := sqlitelog.Open(*journal, sqlitelog.WithDefaultProject(*project))
 	if err != nil {

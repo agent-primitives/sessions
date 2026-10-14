@@ -9,6 +9,7 @@ import (
 	"time"
 
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/sqlitelog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -25,7 +26,7 @@ func cmdHarness(args []string) error {
 	if op != "register" && op != "get" && op != "list" && op != "retire" {
 		return fmt.Errorf("unknown harness command %q; want register, get, list or retire", op)
 	}
-	fs := flag.NewFlagSet("harness "+op, flag.ContinueOnError)
+	fs := flag.NewFlagSet("harness "+op, flag.ExitOnError)
 	var server, name, specPath, reason string
 	var observe, includeRetired bool
 	var pageSize int
@@ -62,10 +63,10 @@ func cmdHarness(args []string) error {
 	if op == "list" && pageSize < 0 {
 		return errors.New("harness list: --page-size must not be negative")
 	}
-	// The service clamps requests above 500. Clamp before narrowing to the proto's int32
-	// field too, so a large positive CLI value cannot wrap into a negative request.
-	if op == "list" && pageSize > 500 {
-		pageSize = 500
+	// Clamp to the service limit before narrowing to the proto's int32 field, so a large
+	// positive CLI value cannot wrap into a negative request.
+	if op == "list" && pageSize > sqlitelog.MaxPageSize {
+		pageSize = sqlitelog.MaxPageSize
 	}
 	var spec *v1.HarnessSpec
 	if op == "register" {

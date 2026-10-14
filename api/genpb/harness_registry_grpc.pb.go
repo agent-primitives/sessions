@@ -44,24 +44,8 @@ const (
 //
 // HarnessRegistry manages the harnesses a host can place sessions on. It is an admin API: a caller
 // that can register a harness decides where the host sends session history and whose model calls it
-// pays for. agentsessionsd serves this service only when -registry-addr is set to a literal loopback
-// IP:port (for example 127.0.0.1:8081), on a separate gRPC server from Sessions. There is no TLS or
-// authentication on either listener. Any process that can reach this port can administer it.
-//
-// CLI usage (pass --server on every operator command; no embedded registry):
-//
-// ```sh
-// agentctl harness register --server 127.0.0.1:8081 --name mine --spec spec.json
-// agentctl harness get --server 127.0.0.1:8081 --name mine --observe
-// agentctl harness list --server 127.0.0.1:8081 --include-retired --page-size 50
-// agentctl harness retire --server 127.0.0.1:8081 --name mine --reason maintenance
-// ```
-//
-// spec.json uses strict HarnessSpec proto-JSON; see the copyable spec and operator setup example
-// in [operator access](security.md#operator-access).
-//
-// Remote registrations require agentsessionsd -model; substrate placements are not supported by
-// this daemon. The CLI prints the full proto-JSON response, including digest and lifecycle state.
+// pays for. Keep it off the Sessions listener and control access to it.
+// See docs/security.md#operator-access for operator setup and CLI usage.
 type HarnessRegistryClient interface {
 	// Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec,
 	// or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve
@@ -133,24 +117,8 @@ func (c *harnessRegistryClient) RetireHarness(ctx context.Context, in *RetireHar
 //
 // HarnessRegistry manages the harnesses a host can place sessions on. It is an admin API: a caller
 // that can register a harness decides where the host sends session history and whose model calls it
-// pays for. agentsessionsd serves this service only when -registry-addr is set to a literal loopback
-// IP:port (for example 127.0.0.1:8081), on a separate gRPC server from Sessions. There is no TLS or
-// authentication on either listener. Any process that can reach this port can administer it.
-//
-// CLI usage (pass --server on every operator command; no embedded registry):
-//
-// ```sh
-// agentctl harness register --server 127.0.0.1:8081 --name mine --spec spec.json
-// agentctl harness get --server 127.0.0.1:8081 --name mine --observe
-// agentctl harness list --server 127.0.0.1:8081 --include-retired --page-size 50
-// agentctl harness retire --server 127.0.0.1:8081 --name mine --reason maintenance
-// ```
-//
-// spec.json uses strict HarnessSpec proto-JSON; see the copyable spec and operator setup example
-// in [operator access](security.md#operator-access).
-//
-// Remote registrations require agentsessionsd -model; substrate placements are not supported by
-// this daemon. The CLI prints the full proto-JSON response, including digest and lifecycle state.
+// pays for. Keep it off the Sessions listener and control access to it.
+// See docs/security.md#operator-access for operator setup and CLI usage.
 type HarnessRegistryServer interface {
 	// Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec,
 	// or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve

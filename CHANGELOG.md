@@ -73,8 +73,10 @@ provide.
   unauthenticated **local admin surface** on a separate literal-loopback listener; Sessions still
   refuses registry RPCs, and neither listener gains TLS or authentication. Any local or same-pod
   process that can reach it can administer harnesses. The daemon now loads persisted registrations
-  even when the listener is off, so existing sessions can still use retired harnesses after restart.
-  New remote registrations require `-model` (unlike inspecting, listing or retiring); substrate
+  even when the listener is off, so existing sessions can still use retired harnesses after restart
+  with `-model` set. Both new and stored remote registrations require `-model`; without it, stored
+  remote registrations load as unservable and their existing sessions fail `FAILED_PRECONDITION`,
+  whether active or retired. Inspecting, listing and retiring do not require `-model`; substrate
   placements are unsupported by this reference daemon. No Sessions transport/access guarantees
   change.
 - `model/openai` refuses a redirect to another origin instead of following it. Set the base URL

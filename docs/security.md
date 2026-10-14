@@ -145,9 +145,11 @@ agentctl harness retire --server 127.0.0.1:8081 --name mine --reason maintenance
 
 `spec.json` is a strict proto-JSON `HarnessSpec`, for example
 `{"remote":{"address":"127.0.0.1:9000"},"capabilities":{"resumability":"RESUMABILITY_STATELESS_REPLAY"},"descriptor_id":"echo"}`.
-A new remote registration needs `-model` (and a model key when that endpoint requires one), so
-model calls cannot silently use the built-in echo stub. Static inspection, listing and retirement
-do not require `-model`. This reference daemon does not serve substrate placements. Registry
+Both new and stored remote registrations need `-model` (and a model key when that endpoint
+requires one), so model calls cannot silently use the built-in echo stub. Without `-model`, stored
+remote registrations load as unservable and their existing sessions fail `FAILED_PRECONDITION`,
+whether active or retired, even with the operator listener off. Static inspection, listing and
+retirement do not require `-model`. This reference daemon does not serve substrate placements. Registry
 responses print proto-JSON, including `spec_digest` and lifecycle state.
 
 The checked-in [Kubernetes manifest](../deploy/kubernetes/agentsessionsd.yaml) pins v0.1.2,
@@ -163,11 +165,13 @@ agentctl harness list --server 127.0.0.1:18081 --include-retired
 ```
 
 Explicitly bind kubectl's local endpoint to `127.0.0.1` with `--address`, not `0.0.0.0`. Grant
-`pods/portforward` narrowly: that RBAC controls who can open a port-forward, **not** authorization
-for processes already inside the pod. Do not expose the registry through a Kubernetes Service or
-Ingress. The daemon's operator port has no independent token or TLS; authentication and TLS for
-**both** listeners are follow-up work when Sessions gains those controls. Anyone who can reach
-this port can change destinations for session history and spend the host's model budget.
+`pods/portforward` and `pods/exec` narrowly: exec access also reaches the pod's loopback. Port-forward
+RBAC controls who can open a tunnel, **not** authorization for processes already inside the pod.
+Do not expose the registry through a Kubernetes Service or Ingress. The daemon's operator port has
+no independent token or TLS. [#127](https://github.com/aramase/agentsessions/issues/127) tracks
+covering it with the same verifier and authorizer as Sessions, using a separate operator role.
+Until then it stays loopback-only and off by default. Anyone who can reach this port can change
+destinations for session history and spend the host's model budget.
 
 ## Deploying it
 
@@ -182,6 +186,9 @@ Given the above, there is one safe shape for this release:
   execution config; operational logging omits it, but the durable journal and Replay API expose it.
 - Anyone who can **write** the journal can rewrite history. The chain makes that detectable, not
   impossible: verification tells you the log was altered, it does not prevent the alteration.
+  Journal write access is also as powerful as registry access: the daemon loads stored remote
+  addresses even with the operator listener off and dials them when observing or placing sessions,
+  so a writer can choose where session history goes and whose calls spend the host's model budget.
 
 ## What changes later
 

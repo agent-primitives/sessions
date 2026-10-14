@@ -265,6 +265,26 @@ func TestOperatorRegistryWithoutModelCanInspectButNotRegisterRemote(t *testing.T
 	}
 }
 
+func TestHarnessCLIFlagExits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds agentctl")
+	}
+	bin := buildBinaries(t)
+	for _, op := range []string{"register", "get", "list", "retire"} {
+		t.Run(op+" help", func(t *testing.T) {
+			out, err := exec.Command(filepath.Join(bin, "agentctl"), "harness", op, "-h").CombinedOutput()
+			if err != nil || !strings.Contains(string(out), "Usage of harness "+op) {
+				t.Fatalf("help = %v\n%s; want usage and exit 0", err, out)
+			}
+		})
+	}
+	out, err := exec.Command(filepath.Join(bin, "agentctl"), "harness", "list", "--unknown-flag").CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 2 || strings.Count(string(out), "flag provided but not defined") != 1 {
+		t.Fatalf("bad flag = %v\n%s; want one diagnostic and exit 2", err, out)
+	}
+}
+
 func TestOperatorRegistryLifecycleRealBinaries(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds agentsessionsd, harnessnode and agentctl")
@@ -429,5 +449,25 @@ func TestOperatorRegistryLifecycleRealBinaries(t *testing.T) {
 	daemon.stop(t)
 	if strings.Contains(daemon.out.String(), "operator registry listening") {
 		t.Fatalf("off-by-default listener started: %s", daemon.out)
+	}
+
+	// Without -model, stored remote registrations are isolated even with the listener off.
+	// Their warnings must use the daemon's structured handler, not the stdlib log format.
+	daemon = startServer(t, bin, sessionsAddr, "-journal", journalPath)
+	if _, err := c.Exec(ctx, client.ExecOptions{Session: uid, Inputs: []string{"no-model"}}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("existing retired session without -model = %v", err)
+	}
+	daemon.stop(t)
+	found := false
+	for _, line := range strings.Split(daemon.out.String(), "\n") {
+		if strings.Contains(line, "stored harness cannot be served on this host") && strings.Contains(line, "harness=mine") {
+			found = true
+			if !strings.HasPrefix(line, "time=") || !strings.Contains(line, "level=WARN") || !strings.Contains(line, "requires -model") {
+				t.Fatalf("registry warning did not use daemon handler: %s", line)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("missing stored harness warning: %s", daemon.out)
 	}
 }

@@ -61,3 +61,58 @@ func TestCheckModel(t *testing.T) {
 		t.Fatalf("extra argument: err=%v", err)
 	}
 }
+
+// check-model's -path may carry only a date-shaped api-version, the one query Azure OpenAI needs on a
+// deployment path, since up.sh renders the path into the Deployment and the daemon logs it; and
+// -auth-header must be a header name. No refusal repeats any part of the path.
+func TestCheckModelPathAndAuthHeader(t *testing.T) {
+	const azure = "https://res.openai.azure.com"
+	for _, tc := range []struct {
+		name, path, header string
+		wantErr            string // "" accepts
+	}{
+		{name: "the default path", path: ""},
+		{name: "an Azure deployment path", path: "/openai/deployments/dep/chat/completions?api-version=2024-10-21", header: "api-key"},
+		{name: "a preview api-version", path: "/openai/deployments/dep/chat/completions?api-version=2025-04-01-preview", header: "api-key"},
+		{name: "a path without a query", path: "/v1/chat/completions"},
+		{name: "a key in the query", path: "/openai/deployments/dep/chat/completions?api-version=2024-10-21&api-key=secret", wantErr: "other than api-version"},
+		{name: "only a key in the query", path: "/chat/completions?api-key=secret", wantErr: "other than api-version"},
+		{name: "a key as the api-version", path: "/chat/completions?api-version=secret", wantErr: "is not one date"},
+		{name: "two api-versions", path: "/chat/completions?api-version=2024-10-21&api-version=2024-10-22", wantErr: "is not one date"},
+		{name: "an empty api-version", path: "/chat/completions?api-version=", wantErr: "is not one date"},
+		{name: "an empty query", path: "/chat/completions?", wantErr: "empty query"},
+		{name: "a query that does not parse", path: "/chat/completions?api-version=2024-10-21;secret", wantErr: "does not parse"},
+		{name: "a fragment", path: "/chat/completions#secret", wantErr: "carries a fragment"},
+		{name: "userinfo", path: "/user:secret@llm.example/chat", wantErr: "contains '@'"},
+		{name: "an authority", path: "//secret.example/chat", wantErr: "single '/'"},
+		{name: "a relative path", path: "secret/chat", wantErr: "single '/'"},
+		{name: "a bad escape", path: "/secret%zz", wantErr: "not a valid URL path"},
+		{name: "a header with a space", path: "", header: "api key", wantErr: "not an HTTP header name"},
+		{name: "a header with a colon", path: "", header: "api-key:", wantErr: "not an HTTP header name"},
+		{name: "x-api-key", path: "", header: "x-api-key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"-base-url", azure, "-model", "dep", "-path", tc.path}
+			if tc.header != "" {
+				args = append(args, "-auth-header", tc.header)
+			}
+			err := checkModel(args)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("err=%v, want it accepted", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("err=%v, want one containing %q", err, tc.wantErr)
+			}
+			if err != nil {
+				for _, leak := range []string{"secret", "deployments", "llm.example", "%zz", "chat"} {
+					if strings.Contains(err.Error(), leak) {
+						t.Errorf("err=%q repeats %q from the path", err, leak)
+					}
+				}
+			}
+		})
+	}
+	if err := checkModel([]string{"-base-url", azure, "-model", "dep", "-auth-header", ""}); err == nil || !strings.Contains(err.Error(), "not an HTTP header name") {
+		t.Fatalf("empty -auth-header: err=%v", err)
+	}
+}

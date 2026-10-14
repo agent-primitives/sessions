@@ -4,8 +4,9 @@
 //	    stage the agent manifest and instructions for the harness image (the image's agent layer)
 //	emit render -suite DIR -agent ID -platform os/arch -binding FILE -image REF@sha256:... [-model ID] -out DIR
 //	    write actortemplate.json, harness-registration.json, agentsessionsd.args and template-name
-//	emit check-model -base-url URL -model ID
-//	    refuse model settings agentsessionsd would refuse at startup, or a URL that is not http(s)
+//	emit check-model -base-url URL -model ID [-path PATH] [-auth-header NAME]
+//	    refuse model settings agentsessionsd would refuse at startup, a URL that is not http(s), or
+//	    a URL or path that could carry a credential
 package main
 
 import (
@@ -15,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"google.golang.org/protobuf/encoding/protojson"
@@ -127,19 +129,23 @@ func renderCmd(args []string) error {
 
 // checkModel refuses model settings agentsessionsd would refuse at startup, so up.sh can stop before
 // the Deployment replaces the running pod and its emptyDir journal with one that never starts. It
-// builds the client with the constructor the daemon uses (internal/modelconfig), with the daemon's
-// default -model-path, which deploy/agentsessionsd.yaml does not override, so it refuses exactly the
-// base URLs and models the daemon would.
+// builds the client with the constructor the daemon uses (internal/modelconfig), with the same base
+// URL, model, path and auth header up.sh renders into deploy/agentsessionsd.yaml, so it refuses
+// exactly the settings the daemon would.
 //
 // The demo also requires an http or https URL with a host, which the client itself does not, and
 // refuses one with userinfo, a query or a fragment: up.sh prints the URL and renders it into the
 // Deployment's arguments and a manifest on disk, so a credential in it would bypass the Secret that
-// holds MODEL_API_KEY. These checks run before the client is built, and their errors do not repeat
-// the URL, since it may hold a credential.
+// holds MODEL_API_KEY. The path is rendered the same way and the daemon logs it, so its only query
+// may be a date-shaped api-version (what Azure OpenAI pins there); see checkPath. These checks run
+// before the client is built, and their errors do not repeat the URL or the path, since either may
+// hold a credential.
 func checkModel(args []string) error {
 	fs := flag.NewFlagSet("check-model", flag.ContinueOnError)
 	baseURL := fs.String("base-url", "", "the -model-base-url agentsessionsd will be given")
 	model := fs.String("model", "", "the -model agentsessionsd will be given")
+	path := fs.String("path", "", "the -model-path agentsessionsd will be given; empty is the daemon's default")
+	authHeader := fs.String("auth-header", "Authorization", "the -model-auth-header agentsessionsd will be given")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -152,17 +158,36 @@ func checkModel(args []string) error {
 	if err := checkBaseURL(*baseURL); err != nil {
 		return err
 	}
-	if _, err := modelconfig.New(modelconfig.Config{Model: *model, BaseURL: *baseURL}); err != nil {
+	if *path != "" {
+		if err := checkPath(*path); err != nil {
+			return err
+		}
+	}
+	if !headerName.MatchString(*authHeader) {
+		return errors.New("check-model: the auth header is not an HTTP header name (letters, digits and '-')")
+	}
+	cfg := modelconfig.Config{Model: *model, BaseURL: *baseURL, Path: *path, AuthHeader: *authHeader}
+	if _, err := modelconfig.New(cfg); err != nil {
 		return err
 	}
 	return nil
 }
 
+// hidden ends every refusal of a value that may hold a credential.
+const hidden = " (the value is not shown, since it may hold a credential)"
+
+// headerName is the header names the demo accepts for -model-auth-header: a subset of the HTTP
+// token characters, enough for Authorization, api-key and x-api-key.
+var headerName = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
+
+// apiVersion is the api-version value the demo accepts in a model path: a date, optionally with
+// Azure OpenAI's -preview suffix. Its shape leaves no room for a key.
+var apiVersion = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}(-preview)?$`)
+
 // checkBaseURL refuses a base URL the demo will not print or render; see checkModel. Its errors
 // never contain the URL or any part of it: a parse error can quote the userinfo of a URL that
 // does not parse ("https://user:secret/x@host" reads "secret" as the port).
 func checkBaseURL(raw string) error {
-	const hidden = " (the value is not shown, since it may hold a credential)"
 	u, err := url.Parse(raw)
 	if err != nil {
 		return errors.New("check-model: the base URL is not a valid URL" + hidden)
@@ -171,7 +196,7 @@ func checkBaseURL(raw string) error {
 	case u.User != nil:
 		return errors.New("check-model: the base URL carries userinfo (user:password@); pass the provider's key in MODEL_API_KEY, which up.sh stores in a Secret" + hidden)
 	case u.RawQuery != "" || u.ForceQuery:
-		return errors.New("check-model: the base URL carries a query; a credential there would be printed and rendered into the Deployment, so pass the provider's key in MODEL_API_KEY" + hidden)
+		return errors.New("check-model: the base URL carries a query; a credential there would be printed and rendered into the Deployment, so pass the provider's key in MODEL_API_KEY and an api-version in AGENTSUITE_MODEL_PATH" + hidden)
 	case strings.Contains(raw, "#"):
 		return errors.New("check-model: the base URL carries a fragment, which the model client drops" + hidden)
 	case u.Scheme != "http" && u.Scheme != "https":
@@ -179,6 +204,43 @@ func checkBaseURL(raw string) error {
 		return errors.New("check-model: the base URL is not http or https" + hidden)
 	case u.Host == "":
 		return errors.New("check-model: the base URL has no host (want scheme://host[/path])" + hidden)
+	}
+	return nil
+}
+
+// checkPath refuses a completions path the demo will not render or let the daemon log; see
+// checkModel. The path must be one absolute path ("//host" would read as an authority), with no '@'
+// or fragment, and its only query parameter may be a single api-version whose value is a date
+// (2024-10-21, 2025-04-01-preview): an Azure OpenAI deployment needs it there, and that shape cannot
+// hold a key. Any other parameter (Azure's own api-key, a signature) is refused. Like checkBaseURL,
+// its errors never contain the path.
+func checkPath(raw string) error {
+	switch {
+	case !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//"):
+		return errors.New("check-model: the model path does not start with a single '/' (want /path[?api-version=YYYY-MM-DD])" + hidden)
+	case strings.Contains(raw, "#"):
+		return errors.New("check-model: the model path carries a fragment, which the model client drops" + hidden)
+	case strings.Contains(raw, "@"):
+		return errors.New("check-model: the model path contains '@', which could be read as userinfo" + hidden)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return errors.New("check-model: the model path is not a valid URL path" + hidden)
+	}
+	if u.ForceQuery && u.RawQuery == "" {
+		return errors.New("check-model: the model path ends with an empty query" + hidden)
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return errors.New("check-model: the model path's query does not parse" + hidden)
+	}
+	for k, vs := range q {
+		if k != "api-version" {
+			return errors.New("check-model: the model path carries a query parameter other than api-version; pass the provider's key in MODEL_API_KEY" + hidden)
+		}
+		if len(vs) != 1 || !apiVersion.MatchString(vs[0]) {
+			return errors.New("check-model: the model path's api-version is not one date (YYYY-MM-DD, optionally -preview)" + hidden)
+		}
 	}
 	return nil
 }

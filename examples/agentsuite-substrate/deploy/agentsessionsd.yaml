@@ -31,6 +31,8 @@ spec:
             - -journal=/data/agentsessions.db
             - -model=MODEL_ID
             - -model-base-url=MODEL_BASE_URL
+            - -model-path=MODEL_PATH
+            - -model-auth-header=MODEL_AUTH_HEADER
             - SUBSTRATE_HARNESS_FLAG
             - -substrate-atespace=agentsuite-demo
             - -ateapi-addr=api.ate-system.svc:443

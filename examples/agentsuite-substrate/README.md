@@ -98,19 +98,43 @@ AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 AGENTSUITE_MODEL=<model> MOD
 AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 ./demo.sh
 ```
 
-`up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL`, `AGENTSUITE_MODEL` or
-`MODEL_API_KEY` without `AGENTSUITE_MODEL_BASE_URL` (only the URL selects a real provider, so the
-run would otherwise switch to the fake model), either value with whitespace or a control character
-in it, a URL that is not `http` or `https` or that carries userinfo, a query or a fragment, and any
-pair `agentsessionsd` would refuse at startup, before it changes the cluster, so a misconfigured
-rerun leaves the running daemon, its journal and an existing key in place. `emit check-model` makes
-the last check: it builds the model client with the daemon's own constructor
-(`internal/modelconfig`), so it refuses the same URLs (no scheme or host, a bad port or `%` escape).
-Both values are copied into the Deployment as written. The URL is also printed and written to
-`${STATE}/agentsessionsd.yaml`, so a credential in its userinfo or query would sit outside the
-Secret; `check-model` refuses those, and a fragment, without repeating the URL. A provider that
-needs a query parameter (Azure OpenAI's `api-version`) is out of reach of this demo; the daemon's
-`-model-path` flag carries one when it is run by hand. It applies the key to the
+Azure OpenAI serves a deployment at `/openai/deployments/<deployment>/chat/completions` and pins
+its API version in an `api-version` query parameter, with the key in an `api-key` header. Put the
+path and the query in `AGENTSUITE_MODEL_PATH` and the header name in `AGENTSUITE_MODEL_AUTH_HEADER`;
+`up.sh` passes them to `agentsessionsd` as `-model-path` and `-model-auth-header`, and the base URL
+stays free of a query:
+
+```bash
+export AGENTSUITE_MODEL_BASE_URL=https://<resource>.openai.azure.com
+AGENTSUITE_MODEL=<deployment> \
+  AGENTSUITE_MODEL_PATH='/openai/deployments/<deployment>/chat/completions?api-version=2024-10-21' \
+  AGENTSUITE_MODEL_AUTH_HEADER=api-key \
+  MODEL_API_KEY=<key> ./up.sh
+./demo.sh
+```
+
+Quote the path, since `?` is a shell glob character. `AGENTSUITE_MODEL` is the deployment name; the
+harness sends it as the request's `model`, and Azure routes by the deployment in the path. The path's only query parameter
+may be one date-shaped `api-version` (`2024-10-21`, `2025-04-01-preview`), and it may not contain
+`@` or a fragment or start with `//`. Unset, the path is `/chat/completions` and the header is
+`Authorization` (a bearer token), the daemon's defaults. This has not been run against a live Azure
+OpenAI deployment (the script tests stub it), and a resource with key authentication disabled
+(Microsoft Entra ID only) is out of reach, since the daemon sends a static key.
+
+`up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL`; `AGENTSUITE_MODEL`,
+`AGENTSUITE_MODEL_PATH`, `AGENTSUITE_MODEL_AUTH_HEADER` or `MODEL_API_KEY` without
+`AGENTSUITE_MODEL_BASE_URL` (only the URL selects a real provider, so the run would otherwise switch
+to the fake model); any of the four settings with whitespace or a control character in it; a URL
+that is not `http` or `https` or that carries userinfo, a query or a fragment; a path that carries
+anything but a date-shaped `api-version`; a header that is not a header name; and any combination
+`agentsessionsd` would refuse at startup. It does so before it changes the cluster, so a
+misconfigured rerun leaves the running daemon, its journal and an existing key in place.
+`emit check-model` makes the last checks: it builds the model client with the daemon's own
+constructor (`internal/modelconfig`), so it refuses the same URLs and paths (no scheme or host, a
+bad port or `%` escape). The values are copied into the Deployment as written. The URL is also
+printed, the daemon logs the URL and the path, and both are written to
+`${STATE}/agentsessionsd.yaml`, so a credential in either would sit outside the Secret;
+`check-model` refuses those without repeating the URL or the path. `up.sh` applies the key to the
 `agentsessionsd-model` Secret through stdin, so it never appears in argv or a file, and a failed
 apply leaves the stored key unchanged. `agentsessionsd` reads the key only when it starts, so
 `up.sh` stamps the Secret's version into the Deployment's pod template: a new or deleted key

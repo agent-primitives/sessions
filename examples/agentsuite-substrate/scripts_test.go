@@ -518,6 +518,11 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 		return path
 	}
 	provider := []string{"AGENTSUITE_MODEL_BASE_URL=https://llm.example/v1", "AGENTSUITE_MODEL=m", "MODEL_API_KEY=k"}
+	azure := []string{
+		"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com", "AGENTSUITE_MODEL=dep", "MODEL_API_KEY=k",
+		"AGENTSUITE_MODEL_PATH=/openai/deployments/dep/chat/completions?api-version=2024-10-21",
+		"AGENTSUITE_MODEL_AUTH_HEADER=api-key",
+	}
 	for _, tc := range []struct {
 		name    string
 		env     func(t *testing.T) []string
@@ -547,7 +552,7 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			env: func(*testing.T) []string {
 				return append(provider, "AGENTSUITE_MODEL_BASE_URL=api.example.com/v1")
 			},
-			wantOut: "AGENTSUITE_MODEL_BASE_URL with AGENTSUITE_MODEL 'm' would not start agentsessionsd: emit: check-model: the base URL is not http or https (the value is not shown, since it may hold a credential); nothing was changed",
+			wantOut: "the model settings (AGENTSUITE_MODEL_BASE_URL, AGENTSUITE_MODEL 'm', AGENTSUITE_MODEL_PATH, AGENTSUITE_MODEL_AUTH_HEADER) would not start agentsessionsd: emit: check-model: the base URL is not http or https (the value is not shown, since it may hold a credential); nothing was changed",
 		},
 		{
 			// emit is built and run as a binary, so go run's own "exit status 1" line is not
@@ -653,6 +658,70 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			wantOut: "the base URL is not http or https (the value is not shown, since it may hold a credential); nothing was changed",
 		},
 		{
+			// Azure OpenAI's api-key belongs in MODEL_API_KEY, which up.sh stores in a Secret; in the
+			// path it would be rendered into the Deployment and logged by the daemon.
+			name: "an Azure path with a key in its query",
+			env: func(*testing.T) []string {
+				return append(azure, "AGENTSUITE_MODEL_PATH=/openai/deployments/dep/chat/completions?api-version=2024-10-21&api-key=secret")
+			},
+			wantOut: "the model path carries a query parameter other than api-version; pass the provider's key in MODEL_API_KEY (the value is not shown, since it may hold a credential); nothing was changed",
+		},
+		{
+			name: "an Azure path whose api-version is a key",
+			env: func(*testing.T) []string {
+				return append(azure, "AGENTSUITE_MODEL_PATH=/openai/deployments/dep/chat/completions?api-version=secret")
+			},
+			wantOut: "the model path's api-version is not one date",
+		},
+		{
+			name: "an Azure path with userinfo",
+			env: func(*testing.T) []string {
+				return append(azure, "AGENTSUITE_MODEL_PATH=//user:secret@res.openai.azure.com/chat/completions")
+			},
+			wantOut: "does not start with a single '/'",
+		},
+		{
+			// The api-version belongs in the path: a query on the base URL could hold a credential.
+			name: "an Azure base URL with the api-version in its query",
+			env: func(*testing.T) []string {
+				return append(azure, "AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com?api-version=2024-10-21&api-key=secret")
+			},
+			wantOut: "the base URL carries a query",
+		},
+		{
+			name: "a path with whitespace",
+			env: func(*testing.T) []string {
+				return append(azure, "AGENTSUITE_MODEL_PATH=/chat/completions - -evil")
+			},
+			wantOut: "AGENTSUITE_MODEL_PATH contains whitespace or a control character; nothing was changed",
+		},
+		{
+			name: "a path naming a placeholder",
+			env: func(*testing.T) []string {
+				return append(azure, "AGENTSUITE_MODEL_PATH=/DAEMON_IMAGE")
+			},
+			wantOut: "AGENTSUITE_MODEL_PATH contains DAEMON_IMAGE, a placeholder of deploy/agentsessionsd.yaml",
+		},
+		{
+			name: "an auth header that is not a header name",
+			env: func(*testing.T) []string {
+				return append(azure, "AGENTSUITE_MODEL_AUTH_HEADER=api-key:")
+			},
+			wantOut: "the auth header is not an HTTP header name",
+		},
+		{
+			name: "a path without a base URL",
+			env: func(*testing.T) []string {
+				return []string{"AGENTSUITE_MODEL_PATH=/openai/deployments/dep/chat/completions?api-version=2024-10-21"}
+			},
+			wantOut: "AGENTSUITE_MODEL_PATH is set without AGENTSUITE_MODEL_BASE_URL; set both for a real provider, or unset AGENTSUITE_MODEL_PATH for the fake model; nothing was changed",
+		},
+		{
+			name:    "an auth header without a base URL",
+			env:     func(*testing.T) []string { return []string{"AGENTSUITE_MODEL_AUTH_HEADER=api-key"} },
+			wantOut: "AGENTSUITE_MODEL_AUTH_HEADER is set without AGENTSUITE_MODEL_BASE_URL; set both for a real provider, or unset AGENTSUITE_MODEL_AUTH_HEADER for the fake model; nothing was changed",
+		},
+		{
 			name:    "a binding for another atespace",
 			env:     func(t *testing.T) []string { return []string{"STUB_BINDING=" + binding(t, "other")} },
 			wantOut: "binding.json names atespace 'other', but the demo deploys into atespace agentsuite-demo; nothing was changed",
@@ -708,17 +777,33 @@ func TestUpRendersTheDaemon(t *testing.T) {
 		wantVersion string
 	}{
 		{
-			name:        "fake provider",
-			wantLines:   []string{"- -model=triage-model", "- -model-base-url=http://fakemodel.agentsuite-demo.svc:8080/v1"},
+			name: "fake provider",
+			wantLines: []string{"- -model=triage-model", "- -model-base-url=http://fakemodel.agentsuite-demo.svc:8080/v1",
+				"- -model-path=/chat/completions", "- -model-auth-header=Authorization"},
 			wantSecret:  "delete secret agentsessionsd-model --ignore-not-found",
 			wantVersion: "none",
 		},
 		{
-			name:        "real provider",
-			env:         []string{"AGENTSUITE_MODEL_BASE_URL=" + url, "AGENTSUITE_MODEL=" + model, "MODEL_API_KEY=k", "STUB_SECRET_VERSION=7"},
-			wantLines:   []string{"- -model=" + model, "- -model-base-url=" + url},
+			name: "real provider",
+			env:  []string{"AGENTSUITE_MODEL_BASE_URL=" + url, "AGENTSUITE_MODEL=" + model, "MODEL_API_KEY=k", "STUB_SECRET_VERSION=7"},
+			wantLines: []string{"- -model=" + model, "- -model-base-url=" + url,
+				"- -model-path=/chat/completions", "- -model-auth-header=Authorization"},
 			wantSecret:  "apply --server-side",
 			wantVersion: "7",
+		},
+		{
+			// An Azure OpenAI deployment: the api-version rides in the path, the key in the api-key
+			// header from the Secret.
+			name: "Azure OpenAI",
+			env: []string{
+				"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com", "AGENTSUITE_MODEL=dep", "MODEL_API_KEY=azure-key",
+				"AGENTSUITE_MODEL_PATH=/openai/deployments/dep/chat/completions?api-version=2024-10-21",
+				"AGENTSUITE_MODEL_AUTH_HEADER=api-key", "STUB_SECRET_VERSION=8",
+			},
+			wantLines: []string{"- -model=dep", "- -model-base-url=https://res.openai.azure.com",
+				"- -model-path=/openai/deployments/dep/chat/completions?api-version=2024-10-21", "- -model-auth-header=api-key"},
+			wantSecret:  "apply --server-side",
+			wantVersion: "8",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -749,10 +834,14 @@ func TestUpRendersTheDaemon(t *testing.T) {
 					t.Errorf("rendered manifest has no line %q:\n%s", l, b)
 				}
 			}
-			for _, p := range []string{"DAEMON_IMAGE", "MODEL_ID", "MODEL_BASE_URL", "SUBSTRATE_HARNESS_FLAG", "MODEL_SECRET_VERSION"} {
+			for _, p := range []string{"DAEMON_IMAGE", "MODEL_ID", "MODEL_BASE_URL", "MODEL_PATH", "MODEL_AUTH_HEADER", "SUBSTRATE_HARNESS_FLAG", "MODEL_SECRET_VERSION"} {
 				if strings.Contains(string(b), p) {
 					t.Errorf("rendered manifest still contains %s", p)
 				}
+			}
+			// The key reaches kubectl over stdin only: never the manifest, argv or the output.
+			if strings.Contains(string(b), "azure-key") || strings.Contains(calls, "azure-key") || strings.Contains(out, "azure-key") {
+				t.Errorf("the API key leaked into the manifest, a call or the output")
 			}
 			secret := strings.Index(calls, tc.wantSecret)
 			apply := strings.Index(calls, "apply -f "+path)

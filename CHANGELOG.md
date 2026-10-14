@@ -62,11 +62,23 @@ provide.
   and `Fork` are refused with `FAILED_PRECONDITION`, before anything is journaled, if the harness
   reports another id (`placement.WithDescriptorID`). A harness added with `placement.Registry.Add`
   shares the Registry's session guard, so overlapping calls for one session through it and a static
-  harness are `ABORTED` too. It is an admin API and `agentsessionsd` does not serve it yet: it is
-  available in-process through `session.NewHarnessRegistry` (see [security.md](docs/security.md)).
+  harness are `ABORTED` too. It is an admin API available in-process through
+  `session.NewHarnessRegistry` and, optionally, on `agentsessionsd`'s separate loopback operator
+  listener (see [security.md](docs/security.md)). `agentctl harness register|get|list|retire`
+  uses that listener with an explicit `--server` address.
 
 ### Compatibility
 
+- `agentsessionsd -registry-addr` is off by default. Enabling it creates a plaintext,
+  unauthenticated **local admin surface** on a separate literal-loopback listener; Sessions still
+  refuses registry RPCs, and neither listener gains TLS or authentication. Any local or same-pod
+  process that can reach it can administer harnesses. The daemon now loads persisted registrations
+  even when the listener is off, so existing sessions can still use retired harnesses after restart
+  with `-model` set. Both new and stored remote registrations require `-model`; without it, stored
+  remote registrations load as unservable and their existing sessions fail `FAILED_PRECONDITION`,
+  whether active or retired. Inspecting, listing and retiring do not require `-model`; substrate
+  placements are unsupported by this reference daemon. No Sessions transport/access guarantees
+  change.
 - `model/openai` refuses a redirect to another origin instead of following it. Set the base URL
   to the endpoint that serves the request. A client passed to `WithHTTPClient` is copied, not
   modified; its own `CheckRedirect` still runs for same-origin redirects.

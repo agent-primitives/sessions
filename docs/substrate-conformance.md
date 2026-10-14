@@ -41,12 +41,156 @@ client without substrate's Tag APIs still satisfies the base interface.
 - `integrations/substrate` is a **separate Go module** with its own `go.mod` that adapts the real
   generated ate-api client to `ControlClient`. The core never imports it.
 - A CI gate asserts `go list -deps ./...` on the core contains **zero** `agent-substrate` packages.
+- The server is shared the same way. `internal/agentsessionsd` holds `agentsessionsd`, with no
+  substrate import; `cmd/agentsessionsd` is the neutral binary, and
+  `integrations/substrate/cmd/agentsessionsd` is the same server with the adapter passed in
+  (`agentsessionsd.WithSubstrate`), so only it offers the substrate flags below.
+
+### Running sessions on substrate with agentsessionsd
+
+The substrate build of `agentsessionsd` adds these flags:
+
+| Flag | Meaning |
+|---|---|
+| `-substrate-harness name=atespace/template[,memory]` | Serve harness `name` from that ActorTemplate, one actor per session. `,memory` declares `REQUIRES_MEMORY_SNAPSHOT`; the default is `STATELESS_REPLAY`. At most one: a second is refused at startup (see [Substrate placement binding](#substrate-placement-binding)). Requires `-model`, like `-harness`. |
+| `-substrate-atespace` | Atespace the session actors are created in (required). It must already exist, and must not change while sessions exist: see [Substrate placement binding](#substrate-placement-binding). |
+| `-ateapi-addr` | ate-api Control address, TLS (default `api.ate-system.svc:443`). |
+| `-ateapi-token-file` | Bearer token file, re-read on every call, so a projected ServiceAccount token rotates. |
+| `-ateapi-ca-file`, `-ateapi-server-name` | Verify the ate-api certificate against this CA and name; the default is the system roots and the host of `-ateapi-addr`. |
+| `-ateapi-insecure-skip-verify` | Skip certificate verification (dev clusters; the conformance Job does the same). A server impersonating the ate-api then receives the `-ateapi-token-file` bearer token. Exclusive with `-ateapi-ca-file`. |
+| `-atenet-router` | Router address harnesses are reached through (default `atenet-router.ate-system.svc:80`). |
+
+The other flags only configure `-substrate-harness` entries; given without one, the daemon refuses
+to start rather than ignore them.
+
+The tier is declared, not discovered: placement gates on it before an actor exists, and nothing
+checks it against the image's own `Describe`. Declaring a `REQUIRES_MEMORY_SNAPSHOT` harness as
+stateless lets fork and a lost actor rebuild it by replay, which loses its RAM state, so declare what
+the harness's own `Describe` reports.
+
+### Substrate placement binding
+
+A session's journal records its harness name, not where that harness's actors live. The atespace,
+the ActorTemplate and the declared tier come from the daemon's flags at each start, and the session
+store keeps none of them. Three ways that goes wrong for a `REQUIRES_MEMORY_SNAPSHOT` session, the
+second of which the daemon prevents by refusing a second `-substrate-harness`:
+
+- **The binding changes under existing sessions.** Restarting with another `-substrate-atespace`
+  makes the next `Exec` look for the session's actor where it never was. Without the check below,
+  `Create` would cold-create a new actor from the template and continue the journal with a harness
+  that remembers none of it. Changing a harness's template does not move its actors, which are named
+  by session UID in the atespace: an existing session's actor is found and attached, still running
+  the old template, and only new sessions and stateless fork children get the new one. Nothing
+  reports the difference.
+- **Harnesses would share one actor per session.** A substrate backend creates its actors in the
+  one `-substrate-atespace`, under the session UID. With two substrate harnesses, a turn an
+  `ExecRequest.harness` override sent to the second would find the first harness's actor running and
+  attach to it, so it would run on the first harness's template while its `EXECUTION_START` records
+  the second. The cold-create guard below counts turns per harness, so after that shared actor is
+  lost, a harness that never ran a turn for the session would cold-create over state the other
+  harness built. `agentsessionsd` therefore accepts `-substrate-harness` at most once and exits
+  with status 2 on a second; per-harness actor names are the open question below. The rule is per
+  daemon: two `agentsessionsd` hosts that share a journal and an atespace but serve different
+  `-substrate-harness` names still share each session's actor, and so does a program that builds
+  its own `placement.Registry` with two substrate backends on one atespace.
+- **The tier is mis-declared.** A stateful image declared without `,memory` is treated as
+  `STATELESS_REPLAY`: a fork cold-creates the child and replays the journal into it, and a lost actor
+  is recreated, both without the parent's RAM.
+
+What is enforced today: `runtime/substrate` refuses to cold-create an actor for a
+`REQUIRES_MEMORY_SNAPSHOT` session whose journal already has a started turn (an `EXECUTION_START`)
+on that harness, whether that turn completed, failed or was interrupted, since any of them may have
+changed the actor's RAM. The Placer hands `Create` a counter in `api.SessionSpec.StartedTurns`, and
+`Create` calls it only after `GetActor` reports the actor missing, so a turn journaled before that
+point is counted, including one another host ran. The Placer attributes a turn by the harness name
+its `EXECUTION_START` recorded: a turn an `ExecRequest.harness` override sent to another harness is
+not counted, a name that aliases the same Placer in the registry is, and so is a turn it cannot
+attribute (no recorded name, a name this host does not serve, a legacy turn with no
+`EXECUTION_START`, or any turn when the Placer is not in a registry, since it cannot tell which
+backend another name ran on), so an unknown history refuses rather than cold-creates. A journal
+that cannot be read refuses too. `Create` returns `substrate.ErrMemoryStateLost` (wrapping
+`api.ErrMemoryStateLost`, `FAILED_PRECONDITION` at the Sessions API), names the session, and creates
+nothing. A stateless session, or a memory-tier session with no started turn, is created as before.
+
+The count cannot see a turn journaled after it. Host A finds no actor and counts no turn; host B
+then creates the actor, runs the session's first turn, and loses the actor; A's `CreateActor` then
+creates a replacement under the session's name, which every later `GetActor` finds. The actor's
+identity covers that case. A memory-tier incarnation carries the actor's UID
+(`ResourceMetadata.uid`, which substrate assigns at create and keeps across suspend and resume) as
+`api.Incarnation.ComputeInstance`, and each turn records it in `EXECUTION_START.compute_instance`.
+Before `Exec` journals a turn, the controller compares the UID of the actor it was placed on with the
+latest UID recorded for that harness since the session's `FORK` marker (attributed as above), reading
+the history its compare-and-swap append extends, so a turn another host journaled first is either
+compared or makes the append fail. `Resume` makes the same comparison before it re-drives a turn or
+records the resume. A different UID is `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`), names the
+session, and journals nothing; so is every later turn on either host. `Suspend` and a stateful
+`Fork` make the same comparison against the session's actor: the Placer reads the session's journal
+(at the fork point, for a fork) and passes the latest recorded UID to `Runtime.Snapshot`, and
+`runtime/substrate` refuses another actor, or a missing one, with `api.ErrMemoryStateLost`
+(`FAILED_PRECONDITION`) before it suspends it, and again on the UID the suspend reports, since
+substrate's `SuspendActor` takes no UID precondition. Neither then appends a `SUSPEND`, so the
+journal never records a replacement's snapshot as the session's checkpoint, and the fork clones
+nothing and records no child, where it would otherwise have cloned the replacement into children
+whose own turns never compare against the parent's UID. `runtime/substrate` refuses to place a
+memory-tier session on an actor that reports no UID, and refuses to snapshot one with a plain error
+(`INTERNAL`), a fork child before its first turn included, since a `ControlClient` that reports no
+UID breaks its contract. When `CreateActor` finds the name taken (`substrate.ErrActorExists`),
+`Create` attaches to that actor, so two hosts racing a session's first turn share one actor. The
+loser's turn fails at worst, never the session, and a retry attaches: `ABORTED` when its append
+loses, and `ABORTED` (`api.ErrComputeBusy`) when it finds the winner's actor `RESUMING`,
+`SUSPENDING` or `PAUSING`, or substrate refuses its resume because another operation holds the actor
+(substrate's `ABORTED`, reported as `substrate.ErrActorBusy`). An actor that is `CRASHED`,
+`DELETING`, `REVERTING` or in a state the adapter does not know is `INTERNAL`. When `Create` resumes
+a `SUSPENDED` actor and the resume reports it missing (`substrate.ErrActorNotFound`), `Create` reads
+it again: gone, it is a missing actor (a memory-tier session with started turns is
+`ErrMemoryStateLost`, anything else gets a new actor); replaced under the name, it is `ABORTED`;
+still there, the resume error stands, since substrate also answers `NOT_FOUND` for an actor whose
+template lacks a volume. `Restore` (`Sessions.Resume`) returns `ErrMemoryStateLost` for every
+memory-tier session whose actor is gone, whatever its journal records (a session interrupted on its
+first turn included), since the snapshot it would resume went with the actor: after the resume
+fails, `GetActor` finds no actor, or, when the resume reported it missing, one that does not hold
+the snapshot being restored (a replacement).
+
+Limits of these checks:
+
+- The check only sees the tier the daemon is configured with, so it does not cover a mis-declared
+  tier.
+- The router reaches an actor by name, and the backend reads the UID when it looks. A turn that is
+  already placed when its actor is replaced runs on the replacement and records the old UID; the
+  next turn is refused, so one turn's output can come from a harness without the session's state.
+- Turns journaled before `compute_instance` existed recorded no UID and are not compared.
+- `compute_instance` is in the record's canonical bytes. A binary built before it drops the field on
+  read and fails chain verification (`content_hash` mismatch) on a session with a memory-tier turn,
+  so every host sharing a journal must be upgraded before any of them runs one, and rollback is not
+  supported for such sessions.
+- A fork child's comparison starts at its `FORK` marker, and the child records no UID until its own
+  first turn. If the child's actor is replaced out of band before that turn, the replacement is not
+  compared: the started-turn count refuses to cold-create a missing child actor, since it includes
+  the inherited prefix, and `Suspend` or a stateful `Fork` of a child whose actor is missing is
+  `FAILED_PRECONDITION`, but neither can see an actor someone else created under the child's name.
+- The refused replacement actor is not deleted: it keeps its name and any worker it holds until an
+  operator deletes it.
+
+Open questions, not implemented:
+
+TODO(spike): should the `FORK` marker record each child's actor UID (the clone `CreateActorFromTag` made), so `LatestComputeInstance` starts a child's comparison from that UID instead of `""` and an actor created under the child's name before its first turn is refused? It is a new journal field, so it needs a canonical-bytes and replay story.
+
+TODO(spike): can the atenet-router target an actor by UID (or reject a request whose expected UID differs), so a turn already placed never reaches a replacement actor?
+
+TODO(spike): should the session store persist each session's substrate binding (atespace, template, declared tier) at its first placement, and refuse a turn when the daemon's configured binding differs?
+
+TODO(spike): should `runtime/substrate` verify the live harness's `Describe` resumability against the configured tier, given that `Placer.recheck` runs only for a `LiveDescriber` backend and does not compare tiers?
+
+TODO(spike): should a substrate actor name carry the harness as well as the session, or `Create` refuse to attach to an actor created from another template, so `agentsessionsd` can accept more than one `-substrate-harness` without them sharing a session's actor (and without the per-harness cold-create guard undercounting the turns that ran on it)? Existing actors are named by session UID only, so this needs a migration story.
+
+`examples/agentsuite-substrate` runs this end to end on kind: an AgentSuite agent rendered into an
+ActorTemplate and served with `-substrate-harness`, then suspended, resumed, replayed and forked.
 
 ## SPI → substrate mapping
 
 | `api.Runtime` | substrate Control |
 |---|---|
-| `Create` | `CreateActor` + `ResumeActor` (starts from the template's golden snapshot, or cold-boots) |
+| `Create` | `CreateActor` + `ResumeActor` (starts from the template's golden snapshot, or cold-boots); refused for a memory-tier session with started turns and no actor |
 | `Snapshot(EXTERNAL)` | `SuspendActor` (RAM+disk snapshot to storage, worker freed, actor SUSPENDED) |
 | `Restore` | `ResumeActor` (restores the actor's own snapshot on a possibly-different worker) |
 | `Fork` (stateless) | `CreateActor` + `ResumeActor` — a replay-fork; the journal reconstructs the child |
@@ -59,17 +203,19 @@ source itself: the actor's own snapshot, else the template's golden snapshot, el
 template spec. That is enough for `STATELESS_REPLAY`: a new actor has no snapshot of its own, and the
 golden snapshot is the harness captured right after it became ready, before any session touched it,
 so it carries no session state. A template that must cold-boot on every resume would set
-`snapshotConfig.onCommit: DATA` instead; nothing here needs that.
+`snapshotConfig.preferredFidelity: SNAPSHOT_FIDELITY_VOLUMES` instead; nothing here needs that.
 
 `Capabilities.MemorySnapshot = true` is the tier that lets substrate host a `REQUIRES_MEMORY_SNAPSHOT`
 harness a filesystem-only backend (`runtime/local`, a plain pod) refuses via `CanPlace`.
 
 ## Fork: cloning an actor from a durable snapshot
 
-Every successful `SuspendActor` leaves the actor holding a new external snapshot
-(`Actor.status.external_snapshot`). `CreateTag{source_actor}` copies the snapshot a SUSPENDED actor
-holds into tag-owned storage, and `CreateActor{source_tag}` seeds a new actor from that copy. That is
-the compute half of a session fork.
+Every successful `SuspendActor` leaves the actor holding a new external snapshot: a new generation in
+`Actor.status.snapshots` whose durable copy is `COMPLETED`. The adapter reports the highest such
+generation's URI as the held snapshot, the same one `ResumeActor` restores and `CreateTag` copies.
+`CreateTag{source_actor}` copies the snapshot a SUSPENDED actor holds into tag-owned storage, and
+`CreateActor{source_tag}` seeds a new actor from that copy. That is the compute half of a session
+fork.
 
 There is no `Fork` RPC to wait for. The Control service exposes no method that forks or clones an
 actor directly; tags are the primitive it provides. That is the right half of the split: the compute layer copies a sandbox,
@@ -100,8 +246,12 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   request addressed to it, so the parent can be woken and suspended again between the fork's
   checkpoint and its tag. The backend checks on both sides of the tag that the parent is still
   SUSPENDED holding the snapshot the fork took (a suspend always writes a new one), and otherwise
-  deletes the tag and fails with `ErrSnapshotSuperseded`. That error wraps `api.ErrSnapshotSuperseded`,
-  which `Fork` reports as ABORTED; the caller retries at the parent's new head. The Placer's hold on
+  deletes the tag and fails with `ErrSnapshotSuperseded`. That error wraps
+  `api.ErrSnapshotSuperseded`, which `Fork` reports as ABORTED; the caller retries at the parent's
+  new head. When the tag itself fails, the backend reads the parent again: a parent that is gone is
+  `api.ErrMemoryStateLost` (FAILED_PRECONDITION), and one holding another snapshot is
+  `ErrSnapshotSuperseded`. A tag substrate refuses because another operation holds the parent's
+  lease (`ABORTED`) is `substrate.ErrActorBusy`, also ABORTED. The Placer's hold on
   the parent starts when the fork installs its checkpoint mark and covers the turns this
   `placement.Registry` drives. It does not stop a request from outside this Registry, or a turn whose
   `Runtime.Create` or `Runtime.Restore` was already in flight when the mark was installed; this
@@ -114,6 +264,11 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
 - A memory clone reflects the parent's RAM **now**, so it can only realize a fork at the log head.
   Forking a stateful session at a historical seq is refused with `ErrUnplaceable` →
   `FailedPrecondition` instead of pairing an old prefix with present-day RAM.
+- A memory clone must come from the actor the parent's turns ran on. When the actor under the
+  parent's name has another UID than the parent's journal last recorded, the fork is refused with
+  `api.ErrMemoryStateLost` → `FailedPrecondition` before the backend suspends it, or, if it was
+  replaced between that look and the suspend, after: the replacement is then left suspended, with
+  no SUSPEND event on the parent's chain and no child.
 - A control client without the Tag APIs does not satisfy the optional `SnapshotCloner` interface; a
   stateful fork there fails loudly rather than degrading to a lossy replay-fork.
 - The child fan-out is all-or-nothing. If a child fails to provision, the ones already created are
@@ -326,6 +481,11 @@ prefix plus the `FORK` marker), then resumes the **parent** and requires it to c
 fork checkpoints its parent, it does not consume it. The fan-out is timed and logged, so a run reports
 the real per-child clone cost rather than leaving it asserted.
 
+`TestMemorySessionWhoseActorIsLostIsRefused` drives the counter one turn, deletes its actor and
+requires the next turn to fail with `api.ErrMemoryStateLost`, with no actor created and nothing
+journaled. A fresh actor would answer 1 again where the journal expects 2, which is the silent loss
+the check exists to stop.
+
 `TestForkOfMemoryHarnessAtHistoricalSeqIsRefused` pins the honest-degradation half on real compute: a
 stateful fork behind the head is refused, and the refusal leaves the parent usable.
 
@@ -427,15 +587,15 @@ for tier in echo counter; do
   hack/wait-worker-pool.sh "${tier}-gvisor"
 done
 HARNESS_IMAGE="${HARNESS_IMAGE}" ECHO_SANDBOX_CLASS=gvisor COUNTER_SANDBOX_CLASS=gvisor \
-  hack/run-e2e-job.sh 'TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestMemorySnapshotSuspendResume|TestFork|TestConcurrentSessionsReachTheirOwnActors' \
+  hack/run-e2e-job.sh 'TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestMemorySnapshotSuspendResume|TestMemorySessionWhoseActorIsLostIsRefused|TestFork|TestConcurrentSessionsReachTheirOwnActors' \
   "${E2E_IMAGE}" 1800
 ```
 
 `kind delete cluster --name "${KIND_CLUSTER_NAME}"` removes the cluster afterwards. The
 `kind-registry` container is shared by every cluster `create-kind-cluster.sh` makes, so it stays.
 
-A gVisor FULL checkpoint also captures memory, so the stateful and fork tests exercise the same code
-paths on gVisor; the micro-VM run in CI remains the reference for both tiers.
+A gVisor MEMORY-fidelity checkpoint also captures memory, so the stateful and fork tests exercise
+the same code paths on gVisor; the micro-VM run in CI remains the reference for both tiers.
 
 ### Verification boundary
 

@@ -1,0 +1,46 @@
+{
+  "schemaVersion": "1.0.0-draft",
+  "mediaType": "application/vnd.agentsuite.manifest.v1+json",
+  "name": "support-desk",
+  "agents": [
+    {
+      "id": "triage",
+      "path": "agents/triage.json",
+      "digest": "sha256:51d14212bf1710dad5eb0de948c5a09d4239dff8cb9b3b54f54ac126d11c527c"
+    }
+  ],
+  "toolProviderCatalog": {
+    "id": "catalog",
+    "path": "tool-providers/catalog.json",
+    "digest": "sha256:933283a1fa90fd488db3f872fb89dc1572a5f638bf0a81514a542333e310ef95"
+  },
+  "compositions": [
+    {
+      "agent": "triage",
+      "platform": {
+        "os": "linux",
+        "architecture": "amd64"
+      },
+      "path": "compositions/triage-linux-amd64.json",
+      "digest": "sha256:2f99221b95f710b9ca4fa25a3baa7e8ba03ee669c3a3d1148f4902990cadaeef"
+    },
+    {
+      "agent": "triage",
+      "platform": {
+        "os": "linux",
+        "architecture": "arm64"
+      },
+      "path": "compositions/triage-linux-arm64.json",
+      "digest": "sha256:d40e25f572a5c7716bb52ba20eb3581b798e49b55f52b38ac1ec5cffd7bd8bdd"
+    }
+  ],
+  "buildProfiles": [
+    {
+      "id": "default",
+      "path": "build-profiles/default.json",
+      "digest": "sha256:01e0621ca4c3c090c0961b5c033f6114aec5bcc5d89e6a58682d7d5c38726412"
+    }
+  ],
+  "capabilities": [],
+  "extensions": []
+}

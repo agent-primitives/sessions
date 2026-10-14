@@ -13,9 +13,28 @@ provide.
   a redirect. net/http copied custom headers such as `api-key` to any redirect target, so a provider
   or proxy answering with a cross-host redirect received the credential. A redirect that changes
   scheme, host or port is now refused; same-origin redirects are followed as before.
+- `agentsessionsd` refuses to start when a model API key is set (`MODEL_API_KEY` or
+  `OPENAI_API_KEY`) and `-model-base-url` is plain `http` to a host other than a loopback address,
+  `localhost`, or an in-cluster service name ending in `.svc` or `.svc.cluster.local`
+  (case-insensitive, port ignored): the key and every prompt would cross the network unencrypted.
+  The error names the host and asks for `https`; it never prints the key. `https`, and `http` with
+  no key, are unchanged. The check is in `internal/modelconfig.New`, which the AgentSuite demo's
+  `up.sh` runs too.
 
 ### Fixed
 
+- `model/openai` joins the completions path to the base URL's path instead of appending it to the
+  string, so a base URL with a query (`-model-base-url 'https://h/v1?api-version=2'`) reaches
+  `/v1/chat/completions` with the query kept, ahead of any query `-model-path` carries. A fragment
+  is dropped. Before, the path landed inside the query or fragment and every turn went to `/v1`.
+- The substrate adapter (`integrations/substrate`) builds against agent-substrate `96dffb28`, which
+  replaced `ActorStatus.external_snapshot` with a `snapshots` list (substrate `f03327bd`) and
+  `SnapshotConfig.on_commit` with `preferred_fidelity`. The held snapshot is now the
+  highest-generation entry whose durable copy is `COMPLETED`, the one substrate restores and tags,
+  so a stateful fork keeps cloning the snapshot its suspend produced. Against an ate-api older than
+  `f03327bd` the adapter reads no snapshot and a stateful fork refuses with `ErrNoSnapshotToClone`;
+  upgrade substrate and the adapter together. The CI cluster moves to the same commit, and the
+  `deploy/substrate` WorkerPools use its `sandboxClasses` list in place of `sandboxClass`.
 - Session-level suspend no longer destroys the Substrate actor needed by resume. Both replay-based
   and memory-snapshot sessions retain their restore handle after `Placer.Suspend`; explicit `Stop`
   remains destructive teardown.
@@ -55,6 +74,17 @@ provide.
   reclaims a socket file left behind by a crashed instance. It never removes a socket another
   process created, and it refuses a lock file that is a symlink, a hard link, or owned by another
   user.
+- `integrations/substrate/cmd/agentsessionsd` is `agentsessionsd` with the substrate backend linked
+  in. `-substrate-harness name=atespace/template[,memory]` serves a harness as one actor per session
+  in `-substrate-atespace`, controlled over the ate-api (`-ateapi-addr`, TLS, with
+  `-ateapi-token-file` re-read on every call, `-ateapi-ca-file` or `-ateapi-insecure-skip-verify`)
+  and reached through `-atenet-router`. It requires `-model`, and refuses the other substrate flags
+  without a `-substrate-harness`. It takes one `-substrate-harness` and exits with status 2 on a
+  second: actors are named by session UID in the one atespace, so two substrate harnesses would
+  share a session's actor. The rule is per daemon: two hosts sharing a journal and an atespace with
+  different `-substrate-harness` names share it too (see `docs/substrate-conformance.md`). The
+  neutral `cmd/agentsessionsd` does not offer these flags; both binaries are now built from
+  `internal/agentsessionsd`.
 - `HarnessRegistry` API (`api/harness_registry.proto`): register, get, list and retire harnesses on a
   running host. A registration is immutable and identified by its name and `spec_digest`. Retiring a
   harness refuses new sessions while existing sessions keep running, resuming and forking;
@@ -82,6 +112,88 @@ provide.
   until this host restarts or loads it through `RegisterHarness` with the identical compatible spec.
   For a RETIRED row, restart this host to serve its existing sessions without reactivating it:
   `RegisterHarness` reactivates the row for every host sharing the journal.
+- `openai.New` refuses a base URL that is not absolute (no scheme or host), so `agentsessionsd`
+  exits at startup with `-model-base-url` set to one. Such a URL used to fail every request.
+- `agentsessionsd` exits at startup with a model API key and a plain-`http` `-model-base-url` to a
+  host that is not loopback, `localhost` or an in-cluster service (see Security). Switch such an
+  endpoint to `https`, or unset the key, before upgrading.
+- `agentsessionsd` now refuses positional arguments, naming them, and exits with status 2. It used
+  to ignore them, along with every flag after the first one, since flag parsing stops there.
+- `runtime/substrate` no longer cold-creates an actor for a `REQUIRES_MEMORY_SNAPSHOT` session that
+  has a started turn on that harness (completed, failed or interrupted) but no actor (deleted out of
+  band, or the daemon restarted with another `-substrate-atespace`). `Exec` fails with
+  `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and nothing is created, where it used to continue
+  the journal on a fresh harness that had lost the session's RAM state. `Runtime.Create` gets a
+  journal counter in the new `api.SessionSpec.StartedTurns`, which `runtime/substrate` calls only
+  after it finds the actor missing, so a turn another host journaled before then is counted; other
+  backends ignore it. The count is per harness: a turn an `ExecRequest.harness` override ran
+  elsewhere does not count, while a turn with no recorded harness name, or one this host does not
+  serve, does. Two substrate backends on one atespace share each session's actor, so the count
+  misses the turns the other one ran there; `agentsessionsd` allows one substrate harness for this
+  reason, but the rule is per daemon, so hosts sharing a journal and an atespace must serve the same
+  one, and a program that builds its own registry must do the same. `Sessions.Resume` of any
+  memory-tier session whose actor is gone, whatever its journal records, is `FAILED_PRECONDITION`
+  (`api.ErrMemoryStateLost`) too, where it used to be `INTERNAL`; a stateless session's `Resume`
+  keeps its error.
+- A memory-tier turn on substrate records its actor's UID in the new
+  `EXECUTION_START.compute_instance` (`api.Incarnation.ComputeInstance`, set by `runtime/substrate`
+  from the new `substrate.ActorInfo.UID`). `Exec` or `Resume` placed on an actor whose UID differs
+  from the latest one recorded for that harness since the session's `FORK` marker is
+  `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and journals nothing. This catches an actor
+  another host created under the session's name after it counted no turns, while the actor the first
+  turn ran on was lost; the count alone let later turns attach to it. `Suspend` and a stateful
+  `Fork` of such a session, or of one whose actor is gone, are `FAILED_PRECONDITION` too (they were
+  `INTERNAL`, and `Suspend` of a replaced actor succeeded), and suspend, clone and journal nothing:
+  the Placer passes the recorded UID to `Runtime.Snapshot` in `api.Incarnation.ComputeInstance`, and
+  `runtime/substrate` refuses another actor or a missing one, checking the UID before it suspends
+  and the one the suspend reports. A memory-tier fork child whose cloned actor is gone before its
+  first turn (no UID recorded yet), and a stateful `Fork` whose parent actor is deleted around or
+  during the tag, are `FAILED_PRECONDITION` the same way; a tag that substrate refuses because
+  another operation holds the parent is `ABORTED`, and one whose parent was suspended again while it
+  ran is `ABORTED` (`api.ErrSnapshotSuperseded`). `runtime/substrate` refuses a memory-tier actor that
+  reports no UID (`INTERNAL` from `Snapshot`, a fork child before its first turn included), so a
+  custom `ControlClient` must report one from `GetActor`, `ResumeActor` and `SuspendActor`, and must
+  report a missing actor as `substrate.ErrActorNotFound` from `SuspendActor` as well as `GetActor`
+  (the `integrations/substrate` adapter now maps substrate's `NOT_FOUND` from both, and from
+  `ResumeActor`), or a Suspend or Fork whose actor is deleted between the check and the suspend is
+  `INTERNAL`. It should report it from `ResumeActor` too, and the backend checks it with `GetActor`
+  before reading it as the actor being gone, since substrate also answers `NOT_FOUND` for an actor
+  whose template lacks a volume: such an actor keeps the resume error. Otherwise a `Resume` whose
+  actor is replaced between the failed resume and `Restore`'s `GetActor` is `INTERNAL`; with it, a
+  replacement that does not hold the session's snapshot is `FAILED_PRECONDITION`. An `Exec` whose
+  `SUSPENDED` actor is deleted before its resume is treated as a missing actor
+  (`FAILED_PRECONDITION` for a memory-tier session with started turns, a new actor otherwise), and
+  one replaced there, or deleted again after `CreateActor` found the name taken, is `ABORTED`; both
+  were `INTERNAL`. A `Placer` outside a `placement.Registry` now counts every started turn, and
+  compares every recorded UID, whatever harness name the turn recorded, since it cannot tell another
+  name's backend from its own.
+  `ControlClient.SuspendActor` now returns the suspended actor's `substrate.ActorInfo` (snapshot
+  handle and UID) instead of the snapshot handle alone. When `CreateActor` finds the name taken
+  (`substrate.ErrActorExists`, which a `ControlClient` must return for it), `Create` attaches to
+  that actor where it used to fail the turn with `INTERNAL`. Stateless turns record no UID and their
+  canonical bytes are unchanged; turns recorded before this change are not compared. The router
+  reaches an actor by name, so a turn already placed when its actor is replaced still runs; the next
+  one is refused. `compute_instance` is part of the record's canonical bytes. A binary built before
+  this change drops the field when it reads the record, so it fails chain verification with a
+  `content_hash` mismatch on any session with a memory-tier substrate turn, as older binaries do for
+  `EXECUTION_START` itself. Rollback is not supported for such sessions, and every host sharing a
+  journal must run this release before any of them runs a memory-tier substrate turn. There is no
+  SQLite schema migration (`user_version` stays 2), so an older binary still opens the journal and
+  reports only those sessions as tampered.
+- `ExecRequest.harness` can no longer override a session's harness with a different
+  `REQUIRES_MEMORY_SNAPSHOT` harness: the turn is `FAILED_PRECONDITION`
+  (`placement.ErrStatefulOverride`) before any compute is provisioned, and so is
+  `Sessions.Resume` of a pending turn recorded that way. Suspend and Fork follow the session's own
+  harness, so they would neither checkpoint nor clone the state that turn left in RAM. An override
+  onto a name that aliases the session's own Placer is not an override and still runs.
+- An actor another operation holds is now retryable: `Exec`, `Resume`, `Suspend` and `Fork` are
+  `ABORTED` (new `api.ErrComputeBusy`) where they used to be `INTERNAL` when `runtime/substrate`
+  finds the session's actor `RESUMING`, `SUSPENDING` or `PAUSING` (new
+  `substrate.StatusTransitioning`), or when substrate refuses a resume or suspend with `ABORTED`
+  because another operation holds the actor's lease. The adapter reports the latter as the new
+  `substrate.ErrActorBusy`; a `ControlClient` that returns a raw transport status still gets
+  `INTERNAL`. This is the usual outcome for the host that loses a race for a session's first turn
+  while the winner's actor is still resuming.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

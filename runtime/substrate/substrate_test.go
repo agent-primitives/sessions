@@ -456,6 +456,41 @@ func TestForkDeletesATagTakenAfterTheParentMoved(t *testing.T) {
 	}
 }
 
+// A parent deleted before or after the fork tags it took its snapshot with it: no child can be
+// cloned and a retry cannot help, so the fork is api.ErrMemoryStateLost (FAILED_PRECONDITION at the
+// Sessions API), not a plain error, and a tag taken before the parent vanished is released.
+func TestForkOfADeletedParentIsMemoryStateLost(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		afterTag  bool // the parent is deleted between the first check and the tag, else before the fork
+		wantCalls []string
+	}{
+		{name: "before the tag", wantCalls: []string{"get:parent"}},
+		{name: "after the tag", afterTag: true, wantCalls: []string{"get:parent", "tag:parent->fork-child", "get:parent", "untag:fork-child"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newClonerWithSuspendedParent()
+			if tc.afterTag {
+				m.afterGet = func(name string) {
+					delete(m.actors, name)
+					m.afterGet = nil
+				}
+			} else {
+				delete(m.actors, "parent")
+			}
+			_, err := newMemoryBackend(m).Fork(context.Background(),
+				api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
+				api.ForkOpts{ChildSessionUID: "child"})
+			if !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound) {
+				t.Fatalf("fork of a deleted parent: err=%v, want ErrMemoryStateLost wrapping ErrActorNotFound", err)
+			}
+			if !reflect.DeepEqual(m.calls, tc.wantCalls) {
+				t.Fatalf("calls=%v want %v", m.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
 // Forking a memory harness with no parent snapshot must fail loudly. Cold-booting the child instead
 // would hand back a child whose RAM is empty while its copied journal prefix says otherwise — a
 // silently divergent branch, since such a harness never rebuilds state from History (I4).
@@ -931,11 +966,18 @@ func TestSnapshotRefusesAReplacedActor(t *testing.T) {
 	if err == nil || errors.Is(err, api.ErrMemoryStateLost) {
 		t.Fatalf("suspend failure: err=%v, want a plain error", err)
 	}
-	// Nor is a stateless snapshot of a missing actor memory-state loss: it requires no instance.
+	// A memory-tier actor with no recorded instance (a fork child before its first turn) that is
+	// gone took the cloned state with it too.
 	m = &mockControl{info: running("worker-a"), suspendErr: substrate.ErrActorNotFound}
 	_, err = newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+	if !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound) {
+		t.Fatalf("snapshot of a missing memory-tier actor with no recorded instance: err=%v, want ErrMemoryStateLost wrapping ErrActorNotFound", err)
+	}
+	// A stateless snapshot of a missing actor is not memory-state loss: the journal holds the state.
+	m = &mockControl{info: running("worker-a"), suspendErr: substrate.ErrActorNotFound}
+	_, err = newBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
 	if !errors.Is(err, substrate.ErrActorNotFound) || errors.Is(err, api.ErrMemoryStateLost) {
-		t.Fatalf("snapshot of a missing actor with no instance required: err=%v, want ErrActorNotFound only", err)
+		t.Fatalf("stateless snapshot of a missing actor: err=%v, want ErrActorNotFound only", err)
 	}
 
 	// An actor that reports no UID cannot be compared. That is a ControlClient fault, not a

@@ -31,6 +31,8 @@ type actorControl struct {
 	onResume  func(actor string)
 	onSuspend func(actor string)
 	onGet     func(actor string)
+	// onTag, when set, runs when TagActor tags actor.
+	onTag func(actor string)
 	// onCreate, when set, runs before CreateActor looks at the registry.
 	onCreate func(actor string)
 	// uids is each actor's server-assigned UID, minted at create and dropped at delete, so an actor
@@ -117,7 +119,10 @@ func (c *actorControl) GetActor(_ context.Context, a substrate.ActorRef) (substr
 	return substrate.ActorInfo{Status: st, Worker: "w", Snapshot: c.snapshots[a.Name], UID: c.uids[a.Name]}, nil
 }
 
-func (c *actorControl) TagActor(context.Context, substrate.ActorRef, substrate.SnapshotID) error {
+func (c *actorControl) TagActor(_ context.Context, a substrate.ActorRef, _ substrate.SnapshotID) error {
+	if c.onTag != nil {
+		c.onTag(a.Name)
+	}
 	return nil
 }
 

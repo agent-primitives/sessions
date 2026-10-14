@@ -402,17 +402,23 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 	return snapshot, nil
 }
 
-// instanceGone wraps err, from the control call op, for Snapshot. When in requires a compute
-// instance and the actor is not found, the instance that holds the session's in-RAM state is gone
-// for good, so the result wraps api.ErrMemoryStateLost as well as err, the way Restore reports a
-// missing memory-tier actor; any other error is only wrapped.
+// instanceGone wraps err, from the control call op, for Snapshot. When the actor is not found and
+// in requires a compute instance, or the harness is REQUIRES_MEMORY_SNAPSHOT (a fork child before
+// its first turn has no recorded instance yet), the actor that held the session's in-RAM state is
+// gone for good, so the result wraps api.ErrMemoryStateLost as well as err, the way Restore reports
+// a missing memory-tier actor; any other error is only wrapped.
 func (b *Backend) instanceGone(in api.Incarnation, op string, err error) error {
-	if in.ComputeInstance == "" || !errors.Is(err, ErrActorNotFound) {
+	memory := in.ComputeInstance != "" || b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+	if !memory || !errors.Is(err, ErrActorNotFound) {
 		return fmt.Errorf("substrate: %s: %w", op, err)
 	}
-	return fmt.Errorf("%w: actor %s/%s, instance %q, which held the session's in-RAM state, no longer exists, "+
+	instance := ""
+	if in.ComputeInstance != "" {
+		instance = fmt.Sprintf(", instance %q,", in.ComputeInstance)
+	}
+	return fmt.Errorf("%w: actor %s/%s%s which held the session's in-RAM state, no longer exists, "+
 		"so that state cannot be captured; nothing was snapshotted for the session: %s: %w",
-		api.ErrMemoryStateLost, b.atespace, in.ID, in.ComputeInstance, op, err)
+		api.ErrMemoryStateLost, b.atespace, in.ID, instance, op, err)
 }
 
 // snapshotErrorKind is the debug error_kind for a failed step of Snapshot: memory_state_lost when
@@ -612,9 +618,14 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 }
 
 // requireSnapshot fails with ErrSnapshotSuperseded unless the actor is SUSPENDED holding exactly
-// snapshot.
+// snapshot. A parent that no longer exists took the snapshot with it, so that is
+// api.ErrMemoryStateLost: no child can be cloned from it, and retrying cannot help.
 func (b *Backend) requireSnapshot(ctx context.Context, actor ActorRef, snapshot string) error {
 	info, err := b.ctl.GetActor(ctx, actor)
+	if errors.Is(err, ErrActorNotFound) {
+		return fmt.Errorf("%w: fork parent %s/%s no longer exists, so the snapshot it held cannot be cloned; no child was created: %w",
+			api.ErrMemoryStateLost, actor.Atespace, actor.Name, err)
+	}
 	if err != nil {
 		return fmt.Errorf("substrate: get fork parent %q: %w", actor.Name, err)
 	}

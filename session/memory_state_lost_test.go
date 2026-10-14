@@ -695,9 +695,12 @@ func TestResumeOntoAReplacementActorIsRefused(t *testing.T) {
 // under its name, its in-RAM state cannot be captured: both are refused with FAILED_PRECONDITION
 // (not a retryable INTERNAL), snapshot nothing, create no actor and journal nothing, so no SUSPEND
 // records a checkpoint without the session's state.
+//
+// A fork child before its first turn has no recorded instance yet; when its cloned actor is gone,
+// the cloned state went with it, so it is refused the same way.
 func TestSuspendAndForkOfALostOrReplacedActorAreRefused(t *testing.T) {
 	ctx := context.Background()
-	for _, actor := range []string{"gone", "replaced"} {
+	for _, actor := range []string{"gone", "replaced", "child-gone"} {
 		for _, op := range []string{"suspend", "fork"} {
 			t.Run(actor+"/"+op, func(t *testing.T) {
 				ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
@@ -710,6 +713,13 @@ func TestSuspendAndForkOfALostOrReplacedActorAreRefused(t *testing.T) {
 				sess := mustCreate(t, c)
 				if err := execHi(c, sess); err != nil {
 					t.Fatalf("first turn: %v", err)
+				}
+				if actor == "child-gone" {
+					resp, err := c.Fork(ctx, &v1.ForkRequest{Session: sess, Count: 1})
+					if err != nil {
+						t.Fatalf("fork: %v", err)
+					}
+					sess = resp.GetChildren()[0].GetMetadata().GetUid()
 				}
 				ref := substrate.ActorRef{Atespace: "space", Name: sess}
 				if err := ctl.DeleteActor(ctx, ref); err != nil {
@@ -753,5 +763,45 @@ func TestSuspendAndForkOfALostOrReplacedActorAreRefused(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A stateful Fork checks that the suspended parent still holds its snapshot on both sides of the tag.
+// A parent deleted in between took that snapshot with it, so the fork is FAILED_PRECONDITION, not
+// INTERNAL, and no child actor is created.
+func TestForkWhoseParentIsDeletedAtTheTagIsRefused(t *testing.T) {
+	ctx := context.Background()
+	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	c := newMemoryHost(t, ctl, store, echoagent.Harness{})
+	sess := mustCreate(t, c)
+	if err := execHi(c, sess); err != nil {
+		t.Fatalf("first turn: %v", err)
+	}
+	ctl.onTag = func(actor string) {
+		if err := ctl.DeleteActor(ctx, substrate.ActorRef{Atespace: "space", Name: actor}); err != nil {
+			t.Error(err)
+		}
+	}
+	ctl.mu.Lock()
+	created := ctl.created
+	ctl.mu.Unlock()
+
+	_, err = c.Fork(ctx, &v1.ForkRequest{Session: sess, Count: 1})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("fork whose parent is deleted at the tag: want FailedPrecondition, got %v", err)
+	}
+	if msg := status.Convert(err).Message(); !strings.Contains(msg, "no longer exists") {
+		t.Errorf("error %q does not say the parent no longer exists", msg)
+	}
+	ctl.mu.Lock()
+	gotCreated := ctl.created
+	ctl.mu.Unlock()
+	if gotCreated != created {
+		t.Errorf("actors created %d->%d: the refused fork may create no child", created, gotCreated)
 	}
 }

@@ -250,7 +250,8 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	// snapshot or tag of it is reachable from here. A stateless harness rebuilds from the journal; a
 	// memory-tier one would silently continue the journal with none of the state it recorded. Count
 	// the turns only now that the actor is known to be missing: every turn that ran on it was journaled
-	// before it ran, so a turn another host ran while this call was being placed is counted too.
+	// before it ran, so a turn another host journaled before this point is counted too. One journaled
+	// after it is left to the host's compute-instance check (see the doc comment above).
 	if b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot && s.StartedTurns != nil {
 		turns, err := s.StartedTurns()
 		if err != nil {

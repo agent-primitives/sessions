@@ -202,8 +202,10 @@ func Run(args []string, opts ...Option) error {
 	}
 }
 
-// Main runs the server with os.Args and exits with the conventional status: 0 on success or -h,
-// 2 on a command-line error, 1 otherwise.
+// Main runs the server with os.Args and exits with the conventional status: 0 on success or -h, 2
+// when the arguments cannot be parsed (an unknown or malformed flag, a positional argument, a repeated
+// -substrate-harness; see Run's ErrUsage), and 1 otherwise, including a configuration error in flags
+// that parsed.
 func Main(opts ...Option) {
 	err := Run(os.Args[1:], opts...)
 	switch {

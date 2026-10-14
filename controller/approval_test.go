@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
-	"reflect"
 	"testing"
 
 	"github.com/aramase/agentsessions/api"
@@ -59,104 +58,73 @@ func (h *approvalHarness) Run(ctx context.Context, start *api.Start, sink api.Ev
 	}
 	return nil
 }
-func TestApprovalPublicStaging(t *testing.T) {
-	for cut := 2; cut <= 6; cut++ {
-		for _, entry := range []string{"resume", "replay"} {
-			t.Run(entry+string(rune('0'+cut)), func(t *testing.T) {
-				log := gateLog(t, gateEvents()[:cut]...)
-				c, err := New(log, nil, WithSessionUID("s"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				before, _ := log.Read(1)
-				h := &approvalHarness{}
-				if entry == "resume" {
-					_, err = c.Resume(t.Context(), h)
-				} else {
-					_, err = c.Replay(t.Context(), h)
-				}
-				if !errors.Is(err, ErrApprovalUnavailable) {
-					t.Fatalf("recorded gate must remain unavailable: %v", err)
-				}
-				after, _ := log.Read(1)
-				if h.runs != 0 || h.describes != 0 || !reflect.DeepEqual(before, after) {
-					t.Fatal("disabled recovery performed IO/repair")
-				}
-				if controllerErrorKind(err) != "approval_unavailable" {
-					t.Fatalf("unhelpful code: %s", controllerErrorKind(err))
-				}
-			})
-		}
-	}
-	for _, tc := range []struct {
-		name   string
-		events []api.Event
-		exec   bool
-		want   error
-	}{
-		{"owned pending blocks new input", gateEvents()[:3], true, ErrApprovalBlocked},
-		{"ordinary marked receipt blocks recovery", []api.Event{{ExecutionID: "e", Kind: api.EventToolResult, Result: &api.ToolResult{ID: "ordinary", ApprovalRequestSeq: 9}}}, false, ErrApprovalUnavailable},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			log := gateLog(t, tc.events...)
-			c, err := New(log, nil, WithSessionUID("s"))
+func TestApprovalPublicActivation(t *testing.T) {
+	for _, cut := range []int{2, 3, 4, 5, 6} {
+		t.Run(string(rune('0'+cut)), func(t *testing.T) {
+			log := gateLog(t, gateEvents()[:cut]...)
+			effects := 0
+			c, err := New(log, nil, WithSessionUID("s"), WithToolExecutor(func(context.Context, ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				effects++
+				return api.ToolResult{}, nil
+			}))
 			if err != nil {
 				t.Fatal(err)
 			}
-			before, err := log.Read(1)
-			if err != nil {
-				t.Fatal(err)
-			}
-			h := &approvalHarness{}
-			if tc.exec {
-				err = c.Exec(t.Context(), h, []api.Message{*api.TextMessage("user", "new")}, int64(len(before)))
-			} else {
-				_, err = c.Resume(t.Context(), h)
-			}
-			after, readErr := log.Read(1)
-			if !errors.Is(err, tc.want) || readErr != nil || h.runs != 0 || h.describes != 0 || !reflect.DeepEqual(before, after) {
-				t.Fatalf("staging admitted effects: err=%v read=%v describe=%d run=%d", err, readErr, h.describes, h.runs)
-			}
-			if tc.exec && controllerErrorKind(err) != "approval_blocked" {
-				t.Fatalf("blocked kind=%s", controllerErrorKind(err))
+			h := &approvalHarness{fn: func(ctx context.Context, _ *api.Start, s api.EventSink) error {
+				_, err := s.ToolCall(ctx, *gateEvents()[1].ToolCall)
+				return err
+			}}
+			_, err = c.Resume(t.Context(), h)
+			if cut <= 3 {
+				if !errors.Is(err, api.ErrApprovalParked) || h.runs != 0 || h.describes != 0 || effects != 0 {
+					t.Fatalf("pending=%v runs=%d describe=%d effects=%d", err, h.runs, h.describes, effects)
+				}
+				if head, _ := log.Head(); head != 3 {
+					t.Fatalf("repair head=%d", head)
+				}
+			} else if err != nil || effects != map[int]int{4: 1, 5: 0, 6: 0}[cut] {
+				t.Fatalf("decided=%v effects=%d", err, effects)
 			}
 		})
 	}
-	t.Run("live pre-intent fallback", func(t *testing.T) {
+	t.Run("live sticky public park", func(t *testing.T) {
 		log := gateLog(t)
-		effects := 0
-		c, err := New(log, nil, WithSessionUID("s"), WithToolExecutor(func(context.Context, ToolCallContext, api.ToolCall) (api.ToolResult, error) {
-			effects++
-			return api.ToolResult{}, nil
-		}))
+		c, err := New(log, nil, WithSessionUID("s"))
 		if err != nil {
 			t.Fatal(err)
 		}
 		h := &approvalHarness{fn: func(ctx context.Context, _ *api.Start, s api.EventSink) error {
 			_, err := s.ToolCall(ctx, *gateEvents()[1].ToolCall)
-			if !errors.Is(err, ErrApprovalUnavailable) {
-				t.Fatalf("live gate: %v", err)
+			if !errors.Is(err, api.ErrApprovalParked) {
+				t.Fatalf("live gate=%v", err)
 			}
-			call := *gateEvents()[1].ToolCall
-			call.ID = "fallback"
-			call.Mediation = api.MediationControllerMediated
-			_, err = s.ToolCall(ctx, call)
+			for _, late := range allGateMethods(ctx, s) {
+				if !errors.Is(late, api.ErrApprovalParked) {
+					t.Fatalf("late=%v", late)
+				}
+			}
 			return err
 		}}
-		if err := c.Exec(t.Context(), h, nil, 0); err != nil {
+		if err := c.Exec(t.Context(), h, nil, 0); !errors.Is(err, api.ErrApprovalParked) {
 			t.Fatal(err)
 		}
-		if effects != 1 {
-			t.Fatalf("effects %d", effects)
+		if head, _ := log.Head(); head != 3 {
+			t.Fatalf("head=%d", head)
 		}
-		recs, _ := log.Read(1)
-		for _, r := range recs {
-			if r.Event.Kind == api.EventApprovalRequest || r.Event.ToolCall != nil && r.Event.ToolCall.Mediation == api.MediationRequiresApproval {
-				t.Fatal("gate intent committed")
-			}
-		}
-		if _, err := c.Replay(t.Context(), h); err != nil {
+		if err := c.Exec(t.Context(), h, []api.Message{*api.TextMessage("user", "new")}, 3); !errors.Is(err, ErrApprovalBlocked) || controllerErrorKind(err) != "approval_blocked" {
 			t.Fatal(err)
+		}
+	})
+	t.Run("marked malformed receipt", func(t *testing.T) {
+		log := gateLog(t, api.Event{ExecutionID: "e", Kind: api.EventToolResult, Result: &api.ToolResult{ID: "ordinary", ApprovalRequestSeq: 9}})
+		c, err := New(log, nil, WithSessionUID("s"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := &approvalHarness{}
+		_, err = c.Resume(t.Context(), h)
+		if !errors.Is(err, ErrInvalidExecutionLog) || h.runs != 0 || h.describes != 0 {
+			t.Fatalf("malformed=%v", err)
 		}
 	})
 }

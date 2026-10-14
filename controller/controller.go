@@ -214,8 +214,8 @@ func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, erro
 
 // Exec runs one live execution/turn. The first append (EXECUTION_START) is guarded by
 // expectedLastSeq (the single-writer CAS at the session boundary); the harness runs
-// host-mediated, and a completed turn ends with END. Live approval calls are rejected before
-// intent until host handoff is available. An owned recorded unresolved gate blocks new turns before Describe.
+// host-mediated, and a completed turn ends with END. A durable approval request seals the sink
+// and returns a typed park without ERROR/END. An owned unresolved gate blocks new turns before Describe.
 func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Message, expectedLastSeq int64) (err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	executionID := newID()
@@ -360,9 +360,6 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 	recs, err := c.log.Read(1)
 	if err != nil {
 		return nil, err
-	}
-	if hasRecordedApproval(recs) {
-		return nil, ErrApprovalUnavailable
 	}
 	recordCount = len(recs)
 	events := make([]api.Event, 0, recordCount)

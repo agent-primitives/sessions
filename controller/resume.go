@@ -48,8 +48,9 @@ func ResumeInvocation(log eventlog.Store) (*api.ExecutionStart, error) {
 // An unresolved tool intent inherited across a fork returns ErrInheritedToolIntent before running
 // the harness or appending events: the child's dedup namespace cannot recover the parent's effect.
 //
-// Recorded approval history returns ErrApprovalUnavailable before Describe, Run or repair.
-// Approval recovery requires a host capable of completing the park handoff.
+// An owned unanswered approval returns (true, *api.ApprovalParkedError) without Describe or Run.
+// A call-only cut repairs its request exactly once using the captured head and current fence;
+// repair failure returns (true, operational error). A decided call resumes under the original key.
 //
 // Outside a legacy ID-less prefix, ERROR events, including those left by earlier failed Resume
 // attempts, are not effects: they stay in the journal as an audit trail, are skipped when the
@@ -70,9 +71,6 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	recs, err := c.log.Read(1)
 	if err != nil {
 		return false, err
-	}
-	if hasRecordedApproval(recs) {
-		return false, ErrApprovalUnavailable
 	}
 	recordCount = len(recs)
 	if len(recs) == 0 {

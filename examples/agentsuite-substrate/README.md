@@ -308,6 +308,6 @@ through a filter that redacts bearer tokens, JWTs and the metadata response's to
 each step's offset in the video and the video's sha256 to `DEMO_OUT`. By default it runs the driver
 on the machine vhs runs on (`DEMO_REMOTE=local`); `DEMO_REMOTE=hq DEMO_HOST=<host>` drives a remote
 host through `hq remote-test`, a private tool, in the image `Dockerfile.tools` builds there. It
-paces the run with `DEMO_PAUSE=25` and `DEMO_RUN_PAUSE=8` (about 25 minutes). The tape waits with
+paces the run with `DEMO_PAUSE=30` and `DEMO_RUN_PAUSE=10` (about 22 minutes). The tape waits with
 `Wait+Line` for the marker `record.sh run` prints once the driver returns: vhs 0.12.1's
 `Wait+Screen` stops the terminal drawing output that streams in over time.

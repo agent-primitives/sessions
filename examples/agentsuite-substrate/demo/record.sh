@@ -16,14 +16,14 @@
 # The model settings come from AZURE_OPENAI_ENV, a file of non-secret NAME=value lines
 # (AGENTSUITE_MODEL_BASE_URL, AGENTSUITE_MODEL, AGENTSUITE_MODEL_PATH, AZURE_MI_CLIENT_ID); the token
 # is fetched on the host by the driver and never reaches this machine. DEMO_PAUSE and DEMO_RUN_PAUSE
-# (see driver.sh) default to 25 and 8 seconds here, which paces the run at about 25 minutes.
+# (see driver.sh) default to 30 and 10 seconds here, which paces the run at about 22 minutes.
 set -euo pipefail
 DEMO="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${DEMO}/../../.." && pwd)"
 OUT="${DEMO_OUT:-${HOME}/.local/state/hq/demos/$(date +%F)-poc}"
 ENV_FILE="${AZURE_OPENAI_ENV:-${HOME}/.config/hq/azure-openai.env}"
 REMOTE="${DEMO_REMOTE:-local}"
-export DEMO_PAUSE="${DEMO_PAUSE:-25}" DEMO_RUN_PAUSE="${DEMO_RUN_PAUSE:-8}"
+export DEMO_PAUSE="${DEMO_PAUSE:-30}" DEMO_RUN_PAUSE="${DEMO_RUN_PAUSE:-10}"
 # The deadline for the driver, and so for the tape's wait (demo.tape waits a little longer).
 DEADLINE=3000
 IMAGE=agentsuite-demo-tools:2

@@ -131,6 +131,7 @@ func (h Harness) Run(ctx context.Context, start *api.Start, sink api.EventSink) 
 		}
 	}
 	messages = append(messages, start.Inputs...)
+	log.Printf("harness: stateless tier: %d journal events in, %d messages to the model", len(start.History), len(messages))
 	resp, err := sink.Model(ctx, api.ModelRequest{Model: h.Model, Messages: messages})
 	if err != nil {
 		return err
@@ -145,6 +146,7 @@ func reportUsage(ctx context.Context, sink api.EventSink, resp api.ModelResponse
 	if resp.Usage == (api.Usage{}) {
 		return nil
 	}
+	log.Printf("harness: model %s used %d input and %d output tokens", resp.Usage.Model, resp.Usage.InputTokens, resp.Usage.OutputTokens)
 	return sink.Usage(ctx, resp.Usage)
 }
 

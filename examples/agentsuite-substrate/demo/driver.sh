@@ -15,7 +15,7 @@
 #   DEMO_LOGS              directory for the per-step logs (default ${WORK}/demo-logs)
 #   DEMO_PAUSE             seconds to pause after each step's proof (default 12), and
 #   DEMO_RUN_PAUSE         after each command (default 4), so a viewer can read the output; 0 for a
-#                          quick run (record.sh sets 25 and 8)
+#                          quick run (record.sh sets 30 and 10)
 #
 # Every line the script prints, on the terminal and in the logs, goes through redact first.
 set -euo pipefail

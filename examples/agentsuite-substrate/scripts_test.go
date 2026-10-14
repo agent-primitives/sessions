@@ -520,8 +520,6 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 	}
 }
 
-// up.sh renders the agentsessionsd Deployment with every value copied as written: a model URL with
-// '&' and '#' (which a sed s### expression would mangle or choke on) reaches the manifest intact.
 // stdin returns what the scripts piped into kubectl -f - during the last run.
 func stdin(t *testing.T, s *stubs) string {
 	t.Helper()

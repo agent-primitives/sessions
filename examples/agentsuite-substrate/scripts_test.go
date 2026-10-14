@@ -118,7 +118,7 @@ fi
 	// harness image's digest.
 	stub(t, bin, "docker", log+`
 case "$1" in
-info) echo arm64 ;;
+info) echo "${STUB_DOCKER_ARCH:-arm64}" ;;
 inspect)
 	case "$3" in
 	*RepoDigests*) echo "localhost:5001/agentsuite-harness@`+digest+`" ;;
@@ -139,6 +139,8 @@ if [ "$1 $2 $4" = "build -o ./cmd/emit" ]; then
 	fi
 	exec /bin/cp "`+emitBinary(t)+`" "$3"
 fi
+# go run ./cmd/ate-setup is the ate-system install, which exits STUB_INSTALL_RC.
+[ "$1 $2" != "run ./cmd/ate-setup" ] || exit "${STUB_INSTALL_RC:-0}"
 [ -n "${STUB_FULL:-}" ] || exit 97
 if [ "$1 $2 $3" = "run ./cmd/emit render" ]; then
 	prev= model=unset
@@ -202,8 +204,9 @@ if [ -n "${STUB_CREATE_SIGNAL:-}" ]; then
 fi
 exit "${STUB_CREATE_RC:-0}"
 `)
+	// up.sh runs ate-setup itself; this wrapper would build for the host's architecture.
 	stub(t, filepath.Join(substrate, "hack"), "install-ate-kind.sh", `echo "install-ate-kind.sh $*" >>"$STUB_DIR/calls"
-exit "${STUB_INSTALL_RC:-0}"
+exit 1
 `)
 	s.env = []string{
 		"PATH=" + bin + ":/usr/bin:/bin",
@@ -293,6 +296,9 @@ func (s *stubs) run(t *testing.T, script string, env ...string) (int, string, st
 	return code, string(out), string(calls)
 }
 
+// installCall is how the go stub logs up.sh's ate-system install.
+const installCall = "go run ./cmd/ate-setup --kind"
+
 // pastClusterPhase is the status the go stub exits with, so up.sh reached the step after the cluster.
 const pastClusterPhase = 97
 
@@ -316,27 +322,49 @@ func TestUpClusterPhase(t *testing.T) {
 			name: "a failed kind listing changes nothing", env: []string{"STUB_KIND_LIST_FAIL=1", "STUB_CLUSTERS=" + cluster},
 			node: "node-0", owned: "node-0", setup: "node-0 installed",
 			wantCode: 1, wantOut: "kind get clusters failed",
-			noCalls:   []string{"create-kind-cluster.sh", "install-ate-kind.sh", "kind delete", "kind export", "kubectl", "go "},
+			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl", "go "},
 			wantOwned: "node-0", wantSetup: "node-0 installed",
 		},
 		{
 			name: "an unlisted cluster whose container exists is refused", node: "node-0",
 			wantCode: 1, wantOut: "kind does not list it, but container demo-control-plane exists",
-			noCalls:   []string{"create-kind-cluster.sh", "install-ate-kind.sh"},
+			noCalls:   []string{"create-kind-cluster.sh", installCall},
 			wantOwned: "<absent>", wantSetup: "<absent>",
 		},
 		{
 			name:      "an absent cluster is created and installed",
 			wantCode:  pastClusterPhase,
-			wantCalls: []string{"create-kind-cluster.sh", "kind export kubeconfig", "install-ate-kind.sh --deploy-ate-system"},
+			wantCalls: []string{"create-kind-cluster.sh", "kind export kubeconfig", installCall + " --no-dev-env --kind-cluster-name=demo --context=kind-demo"},
+			noCalls:   []string{"install-ate-kind.sh"},
 			wantOwned: "node-1", wantSetup: "node-1 installed",
+		},
+		{
+			// ate-setup on Kind builds for its own GOARCH unless told otherwise, so up.sh passes the
+			// platform Docker reports: a Mac driving a remote amd64 Docker gets amd64 images.
+			name: "the install builds for the platform Docker reports", env: []string{"STUB_DOCKER_ARCH=x86_64"},
+			wantCode:  pastClusterPhase,
+			wantCalls: []string{installCall, "--ko-default-platforms=linux/amd64", "deploy ate-system --setup-csi=none"},
+			wantOwned: "node-1", wantSetup: "node-1 installed",
+		},
+		{
+			name:      "an arm64 Docker gets arm64 control-plane images",
+			wantCode:  pastClusterPhase,
+			wantCalls: []string{installCall, "--ko-default-platforms=linux/arm64", "deploy ate-system"},
+			wantOwned: "node-1", wantSetup: "node-1 installed",
+		},
+		{
+			// The record stays at created, so the rerun installs again instead of reusing it.
+			name: "a failed install keeps the cluster at created", env: []string{"STUB_INSTALL_RC=5"},
+			wantCode:  5,
+			wantCalls: []string{"create-kind-cluster.sh", installCall},
+			wantOwned: "node-1", wantSetup: "node-1 created",
 		},
 		{
 			// Ownership is recorded as soon as the container exists, so the rerun below can finish it.
 			name: "a create that fails after the node exists records ownership", env: []string{"STUB_CREATE_RC=3"},
 			wantCode: 3, wantOut: "rerun up.sh to recreate the cluster",
 			wantCalls: []string{"create-kind-cluster.sh"},
-			noCalls:   []string{"install-ate-kind.sh"},
+			noCalls:   []string{installCall},
 			wantOwned: "node-1", wantSetup: "node-1 creating",
 		},
 		{
@@ -344,14 +372,14 @@ func TestUpClusterPhase(t *testing.T) {
 			name: "an interrupt after the node exists records ownership", env: []string{"STUB_CREATE_SIGNAL=INT"},
 			wantCode:  130,
 			wantCalls: []string{"create-kind-cluster.sh"},
-			noCalls:   []string{"kind export", "install-ate-kind.sh"},
+			noCalls:   []string{"kind export", installCall},
 			wantOwned: "node-1", wantSetup: "node-1 creating",
 		},
 		{
 			name: "a TERM after the node exists records ownership", env: []string{"STUB_CREATE_SIGNAL=TERM"},
 			wantCode:  143,
 			wantCalls: []string{"create-kind-cluster.sh"},
-			noCalls:   []string{"kind export", "install-ate-kind.sh"},
+			noCalls:   []string{"kind export", installCall},
 			wantOwned: "node-1", wantSetup: "node-1 creating",
 		},
 		{
@@ -360,14 +388,14 @@ func TestUpClusterPhase(t *testing.T) {
 			node: "node-1", owned: "node-1", setup: "node-1 creating",
 			wantCode: 143, wantOut: "its setup did not finish; recreating it",
 			wantCalls: []string{"create-kind-cluster.sh"},
-			noCalls:   []string{"install-ate-kind.sh"},
+			noCalls:   []string{installCall},
 			wantOwned: "node-2", wantSetup: "node-2 creating",
 		},
 		{
 			name: "an owned cluster whose create did not finish is recreated", env: []string{"STUB_CLUSTERS=" + cluster, "STUB_NEW_NODE_ID=node-2"},
 			node: "node-1", owned: "node-1", setup: "node-1 creating",
 			wantCode: pastClusterPhase, wantOut: "its setup did not finish; recreating it",
-			wantCalls: []string{"create-kind-cluster.sh", "install-ate-kind.sh"},
+			wantCalls: []string{"create-kind-cluster.sh", installCall},
 			wantOwned: "node-2", wantSetup: "node-2 installed",
 		},
 		{
@@ -377,28 +405,28 @@ func TestUpClusterPhase(t *testing.T) {
 			name: "an owned cluster with no setup record is refused", env: []string{"STUB_CLUSTERS=" + cluster},
 			node: "node-1", owned: "node-1",
 			wantCode: 1, wantOut: "does not record how far its setup got",
-			noCalls:   []string{"create-kind-cluster.sh", "install-ate-kind.sh", "kind delete", "kind export", "kubectl"},
+			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl"},
 			wantOwned: "node-1", wantSetup: "<absent>",
 		},
 		{
 			name: "an owned cluster whose setup record names another node is refused", env: []string{"STUB_CLUSTERS=" + cluster},
 			node: "node-1", owned: "node-1", setup: "node-0 installed",
 			wantCode: 1, wantOut: "Run ./down.sh to delete it",
-			noCalls:   []string{"create-kind-cluster.sh", "install-ate-kind.sh", "kind delete", "kind export", "kubectl"},
+			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl"},
 			wantOwned: "node-1", wantSetup: "node-0 installed",
 		},
 		{
 			name: "an owned cluster whose setup record holds an unknown stage is refused", env: []string{"STUB_CLUSTERS=" + cluster},
 			node: "node-1", owned: "node-1", setup: "node-1 bogus",
 			wantCode: 1, wantOut: "does not record how far its setup got",
-			noCalls:   []string{"create-kind-cluster.sh", "install-ate-kind.sh", "kind delete", "kind export", "kubectl"},
+			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl"},
 			wantOwned: "node-1", wantSetup: "node-1 bogus",
 		},
 		{
 			name: "an owned cluster whose install did not finish is installed", env: []string{"STUB_CLUSTERS=" + cluster},
 			node: "node-1", owned: "node-1", setup: "node-1 created",
 			wantCode:  pastClusterPhase,
-			wantCalls: []string{"kind export kubeconfig", "install-ate-kind.sh --deploy-ate-system"},
+			wantCalls: []string{"kind export kubeconfig", installCall},
 			noCalls:   []string{"create-kind-cluster.sh"},
 			wantOwned: "node-1", wantSetup: "node-1 installed",
 		},
@@ -407,7 +435,7 @@ func TestUpClusterPhase(t *testing.T) {
 			node: "node-1", owned: "node-1", setup: "node-1 installed",
 			wantCode:  pastClusterPhase,
 			wantCalls: []string{"kind export kubeconfig", "kubectl --context kind-demo"},
-			noCalls:   []string{"create-kind-cluster.sh", "install-ate-kind.sh"},
+			noCalls:   []string{"create-kind-cluster.sh", installCall},
 			wantOwned: "node-1", wantSetup: "node-1 installed",
 		},
 		{
@@ -417,7 +445,7 @@ func TestUpClusterPhase(t *testing.T) {
 			node: "node-9", owned: "node-1", setup: "node-1 created",
 			wantCode: pastClusterPhase, wantOut: "up.sh did not create kind cluster demo",
 			wantCalls: []string{"kubectl --context kind-demo"},
-			noCalls:   []string{"create-kind-cluster.sh", "install-ate-kind.sh"},
+			noCalls:   []string{"create-kind-cluster.sh", installCall},
 			wantOwned: "node-1", wantSetup: "node-1 created",
 		},
 	} {

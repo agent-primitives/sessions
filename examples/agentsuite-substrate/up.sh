@@ -212,9 +212,18 @@ if [[ "${stage}" == absent || "${stage}" == incomplete ]]; then
 fi
 kind export kubeconfig --name "${CLUSTER}" --kubeconfig "${KUBECONFIG}"
 if [[ "${stage}" == created ]]; then
-	step "ate-system (install-ate-kind.sh, which runs ate-setup)"
-	(cd "${SUBSTRATE}" && ATE_CREDENTIAL_PROVIDER='{"name":"k8s.io"}' ATE_INSTALL_ROLLOUT_TIMEOUT=10m \
-		hack/install-ate-kind.sh --deploy-ate-system)
+	step "ate-system (ate-setup deploy ate-system, the command install-ate-kind.sh runs)"
+	# ate-setup is called directly, not through hack/install-ate-kind.sh: on Kind it builds the
+	# control-plane images for linux/<its own GOARCH> unless --ko-default-platforms is given (the
+	# wrapper's KO_DEFAULTPLATFORMS is ambient and ignored), so a Mac driving a remote amd64 Docker
+	# would push arm64 images to an amd64 node. The flags below are the wrapper's settings plus the
+	# platform Docker reports; the GCP variables it unsets are unset here too.
+	(cd "${SUBSTRATE}" && env -u GCE_REGION -u CLUSTER_LOCATION -u NETWORK -u SUBNETWORK \
+		-u MEMORYSTORE_INSTANCE -u PROJECT_ID \
+		go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}" \
+		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${ARCH}" \
+		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m \
+		deploy ate-system --setup-csi=none)
 	echo "${id} installed" >"${SETUP}"
 else
 	step "reusing kind cluster ${CLUSTER}"

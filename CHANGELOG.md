@@ -126,38 +126,37 @@ provide.
   (`api.ErrMemoryStateLost`) too, where it used to be `INTERNAL`; a stateless session's `Resume`
   keeps its error.
 - A memory-tier turn on substrate records its actor's UID in the new
-  `EXECUTION_START.compute_instance` (`api.Incarnation.ComputeInstance`, set by
-  `runtime/substrate` from the new `substrate.ActorInfo.UID`). `Exec` or `Resume` placed on an actor
-  whose UID differs from the latest one recorded for that harness since the session's `FORK` marker
-  is `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and journals nothing. This catches an actor
-  another host created under the session's name after it counted no turns, while the actor the
-  first turn ran on was lost; the count alone let later turns attach to it. `Suspend` and a
-  stateful `Fork` of such a session, or of one whose actor is gone, are `FAILED_PRECONDITION` too
-  (they were `INTERNAL`, and `Suspend` of a replaced actor succeeded), and suspend, clone and
-  journal nothing: the Placer passes the recorded UID to `Runtime.Snapshot` in
-  `api.Incarnation.ComputeInstance`, and `runtime/substrate` refuses another actor or a missing
-  one, checking the UID before it suspends and the one the suspend reports. A memory-tier fork
-  child whose cloned actor is gone before its first turn (no UID recorded yet), and a stateful
-  `Fork` whose parent actor is deleted around the tag, are `FAILED_PRECONDITION` the same way.
-  `runtime/substrate`
-  refuses a memory-tier actor that reports no UID (`INTERNAL` from `Snapshot`), so a custom
-  `ControlClient` must report one from `GetActor`, `ResumeActor` and `SuspendActor`, and must
+  `EXECUTION_START.compute_instance` (`api.Incarnation.ComputeInstance`, set by `runtime/substrate`
+  from the new `substrate.ActorInfo.UID`). `Exec` or `Resume` placed on an actor whose UID differs
+  from the latest one recorded for that harness since the session's `FORK` marker is
+  `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and journals nothing. This catches an actor
+  another host created under the session's name after it counted no turns, while the actor the first
+  turn ran on was lost; the count alone let later turns attach to it. `Suspend` and a stateful
+  `Fork` of such a session, or of one whose actor is gone, are `FAILED_PRECONDITION` too (they were
+  `INTERNAL`, and `Suspend` of a replaced actor succeeded), and suspend, clone and journal nothing:
+  the Placer passes the recorded UID to `Runtime.Snapshot` in `api.Incarnation.ComputeInstance`, and
+  `runtime/substrate` refuses another actor or a missing one, checking the UID before it suspends
+  and the one the suspend reports. A memory-tier fork child whose cloned actor is gone before its
+  first turn (no UID recorded yet), and a stateful `Fork` whose parent actor is deleted around the
+  tag, are `FAILED_PRECONDITION` the same way. `runtime/substrate` refuses a memory-tier actor that
+  reports no UID (`INTERNAL` from `Snapshot`, a fork child before its first turn included), so a
+  custom `ControlClient` must report one from `GetActor`, `ResumeActor` and `SuspendActor`, and must
   report a missing actor as `substrate.ErrActorNotFound` from `SuspendActor` as well as `GetActor`
-  (the `integrations/substrate` adapter now maps substrate's `NOT_FOUND` from both), or a Suspend
-  or Fork whose actor is deleted between the check and the suspend is `INTERNAL`.
+  (the `integrations/substrate` adapter now maps substrate's `NOT_FOUND` from both), or a Suspend or
+  Fork whose actor is deleted between the check and the suspend is `INTERNAL`.
   `ControlClient.SuspendActor` now returns the suspended actor's `substrate.ActorInfo` (snapshot
-  handle and UID) instead of the snapshot handle alone. When
-  `CreateActor` finds the name taken (`substrate.ErrActorExists`, which a `ControlClient` must
-  return for it), `Create` attaches to that actor where it used to fail the turn with `INTERNAL`.
-  Stateless turns record no UID and their canonical bytes are unchanged; turns recorded before this
-  change are not compared. The router reaches an actor by name, so a turn already placed when its
-  actor is replaced still runs; the next one is refused. `compute_instance` is part of the record's
-  canonical bytes. A binary built before this change drops the field when it reads the record, so
-  it fails chain verification with a `content_hash` mismatch on any session with a memory-tier
-  substrate turn, as older binaries do for `EXECUTION_START` itself. Rollback is not supported for
-  such sessions, and every host sharing a journal must run this release before any of them runs a
-  memory-tier substrate turn. There is no SQLite schema migration (`user_version` stays 2), so an
-  older binary still opens the journal and reports only those sessions as tampered.
+  handle and UID) instead of the snapshot handle alone. When `CreateActor` finds the name taken
+  (`substrate.ErrActorExists`, which a `ControlClient` must return for it), `Create` attaches to
+  that actor where it used to fail the turn with `INTERNAL`. Stateless turns record no UID and their
+  canonical bytes are unchanged; turns recorded before this change are not compared. The router
+  reaches an actor by name, so a turn already placed when its actor is replaced still runs; the next
+  one is refused. `compute_instance` is part of the record's canonical bytes. A binary built before
+  this change drops the field when it reads the record, so it fails chain verification with a
+  `content_hash` mismatch on any session with a memory-tier substrate turn, as older binaries do for
+  `EXECUTION_START` itself. Rollback is not supported for such sessions, and every host sharing a
+  journal must run this release before any of them runs a memory-tier substrate turn. There is no
+  SQLite schema migration (`user_version` stays 2), so an older binary still opens the journal and
+  reports only those sessions as tampered.
 - `ExecRequest.harness` can no longer override a session's harness with a different
   `REQUIRES_MEMORY_SNAPSHOT` harness: the turn is `FAILED_PRECONDITION`
   (`placement.ErrStatefulOverride`) before any compute is provisioned, and so is

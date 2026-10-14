@@ -132,8 +132,8 @@ journal never records a replacement's snapshot as the session's checkpoint, and 
 nothing and records no child, where it would otherwise have cloned the replacement into children
 whose own turns never compare against the parent's UID. `runtime/substrate` refuses to place a
 memory-tier session on an actor that reports no UID, and refuses to snapshot one with a plain error
-(`INTERNAL`), since a `ControlClient` that reports no UID breaks its contract. When
-`CreateActor` finds the name taken (`substrate.ErrActorExists`), `Create` attaches to that actor, so
+(`INTERNAL`), a fork child before its first turn included, since a `ControlClient` that reports no
+UID breaks its contract. When `CreateActor` finds the name taken (`substrate.ErrActorExists`), `Create` attaches to that actor, so
 two hosts racing a session's first turn share one actor. The loser's turn fails at worst, never the
 session, and a retry attaches: `ABORTED` when its append loses, and `ABORTED` (`api.ErrComputeBusy`)
 when it finds the winner's actor `RESUMING`, `SUSPENDING` or `PAUSING`, or substrate refuses its

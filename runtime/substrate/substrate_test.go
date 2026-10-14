@@ -1010,6 +1010,45 @@ func TestSnapshotRefusesAReplacedActor(t *testing.T) {
 	if want := []string{"suspend:sess-x"}; !reflect.DeepEqual(m.calls, want) {
 		t.Fatalf("calls=%v want %v", m.calls, want)
 	}
+
+	// A memory-tier actor with no recorded instance (a fork child before its first turn) must still
+	// report a UID from the suspend: the ControlClient contract requires one. A stateless backend
+	// does not depend on it.
+	m = newRunning()
+	m.suspendNoUID = true
+	_, err = newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+	if err == nil || errors.Is(err, api.ErrMemoryStateLost) || !strings.Contains(err.Error(), "reported no UID") ||
+		strings.Contains(err.Error(), "instance \"\"") {
+		t.Fatalf("memory-tier suspend with no UID and no recorded instance: err=%v, want a plain error saying the actor reported no UID", err)
+	}
+	m = newRunning()
+	m.suspendNoUID = true
+	if _, err := newBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x"}, api.SnapshotExternal); err != nil {
+		t.Fatalf("stateless suspend with no UID and no recorded instance: %v", err)
+	}
+}
+
+// The lost-state message reads the same whether or not an instance was recorded.
+func TestSnapshotOfAMissingActorMessage(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		in   api.Incarnation
+		want string
+	}{
+		{"recorded instance", api.Incarnation{ID: "sess-x", ComputeInstance: "uid-1"},
+			`actor space/sess-x, instance "uid-1", which held the session's in-RAM state, no longer exists, `},
+		{"no recorded instance", api.Incarnation{ID: "sess-x"},
+			`actor space/sess-x, which held the session's in-RAM state, no longer exists, `},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockControl{info: running("worker-a"), suspendErr: substrate.ErrActorNotFound}
+			_, err := newMemoryBackend(m).Snapshot(ctx, tc.in, api.SnapshotExternal)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want it to contain %q", err, tc.want)
+			}
+		})
+	}
 }
 
 // An actor in the middle of another operation (usually another host resuming the actor it just

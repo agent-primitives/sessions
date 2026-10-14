@@ -352,7 +352,9 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation
 // left suspended, which costs nothing: it holds none of the session's state and the host refuses it
 // on every later turn. An actor that is gone is refused with api.ErrMemoryStateLost as well, since
 // the state it held went with it. An actor that reports no UID is refused with a plain error: it
-// cannot be compared, and that is a ControlClient fault, not evidence of a replacement.
+// cannot be compared, and that is a ControlClient fault, not evidence of a replacement. A
+// REQUIRES_MEMORY_SNAPSHOT backend refuses a suspend that reports no UID even when no instance is
+// recorded (a fork child before its first turn).
 func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (snapshot api.SnapshotRef, err error) {
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "snapshot_compute",
 		"actor", in.ID,
@@ -414,9 +416,9 @@ func (b *Backend) instanceGone(in api.Incarnation, op string, err error) error {
 	}
 	instance := ""
 	if in.ComputeInstance != "" {
-		instance = fmt.Sprintf(", instance %q,", in.ComputeInstance)
+		instance = fmt.Sprintf(", instance %q", in.ComputeInstance)
 	}
-	return fmt.Errorf("%w: actor %s/%s%s which held the session's in-RAM state, no longer exists, "+
+	return fmt.Errorf("%w: actor %s/%s%s, which held the session's in-RAM state, no longer exists, "+
 		"so that state cannot be captured; nothing was snapshotted for the session: %s: %w",
 		api.ErrMemoryStateLost, b.atespace, in.ID, instance, op, err)
 }
@@ -433,15 +435,24 @@ func snapshotErrorKind(err error, step string) string {
 // requireInstance returns an error wrapping api.ErrMemoryStateLost when in requires a compute
 // instance and the actor under in.ID reports another UID. An actor that reports no UID cannot be
 // compared at all, which is a ControlClient that breaks its contract rather than a replacement, so
-// that is a plain error.
+// that is a plain error. A REQUIRES_MEMORY_SNAPSHOT backend refuses a missing UID even when in
+// records no instance (a fork child before its first turn): the ControlClient contract requires
+// one, and the snapshot would otherwise be taken of an actor nobody could identify.
 func (b *Backend) requireInstance(in api.Incarnation, uid string) error {
-	if in.ComputeInstance == "" || uid == in.ComputeInstance {
+	memory := in.ComputeInstance != "" || b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+	if !memory {
 		return nil
 	}
 	if uid == "" {
-		return fmt.Errorf("substrate: actor %s/%s reported no UID, so it could not be checked against instance %q, "+
-			"which holds the session's in-RAM state; no checkpoint was recorded for the session",
-			b.atespace, in.ID, in.ComputeInstance)
+		why := "so the snapshot of the session's in-RAM state could not be tied to the actor that took it"
+		if in.ComputeInstance != "" {
+			why = fmt.Sprintf("so it could not be checked against instance %q, which holds the session's in-RAM state", in.ComputeInstance)
+		}
+		return fmt.Errorf("substrate: actor %s/%s reported no UID, %s; no checkpoint was recorded for the session",
+			b.atespace, in.ID, why)
+	}
+	if in.ComputeInstance == "" || uid == in.ComputeInstance {
+		return nil
 	}
 	return fmt.Errorf("%w: actor %s/%s is instance %q, but the session's turns ran on instance %q, which has been replaced, "+
 		"so its in-RAM state cannot be captured; nothing was snapshotted for the session",

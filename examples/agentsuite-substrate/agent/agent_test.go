@@ -175,3 +175,57 @@ func (s *replySink) Model(_ context.Context, req api.ModelRequest) (api.ModelRes
 	}
 	return api.ModelResponse{Message: *api.TextMessage("assistant", s.reply)}, nil
 }
+
+// usageSink answers every model call with usage and records what the harness reports.
+type usageSink struct {
+	api.EventSink
+	usage    api.Usage
+	failUse  bool
+	reported []api.Usage
+}
+
+func (s *usageSink) Model(context.Context, api.ModelRequest) (api.ModelResponse, error) {
+	return api.ModelResponse{Message: *api.TextMessage("assistant", "ok"), Usage: s.usage}, nil
+}
+
+func (s *usageSink) Usage(_ context.Context, u api.Usage) error {
+	if s.failUse {
+		return errors.New("journal down")
+	}
+	s.reported = append(s.reported, u)
+	return nil
+}
+
+// Both tiers journal the usage the provider returned, once per model call, and record nothing when
+// the provider returns none. A memory turn whose usage record fails keeps RAM as it was.
+func TestRunReportsProviderUsage(t *testing.T) {
+	usage := api.Usage{Model: "m", InputTokens: 40, OutputTokens: 9}
+	for name, h := range map[string]Harness{
+		"stateless": {ID: "writer", Model: "m"},
+		"memory":    Harness{ID: "writer", Model: "m"}.WithMemory(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			sink := &usageSink{usage: usage}
+			start := &api.Start{Inputs: []api.Message{*api.TextMessage("user", "hi")}}
+			if err := h.Run(t.Context(), start, sink); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(sink.reported, []api.Usage{usage}) {
+				t.Fatalf("reported %+v, want exactly %+v", sink.reported, usage)
+			}
+			none := &usageSink{}
+			if err := h.Run(t.Context(), start, none); err != nil {
+				t.Fatal(err)
+			}
+			if len(none.reported) != 0 {
+				t.Fatalf("zero usage reported %+v, want nothing", none.reported)
+			}
+			if err := h.Run(t.Context(), start, &usageSink{usage: usage, failUse: true}); err == nil {
+				t.Fatal("failed usage record: err = nil")
+			}
+			if h.memory != nil && h.memory.turns != 2 {
+				t.Fatalf("memory tier kept %d turns, want 2 (the failed usage record must not count)", h.memory.turns)
+			}
+		})
+	}
+}

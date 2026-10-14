@@ -131,13 +131,26 @@ func (h Harness) Run(ctx context.Context, start *api.Start, sink api.EventSink) 
 		}
 	}
 	messages = append(messages, start.Inputs...)
-	_, err := sink.Model(ctx, api.ModelRequest{Model: h.Model, Messages: messages})
-	return err
+	resp, err := sink.Model(ctx, api.ModelRequest{Model: h.Model, Messages: messages})
+	if err != nil {
+		return err
+	}
+	return reportUsage(ctx, sink, resp)
+}
+
+// reportUsage journals the token usage the provider returned with a completion. Replay serves the
+// recorded usage with the recorded completion, so a replayed turn reports the same record. A
+// provider that returns no usage records nothing.
+func reportUsage(ctx context.Context, sink api.EventSink, resp api.ModelResponse) error {
+	if resp.Usage == (api.Usage{}) {
+		return nil
+	}
+	return sink.Usage(ctx, resp.Usage)
 }
 
 // runFromMemory is Run for the memory tier. The transcript gains this turn's inputs and the model's
-// reply only when the model call succeeds, so a failed turn leaves RAM as it was. It logs how much
-// it holds, which is what a resumed or replaced actor shows in its logs.
+// reply only when the model call and its usage record succeed, so a failed turn leaves RAM as it
+// was. It logs how much it holds, which is what a resumed or replaced actor shows in its logs.
 func (h Harness) runFromMemory(ctx context.Context, start *api.Start, sink api.EventSink) error {
 	t := h.memory
 	t.mu.Lock()
@@ -152,6 +165,9 @@ func (h Harness) runFromMemory(ctx context.Context, start *api.Start, sink api.E
 		t.turns+1, len(t.messages), len(start.History))
 	resp, err := sink.Model(ctx, api.ModelRequest{Model: h.Model, Messages: messages})
 	if err != nil {
+		return err
+	}
+	if err := reportUsage(ctx, sink, resp); err != nil {
 		return err
 	}
 	t.messages = append(t.messages, start.Inputs...)

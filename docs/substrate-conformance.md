@@ -137,14 +137,19 @@ memory-tier session on an actor that reports no UID, and refuses to snapshot one
 UID breaks its contract. When `CreateActor` finds the name taken (`substrate.ErrActorExists`),
 `Create` attaches to that actor, so two hosts racing a session's first turn share one actor. The
 loser's turn fails at worst, never the session, and a retry attaches: `ABORTED` when its append
-loses, and `ABORTED` (`api.ErrComputeBusy`) when it finds the winner's actor `RESUMING`, `SUSPENDING` or `PAUSING`, or substrate refuses its
-resume because another operation holds the actor (substrate's `ABORTED`, reported as
-`substrate.ErrActorBusy`). An actor that is `CRASHED`, `DELETING`, `REVERTING` or in a state the
-adapter does not know is `INTERNAL`. `Restore` (`Sessions.Resume`) returns `ErrMemoryStateLost` for
-every memory-tier session whose actor is gone, whatever its journal records (a session interrupted
-on its first turn included), since the snapshot it would resume went with the actor: a resume
-that reports the actor missing (`substrate.ErrActorNotFound`) settles it, and otherwise `GetActor`
-confirms the absence after the resume fails.
+loses, and `ABORTED` (`api.ErrComputeBusy`) when it finds the winner's actor `RESUMING`,
+`SUSPENDING` or `PAUSING`, or substrate refuses its resume because another operation holds the actor
+(substrate's `ABORTED`, reported as `substrate.ErrActorBusy`). An actor that is `CRASHED`,
+`DELETING`, `REVERTING` or in a state the adapter does not know is `INTERNAL`. When `Create` resumes
+a `SUSPENDED` actor and the resume reports it missing (`substrate.ErrActorNotFound`), `Create` reads
+it again: gone, it is a missing actor (a memory-tier session with started turns is
+`ErrMemoryStateLost`, anything else gets a new actor); replaced under the name, it is `ABORTED`;
+still there, the resume error stands, since substrate also answers `NOT_FOUND` for an actor whose
+template lacks a volume. `Restore` (`Sessions.Resume`) returns `ErrMemoryStateLost` for every
+memory-tier session whose actor is gone, whatever its journal records (a session interrupted on its
+first turn included), since the snapshot it would resume went with the actor: after the resume
+fails, `GetActor` finds no actor, or, when the resume reported it missing, one that does not hold
+the snapshot being restored (a replacement).
 
 Limits of these checks:
 

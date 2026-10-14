@@ -156,10 +156,17 @@ provide.
   report a missing actor as `substrate.ErrActorNotFound` from `SuspendActor` as well as `GetActor`
   (the `integrations/substrate` adapter now maps substrate's `NOT_FOUND` from both, and from
   `ResumeActor`), or a Suspend or Fork whose actor is deleted between the check and the suspend is
-  `INTERNAL`. It should report it from `ResumeActor` too: otherwise a `Resume` whose actor is
-  replaced between the failed resume and `Restore`'s `GetActor` is `INTERNAL`. A `Placer` outside a
-  `placement.Registry` now counts every started turn, and compares every recorded UID, whatever
-  harness name the turn recorded, since it cannot tell another name's backend from its own.
+  `INTERNAL`. It should report it from `ResumeActor` too, and the backend checks it with `GetActor`
+  before reading it as the actor being gone, since substrate also answers `NOT_FOUND` for an actor
+  whose template lacks a volume: such an actor keeps the resume error. Otherwise a `Resume` whose
+  actor is replaced between the failed resume and `Restore`'s `GetActor` is `INTERNAL`; with it, a
+  replacement that does not hold the session's snapshot is `FAILED_PRECONDITION`. An `Exec` whose
+  `SUSPENDED` actor is deleted before its resume is treated as a missing actor
+  (`FAILED_PRECONDITION` for a memory-tier session with started turns, a new actor otherwise), and
+  one replaced there, or deleted again after `CreateActor` found the name taken, is `ABORTED`; both
+  were `INTERNAL`. A `Placer` outside a `placement.Registry` now counts every started turn, and
+  compares every recorded UID, whatever harness name the turn recorded, since it cannot tell another
+  name's backend from its own.
   `ControlClient.SuspendActor` now returns the suspended actor's `substrate.ActorInfo` (snapshot
   handle and UID) instead of the snapshot handle alone. When `CreateActor` finds the name taken
   (`substrate.ErrActorExists`, which a `ControlClient` must return for it), `Create` attaches to

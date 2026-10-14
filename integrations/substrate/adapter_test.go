@@ -33,6 +33,9 @@ type fakeControl struct {
 	createErr  error
 	resumeErr  error
 	suspendErr error
+	// onGet, when set, runs before GetActor answers its n-th call (1-based).
+	onGet func(n int)
+	gets  int
 }
 
 func (f *fakeControl) CreateActor(_ context.Context, in *atepb.CreateActorRequest, _ ...grpc.CallOption) (*atepb.Actor, error) {
@@ -68,6 +71,10 @@ func (f *fakeControl) DeleteActor(_ context.Context, in *atepb.DeleteActorReques
 }
 func (f *fakeControl) GetActor(_ context.Context, in *atepb.GetActorRequest, _ ...grpc.CallOption) (*atepb.Actor, error) {
 	f.calls = append(f.calls, "get:"+in.GetActor().GetName())
+	f.gets++
+	if f.onGet != nil {
+		f.onGet(f.gets)
+	}
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
@@ -481,6 +488,62 @@ func TestAbortedResumeAndSuspendAreBusy(t *testing.T) {
 			f = &fakeControl{actor: runningActor(), resumeErr: unavailable, suspendErr: unavailable, tagErr: unavailable}
 			if err := op(f); err == nil || errors.Is(err, substrate.ErrActorBusy) {
 				t.Fatalf("unavailable %s: err=%v, want a failure that is not ErrActorBusy", name, err)
+			}
+		})
+	}
+}
+
+// Substrate answers ResumeActor with NOT_FOUND for a missing actor and also for one that exists but
+// whose template lacks a volume (createActorVolumes in cmd/ateapi/internal/controlapi/volumes.go).
+// Over the adapter, a memory-tier Restore and Create report the session's state lost only when
+// GetActor confirms the actor is gone (or, for Restore, no longer holds the snapshot); an actor that
+// still holds it keeps substrate's resume error.
+func TestResumeNotFoundOnAnExistingActorIsNotLostState(t *testing.T) {
+	const uri = "gs://b/atespaces/space/actors/u1/snapshots/s1"
+	volume := status.Error(codes.NotFound, `volume "scratch" not found in template`)
+	suspended := func() *atepb.Actor {
+		a := runningActor()
+		a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
+		a.Status.WorkerAssignment = nil
+		return a
+	}
+	desc := api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}}
+	backend := func(f *fakeControl) *substrate.Backend {
+		return substrate.New(FromClient(f), "space", substrate.ObjectRef{Atespace: "space", Name: "counter"}, desc)
+	}
+	turns := func() (int, error) { return 1, nil }
+	ops := map[string]func(*substrate.Backend) error{
+		"restore": func(b *substrate.Backend) error {
+			_, err := b.Restore(context.Background(), api.SnapshotRef{Local: "sess-x", ExternalURI: uri, Memory: true})
+			return err
+		},
+		"create": func(b *substrate.Backend) error {
+			_, err := b.Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x", StartedTurns: turns})
+			return err
+		},
+	}
+	for name, op := range ops {
+		t.Run(name+" of an actor that still exists keeps the resume error", func(t *testing.T) {
+			f := &fakeControl{actor: suspended(), resumeErr: volume}
+			err := op(backend(f))
+			if err == nil || errors.Is(err, api.ErrMemoryStateLost) || !strings.Contains(err.Error(), "not found in template") {
+				t.Fatalf("err=%v, want substrate's resume error, not lost state", err)
+			}
+		})
+		t.Run(name+" of an actor that is gone is lost state", func(t *testing.T) {
+			f := &fakeControl{actor: suspended(), resumeErr: status.Error(codes.NotFound, "Actor space/sess-x not found")}
+			if name == "restore" {
+				f.getErr = status.Error(codes.NotFound, "Actor space/sess-x not found")
+			} else {
+				// Create's first GetActor finds it SUSPENDED; it is gone by the second.
+				f.onGet = func(n int) {
+					if n == 2 {
+						f.getErr = status.Error(codes.NotFound, "Actor space/sess-x not found")
+					}
+				}
+			}
+			if err := op(backend(f)); !errors.Is(err, api.ErrMemoryStateLost) {
+				t.Fatalf("err=%v, want api.ErrMemoryStateLost", err)
 			}
 		})
 	}

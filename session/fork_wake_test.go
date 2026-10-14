@@ -104,6 +104,8 @@ func (c *actorControl) DeleteActor(_ context.Context, a substrate.ActorRef) erro
 	defer c.mu.Unlock()
 	delete(c.status, a.Name)
 	delete(c.uids, a.Name)
+	// The snapshot went with the actor: one created again under the name holds none.
+	delete(c.snapshots, a.Name)
 	return nil
 }
 

@@ -72,8 +72,10 @@ func (ad *Adapter) CreateActor(ctx context.Context, actor substrate.ActorRef, te
 // spec otherwise; the request carries no boot flag. Substrate refuses a resume while another
 // operation holds the actor's lease with ABORTED, reported as substrate.ErrActorBusy, and a missing
 // actor with NOT_FOUND (RPCService.ResumeActor in cmd/ateapi/internal/controlapi/actor.go), reported
-// as substrate.ErrActorNotFound: a memory-tier Restore reads it as the session's in-RAM state being
-// gone even when a replacement actor exists by the time it asks GetActor.
+// as substrate.ErrActorNotFound. Substrate can also answer NOT_FOUND for an actor that exists, when
+// a volume is missing from its template (createActorVolumes in
+// cmd/ateapi/internal/controlapi/volumes.go, called by ensureVolumesCreated in workflow_resume.go),
+// so the backend checks the actor with GetActor before it reads either as the actor being gone.
 func (ad *Adapter) ResumeActor(ctx context.Context, actor substrate.ActorRef) (substrate.ActorInfo, error) {
 	resp, err := ad.ctl.ResumeActor(ctx, &atepb.ResumeActorRequest{Actor: objectRef(actor)})
 	if status.Code(err) == codes.NotFound {

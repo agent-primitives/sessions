@@ -939,3 +939,86 @@ func TestResumeWhoseActorIsReplacedAfterTheFailedResumeIsRefused(t *testing.T) {
 		t.Errorf("journal head after the refused resume = %d (err %v), want %d", got, err, head)
 	}
 }
+
+// An Exec finds the session's actor SUSPENDED and resumes it, and the actor is deleted in between.
+// For a REQUIRES_MEMORY_SNAPSHOT session that is the actor lost, as when Exec finds it missing:
+// FAILED_PRECONDITION, no actor created and nothing journaled, where the bare resume error used to
+// surface as INTERNAL. A STATELESS_REPLAY session gets a new actor and the turn runs.
+func TestExecWhoseActorIsDeletedDuringTheResume(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		tier       api.Resumability
+		wantRefuse bool
+	}{
+		{name: "memory tier is refused", tier: api.ResumabilityRequiresMemorySnapshot, wantRefuse: true},
+		{name: "stateless tier creates a new actor", tier: api.ResumabilityStatelessReplay},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+			desc, err := echoagent.Harness{}.Describe(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			desc.Capabilities.Resumability = tc.tier
+			backend := substrate.New(ctl, "space", substrate.ObjectRef{Atespace: "space", Name: "echo"}, desc)
+			dial := placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
+				return echoagent.Harness{}, func() error { return nil }, nil
+			})
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			r, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": placement.New(backend, echoagent.Model, dial)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := serveRegistry(t, store, r)
+			sess := mustCreate(t, c)
+			if err := execHi(c, sess); err != nil {
+				t.Fatalf("first turn: %v", err)
+			}
+			if _, err := c.Suspend(ctx, &v1.SuspendRequest{Session: sess}); err != nil {
+				t.Fatalf("suspend: %v", err)
+			}
+			head, err := store.Session(sess).Head()
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The next Exec's GetActor sees the actor SUSPENDED; it is deleted before the resume.
+			var deleted atomic.Bool
+			ctl.onResume = func(actor string) {
+				if actor == sess && deleted.CompareAndSwap(false, true) {
+					_ = ctl.DeleteActor(ctx, substrate.ActorRef{Atespace: "space", Name: actor})
+				}
+			}
+
+			err = execHi(c, sess)
+			ctl.mu.Lock()
+			_, recreated := ctl.status[sess]
+			ctl.mu.Unlock()
+			if !deleted.Load() {
+				t.Fatal("the Exec never resumed the suspended actor")
+			}
+			if !tc.wantRefuse {
+				if err != nil || !recreated {
+					t.Fatalf("turn whose actor was deleted during the resume: err=%v recreated=%v, want a new actor and success", err, recreated)
+				}
+				return
+			}
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("turn whose actor was deleted during the resume: want FailedPrecondition, got %v", err)
+			}
+			if msg := status.Convert(err).Message(); !strings.Contains(msg, sess) || !strings.Contains(msg, "cannot be reconstructed") {
+				t.Errorf("error %q does not name the session and the lost state", msg)
+			}
+			if recreated {
+				t.Error("the refused turn created an actor for the session")
+			}
+			if got, err := store.Session(sess).Head(); err != nil || got != head {
+				t.Errorf("journal head after the refused turn = %d (err %v), want %d: nothing may be journaled", got, err, head)
+			}
+		})
+	}
+}

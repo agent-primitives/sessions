@@ -96,11 +96,12 @@ type ControlClient interface {
 }
 
 // ErrActorNotFound is what a ControlClient must return (or wrap) from GetActor and SuspendActor when
-// the actor does not exist, and should from ResumeActor: Restore then reports a memory-tier
-// session's state lost from the resume itself, and asks GetActor only when the resume did not say
-// (a replacement created between the two would otherwise hide the loss). It is a sentinel rather than a transport code so the seam stays neutral:
-// the backend decides "create it" vs "attach to it", and whether a memory-tier session's in-RAM state
-// is gone, without knowing that the client underneath speaks gRPC.
+// the actor does not exist, and should from ResumeActor. After a resume that reports it, Restore
+// asks GetActor and reports a memory-tier session's state lost unless the actor still holds the
+// snapshot being restored, so a replacement created between the two calls does not hide the loss.
+// It is a sentinel rather than a transport code so the seam stays neutral: the backend decides
+// "create it" vs "attach to it", and whether a memory-tier session's in-RAM state is gone, without
+// knowing that the client underneath speaks gRPC.
 var ErrActorNotFound = errors.New("substrate: actor not found")
 
 // ErrActorExists is what a ControlClient must return (or wrap) from CreateActor when an actor of that
@@ -110,9 +111,9 @@ var ErrActorExists = errors.New("substrate: actor already exists")
 
 // ErrActorBusy is what a ControlClient must return (or wrap) when substrate refuses an operation
 // because another one holds the actor (substrate reports ABORTED: another host is resuming or
-// suspending it). The backend also returns it for an actor it finds mid-transition. It wraps
-// api.ErrComputeBusy, which the session service reports as ABORTED, so the caller retries once the
-// actor settles.
+// suspending it). The backend also returns it for an actor it finds mid-transition, and for one
+// replaced or deleted while Create was attaching to it. It wraps api.ErrComputeBusy, which the
+// session service reports as ABORTED, so the caller retries once the actor settles.
 var ErrActorBusy = fmt.Errorf("substrate: actor is busy with another operation: %w", api.ErrComputeBusy)
 
 // ErrTagExists is what a SnapshotCloner must return (or wrap) from TagActor when a tag of that name
@@ -292,7 +293,8 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 			createFinished(nil, "actor_exists", true)
 			inc, found, aerr := b.attach(ctx, ref)
 			if !found && aerr == nil {
-				aerr = fmt.Errorf("substrate: actor %s/%s already existed at create and is now gone: %w", ref.Atespace, ref.Name, err)
+				// Deleted again since. A retry looks afresh, and refuses a lost memory-tier session.
+				aerr = fmt.Errorf("%w: actor %s/%s already existed at create and is now gone: %w", ErrActorBusy, ref.Atespace, ref.Name, err)
 			}
 			return inc, aerr
 		}
@@ -317,9 +319,10 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 
 // attach returns the incarnation of the session's existing actor: a RUNNING actor as it is, a
 // SUSPENDED one after resuming it, which restores its own snapshot. found is false, with no error,
-// when the actor does not exist. An actor mid-transition is ErrActorBusy, as is a resume substrate
-// refuses because another operation holds the actor (the ControlClient wraps it), so a host that
-// lost a race for a session's first turn gets a retryable error, not a permanent one.
+// when the actor does not exist, including when it is deleted between the look and the resume (see
+// resumeFailed). An actor mid-transition is ErrActorBusy, as is a resume substrate refuses because
+// another operation holds the actor (the ControlClient wraps it), so a host that lost a race for a
+// session's first turn gets a retryable error, not a permanent one.
 func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation, found bool, err error) {
 	info, err := b.ctl.GetActor(ctx, ref)
 	switch {
@@ -329,8 +332,9 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation
 		return api.Incarnation{}, false, fmt.Errorf("substrate: get actor: %w", err)
 	case info.Status == StatusRunning:
 	case info.Status == StatusSuspended:
+		seen := info
 		if info, err = b.ctl.ResumeActor(ctx, ref); err != nil {
-			return api.Incarnation{}, true, fmt.Errorf("substrate: resume suspended actor: %w", err)
+			return b.resumeFailed(ctx, ref, seen, err)
 		}
 	case info.Status == StatusTransitioning:
 		// Usually another host's Create is resuming the actor it just made. Retrying finds it
@@ -341,6 +345,28 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation
 	}
 	inc, err = b.incarnation(ref.Name, info)
 	return inc, true, err
+}
+
+// resumeFailed classifies a failed resume of the SUSPENDED actor attach found (seen). A resume that
+// reports the actor missing (ErrActorNotFound) is checked with GetActor, because the actor can be
+// deleted, or deleted and created again, between the look and the resume, and substrate also
+// answers NOT_FOUND for an actor that exists (a template volume it cannot find). Gone now, it is
+// reported as not found, so Create treats it as any missing actor: a memory-tier session with
+// started turns is refused with ErrMemoryStateLost, anything else gets a new actor. Replaced (another
+// UID), the resume is ErrActorBusy, which is retryable: the next attempt attaches to the replacement,
+// which the host refuses if it recorded another UID. Otherwise the resume error stands.
+func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo, resumeErr error) (api.Incarnation, bool, error) {
+	if errors.Is(resumeErr, ErrActorNotFound) {
+		now, err := b.ctl.GetActor(ctx, ref)
+		switch {
+		case errors.Is(err, ErrActorNotFound):
+			return api.Incarnation{}, false, nil
+		case err == nil && now.UID != seen.UID:
+			return api.Incarnation{}, true, fmt.Errorf("%w: actor %s/%s was replaced while it was being resumed: %w",
+				ErrActorBusy, ref.Atespace, ref.Name, resumeErr)
+		}
+	}
+	return api.Incarnation{}, true, fmt.Errorf("substrate: resume suspended actor: %w", resumeErr)
 }
 
 // Snapshot suspends the actor: RAM+disk snapshot to external storage, worker freed. Only the
@@ -482,7 +508,7 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (inc api.Inc
 	info, err := b.ctl.ResumeActor(ctx, b.ref(name)) // restores the actor's own snapshot
 	if err != nil {
 		resumeFinished(err, "error_kind", "resume_actor_failed")
-		if lost := b.memoryActorGone(ctx, name, err); lost != nil {
+		if lost := b.memoryActorGone(ctx, ref, err); lost != nil {
 			return api.Incarnation{}, lost
 		}
 		return api.Incarnation{}, fmt.Errorf("substrate: resume (restore) actor: %w", err)
@@ -492,25 +518,36 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (inc api.Inc
 	return inc, err
 }
 
-// memoryActorGone reports, after resumeErr, that a REQUIRES_MEMORY_SNAPSHOT harness's actor no longer
-// exists, as ErrMemoryStateLost wrapping resumeErr too. The snapshot Restore would resume belonged to
-// that actor, so the state is gone with it and there is nothing to retry. A resume that reported the
-// actor missing (ErrActorNotFound) settles it, even if a replacement exists by the time GetActor
-// could ask; otherwise it asks GetActor, whose ControlClient contract reports a missing actor as
-// ErrActorNotFound. It returns nil for a stateless harness, whose state is in the journal, and when
-// the actor exists or GetActor fails too, so the caller keeps the resume error.
-func (b *Backend) memoryActorGone(ctx context.Context, name string, resumeErr error) error {
+// memoryActorGone reports, after resumeErr, that the actor holding a REQUIRES_MEMORY_SNAPSHOT
+// session's snapshot is gone, as ErrMemoryStateLost wrapping resumeErr too: the snapshot Restore
+// would resume belonged to that actor, so the state went with it and there is nothing to retry. It
+// asks GetActor, whose ControlClient contract reports a missing actor as ErrActorNotFound. The actor
+// is gone when GetActor finds none, or, after a resume that reported it missing (ErrActorNotFound),
+// when the actor GetActor finds does not hold snap.ExternalURI: a replacement created between the
+// two calls holds no snapshot of the session's, while substrate also answers a resume with NOT_FOUND
+// for an actor that still exists (a template volume it cannot find), which keeps the resume error.
+// Without an ExternalURI to compare, that resume's ErrActorNotFound settles it. It returns nil for a
+// stateless harness, whose state is in the journal, and when GetActor fails, so the caller keeps the
+// resume error.
+func (b *Backend) memoryActorGone(ctx context.Context, snap api.SnapshotRef, resumeErr error) error {
 	if b.descriptor.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
 		return nil
 	}
-	ref := b.ref(name)
-	if !errors.Is(resumeErr, ErrActorNotFound) {
-		if _, err := b.ctl.GetActor(ctx, ref); !errors.Is(err, ErrActorNotFound) {
-			return nil
-		}
+	ref := b.ref(snap.Local)
+	info, err := b.ctl.GetActor(ctx, ref)
+	switch {
+	case errors.Is(err, ErrActorNotFound):
+	case err != nil:
+		return nil
+	case errors.Is(resumeErr, ErrActorNotFound) && (snap.ExternalURI == "" || info.Snapshot != snap.ExternalURI):
+		return fmt.Errorf("%w: actor %s/%s of session %q on harness %q no longer holds the snapshot the session was suspended to "+
+			"(the actor was replaced), so its in-RAM state cannot be restored; no actor was created: resume: %w",
+			ErrMemoryStateLost, ref.Atespace, ref.Name, snap.Local, b.descriptor.ID, resumeErr)
+	default:
+		return nil
 	}
 	return fmt.Errorf("%w: actor %s/%s of session %q on harness %q does not exist, so its in-RAM state cannot be restored; no actor was created: resume: %w",
-		ErrMemoryStateLost, ref.Atespace, ref.Name, name, b.descriptor.ID, resumeErr)
+		ErrMemoryStateLost, ref.Atespace, ref.Name, snap.Local, b.descriptor.ID, resumeErr)
 }
 
 // ErrNoSnapshotToClone is returned when a REQUIRES_MEMORY_SNAPSHOT harness is forked without a

@@ -743,9 +743,12 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 		backend   func(*mockControl) *substrate.Backend
 		existing  substrate.ActorStatus // StatusUnknown: the actor does not exist
 		getErr    error
-		resumeErr error // nil: resumeErr below, which GetActor has to classify
+		holds     string // the snapshot the existing actor holds
+		snapshot  string // the ExternalURI restored: "" is gs://snap/sess-x, "-" is none
+		resumeErr error  // nil: resumeErr below, which GetActor has to classify
 		wantCalls []string
 		wantLost  bool
+		wantMsg   string // "" is "cannot be restored" alone
 	}{
 		{name: "memory tier without an actor", backend: memory,
 			wantCalls: []string{"resume:sess-x", "get:sess-x"}, wantLost: true},
@@ -755,10 +758,20 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 			wantCalls: []string{"resume:sess-x", "get:sess-x"}},
 		{name: "stateless tier keeps the resume error", backend: stateless,
 			wantCalls: []string{"resume:sess-x"}},
-		// A replacement created after the resume failed would make GetActor report an actor; the
-		// resume's own ErrActorNotFound already says the snapshot's actor is gone.
-		{name: "memory tier whose resume reports the actor missing", backend: memory, existing: substrate.StatusSuspended,
-			resumeErr: notFound, wantCalls: []string{"resume:sess-x"}, wantLost: true},
+		// After a resume that reports the actor missing, GetActor decides: no actor, or one that
+		// does not hold the snapshot (a replacement created after the resume failed), is lost.
+		{name: "memory tier whose resume reports the actor missing and which is gone", backend: memory,
+			resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x"}, wantLost: true},
+		{name: "memory tier whose resume reports the actor missing and which is replaced", backend: memory, existing: substrate.StatusSuspended,
+			resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x"}, wantLost: true, wantMsg: "no longer holds the snapshot"},
+		{name: "memory tier whose resume reports the actor missing and no snapshot to compare", backend: memory, existing: substrate.StatusSuspended,
+			holds: "gs://snap/sess-x", snapshot: "-", resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x"}, wantLost: true},
+		// Substrate also answers NOT_FOUND for an actor that exists (a template volume it cannot
+		// find); one that still holds the snapshot keeps the resume error.
+		{name: "memory tier whose resume reports the actor missing but which holds the snapshot keeps the resume error", backend: memory,
+			existing: substrate.StatusSuspended, holds: "gs://snap/sess-x", resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x"}},
+		{name: "memory tier whose resume reports the actor missing and whose GetActor fails keeps the resume error", backend: memory,
+			getErr: errors.New("unavailable"), resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x"}},
 		{name: "stateless tier whose resume reports the actor missing keeps the resume error", backend: stateless,
 			resumeErr: notFound, wantCalls: []string{"resume:sess-x"}},
 	} {
@@ -771,7 +784,18 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 			if tc.existing != substrate.StatusUnknown {
 				m.exists("sess-x", tc.existing)
 			}
-			_, err := tc.backend(m).Restore(context.Background(), api.SnapshotRef{Local: "sess-x", ExternalURI: "gs://snap/sess-x", Memory: true})
+			if tc.holds != "" {
+				m.holds("sess-x", tc.holds)
+			}
+			uri := "gs://snap/sess-x"
+			switch tc.snapshot {
+			case "-":
+				uri = ""
+			case "":
+			default:
+				uri = tc.snapshot
+			}
+			_, err := tc.backend(m).Restore(context.Background(), api.SnapshotRef{Local: "sess-x", ExternalURI: uri, Memory: true})
 			if !reflect.DeepEqual(m.calls, tc.wantCalls) {
 				t.Errorf("calls=%v want %v", m.calls, tc.wantCalls)
 			}
@@ -784,7 +808,7 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 			if !errors.Is(err, substrate.ErrMemoryStateLost) || !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, resumeErr) {
 				t.Fatalf("Restore error = %v, want ErrMemoryStateLost wrapping api.ErrMemoryStateLost and the resume error", err)
 			}
-			for _, want := range []string{`"sess-x"`, "space/sess-x", "cannot be restored"} {
+			for _, want := range []string{`"sess-x"`, "space/sess-x", "cannot be restored", tc.wantMsg} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("error %q does not contain %q", err, want)
 				}
@@ -1107,5 +1131,129 @@ func TestCreateOnABusyActorIsRetryable(t *testing.T) {
 	_, err = newMemoryBackend(m).Create(ctx, &api.SessionSpec{SessionUID: "sess-x"})
 	if err == nil || errors.Is(err, api.ErrComputeBusy) {
 		t.Fatalf("actor in an unknown state: err=%v, want a failure that is not retryable", err)
+	}
+}
+
+// Create looks at the actor, then resumes it if it is SUSPENDED. When the resume reports the actor
+// missing, Create reads it again rather than fail with the bare resume error: gone, it is a missing
+// actor (a memory-tier session with turns is ErrMemoryStateLost, anything else gets a new actor);
+// replaced under the name, or deleted again after CreateActor found the name taken, it is
+// ErrActorBusy, so a retry looks afresh; still there (substrate also answers NOT_FOUND for a template
+// volume it cannot find), the resume error stands.
+func TestCreateWhoseActorChangesDuringTheResume(t *testing.T) {
+	ctx := context.Background()
+	notFound := fmt.Errorf("%w: space/sess-x: rpc error: code = NotFound", substrate.ErrActorNotFound)
+	// gone deletes the actor out of band, without recording a call.
+	gone := func(m *mockControl) {
+		delete(m.actors, "sess-x")
+		delete(m.uids, "sess-x")
+	}
+	for _, tc := range []struct {
+		name string
+		// memory selects the REQUIRES_MEMORY_SNAPSHOT tier; turns is what StartedTurns reports.
+		memory bool
+		turns  int
+		// absent starts with no actor; otherwise the actor is SUSPENDED.
+		absent bool
+		// onGet runs after the n-th GetActor (1-based) answers.
+		onGet     func(m *mockControl, n int)
+		wantCalls []string
+		wantErr   error // nil: success
+		notErr    []error
+	}{
+		{
+			name: "memory tier with turns whose actor is deleted is lost", memory: true, turns: 1,
+			onGet: func(m *mockControl, n int) {
+				if n == 1 {
+					gone(m)
+				}
+			},
+			wantCalls: []string{"get:sess-x", "resume:sess-x", "get:sess-x", "count"},
+			wantErr:   substrate.ErrMemoryStateLost,
+		},
+		{
+			name: "stateless tier whose actor is deleted gets a new actor",
+			onGet: func(m *mockControl, n int) {
+				switch n {
+				case 1:
+					gone(m)
+				case 2:
+					m.resumeErr = nil // the new actor resumes
+				}
+			},
+			wantCalls: []string{"get:sess-x", "resume:sess-x", "get:sess-x", "create:sess-x", "resume:sess-x"},
+		},
+		{
+			name: "memory tier whose actor is replaced is retryable", memory: true, turns: 1,
+			onGet: func(m *mockControl, n int) {
+				if n == 1 {
+					gone(m)
+					m.exists("sess-x", substrate.StatusSuspended)
+				}
+			},
+			wantCalls: []string{"get:sess-x", "resume:sess-x", "get:sess-x"},
+			wantErr:   substrate.ErrActorBusy,
+			notErr:    []error{api.ErrMemoryStateLost},
+		},
+		{
+			name: "memory tier whose actor is still there keeps the resume error", memory: true, turns: 1,
+			wantCalls: []string{"get:sess-x", "resume:sess-x", "get:sess-x"},
+			wantErr:   notFound,
+			notErr:    []error{api.ErrMemoryStateLost, api.ErrComputeBusy},
+		},
+		{
+			name: "an actor created by another host and deleted before its resume is retryable", memory: true, absent: true,
+			onGet: func(m *mockControl, n int) {
+				switch n {
+				case 1:
+					m.exists("sess-x", substrate.StatusSuspended) // the other host creates it
+				case 2:
+					gone(m)
+				}
+			},
+			wantCalls: []string{"get:sess-x", "count", "create:sess-x", "get:sess-x", "resume:sess-x", "get:sess-x"},
+			wantErr:   substrate.ErrActorBusy,
+			notErr:    []error{api.ErrMemoryStateLost},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockControl{info: running("worker-a"), resumeErr: notFound}
+			if !tc.absent {
+				m.exists("sess-x", substrate.StatusSuspended)
+			}
+			gets := 0
+			m.afterGet = func(string) {
+				gets++
+				if tc.onGet != nil {
+					tc.onGet(m, gets)
+				}
+			}
+			b := newBackend(m)
+			if tc.memory {
+				b = newMemoryBackend(m)
+			}
+			count := func() (int, error) {
+				m.calls = append(m.calls, "count")
+				return tc.turns, nil
+			}
+			_, err := b.Create(ctx, &api.SessionSpec{SessionUID: "sess-x", StartedTurns: count})
+			if !reflect.DeepEqual(m.calls, tc.wantCalls) {
+				t.Errorf("calls=%v want %v", m.calls, tc.wantCalls)
+			}
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Create error = %v, want %v", err, tc.wantErr)
+			}
+			for _, not := range tc.notErr {
+				if errors.Is(err, not) {
+					t.Errorf("Create error = %v, want it not to wrap %v", err, not)
+				}
+			}
+		})
 	}
 }

@@ -569,17 +569,19 @@ func TestFailedCloneReleasesItsTag(t *testing.T) {
 }
 
 // Substrate reserves a tag before copying the snapshot into it, so a tag whose copy failed is left
-// pending, holding partial data, and blocks deleting the atespace. The fork must release it.
+// pending, holding partial data, and blocks deleting the atespace. The fork must release it. It then
+// reads the parent again to classify the failure; a parent that still holds the snapshot leaves the
+// tag's own error, untyped.
 func TestFailedTagReleasesTheReservedTag(t *testing.T) {
 	m := newClonerWithSuspendedParent()
 	m.tagErr = errors.New("while copying the external snapshot: object store unavailable")
 	_, err := newMemoryBackend(m).Fork(context.Background(),
 		api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
 		api.ForkOpts{ChildSessionUID: "child"})
-	if err == nil {
-		t.Fatal("expected the tag to fail")
+	if !errors.Is(err, m.tagErr) || errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, api.ErrSnapshotSuperseded) {
+		t.Fatalf("err=%v, want the tag error alone", err)
 	}
-	want := []string{"get:parent", "tag:parent->fork-child", "untag:fork-child"}
+	want := []string{"get:parent", "tag:parent->fork-child", "untag:fork-child", "get:parent"}
 	if !reflect.DeepEqual(m.calls, want) {
 		t.Fatalf("calls=%v want the reserved tag released %v", m.calls, want)
 	}
@@ -735,11 +737,13 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 	memory := func(m *mockControl) *substrate.Backend { return newMemoryBackend(m) }
 	stateless := func(m *mockControl) *substrate.Backend { return newBackend(m) }
 	resumeErr := errors.New("rpc error: code = NotFound desc = actor not found")
+	notFound := fmt.Errorf("%w: space/sess-x: %w", substrate.ErrActorNotFound, resumeErr)
 	for _, tc := range []struct {
 		name      string
 		backend   func(*mockControl) *substrate.Backend
 		existing  substrate.ActorStatus // StatusUnknown: the actor does not exist
 		getErr    error
+		resumeErr error // nil: resumeErr below, which GetActor has to classify
 		wantCalls []string
 		wantLost  bool
 	}{
@@ -751,8 +755,18 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 			wantCalls: []string{"resume:sess-x", "get:sess-x"}},
 		{name: "stateless tier keeps the resume error", backend: stateless,
 			wantCalls: []string{"resume:sess-x"}},
+		// A replacement created after the resume failed would make GetActor report an actor; the
+		// resume's own ErrActorNotFound already says the snapshot's actor is gone.
+		{name: "memory tier whose resume reports the actor missing", backend: memory, existing: substrate.StatusSuspended,
+			resumeErr: notFound, wantCalls: []string{"resume:sess-x"}, wantLost: true},
+		{name: "stateless tier whose resume reports the actor missing keeps the resume error", backend: stateless,
+			resumeErr: notFound, wantCalls: []string{"resume:sess-x"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			resumeErr := resumeErr
+			if tc.resumeErr != nil {
+				resumeErr = tc.resumeErr
+			}
 			m := &mockControl{info: running("worker-a"), resumeErr: resumeErr, getErr: tc.getErr}
 			if tc.existing != substrate.StatusUnknown {
 				m.exists("sess-x", tc.existing)
@@ -775,7 +789,7 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 					t.Errorf("error %q does not contain %q", err, want)
 				}
 			}
-			if _, ok := m.actors["sess-x"]; ok {
+			if _, ok := m.actors["sess-x"]; ok && tc.existing == substrate.StatusUnknown {
 				t.Error("Restore created an actor")
 			}
 		})

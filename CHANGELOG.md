@@ -137,13 +137,19 @@ provide.
   the Placer passes the recorded UID to `Runtime.Snapshot` in `api.Incarnation.ComputeInstance`, and
   `runtime/substrate` refuses another actor or a missing one, checking the UID before it suspends
   and the one the suspend reports. A memory-tier fork child whose cloned actor is gone before its
-  first turn (no UID recorded yet), and a stateful `Fork` whose parent actor is deleted around the
-  tag, are `FAILED_PRECONDITION` the same way. `runtime/substrate` refuses a memory-tier actor that
+  first turn (no UID recorded yet), and a stateful `Fork` whose parent actor is deleted around or
+  during the tag, are `FAILED_PRECONDITION` the same way; a tag that substrate refuses because
+  another operation holds the parent is `ABORTED`, and one whose parent was suspended again while it
+  ran is `ABORTED` (`api.ErrSnapshotSuperseded`). `runtime/substrate` refuses a memory-tier actor that
   reports no UID (`INTERNAL` from `Snapshot`, a fork child before its first turn included), so a
   custom `ControlClient` must report one from `GetActor`, `ResumeActor` and `SuspendActor`, and must
   report a missing actor as `substrate.ErrActorNotFound` from `SuspendActor` as well as `GetActor`
-  (the `integrations/substrate` adapter now maps substrate's `NOT_FOUND` from both), or a Suspend or
-  Fork whose actor is deleted between the check and the suspend is `INTERNAL`.
+  (the `integrations/substrate` adapter now maps substrate's `NOT_FOUND` from both, and from
+  `ResumeActor`), or a Suspend or Fork whose actor is deleted between the check and the suspend is
+  `INTERNAL`. It should report it from `ResumeActor` too: otherwise a `Resume` whose actor is
+  replaced between the failed resume and `Restore`'s `GetActor` is `INTERNAL`. A `Placer` outside a
+  `placement.Registry` now counts every started turn, and compares every recorded UID, whatever
+  harness name the turn recorded, since it cannot tell another name's backend from its own.
   `ControlClient.SuspendActor` now returns the suspended actor's `substrate.ActorInfo` (snapshot
   handle and UID) instead of the snapshot handle alone. When `CreateActor` finds the name taken
   (`substrate.ErrActorExists`, which a `ControlClient` must return for it), `Create` attaches to

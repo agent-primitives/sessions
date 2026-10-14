@@ -336,6 +336,18 @@ func TestSuspendActorReportsNotFoundAsSentinel(t *testing.T) {
 	}
 }
 
+// Substrate refuses ResumeActor of a missing actor with NOT_FOUND (RPCService.ResumeActor in
+// cmd/ateapi/internal/controlapi/actor.go). The adapter reports it as ErrActorNotFound, so a
+// memory-tier Restore reports the session's in-RAM state as lost from the resume itself; substrate's
+// reason is kept.
+func TestResumeActorReportsNotFoundAsSentinel(t *testing.T) {
+	f := &fakeControl{resumeErr: status.Error(codes.NotFound, "Actor space/gone not found")}
+	_, err := FromClient(f).ResumeActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: "gone"})
+	if !errors.Is(err, substrate.ErrActorNotFound) || errors.Is(err, substrate.ErrActorBusy) || !strings.Contains(err.Error(), "Actor space/gone not found") {
+		t.Fatalf("err=%v want ErrActorNotFound carrying substrate's reason", err)
+	}
+}
+
 // A suspend yields the URI of the external snapshot the actor now holds, the handle the backend
 // records and later compares against GetActor to detect a superseded snapshot, and the UID of the
 // actor it suspended, which a stateful fork compares with the one the journal recorded.
@@ -439,7 +451,7 @@ func TestStatusMapping(t *testing.T) {
 	}
 }
 
-// Substrate refuses a resume or suspend while another operation holds the actor's lease with
+// Substrate refuses a resume, suspend or tag while another operation holds the actor's lease with
 // ABORTED (another host resuming the actor it just created, say). The adapter reports that as
 // substrate.ErrActorBusy, which the session service maps to a retryable ABORTED; any other failure
 // keeps its own error.
@@ -455,15 +467,18 @@ func TestAbortedResumeAndSuspendAreBusy(t *testing.T) {
 			_, err := FromClient(f).SuspendActor(context.Background(), ref)
 			return err
 		},
+		"tag": func(f *fakeControl) error {
+			return FromClient(f).TagActor(context.Background(), ref, substrate.SnapshotID{Atespace: "space", Name: "fork-c"})
+		},
 	}
 	for name, op := range ops {
 		t.Run(name, func(t *testing.T) {
-			f := &fakeControl{actor: runningActor(), resumeErr: aborted, suspendErr: aborted}
+			f := &fakeControl{actor: runningActor(), resumeErr: aborted, suspendErr: aborted, tagErr: aborted}
 			if err := op(f); !errors.Is(err, substrate.ErrActorBusy) || !errors.Is(err, api.ErrComputeBusy) || !strings.Contains(err.Error(), "in progress") {
 				t.Fatalf("aborted %s: err=%v, want ErrActorBusy carrying substrate's reason", name, err)
 			}
 			unavailable := status.Error(codes.Unavailable, "ate-api unavailable")
-			f = &fakeControl{actor: runningActor(), resumeErr: unavailable, suspendErr: unavailable}
+			f = &fakeControl{actor: runningActor(), resumeErr: unavailable, suspendErr: unavailable, tagErr: unavailable}
 			if err := op(f); err == nil || errors.Is(err, substrate.ErrActorBusy) {
 				t.Fatalf("unavailable %s: err=%v, want a failure that is not ErrActorBusy", name, err)
 			}

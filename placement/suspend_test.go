@@ -74,7 +74,7 @@ func (c *suspendControl) ResumeActor(_ context.Context, ref substrate.ActorRef) 
 	c.calls = append(c.calls, "resume:"+ref.Name)
 	a, exists := c.actors[ref]
 	if !exists {
-		return substrate.ActorInfo{}, status.Error(codes.NotFound, "actor does not exist")
+		return substrate.ActorInfo{}, fmt.Errorf("%w: %w", substrate.ErrActorNotFound, status.Error(codes.NotFound, "actor does not exist"))
 	}
 	if a.status == substrate.StatusSuspended && a.snapshot.Name == "" {
 		a.turns = 0 // no snapshot of its own yet: a fresh harness

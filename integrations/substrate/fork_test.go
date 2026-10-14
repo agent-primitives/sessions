@@ -148,7 +148,9 @@ func (l *lifecycleControl) CreateTag(_ context.Context, in *atepb.CreateTagReque
 	tg := in.GetTag()
 	l.record("tag:" + tg.GetSourceActor().GetName() + "->" + tg.GetMetadata().GetName())
 	if _, ok := l.actors[tg.GetSourceActor().GetName()]; !ok {
-		return nil, status.Errorf(codes.NotFound, "Actor %s not found", tg.GetSourceActor().GetName())
+		// RPCService.CreateTag in cmd/ateapi/internal/controlapi/tag.go reports a missing source
+		// actor as FAILED_PRECONDITION, not NOT_FOUND.
+		return nil, status.Errorf(codes.FailedPrecondition, "Actor %s not found", tg.GetSourceActor().GetName())
 	}
 	uri := l.completed[tg.GetSourceActor().GetName()]
 	if uri == "" {

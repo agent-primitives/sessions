@@ -70,9 +70,15 @@ func (ad *Adapter) CreateActor(ctx context.Context, actor substrate.ActorRef, te
 // ResumeActor schedules the actor onto a worker. Substrate restores the actor's own external
 // snapshot when it holds one (including a tag's, borrowed at creation) and cold-boots the template
 // spec otherwise; the request carries no boot flag. Substrate refuses a resume while another
-// operation holds the actor's lease with ABORTED, reported as substrate.ErrActorBusy.
+// operation holds the actor's lease with ABORTED, reported as substrate.ErrActorBusy, and a missing
+// actor with NOT_FOUND (RPCService.ResumeActor in cmd/ateapi/internal/controlapi/actor.go), reported
+// as substrate.ErrActorNotFound: a memory-tier Restore reads it as the session's in-RAM state being
+// gone even when a replacement actor exists by the time it asks GetActor.
 func (ad *Adapter) ResumeActor(ctx context.Context, actor substrate.ActorRef) (substrate.ActorInfo, error) {
 	resp, err := ad.ctl.ResumeActor(ctx, &atepb.ResumeActorRequest{Actor: objectRef(actor)})
+	if status.Code(err) == codes.NotFound {
+		return substrate.ActorInfo{}, fmt.Errorf("%w: %s/%s: %w", substrate.ErrActorNotFound, actor.Atespace, actor.Name, err)
+	}
 	if err != nil {
 		return substrate.ActorInfo{}, busy(actor, err)
 	}
@@ -137,6 +143,11 @@ func (ad *Adapter) GetActor(ctx context.Context, actor substrate.ActorRef) (subs
 //
 // A name already taken, whether by a finished tag or one a failed create left pending, is reported
 // as substrate.ErrTagExists, so the backend does not delete a tag this call did not reserve.
+// Substrate refuses a tag while another operation holds the source actor's lease with ABORTED
+// (acquireLease in cmd/ateapi/internal/controlapi/workflow.go, called from TagActorSnapshot in
+// cmd/ateapi/internal/controlapi/workflow_tag.go), reported as substrate.ErrActorBusy. A missing
+// source actor is FAILED_PRECONDITION (RPCService.CreateTag in
+// cmd/ateapi/internal/controlapi/tag.go), which the backend classifies by reading the actor.
 func (ad *Adapter) TagActor(ctx context.Context, source substrate.ActorRef, tag substrate.SnapshotID) error {
 	_, err := ad.ctl.CreateTag(ctx, &atepb.CreateTagRequest{
 		Tag: &atepb.Tag{
@@ -148,7 +159,7 @@ func (ad *Adapter) TagActor(ctx context.Context, source substrate.ActorRef, tag 
 	if status.Code(err) == codes.AlreadyExists {
 		return fmt.Errorf("%w: %s/%s: %w", substrate.ErrTagExists, tag.Atespace, tag.Name, err)
 	}
-	return err
+	return busy(source, err)
 }
 
 // CreateActorFromTag creates an actor seeded from the snapshot behind tag. Substrate requires the

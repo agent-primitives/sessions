@@ -96,7 +96,9 @@ type ControlClient interface {
 }
 
 // ErrActorNotFound is what a ControlClient must return (or wrap) from GetActor and SuspendActor when
-// the actor does not exist. It is a sentinel rather than a transport code so the seam stays neutral:
+// the actor does not exist, and should from ResumeActor: Restore then reports a memory-tier
+// session's state lost from the resume itself, and asks GetActor only when the resume did not say
+// (a replacement created between the two would otherwise hide the loss). It is a sentinel rather than a transport code so the seam stays neutral:
 // the backend decides "create it" vs "attach to it", and whether a memory-tier session's in-RAM state
 // is gone, without knowing that the client underneath speaks gRPC.
 var ErrActorNotFound = errors.New("substrate: actor not found")
@@ -492,17 +494,20 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (inc api.Inc
 
 // memoryActorGone reports, after resumeErr, that a REQUIRES_MEMORY_SNAPSHOT harness's actor no longer
 // exists, as ErrMemoryStateLost wrapping resumeErr too. The snapshot Restore would resume belonged to
-// that actor, so the state is gone with it and there is nothing to retry. It asks GetActor, whose
-// ControlClient contract reports a missing actor as ErrActorNotFound, rather than reading
-// ResumeActor's error. It returns nil for a stateless harness, whose state is in the journal, and
-// when the actor exists or GetActor fails too, so the caller keeps the resume error.
+// that actor, so the state is gone with it and there is nothing to retry. A resume that reported the
+// actor missing (ErrActorNotFound) settles it, even if a replacement exists by the time GetActor
+// could ask; otherwise it asks GetActor, whose ControlClient contract reports a missing actor as
+// ErrActorNotFound. It returns nil for a stateless harness, whose state is in the journal, and when
+// the actor exists or GetActor fails too, so the caller keeps the resume error.
 func (b *Backend) memoryActorGone(ctx context.Context, name string, resumeErr error) error {
 	if b.descriptor.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
 		return nil
 	}
 	ref := b.ref(name)
-	if _, err := b.ctl.GetActor(ctx, ref); !errors.Is(err, ErrActorNotFound) {
-		return nil
+	if !errors.Is(resumeErr, ErrActorNotFound) {
+		if _, err := b.ctl.GetActor(ctx, ref); !errors.Is(err, ErrActorNotFound) {
+			return nil
+		}
 	}
 	return fmt.Errorf("%w: actor %s/%s of session %q on harness %q does not exist, so its in-RAM state cannot be restored; no actor was created: resume: %w",
 		ErrMemoryStateLost, ref.Atespace, ref.Name, name, b.descriptor.ID, resumeErr)
@@ -599,6 +604,13 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 		// remains. Release it, unless the name was already taken: that tag is not this attempt's.
 		if !errors.Is(err, ErrTagExists) {
 			b.releaseForkTag(ctx, cloner, child)
+			// The parent may have been deleted, or woken and suspended again, while the tag ran:
+			// substrate reports a missing source as FAILED_PRECONDITION, which says nothing typed.
+			// Read the parent again so those are api.ErrMemoryStateLost and ErrSnapshotSuperseded,
+			// as on either side of the tag.
+			if gone := b.requireSnapshot(ctx, parent, ref.ExternalURI); errors.Is(gone, api.ErrMemoryStateLost) || errors.Is(gone, ErrSnapshotSuperseded) {
+				return api.Incarnation{}, fmt.Errorf("%w; the tag of parent %q failed: %v", gone, parent.Name, err)
+			}
 		}
 		return api.Incarnation{}, fmt.Errorf("substrate: tag parent %q: %w", parent.Name, err)
 	}

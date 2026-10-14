@@ -3,6 +3,7 @@ package session_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -803,5 +804,138 @@ func TestForkWhoseParentIsDeletedAtTheTagIsRefused(t *testing.T) {
 	ctl.mu.Unlock()
 	if gotCreated != created {
 		t.Errorf("actors created %d->%d: the refused fork may create no child", created, gotCreated)
+	}
+}
+
+// A stateful Fork whose TagActor call fails is classified by reading the parent again, since
+// substrate reports a missing source actor as a plain FAILED_PRECONDITION and contention for the
+// actor's lease as ABORTED: a parent deleted during the tag is FAILED_PRECONDITION
+// (api.ErrMemoryStateLost), one woken and suspended again holds another snapshot and is ABORTED
+// (api.ErrSnapshotSuperseded), and a tag refused because another operation holds the parent is
+// ABORTED (substrate.ErrActorBusy). Each creates no child.
+func TestForkWhoseTagFailsIsClassified(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name    string
+		onTag   func(ctl *actorControl, actor string)
+		tagErr  error
+		want    codes.Code
+		wantMsg string
+	}{
+		{
+			name: "parent deleted during the tag",
+			onTag: func(ctl *actorControl, actor string) {
+				_ = ctl.DeleteActor(ctx, substrate.ActorRef{Atespace: "space", Name: actor})
+			},
+			tagErr:  errors.New("rpc error: code = FailedPrecondition desc = Actor space/x not found"),
+			want:    codes.FailedPrecondition,
+			wantMsg: "no longer exists",
+		},
+		{
+			name: "parent suspended again during the tag",
+			onTag: func(ctl *actorControl, actor string) {
+				ctl.mu.Lock()
+				ctl.snapshots[actor] = "snap-newer"
+				ctl.mu.Unlock()
+			},
+			tagErr:  errors.New("rpc error: code = Internal desc = copy failed"),
+			want:    codes.Aborted,
+			wantMsg: "want suspended holding",
+		},
+		{
+			name:    "tag contends for the parent's lease",
+			tagErr:  fmt.Errorf("%w: space/x: rpc error: code = Aborted desc = another operation is in progress", substrate.ErrActorBusy),
+			want:    codes.Aborted,
+			wantMsg: "another operation is in progress",
+		},
+		{
+			name:    "any other tag failure stays internal",
+			tagErr:  errors.New("rpc error: code = Unavailable desc = ate-api unavailable"),
+			want:    codes.Internal,
+			wantMsg: "ate-api unavailable",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			c := newMemoryHost(t, ctl, store, echoagent.Harness{})
+			sess := mustCreate(t, c)
+			if err := execHi(c, sess); err != nil {
+				t.Fatalf("first turn: %v", err)
+			}
+			if tc.onTag != nil {
+				ctl.onTag = func(actor string) { tc.onTag(ctl, actor) }
+			}
+			ctl.tagErr = tc.tagErr
+			ctl.mu.Lock()
+			created := ctl.created
+			ctl.mu.Unlock()
+
+			_, err = c.Fork(ctx, &v1.ForkRequest{Session: sess, Count: 1})
+			if status.Code(err) != tc.want {
+				t.Fatalf("fork: want %v, got %v", tc.want, err)
+			}
+			if msg := status.Convert(err).Message(); !strings.Contains(msg, tc.wantMsg) {
+				t.Errorf("error %q does not contain %q", msg, tc.wantMsg)
+			}
+			ctl.mu.Lock()
+			gotCreated := ctl.created
+			ctl.mu.Unlock()
+			if gotCreated != created {
+				t.Errorf("actors created %d->%d: the refused fork may create no child", created, gotCreated)
+			}
+		})
+	}
+}
+
+// Resume of a memory-tier session whose actor substrate reports missing is FAILED_PRECONDITION even
+// when a third party creates a replacement under the session's name before Restore could ask
+// GetActor: the resume's own ErrActorNotFound settles that the snapshot is gone.
+func TestResumeWhoseActorIsReplacedAfterTheFailedResumeIsRefused(t *testing.T) {
+	ctx := context.Background()
+	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	c := newMemoryHost(t, ctl, store, echoagent.Harness{})
+	sess := mustCreate(t, c)
+	if err := execHi(c, sess); err != nil {
+		t.Fatalf("first turn: %v", err)
+	}
+	if _, err := c.Suspend(ctx, &v1.SuspendRequest{Session: sess}); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	head, err := store.Session(sess).Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The resume finds the actor deleted; the first GetActor after it finds a replacement.
+	var deleted, replaced atomic.Bool
+	ctl.onResume = func(actor string) {
+		if actor == sess && deleted.CompareAndSwap(false, true) {
+			_ = ctl.DeleteActor(ctx, substrate.ActorRef{Atespace: "space", Name: actor})
+		}
+	}
+	ctl.onGet = func(actor string) {
+		if actor == sess && deleted.Load() && replaced.CompareAndSwap(false, true) {
+			_ = ctl.CreateActor(ctx, substrate.ActorRef{Atespace: "space", Name: actor}, substrate.ObjectRef{})
+		}
+	}
+
+	_, err = c.Resume(ctx, &v1.ResumeRequest{Session: sess})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("resume of a replaced actor: want FailedPrecondition, got %v", err)
+	}
+	if msg := status.Convert(err).Message(); !strings.Contains(msg, "cannot be restored") {
+		t.Errorf("error %q does not say the state cannot be restored", msg)
+	}
+	if got, err := store.Session(sess).Head(); err != nil || got != head {
+		t.Errorf("journal head after the refused resume = %d (err %v), want %d", got, err, head)
 	}
 }

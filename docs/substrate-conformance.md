@@ -105,9 +105,10 @@ changed the actor's RAM. The Placer hands `Create` a counter in `api.SessionSpec
 point is counted, including one another host ran. The Placer attributes a turn by the harness name
 its `EXECUTION_START` recorded: a turn an `ExecRequest.harness` override sent to another harness is
 not counted, a name that aliases the same Placer in the registry is, and so is a turn it cannot
-attribute (no recorded name, a name this host does not serve, or a legacy turn with no
-`EXECUTION_START`), so an unknown history refuses rather than cold-creates. A journal that cannot be
-read refuses too. `Create` returns `substrate.ErrMemoryStateLost` (wrapping
+attribute (no recorded name, a name this host does not serve, a legacy turn with no
+`EXECUTION_START`, or any turn when the Placer is not in a registry, since it cannot tell which
+backend another name ran on), so an unknown history refuses rather than cold-creates. A journal
+that cannot be read refuses too. `Create` returns `substrate.ErrMemoryStateLost` (wrapping
 `api.ErrMemoryStateLost`, `FAILED_PRECONDITION` at the Sessions API), names the session, and creates
 nothing. A stateless session, or a memory-tier session with no started turn, is created as before.
 
@@ -133,15 +134,16 @@ nothing and records no child, where it would otherwise have cloned the replaceme
 whose own turns never compare against the parent's UID. `runtime/substrate` refuses to place a
 memory-tier session on an actor that reports no UID, and refuses to snapshot one with a plain error
 (`INTERNAL`), a fork child before its first turn included, since a `ControlClient` that reports no
-UID breaks its contract. When `CreateActor` finds the name taken (`substrate.ErrActorExists`), `Create` attaches to that actor, so
-two hosts racing a session's first turn share one actor. The loser's turn fails at worst, never the
-session, and a retry attaches: `ABORTED` when its append loses, and `ABORTED` (`api.ErrComputeBusy`)
-when it finds the winner's actor `RESUMING`, `SUSPENDING` or `PAUSING`, or substrate refuses its
+UID breaks its contract. When `CreateActor` finds the name taken (`substrate.ErrActorExists`),
+`Create` attaches to that actor, so two hosts racing a session's first turn share one actor. The
+loser's turn fails at worst, never the session, and a retry attaches: `ABORTED` when its append
+loses, and `ABORTED` (`api.ErrComputeBusy`) when it finds the winner's actor `RESUMING`, `SUSPENDING` or `PAUSING`, or substrate refuses its
 resume because another operation holds the actor (substrate's `ABORTED`, reported as
 `substrate.ErrActorBusy`). An actor that is `CRASHED`, `DELETING`, `REVERTING` or in a state the
 adapter does not know is `INTERNAL`. `Restore` (`Sessions.Resume`) returns `ErrMemoryStateLost` for
 every memory-tier session whose actor is gone, whatever its journal records (a session interrupted
-on its first turn included), since the snapshot it would resume went with the actor; `GetActor`
+on its first turn included), since the snapshot it would resume went with the actor: a resume
+that reports the actor missing (`substrate.ErrActorNotFound`) settles it, and otherwise `GetActor`
 confirms the absence after the resume fails.
 
 Limits of these checks:
@@ -239,8 +241,12 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   request addressed to it, so the parent can be woken and suspended again between the fork's
   checkpoint and its tag. The backend checks on both sides of the tag that the parent is still
   SUSPENDED holding the snapshot the fork took (a suspend always writes a new one), and otherwise
-  deletes the tag and fails with `ErrSnapshotSuperseded`. That error wraps `api.ErrSnapshotSuperseded`,
-  which `Fork` reports as ABORTED; the caller retries at the parent's new head. The Placer's hold on
+  deletes the tag and fails with `ErrSnapshotSuperseded`. That error wraps
+  `api.ErrSnapshotSuperseded`, which `Fork` reports as ABORTED; the caller retries at the parent's
+  new head. When the tag itself fails, the backend reads the parent again: a parent that is gone is
+  `api.ErrMemoryStateLost` (FAILED_PRECONDITION), and one holding another snapshot is
+  `ErrSnapshotSuperseded`. A tag substrate refuses because another operation holds the parent's
+  lease (`ABORTED`) is `substrate.ErrActorBusy`, also ABORTED. The Placer's hold on
   the parent starts when the fork installs its checkpoint mark and covers the turns this
   `placement.Registry` drives. It does not stop a request from outside this Registry, or a turn whose
   `Runtime.Create` or `Runtime.Restore` was already in flight when the mark was installed; this

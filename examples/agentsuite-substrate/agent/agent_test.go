@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -119,4 +120,58 @@ func TestDescribeVersionTracksInstructions(t *testing.T) {
 	if a.Capabilities.Resumability != api.ResumabilityStatelessReplay {
 		t.Fatalf("resumability = %v", a.Capabilities.Resumability)
 	}
+}
+
+// The memory tier builds each request from its own RAM, not the history the host sends, keeps a
+// turn only when the model call succeeds, and says so in its descriptor.
+func TestMemoryTierUsesRAM(t *testing.T) {
+	h := Harness{ID: "writer", Model: "m", Instructions: "write"}.WithMemory()
+	d, _ := h.Describe(t.Context())
+	if d.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
+		t.Fatalf("resumability = %v, want REQUIRES_MEMORY_SNAPSHOT", d.Capabilities.Resumability)
+	}
+	sink := &replySink{reply: "one"}
+	history := []api.Event{{Kind: api.EventInput, Message: api.TextMessage("user", "from the journal")}}
+	turn := func(input string) {
+		t.Helper()
+		if err := h.Run(t.Context(), &api.Start{History: history, Inputs: []api.Message{*api.TextMessage("user", input)}}, sink); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turn("first")
+	sink.reply = "two"
+	turn("second")
+	sink.fail = true
+	if err := h.Run(t.Context(), &api.Start{Inputs: []api.Message{*api.TextMessage("user", "lost")}}, sink); err == nil {
+		t.Fatal("failed model call: err = nil")
+	}
+	sink.fail = false
+	turn("third")
+	var got []string
+	for _, m := range sink.requests[len(sink.requests)-1].Messages {
+		got = append(got, m.Role+":"+m.Text())
+	}
+	want := []string{"system:write", "user:first", "assistant:one", "user:second", "assistant:two", "user:third"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("messages = %v, want %v", got, want)
+	}
+	// Each WithMemory starts an empty transcript.
+	if fresh := (Harness{ID: "writer"}).WithMemory(); len(fresh.memory.messages) != 0 {
+		t.Fatalf("fresh transcript holds %d messages", len(fresh.memory.messages))
+	}
+}
+
+type replySink struct {
+	api.EventSink
+	reply    string
+	fail     bool
+	requests []api.ModelRequest
+}
+
+func (s *replySink) Model(_ context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+	s.requests = append(s.requests, req)
+	if s.fail {
+		return api.ModelResponse{}, errors.New("provider down")
+	}
+	return api.ModelResponse{Message: *api.TextMessage("assistant", s.reply)}, nil
 }

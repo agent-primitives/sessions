@@ -86,6 +86,7 @@ func renderCmd(args []string) error {
 	binding := fs.String("binding", "binding.json", "AgentSessionsBinding file")
 	image := fs.String("image", "", "digest-pinned harness image, name@sha256:...")
 	model := fs.String("model", "", "provider model the harness requests instead of the agent's own; empty keeps the agent's")
+	tier := fs.String("tier", "stateless", "stateless (STATELESS_REPLAY, harness <agent>) or memory (REQUIRES_MEMORY_SNAPSHOT, conversation in RAM, harness <agent>-memory)")
 	_ = fs.Parse(args)
 	comp, err := render.Load(c.suite, c.agent, c.platform)
 	if err != nil {
@@ -95,7 +96,10 @@ func renderCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	out, err := render.Render(comp, *image, b, *model)
+	if *tier != "stateless" && *tier != "memory" {
+		return fmt.Errorf("-tier %q: want stateless or memory", *tier)
+	}
+	out, err := render.Render(comp, *image, b, render.Options{Model: *model, Memory: *tier == "memory"})
 	if err != nil {
 		return err
 	}
@@ -123,7 +127,7 @@ func renderCmd(args []string) error {
 		return err
 	}
 	fmt.Printf("ActorTemplate %s/%s (image %s, binding %s)\nharness %s -> -substrate-harness=%s\n",
-		out.Template.GetMetadata().GetAtespace(), name, *image, b.Digest(), comp.Agent.ID, out.DaemonFlag)
+		out.Template.GetMetadata().GetAtespace(), name, *image, b.Digest(), out.Registration.GetMetadata().GetName(), out.DaemonFlag)
 	return nil
 }
 

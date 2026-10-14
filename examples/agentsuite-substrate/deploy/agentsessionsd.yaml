@@ -1,4 +1,5 @@
-# agentsessionsd, substrate build (integrations/substrate/cmd/agentsessionsd). It journals to an
+# agentsessionsd, substrate build (integrations/substrate/cmd/agentsessionsd). up.sh renders it twice,
+# as agentsessionsd (the stateless tier) and agentsessionsd-memory (the memory tier). It journals to an
 # emptyDir: the demo's journal lives as long as this pod.
 #
 # It reaches the ate-api with the pod's projected ServiceAccount token and verifies the ate-api's
@@ -8,16 +9,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: agentsessionsd
+  name: DAEMON_NAME
   namespace: agentsuite-demo
 spec:
   replicas: 1
   strategy: {type: Recreate}
   selector:
-    matchLabels: {app: agentsessionsd}
+    matchLabels: {app: DAEMON_NAME}
   template:
     metadata:
-      labels: {app: agentsessionsd}
+      labels: {app: DAEMON_NAME}
       annotations:
         # The MODEL_API_KEY env var is read at container start. up.sh stamps the Secret's
         # resourceVersion here, so a rotated or deleted key restarts the pod.
@@ -66,8 +67,8 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: agentsessionsd
+  name: DAEMON_NAME
   namespace: agentsuite-demo
 spec:
-  selector: {app: agentsessionsd}
+  selector: {app: DAEMON_NAME}
   ports: [{port: 8080, targetPort: 8080}]

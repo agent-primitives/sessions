@@ -214,14 +214,29 @@ var (
 	notLabel    = regexp.MustCompile(`[^a-z0-9-]+`)
 )
 
+// Options are what a render sets beyond the composition, image and binding.
+type Options struct {
+	// Model is the provider model the harness requests in place of the agent's own; empty keeps
+	// the agent's.
+	Model string
+	// Memory renders the memory tier: the harness keeps the conversation in RAM
+	// (agent.MemoryEnv=agent.MemoryRAM) and is registered as REQUIRES_MEMORY_SNAPSHOT under the name
+	// <agent>-memory.
+	Memory bool
+}
+
 // TemplateName is <suite>-<agent>-<hash8>: hash8 is the first 8 hex of
-// sha256(imageDigest + "\n" + bindingDigest), with "\n" + model appended when model is not empty
-// (the template then carries a model override in its env). The result is a DNS label of at most 63 characters;
-// suite and agent are lowercased, sanitized and truncated to fit, never hash8.
-func TemplateName(suite, agent, imageDigest, bindingDigest, model string) string {
+// sha256(imageDigest + "\n" + bindingDigest), with "\n" + model appended when o.Model is not empty
+// (the template then carries a model override in its env) and "\nmemory" when o.Memory is set (the
+// template then selects the memory tier in its env). The result is a DNS label of at most 63
+// characters; suite and agent are lowercased, sanitized and truncated to fit, never hash8.
+func TemplateName(suite, agent, imageDigest, bindingDigest string, o Options) string {
 	content := imageDigest + "\n" + bindingDigest
-	if model != "" {
-		content += "\n" + model
+	if o.Model != "" {
+		content += "\n" + o.Model
+	}
+	if o.Memory {
+		content += "\nmemory"
 	}
 	sum := sha256.Sum256([]byte(content))
 	hash8 := hex.EncodeToString(sum[:])[:8]
@@ -253,10 +268,11 @@ type Output struct {
 }
 
 // Render maps a composition, its digest-pinned harness image and a binding onto an ActorTemplate and
-// a harness registration. The harness registration's name is the agent id. A non-empty model is the
-// provider model the harness requests in place of the agent's own: it is set in the template's env
-// (AGENTSUITE_MODEL) and folded into the template name.
-func Render(c *Composition, image string, b *Binding, model string) (*Output, error) {
+// a harness registration. The harness registration's name is the agent id, or <agent>-memory for the
+// memory tier. A non-empty o.Model is the provider model the harness requests in place of the
+// agent's own: it is set in the template's env (AGENTSUITE_MODEL) and folded into the template name,
+// as o.Memory is (AGENTSUITE_MEMORY=ram).
+func Render(c *Composition, image string, b *Binding, o Options) (*Output, error) {
 	// Load checked the agent; check again for a Composition built by hand.
 	if err := supported(c.Agent); err != nil {
 		return nil, err
@@ -273,7 +289,7 @@ func Render(c *Composition, image string, b *Binding, model string) (*Output, er
 	if err != nil {
 		return nil, err
 	}
-	name := TemplateName(c.Suite, c.Agent.ID, m[1], b.Digest(), model)
+	name := TemplateName(c.Suite, c.Agent.ID, m[1], b.Digest(), o)
 	container := &atepb.Container{
 		Name:  "harness",
 		Image: image,
@@ -289,8 +305,13 @@ func Render(c *Composition, image string, b *Binding, model string) (*Output, er
 		// Add no capabilities: the harness needs none, and the template is the only place to say so.
 		SecurityContext: &atepb.SecurityContext{Capabilities: &atepb.Capabilities{}},
 	}
-	if model != "" {
-		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.ModelEnv, Value: model})
+	if o.Model != "" {
+		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.ModelEnv, Value: o.Model})
+	}
+	harness, resumability, tier := c.Agent.ID, v1.Resumability_RESUMABILITY_STATELESS_REPLAY, ""
+	if o.Memory {
+		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.MemoryEnv, Value: agent.MemoryRAM})
+		harness, resumability, tier = c.Agent.ID+"-memory", v1.Resumability_RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT, ",memory"
 	}
 	var limits []*atepb.Limits
 	if b.Resources.CPU != "" {
@@ -315,11 +336,11 @@ func Render(c *Composition, image string, b *Binding, model string) (*Output, er
 		tmpl.WorkerSelector = &atepb.Selector{MatchLabels: b.WorkerSelector.MatchLabels}
 	}
 	reg := &v1.HarnessRegistration{
-		Metadata: &v1.ResourceMetadata{Name: c.Agent.ID},
+		Metadata: &v1.ResourceMetadata{Name: harness},
 		Spec: &v1.HarnessSpec{
 			Placement: &v1.HarnessSpec_Substrate{Substrate: &v1.SubstratePlacement{Atespace: b.Atespace, Template: name}},
 			Capabilities: &v1.Capabilities{
-				Resumability: v1.Resumability_RESUMABILITY_STATELESS_REPLAY,
+				Resumability: resumability,
 			},
 			DescriptorId: c.Agent.ID,
 		},
@@ -327,7 +348,7 @@ func Render(c *Composition, image string, b *Binding, model string) (*Output, er
 	return &Output{
 		Template:     tmpl,
 		Registration: reg,
-		DaemonFlag:   fmt.Sprintf("%s=%s/%s", c.Agent.ID, b.Atespace, name),
+		DaemonFlag:   fmt.Sprintf("%s=%s/%s%s", harness, b.Atespace, name, tier),
 	}, nil
 }
 

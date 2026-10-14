@@ -119,6 +119,7 @@ fi
 	stub(t, bin, "docker", log+`
 case "$1" in
 info) echo "${STUB_DOCKER_ARCH:-arm64}" ;;
+run) [ -z "${STUB_NO_KVM:-}" ] || exit 125 ;;
 inspect)
 	case "$3" in
 	*RepoDigests*) echo "localhost:5001/agentsuite-harness@`+digest+`" ;;
@@ -143,18 +144,24 @@ fi
 [ "$1 $2" != "run ./cmd/ate-setup" ] || exit "${STUB_INSTALL_RC:-0}"
 [ -n "${STUB_FULL:-}" ] || exit 97
 if [ "$1 $2 $3" = "run ./cmd/emit render" ]; then
-	prev= model=unset
+	prev= model=unset tier=
 	for a; do
 		[ "$prev" = -out ] && out=$a
 		[ "$prev" = -model ] && model=$a
+		[ "$prev" = -tier ] && tier=$a
 		prev=$a
 	done
 	# The -model up.sh forwards to the harness, kept verbatim (the call log's echo is not).
 	printf '%s' "$model" >"$STUB_DIR/render-model"
 	mkdir -p "$out"
-	echo tmpl-1 >"$out/template-name"
 	echo '{}' >"$out/harness-registration.json"
-	echo '-substrate-harness=triage=agentsuite-demo/tmpl-1' >"$out/agentsessionsd.args"
+	if [ "$tier" = memory ]; then
+		echo tmpl-2 >"$out/template-name"
+		echo '-substrate-harness=triage-memory=agentsuite-demo/tmpl-2,memory' >"$out/agentsessionsd.args"
+	else
+		echo tmpl-1 >"$out/template-name"
+		echo '-substrate-harness=triage=agentsuite-demo/tmpl-1' >"$out/agentsessionsd.args"
+	fi
 fi
 `)
 	stub(t, bin, "ko", log+`echo "localhost:5001/${3##*/}@`+digest+`"`+"\n")
@@ -169,7 +176,7 @@ esac
 `)
 	// python3 is the host's. STUB_BINDING stands in for the binding.json up.sh reads.
 	stub(t, bin, "python3", log+`
-if [ -n "${STUB_BINDING:-}" ] && [ "$#" -eq 3 ] && [ "$1" = -c ] && [ "${3##*/}" = binding.json ]; then
+if [ -n "${STUB_BINDING:-}" ] && [ "$#" -eq 3 ] && [ "$1" = -c ] && case "${3##*/}" in binding*.json) true ;; *) false ;; esac; then
 	set -- -c "$2" "$STUB_BINDING"
 fi
 exec "`+python3+`" "$@"
@@ -203,6 +210,10 @@ if [ -n "${STUB_CREATE_SIGNAL:-}" ]; then
 	[ "$STUB_CREATE_SIGNAL" != INT ] || kill -s INT $$
 fi
 exit "${STUB_CREATE_RC:-0}"
+`)
+	// The micro-VM class's assets and SandboxConfig; exits STUB_MICROVM_RC.
+	stub(t, filepath.Join(substrate, "hack"), "install-microvm-deps.sh", `echo "install-microvm-deps.sh $* ARCH=$ARCH" >>"$STUB_DIR/calls"
+exit "${STUB_MICROVM_RC:-0}"
 `)
 	// up.sh runs ate-setup itself; this wrapper would build for the host's architecture.
 	stub(t, filepath.Join(substrate, "hack"), "install-ate-kind.sh", `echo "install-ate-kind.sh $*" >>"$STUB_DIR/calls"
@@ -810,7 +821,20 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 		{
 			name:    "a binding for another atespace",
 			env:     func(t *testing.T) []string { return []string{"STUB_BINDING=" + binding(t, "other")} },
+			wantOut: "binding-microvm.json names atespace 'other', but the demo deploys into atespace agentsuite-demo; nothing was changed",
+		},
+		{
+			name: "a gVisor binding for another atespace",
+			env: func(t *testing.T) []string {
+				return []string{"AGENTSUITE_DEMO_SANDBOX=gvisor", "STUB_BINDING=" + binding(t, "other")}
+			},
 			wantOut: "binding.json names atespace 'other', but the demo deploys into atespace agentsuite-demo; nothing was changed",
+		},
+		{
+			// The micro-VM class is the default; without KVM it is refused, never swapped for gVisor.
+			name:    "micro-VM on a Docker host without KVM",
+			env:     func(*testing.T) []string { return []string{"STUB_NO_KVM=1"} },
+			wantOut: "AGENTSUITE_DEMO_SANDBOX=microvm needs /dev/kvm in the Docker host, and 'docker run --device /dev/kvm' failed; set AGENTSUITE_DEMO_SANDBOX=gvisor on a host without KVM (an arm64 Mac); nothing was changed",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -939,10 +963,26 @@ func TestUpRendersTheDaemon(t *testing.T) {
 					t.Errorf("rendered manifest has no line %q:\n%s", l, b)
 				}
 			}
-			for _, p := range []string{"DAEMON_IMAGE", "MODEL_ID", "MODEL_BASE_URL", "MODEL_PATH", "MODEL_AUTH_HEADER", "SUBSTRATE_HARNESS_FLAG", "MODEL_SECRET_VERSION"} {
+			for _, p := range []string{"DAEMON_NAME", "DAEMON_IMAGE", "MODEL_ID", "MODEL_BASE_URL", "MODEL_PATH", "MODEL_AUTH_HEADER", "SUBSTRATE_HARNESS_FLAG", "MODEL_SECRET_VERSION"} {
 				if strings.Contains(string(b), p) {
 					t.Errorf("rendered manifest still contains %s", p)
 				}
+			}
+			// The memory tier gets its own Deployment and Service, with the same model settings and
+			// Secret version and the memory-tier harness flag.
+			memPath := filepath.Join(s.work, "cluster-"+cluster, "agentsessionsd-memory.yaml")
+			mb, err := os.ReadFile(memPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantMem := strings.ReplaceAll(string(b), "- -substrate-harness=triage=agentsuite-demo/tmpl-1", "- -substrate-harness=triage-memory=agentsuite-demo/tmpl-2,memory")
+			wantMem = strings.ReplaceAll(wantMem, "name: agentsessionsd\n  namespace:", "name: agentsessionsd-memory\n  namespace:")
+			wantMem = strings.ReplaceAll(wantMem, "app: agentsessionsd}", "app: agentsessionsd-memory}")
+			if string(mb) != wantMem {
+				t.Errorf("memory-tier manifest:\n%s\nwant:\n%s", mb, wantMem)
+			}
+			if !strings.Contains(calls, "apply -f "+memPath) || !strings.Contains(calls, "rollout status deploy/agentsessionsd-memory") {
+				t.Errorf("the memory-tier daemon was not applied and waited for:\n%s", calls)
 			}
 			// The key reaches kubectl over stdin only: never the manifest, argv or the output.
 			if strings.Contains(string(b), "azure-key") || strings.Contains(calls, "azure-key") || strings.Contains(out, "azure-key") {

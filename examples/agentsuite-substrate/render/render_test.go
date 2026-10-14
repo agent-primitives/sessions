@@ -18,17 +18,17 @@ import (
 const digestA = "sha256:" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func TestTemplateNameIsContentAddressed(t *testing.T) {
-	base := TemplateName("support-desk", "triage", digestA, "sha256:b", "")
+	base := TemplateName("support-desk", "triage", digestA, "sha256:b", Options{})
 	if !strings.HasPrefix(base, "support-desk-triage-") || len(base) != len("support-desk-triage-")+8 {
 		t.Fatalf("name = %q", base)
 	}
-	if TemplateName("support-desk", "triage", digestA, "sha256:b", "") != base {
+	if TemplateName("support-desk", "triage", digestA, "sha256:b", Options{}) != base {
 		t.Fatal("same inputs must give the same name")
 	}
-	if TemplateName("support-desk", "triage", digestA, "sha256:c", "") == base {
+	if TemplateName("support-desk", "triage", digestA, "sha256:c", Options{}) == base {
 		t.Fatal("another binding must give another template")
 	}
-	if TemplateName("support-desk", "triage", "sha256:"+strings.Repeat("c", 64), "sha256:b", "") == base {
+	if TemplateName("support-desk", "triage", "sha256:"+strings.Repeat("c", 64), "sha256:b", Options{}) == base {
 		t.Fatal("another image must give another template")
 	}
 	// No model keeps the original formula, so an existing template keeps its name.
@@ -36,10 +36,10 @@ func TestTemplateNameIsContentAddressed(t *testing.T) {
 	if want := "support-desk-triage-" + hex.EncodeToString(sum[:])[:8]; base != want {
 		t.Fatalf("name = %q, want %q", base, want)
 	}
-	if TemplateName("support-desk", "triage", digestA, "sha256:b", "gpt-x") == base {
+	if TemplateName("support-desk", "triage", digestA, "sha256:b", Options{Model: "gpt-x"}) == base || TemplateName("support-desk", "triage", digestA, "sha256:b", Options{Memory: true}) == base {
 		t.Fatal("a model override must give another template")
 	}
-	long := TemplateName(strings.Repeat("Suite_", 20), strings.Repeat("agent.", 20), digestA, "sha256:b", "")
+	long := TemplateName(strings.Repeat("Suite_", 20), strings.Repeat("agent.", 20), digestA, "sha256:b", Options{})
 	if len(long) > 63 || !dnsLabel.MatchString(long) || long[len(long)-8:] != base[len(base)-8:] {
 		t.Fatalf("long name = %q (%d chars): want a DNS label of at most 63 that keeps hash8", long, len(long))
 	}
@@ -55,12 +55,12 @@ func TestRenderMapsTheComposition(t *testing.T) {
 		t.Fatal(err)
 	}
 	image := "localhost:5001/agentsuite-harness@" + digestA
-	out, err := Render(comp, image, b, "")
+	out, err := Render(comp, image, b, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	tmpl := out.Template
-	name := TemplateName("support-desk", "triage", digestA, b.Digest(), "")
+	name := TemplateName("support-desk", "triage", digestA, b.Digest(), Options{})
 	if tmpl.GetMetadata().GetName() != name || tmpl.GetMetadata().GetAtespace() != "agentsuite-demo" {
 		t.Fatalf("metadata = %v, want agentsuite-demo/%s", tmpl.GetMetadata(), name)
 	}
@@ -101,7 +101,7 @@ func TestRenderMapsTheComposition(t *testing.T) {
 	if out.DaemonFlag != "triage=agentsuite-demo/"+name {
 		t.Fatalf("daemon flag = %q", out.DaemonFlag)
 	}
-	if _, err := Render(comp, "localhost:5001/agentsuite-harness:latest", b, ""); err == nil {
+	if _, err := Render(comp, "localhost:5001/agentsuite-harness:latest", b, Options{}); err == nil {
 		t.Fatal("a tag-only image must be refused: substrate requires a digest-pinned reference")
 	}
 }
@@ -119,7 +119,7 @@ func TestRenderOverridesTheModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	image := "localhost:5001/agentsuite-harness@" + digestA
-	out, err := Render(comp, image, b, "gpt-x")
+	out, err := Render(comp, image, b, Options{Model: "gpt-x"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,9 +132,48 @@ func TestRenderOverridesTheModel(t *testing.T) {
 	if len(got) != 1 || got[0] != "gpt-x" {
 		t.Fatalf("%s in the template env = %v, want [gpt-x]", agent.ModelEnv, got)
 	}
-	name := TemplateName("support-desk", "triage", digestA, b.Digest(), "gpt-x")
+	name := TemplateName("support-desk", "triage", digestA, b.Digest(), Options{Model: "gpt-x"})
 	if out.Template.GetMetadata().GetName() != name || out.DaemonFlag != "triage=agentsuite-demo/"+name {
 		t.Fatalf("template %q, daemon flag %q: want both on %s", out.Template.GetMetadata().GetName(), out.DaemonFlag, name)
+	}
+}
+
+// The memory tier selects the RAM transcript in the template env, gets its own template name, and is
+// registered as REQUIRES_MEMORY_SNAPSHOT under <agent>-memory with the daemon flag's ,memory option.
+func TestRenderMemoryTier(t *testing.T) {
+	comp, err := Load("../suite", "triage", "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := LoadBinding("../binding.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := "localhost:5001/agentsuite-harness@" + digestA
+	out, err := Render(comp, image, b, Options{Memory: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range out.Template.GetContainers()[0].GetEnv() {
+		if e.GetName() == agent.MemoryEnv {
+			got = append(got, e.GetValue())
+		}
+	}
+	if len(got) != 1 || got[0] != agent.MemoryRAM {
+		t.Fatalf("%s in the template env = %v, want [%s]", agent.MemoryEnv, got, agent.MemoryRAM)
+	}
+	name := TemplateName("support-desk", "triage", digestA, b.Digest(), Options{Memory: true})
+	if name == TemplateName("support-desk", "triage", digestA, b.Digest(), Options{}) {
+		t.Fatal("memory and stateless tiers share a template name")
+	}
+	if out.Template.GetMetadata().GetName() != name || out.DaemonFlag != "triage-memory=agentsuite-demo/"+name+",memory" {
+		t.Fatalf("template %q, daemon flag %q", out.Template.GetMetadata().GetName(), out.DaemonFlag)
+	}
+	reg := out.Registration
+	if reg.GetMetadata().GetName() != "triage-memory" || reg.GetSpec().GetDescriptorId() != "triage" ||
+		reg.GetSpec().GetCapabilities().GetResumability() != v1.Resumability_RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT {
+		t.Fatalf("registration = %v", reg)
 	}
 }
 
@@ -211,12 +250,47 @@ func TestRenderRefusesUnsupportedAgents(t *testing.T) {
 			if err := supported(c.Agent); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("supported: err = %v, want %q", err, tc.wantErr)
 			}
-			if _, err := Render(&c, image, b, ""); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			if _, err := Render(&c, image, b, Options{}); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("Render: err = %v, want %q", err, tc.wantErr)
 			}
 		})
 	}
 	if err := supported(comp.Agent); err != nil {
 		t.Fatalf("the demo's triage agent must be supported: %v", err)
+	}
+}
+
+// The vendored copy of kaimahi's minimal suite loads, and each file still has the sha256 SOURCE
+// records for kaimahi 9c5c993 (the demo driver also checks the git blob ids).
+func TestVendoredKaimahiMinimal(t *testing.T) {
+	const dir = "../suites/kaimahi-minimal"
+	comp, err := Load(dir, "writer", "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if comp.Agent.Model.Model != "example-model" {
+		t.Fatalf("model = %q, want the fixture's example-model", comp.Agent.Model.Model)
+	}
+	src, err := os.ReadFile(filepath.Join(dir, "SOURCE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(src)), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 3 || strings.HasPrefix(line, "#") {
+			continue
+		}
+		files++
+		b, err := os.ReadFile(filepath.Join(dir, f[2]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sum := sha256.Sum256(b); hex.EncodeToString(sum[:]) != f[1] {
+			t.Errorf("%s: sha256 differs from SOURCE", f[2])
+		}
+	}
+	if files != 6 {
+		t.Fatalf("SOURCE lists %d files, want 6", files)
 	}
 }

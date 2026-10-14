@@ -52,7 +52,32 @@ cluster_listed() {
 export KUBECONFIG="${STATE}/kubeconfig"
 NS=agentsuite-demo
 ATESPACE=agentsuite-demo
-AGENT=triage
+# The suite (a directory under this one) and the agent in it that becomes the harness. The default
+# is the demo's own fixture, which has compositions for amd64 and arm64; kaimahi's minimal suite
+# (suites/kaimahi-minimal, agent writer) has only linux/amd64.
+SUITE_DIR="${AGENTSUITE_DEMO_SUITE:-suite}"
+AGENT="${AGENTSUITE_DEMO_AGENT:-triage}"
+if [[ ! "${AGENT}" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+	echo "AGENTSUITE_DEMO_AGENT=${AGENT}: want lowercase letters, digits and '-'" >&2
+	exit 1
+fi
+if [[ "${SUITE_DIR}" == /* || "${SUITE_DIR}" == *..* || ! -f "${HERE}/${SUITE_DIR}/agentsuite.json" ]]; then
+	echo "AGENTSUITE_DEMO_SUITE=${SUITE_DIR}: want a suite directory under ${HERE}" >&2
+	exit 1
+fi
+# The sandbox class of the agent's actors: microvm (kata + cloud-hypervisor; needs /dev/kvm in the
+# Docker host) unless gvisor is asked for, which is the only class a kind node without KVM (an arm64
+# Mac) can run. up.sh refuses microvm without KVM rather than fall back.
+SANDBOX="${AGENTSUITE_DEMO_SANDBOX:-microvm}"
+case "${SANDBOX}" in
+microvm) BINDING_FILE=binding-microvm.json WORKERPOOL_FILE=workerpool-microvm.yaml ;;
+gvisor) BINDING_FILE=binding.json WORKERPOOL_FILE=workerpool.yaml ;;
+*)
+	echo "AGENTSUITE_DEMO_SANDBOX=${SANDBOX}: want microvm or gvisor" >&2
+	exit 1
+	;;
+esac
+POOL="agentsuite-demo-${SANDBOX}"
 # Every cluster call names the demo's kind context explicitly; nothing here uses the caller's
 # current context.
 K=(kubectl --context "kind-${CLUSTER}" --kubeconfig "${KUBECONFIG}")

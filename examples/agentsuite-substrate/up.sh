@@ -1,11 +1,29 @@
 #!/usr/bin/env bash
 # Brings up the demo: a kind cluster with agent-substrate installed by its own kind lane (ate-setup),
-# a gVisor WorkerPool, the agent's harness image and ActorTemplate rendered from the AgentSuite
-# composition, the fake model, and agentsessionsd (substrate build) serving the agent as a harness.
+# the micro-VM sandbox class (or gVisor, AGENTSUITE_DEMO_SANDBOX=gvisor) and a WorkerPool for it, the
+# agent's harness image and two ActorTemplates rendered from the AgentSuite composition (the
+# stateless tier and the memory tier), the fake model, and two agentsessionsd Deployments (substrate
+# build): agentsessionsd serves the agent as harness <agent>, agentsessionsd-memory as
+# <agent>-memory.
+#
+# --substrate-only stops once ate-system, the sandbox class and the WorkerPool are up;
+# --templates-only once the ActorTemplates hold their golden snapshots, before the model Secret and
+# the Deployments change.
 #
 # Idempotent: an existing cluster, template or deployment is reused. See README.md for the tools.
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
+
+SUBSTRATE_ONLY=false TEMPLATES_ONLY=false
+case "${1:-}" in
+"") ;;
+--substrate-only) SUBSTRATE_ONLY=true ;;
+--templates-only) TEMPLATES_ONLY=true ;;
+*)
+	echo "usage: $0 [--substrate-only | --templates-only]" >&2
+	exit 2
+	;;
+esac
 
 step() { printf '\n==> %s\n' "$*"; }
 
@@ -34,7 +52,7 @@ refuse() {
 
 # The placeholders in deploy/agentsessionsd.yaml. Each is replaced literally, never through a sed
 # expression, so a value is copied as written ('&', '#' and '\' included).
-DAEMON_PLACEHOLDERS=(MODEL_ID MODEL_BASE_URL MODEL_PATH MODEL_AUTH_HEADER DAEMON_IMAGE SUBSTRATE_HARNESS_FLAG MODEL_SECRET_VERSION)
+DAEMON_PLACEHOLDERS=(MODEL_ID MODEL_BASE_URL MODEL_PATH MODEL_AUTH_HEADER DAEMON_NAME DAEMON_IMAGE SUBSTRATE_HARNESS_FLAG MODEL_SECRET_VERSION)
 # unfilled prints the placeholders the text $1 still contains, in DAEMON_PLACEHOLDERS order.
 unfilled() {
 	local p left=""
@@ -125,15 +143,22 @@ DAEMON_MANIFEST=${DAEMON_MANIFEST//MODEL_ID/"${MODEL_ID}"}
 DAEMON_MANIFEST=${DAEMON_MANIFEST//MODEL_BASE_URL/"${MODEL_BASE_URL}"}
 DAEMON_MANIFEST=${DAEMON_MANIFEST//MODEL_PATH/"${MODEL_PATH}"}
 DAEMON_MANIFEST=${DAEMON_MANIFEST//MODEL_AUTH_HEADER/"${MODEL_AUTH_HEADER}"}
-if [[ "$(unfilled "${DAEMON_MANIFEST}")" != "DAEMON_IMAGE SUBSTRATE_HARNESS_FLAG MODEL_SECRET_VERSION" ]]; then
-	refuse "deploy/agentsessionsd.yaml: after the model settings it holds the placeholders '$(unfilled "${DAEMON_MANIFEST}")', want DAEMON_IMAGE, SUBSTRATE_HARNESS_FLAG and MODEL_SECRET_VERSION"
+if [[ "$(unfilled "${DAEMON_MANIFEST}")" != "DAEMON_NAME DAEMON_IMAGE SUBSTRATE_HARNESS_FLAG MODEL_SECRET_VERSION" ]]; then
+	refuse "deploy/agentsessionsd.yaml: after the model settings it holds the placeholders '$(unfilled "${DAEMON_MANIFEST}")', want DAEMON_NAME, DAEMON_IMAGE, SUBSTRATE_HARNESS_FLAG and MODEL_SECRET_VERSION"
 fi
 
 # deploy/ and this script create the atespace ${ATESPACE}, and agentsessionsd's
 # -substrate-atespace names it, so the binding the template is rendered from must name it too.
-BINDING_ATESPACE="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("atespace", ""))' "${HERE}/binding.json")"
+BINDING_ATESPACE="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("atespace", ""))' "${HERE}/${BINDING_FILE}")"
 if [[ "${BINDING_ATESPACE}" != "${ATESPACE}" ]]; then
-	refuse "binding.json names atespace '${BINDING_ATESPACE}', but the demo deploys into atespace ${ATESPACE}"
+	refuse "${BINDING_FILE} names atespace '${BINDING_ATESPACE}', but the demo deploys into atespace ${ATESPACE}"
+fi
+
+# The micro-VM class needs /dev/kvm in the containers Docker runs (the kind node is one). Probe it the
+# way substrate's create-kind-cluster.sh does, which mounts it into the node only when the probe
+# passes; without it, refuse instead of falling back to gVisor.
+if [[ "${SANDBOX}" == microvm ]] && ! docker run --rm --device /dev/kvm busybox true >/dev/null 2>&1; then
+	refuse "AGENTSUITE_DEMO_SANDBOX=microvm needs /dev/kvm in the Docker host, and 'docker run --device /dev/kvm' failed; set AGENTSUITE_DEMO_SANDBOX=gvisor on a host without KVM (an arm64 Mac)"
 fi
 
 step "agent-substrate ${SUBSTRATE_REF:0:8} checkout in ${SUBSTRATE}"
@@ -236,56 +261,82 @@ fi
 step "kubectl-ate, built from the same substrate checkout"
 (cd "${SUBSTRATE}" && go build -o "${WORK}/bin/kubectl-ate" ./cmd/kubectl-ate)
 
-step "gVisor WorkerPool"
+if [[ "${SANDBOX}" == microvm ]] && ! "${K[@]}" get sandboxconfig microvm >/dev/null 2>&1; then
+	step "micro-VM sandbox class: kata assets and the microvm SandboxConfig (substrate's install-microvm-deps.sh)"
+	# Run once per cluster: assets already assembled in the substrate checkout are reused. ARCH is
+	# passed, since the script otherwise builds for its own GOARCH.
+	(cd "${SUBSTRATE}" && ARCH="${ARCH}" KO_DEFAULTPLATFORMS="linux/${ARCH}" KUBECTL_CONTEXT="kind-${CLUSTER}" \
+		ATE_INSTALL_KIND=true NO_DEV_ENV=true hack/install-microvm-deps.sh --install)
+fi
+
+step "${SANDBOX} WorkerPool ${POOL}"
 "${K[@]}" apply -f "${HERE}/deploy/namespace.yaml"
-ATEOM_IMAGE="$(cd "${SUBSTRATE}" && ko build --base-import-paths ./cmd/ateom-gvisor)"
-sed -e "s#ATEOM_IMAGE#${ATEOM_IMAGE}#" "${HERE}/deploy/workerpool.yaml" | "${K[@]}" apply -f -
-"${ROOT}/hack/wait-worker-pool.sh" agentsuite-demo-gvisor "${NS}" 600
+ATEOM_IMAGE="$(cd "${SUBSTRATE}" && ko build --base-import-paths "./cmd/ateom-${SANDBOX}")"
+sed -e "s#ATEOM_IMAGE#${ATEOM_IMAGE}#" "${HERE}/deploy/${WORKERPOOL_FILE}" | "${K[@]}" apply -f -
+"${ROOT}/hack/wait-worker-pool.sh" "${POOL}" "${NS}" 600
+if ${SUBSTRATE_ONLY}; then
+	step "substrate is up (--substrate-only); run ./up.sh again for the agent and agentsessionsd"
+	exit 0
+fi
 
 step "harness image for agent ${AGENT} (linux/${ARCH} composition)"
 CTXDIR="${STATE}/harness-image"
 rm -rf "${CTXDIR}" && mkdir -p "${CTXDIR}"
-(cd "${HERE}" && go run ./cmd/emit bundle -suite suite -agent "${AGENT}" -platform "linux/${ARCH}" -out "${CTXDIR}/agent")
+(cd "${HERE}" && go run ./cmd/emit bundle -suite "${SUITE_DIR}" -agent "${AGENT}" -platform "linux/${ARCH}" -out "${CTXDIR}/agent")
 (cd "${HERE}" && CGO_ENABLED=0 GOOS=linux GOARCH="${ARCH}" go build -trimpath -o "${CTXDIR}/harness" ./cmd/harness)
 docker build -q --platform "linux/${ARCH}" -f "${HERE}/Dockerfile.harness" -t "localhost:5001/agentsuite-harness:${AGENT}" "${CTXDIR}" >/dev/null
 docker push -q "localhost:5001/agentsuite-harness:${AGENT}" >/dev/null
 HARNESS_IMAGE="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:5001/agentsuite-harness:${AGENT}")"
 echo "harness image: ${HARNESS_IMAGE}"
 
-step "render the composition: ActorTemplate + harness registration"
-(cd "${HERE}" && go run ./cmd/emit render -suite suite -agent "${AGENT}" -platform "linux/${ARCH}" \
-	-binding binding.json -image "${HARNESS_IMAGE}" -model "${HARNESS_MODEL}" -out "${STATE}/render")
-TEMPLATE="$(cat "${STATE}/render/template-name")"
-cat "${STATE}/render/harness-registration.json"
+# Two tiers of the same agent and image: render/ is the stateless one (harness ${AGENT}, rebuilt from
+# the journal), render-memory/ the memory one (harness ${AGENT}-memory, conversation in RAM).
+# agentsessionsd serves one substrate harness, so each tier gets its own Deployment below.
+for tier in stateless memory; do
+	out="${STATE}/render"
+	if [[ "${tier}" == memory ]]; then out="${STATE}/render-memory"; fi
+	step "render the composition (${tier} tier): ActorTemplate + harness registration"
+	(cd "${HERE}" && go run ./cmd/emit render -suite "${SUITE_DIR}" -agent "${AGENT}" -platform "linux/${ARCH}" \
+		-binding "${BINDING_FILE}" -image "${HARNESS_IMAGE}" -model "${HARNESS_MODEL}" -tier "${tier}" -out "${out}")
+	cat "${out}/harness-registration.json"
+done
 
-step "atespace ${ATESPACE} and ActorTemplate ${TEMPLATE}; wait for its golden snapshot"
 "${ATE[@]}" get atespace "${ATESPACE}" >/dev/null 2>&1 || "${ATE[@]}" create atespace "${ATESPACE}"
-if ! "${ATE[@]}" get actor-template "${TEMPLATE}" -a "${ATESPACE}" >/dev/null 2>&1; then
-	"${ATE[@]}" create actor-template -f "${STATE}/render/actortemplate.json"
-fi
-golden_tag() {
-	"${ATE[@]}" get actor-template "${TEMPLATE}" -a "${ATESPACE}" -o json | python3 -c '
+for out in "${STATE}/render" "${STATE}/render-memory"; do
+	TEMPLATE="$(cat "${out}/template-name")"
+	step "ActorTemplate ${ATESPACE}/${TEMPLATE}; wait for its golden snapshot"
+	if ! "${ATE[@]}" get actor-template "${TEMPLATE}" -a "${ATESPACE}" >/dev/null 2>&1; then
+		"${ATE[@]}" create actor-template -f "${out}/actortemplate.json"
+	fi
+	golden_tag() {
+		"${ATE[@]}" get actor-template "${TEMPLATE}" -a "${ATESPACE}" -o json | python3 -c '
 import json, sys
 s = json.load(sys.stdin).get("status", {}).get("goldenSnapshotStatus", {})
 print("ERROR " + s["errorMessage"] if s.get("errorMessage") else s.get("goldenTag", {}).get("name", ""))'
-}
-deadline=$((SECONDS + 600))
-golden=""
-while [[ -z "${golden}" ]]; do
-	golden="$(golden_tag)"
-	if [[ -z "${golden}" ]]; then
-		((SECONDS < deadline)) || {
-			echo "timed out waiting for the golden snapshot" >&2
-			exit 1
-		}
-		sleep 5
-	fi
+	}
+	deadline=$((SECONDS + 600))
+	golden=""
+	while [[ -z "${golden}" ]]; do
+		golden="$(golden_tag)"
+		if [[ -z "${golden}" ]]; then
+			((SECONDS < deadline)) || {
+				echo "timed out waiting for the golden snapshot" >&2
+				exit 1
+			}
+			sleep 5
+		fi
+	done
+	[[ "${golden}" != ERROR* ]] || {
+		echo "golden snapshot failed: ${golden}" >&2
+		exit 1
+	}
+	echo "golden snapshot tag: ${golden}"
 done
-[[ "${golden}" != ERROR* ]] || {
-	echo "golden snapshot failed: ${golden}" >&2
-	exit 1
-}
-echo "golden snapshot tag: ${golden}"
+TEMPLATE="$(cat "${STATE}/render/template-name")"
+if ${TEMPLATES_ONLY}; then
+	step "ActorTemplates ready (--templates-only); run ./up.sh again for agentsessionsd"
+	exit 0
+fi
 
 # The fake model serves only the fixture run; with a real provider it is neither built nor deployed.
 FAKE_MODEL=true
@@ -300,11 +351,17 @@ DAEMON_IMAGE="$(cd "${ROOT}/integrations/substrate" && ko build --base-import-pa
 # Finish rendering everything but the Secret's version before the Secret changes. The model settings
 # were rendered at the top.
 DAEMON_MANIFEST=${DAEMON_MANIFEST//DAEMON_IMAGE/"${DAEMON_IMAGE}"}
+# One manifest per tier, differing in the Deployment's name and its -substrate-harness flag.
+MEMORY_MANIFEST=${DAEMON_MANIFEST//DAEMON_NAME/agentsessionsd-memory}
+MEMORY_MANIFEST=${MEMORY_MANIFEST//SUBSTRATE_HARNESS_FLAG/"$(cat "${STATE}/render-memory/agentsessionsd.args")"}
+DAEMON_MANIFEST=${DAEMON_MANIFEST//DAEMON_NAME/agentsessionsd}
 DAEMON_MANIFEST=${DAEMON_MANIFEST//SUBSTRATE_HARNESS_FLAG/"$(cat "${STATE}/render/agentsessionsd.args")"}
-if [[ "$(unfilled "${DAEMON_MANIFEST}")" != MODEL_SECRET_VERSION ]]; then
-	echo "rendered agentsessionsd.yaml: unexpected placeholders left: $(unfilled "${DAEMON_MANIFEST}"); the agentsessionsd-model Secret and the Deployment were not changed" >&2
-	exit 1
-fi
+for manifest in "${DAEMON_MANIFEST}" "${MEMORY_MANIFEST}"; do
+	if [[ "$(unfilled "${manifest}")" != MODEL_SECRET_VERSION ]]; then
+		echo "rendered agentsessionsd.yaml: unexpected placeholders left: $(unfilled "${manifest}"); the agentsessionsd-model Secret and the Deployments were not changed" >&2
+		exit 1
+	fi
+done
 if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	if [[ -n "${MODEL_API_KEY:-}" ]]; then
 		# Replace the key in place: render the Secret client-side and apply it, so a failed apply
@@ -331,12 +388,17 @@ if ${FAKE_MODEL}; then
 	sed -e "s#FAKEMODEL_IMAGE#${FAKEMODEL_IMAGE}#" "${HERE}/deploy/fakemodel.yaml" | "${K[@]}" apply -f -
 fi
 DAEMON_MANIFEST=${DAEMON_MANIFEST//MODEL_SECRET_VERSION/"${MODEL_SECRET_VERSION}"}
+MEMORY_MANIFEST=${MEMORY_MANIFEST//MODEL_SECRET_VERSION/"${MODEL_SECRET_VERSION}"}
 printf '%s\n' "${DAEMON_MANIFEST}" >"${STATE}/agentsessionsd.yaml"
+printf '%s\n' "${MEMORY_MANIFEST}" >"${STATE}/agentsessionsd-memory.yaml"
 "${K[@]}" apply -f "${STATE}/agentsessionsd.yaml"
+"${K[@]}" apply -f "${STATE}/agentsessionsd-memory.yaml"
 if ${FAKE_MODEL}; then
 	"${K[@]}" -n "${NS}" rollout status deploy/fakemodel --timeout=180s
 fi
-"${K[@]}" -n "${NS}" rollout status deploy/agentsessionsd --timeout=180s
-"${K[@]}" -n "${NS}" logs deploy/agentsessionsd | grep -E 'listening|substrate harness' || true
+for d in agentsessionsd agentsessionsd-memory; do
+	"${K[@]}" -n "${NS}" rollout status "deploy/${d}" --timeout=180s
+	"${K[@]}" -n "${NS}" logs "deploy/${d}" | grep -E 'listening|substrate harness' || true
+done
 
 step "up; now run ./demo.sh"

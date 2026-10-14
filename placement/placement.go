@@ -247,12 +247,9 @@ func (p *Placer) controllerOpts(fence int64, sessionUID string, observer control
 
 // computeInstance binds the controller to the compute instance inc was placed on, attributing a
 // recorded turn to this Placer as startedTurns does (ranHere), so the controller refuses compute that
-// replaced the instance this harness's earlier turns ran on. current is the registry name this
-// execution runs under.
-func (p *Placer) computeInstance(inc api.Incarnation, current string) controller.Option {
-	return controller.WithComputeInstance(inc.ComputeInstance, func(recorded string) bool {
-		return p.ranHere(recorded, current)
-	})
+// replaced the instance this harness's earlier turns ran on.
+func (p *Placer) computeInstance(inc api.Incarnation) controller.Option {
+	return controller.WithComputeInstance(inc.ComputeInstance, p.ranHere)
 }
 
 // WithStreamingModel supplies a model that reports partial output, which the controller relays as
@@ -358,7 +355,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	// this one's compute. The backend counts when it has seen the compute is missing, not here, so a
 	// turn another host journals in between is not missed (see api.SessionSpec.StartedTurns).
 	spec := &api.SessionSpec{SessionUID: sessionUID, StartedTurns: func() (int, error) {
-		return p.startedTurns(log, cfg.harness)
+		return p.startedTurns(log)
 	}}
 	createFinished := observability.StartDebug(ctx, p.logger, "placement", "create_compute",
 		"session_uid", sessionUID)
@@ -404,7 +401,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer),
 		controller.WithStart(cfg.config, cfg.resumeFromSeq),
 		controller.WithHarness(cfg.harness),
-		p.computeInstance(inc, cfg.harness))
+		p.computeInstance(inc))
 	c, err := controller.New(log, p.model, copts...)
 	if err != nil {
 		return inc, err
@@ -899,7 +896,7 @@ func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	if err != nil {
 		return api.SnapshotRef{}, fmt.Errorf("placement: read session journal: %w", err)
 	}
-	instance, _ := controller.LatestComputeInstance(recs, func(recorded string) bool { return p.ranHere(recorded, "") })
+	instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
 	inc := api.Incarnation{ID: sessionUID, ComputeInstance: instance}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
 	if err != nil {
@@ -993,7 +990,7 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		return err
 	}
 	copts := append(p.controllerOpts(fence, sessionUID, controller.Observer{}), controller.WithHarness(cfg.harness),
-		p.computeInstance(inc, cfg.harness))
+		p.computeInstance(inc))
 	c, err := controller.New(log, p.model, copts...)
 	if err != nil {
 		return err
@@ -1244,7 +1241,7 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if err != nil {
 		return api.SnapshotRef{}, nil, fmt.Errorf("placement: read parent journal: %w", err)
 	}
-	instance, _ := controller.LatestComputeInstance(recs, func(recorded string) bool { return p.ranHere(recorded, "") })
+	instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
 	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID, ComputeInstance: instance}, api.SnapshotExternal)
 	if err != nil {
 		return api.SnapshotRef{}, nil, err
@@ -1295,13 +1292,14 @@ func appendLifecycleAt(log eventlog.Store, expectedLastSeq, fence int64, lc api.
 // startedTurns counts the turns the journal records as started that ran on this Placer, the
 // inherited prefix of a forked child included: every EXECUTION_START, whether its turn completed,
 // failed or was interrupted, since a turn that did not complete may still have changed the harness's
-// state. current is the registry name this execution runs under (WithHarness).
+// state.
 //
 // A turn is attributed by the harness name its EXECUTION_START recorded (ranHere). A turn that cannot
-// be attributed (a turn with no recorded name, a name this host does not serve, or a legacy turn
-// written before EXECUTION_START existed) is counted: undercounting would let a memory-tier backend
-// cold-create compute for a session whose state it held, while overcounting can only refuse.
-func (p *Placer) startedTurns(log eventlog.Store, current string) (int, error) {
+// be attributed (a turn with no recorded name, a name this host does not serve, any turn on a Placer
+// outside a Registry, or a legacy turn written before EXECUTION_START existed) is counted:
+// undercounting would let a memory-tier backend cold-create compute for a session whose state it
+// held, while overcounting can only refuse.
+func (p *Placer) startedTurns(log eventlog.Store) (int, error) {
 	recs, err := log.Read(1)
 	if err != nil {
 		return 0, fmt.Errorf("placement: read journal: %w", err)
@@ -1317,7 +1315,7 @@ func (p *Placer) startedTurns(log eventlog.Store, current string) (int, error) {
 			if ev.ExecutionStart != nil {
 				recorded = ev.ExecutionStart.Harness
 			}
-			if p.ranHere(recorded, current) {
+			if p.ranHere(recorded) {
 				n++
 			}
 		case ev.ExecutionID == "" && isLegacyTurnEvent(ev.Kind):
@@ -1347,18 +1345,16 @@ func isLegacyTurnEvent(k api.EventKind) bool {
 }
 
 // ranHere reports whether a turn recorded under the harness name recorded may have run on this
-// Placer, for an execution running under the name current. In a Registry the answer is whether
-// recorded resolves to this Placer, so a name that aliases it counts; a standalone Placer has only
-// the name it is running under to compare. Every case it cannot decide counts as this Placer's.
-func (p *Placer) ranHere(recorded, current string) bool {
-	if recorded == "" {
+// Placer. In a Registry the answer is whether recorded resolves to this Placer, so a name that
+// aliases it counts. A standalone Placer has one backend and no map from names to backends, so a
+// turn recorded under any name may have run on it: every turn counts. Every case it cannot decide
+// counts as this Placer's.
+func (p *Placer) ranHere(recorded string) bool {
+	if recorded == "" || p.registry == nil {
 		return true
 	}
-	if p.registry != nil {
-		q, ok := p.registry.lookup(recorded)
-		return !ok || q == p
-	}
-	return current == "" || recorded == current
+	q, ok := p.registry.lookup(recorded)
+	return !ok || q == p
 }
 
 // lastSuspendRef returns the SnapshotRef from the most recent SUSPEND event THIS session wrote, or —

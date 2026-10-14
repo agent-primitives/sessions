@@ -16,6 +16,6 @@ func SetDescribeTimeout(t *testing.T, d time.Duration) {
 }
 
 // StartedTurns exposes the started-turn count Exec offers to Create.
-func (p *Placer) StartedTurns(log eventlog.Store, current string) (int, error) {
-	return p.startedTurns(log, current)
+func (p *Placer) StartedTurns(log eventlog.Store) (int, error) {
+	return p.startedTurns(log)
 }

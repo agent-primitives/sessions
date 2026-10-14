@@ -124,8 +124,10 @@ func TestStartedTurnsCountOnlyTurnsThisPlacerRan(t *testing.T) {
 	}
 }
 
-// A Placer outside a registry knows only the name it is running under, so it counts the turns
-// recorded under that name; run with no name, it cannot attribute anything and counts every turn.
+// A Placer outside a registry has one backend and cannot map a recorded name to another one, so a
+// turn recorded under any name may have run on it: every turn counts, whatever name the current one
+// runs under. Counting only the current name would let a memory-tier Create under a new name see 0
+// turns and cold-create over the state the session's earlier turns left.
 func TestStartedTurnsOnAStandalonePlacer(t *testing.T) {
 	inner := local.New(echoagent.Harness{})
 	t.Cleanup(func() { _ = inner.Close() })
@@ -135,11 +137,49 @@ func TestStartedTurnsOnAStandalonePlacer(t *testing.T) {
 	execAs(t, p, log, "a")
 	execAs(t, p, log, "b")
 	execAs(t, p, log, "a")
-	if got, want := createCounts(b), []int{0, 0, 1}; !slices.Equal(got, want) {
+	if got, want := createCounts(b), []int{0, 1, 2}; !slices.Equal(got, want) {
 		t.Errorf("StartedTurns per Create = %v, want %v", got, want)
 	}
-	if n, err := p.StartedTurns(log, ""); err != nil || n != 3 {
-		t.Errorf("StartedTurns with no name = %d, %v; want 3", n, err)
+	if n, err := p.StartedTurns(log); err != nil || n != 3 {
+		t.Errorf("StartedTurns = %d, %v; want 3", n, err)
+	}
+}
+
+// instanceBackend places every session on the compute instance named by instance, as a backend
+// that reports actor UIDs does; changing it stands in for the actor being replaced.
+type instanceBackend struct {
+	*local.Backend
+	instance string
+}
+
+func (b *instanceBackend) Create(ctx context.Context, s *api.SessionSpec) (api.Incarnation, error) {
+	inc, err := b.Backend.Create(ctx, s)
+	inc.ComputeInstance = b.instance
+	return inc, err
+}
+
+// A standalone Placer attributes the instance a turn recorded under another name to itself too, so
+// a replaced compute instance is refused under a renamed harness, not adopted as a fresh start.
+func TestStandalonePlacerRefusesALostInstanceUnderARenamedHarness(t *testing.T) {
+	inner := local.New(echoagent.Harness{})
+	t.Cleanup(func() { _ = inner.Close() })
+	b := &instanceBackend{Backend: inner, instance: "uid-1"}
+	p := placement.New(b, echoagent.Model)
+	log := eventlog.AsStore(eventlog.New())
+	execAs(t, p, log, "a")
+	execAs(t, p, log, "b") // the same instance under another name is accepted
+
+	b.instance = "uid-2"
+	head, err := log.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Exec(context.Background(), log, "sess", []api.Message{*api.TextMessage("user", "hi")}, head, placement.WithHarness("c"))
+	if !errors.Is(err, api.ErrMemoryStateLost) {
+		t.Fatalf("Exec under a renamed harness on a replaced instance = %v, want ErrMemoryStateLost", err)
+	}
+	if after, err := log.Head(); err != nil || after != head {
+		t.Fatalf("head moved from %d to %d (%v): the refused turn journaled something", head, after, err)
 	}
 }
 
@@ -201,7 +241,7 @@ func TestStartedTurnsCountsTurnsWithNoRecordedHarness(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if n, err := mem.StartedTurns(log, "mem"); err != nil || n != tc.want {
+			if n, err := mem.StartedTurns(log); err != nil || n != tc.want {
 				t.Errorf("StartedTurns = %d, %v; want %d", n, err, tc.want)
 			}
 		})

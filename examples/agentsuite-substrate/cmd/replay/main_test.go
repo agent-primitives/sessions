@@ -12,7 +12,9 @@ import (
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
+	"github.com/aramase/agentsessions/harness/echoagent"
 )
 
 func journal(t *testing.T, evs ...api.Event) []*v1.LogRecord {
@@ -41,8 +43,21 @@ func TestLoadJournal(t *testing.T) {
 		return append(started(harness), api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
 	}
 
-	t.Run("last turn's harness", func(t *testing.T) {
-		protos := journal(t, append(turn("first"), started("triage")...)...)
+	t.Run("last completed turn's harness", func(t *testing.T) {
+		protos := journal(t, append(turn("first"), turn("triage")...)...)
+		_, recs, harness, err := loadJournal("s", protos)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(recs) != 6 || harness != "triage" || completedTurns(recs) != 2 {
+			t.Fatalf("got %d records, %d completed, on harness %q, want 6, 2 on %q", len(recs), completedTurns(recs), harness, "triage")
+		}
+	})
+
+	// A turn that started on another harness (an override) and never ended is not replayed, so it
+	// does not choose the harness.
+	t.Run("an incomplete turn on another harness", func(t *testing.T) {
+		protos := journal(t, append(turn("triage"), started("override")...)...)
 		_, recs, harness, err := loadJournal("s", protos)
 		if err != nil {
 			t.Fatal(err)
@@ -120,5 +135,61 @@ func TestModelCalls(t *testing.T) {
 		if d := time.Since(start); d > 10*time.Second {
 			t.Errorf("%s: returned after %v", path, d)
 		}
+	}
+}
+
+// TestLoadJournalReplays runs the controller's Replay with the harness loadJournal picks, over a
+// journal whose completed turn ran on "triage" and whose last turn started on "override" and never
+// ended: the replay re-executes the completed turn with no model call instead of failing with
+// ErrHarnessMismatch.
+func TestLoadJournalReplays(t *testing.T) {
+	ctx := context.Background()
+	live := eventlog.New()
+	c, err := controller.New(eventlog.AsStore(live), echoagent.Model, controller.WithSessionUID("s"), controller.WithHarness("triage"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Exec(ctx, echoagent.Harness{}, []api.Message{*api.TextMessage("user", "ping")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	count := int64(1)
+	if _, err := live.Append(live.Head(), live.NewFence(), api.Event{
+		Kind:           api.EventExecutionStart,
+		ExecutionID:    "incomplete-override",
+		ExecutionStart: &api.ExecutionStart{InputCount: &count, Harness: "override"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var protos []*v1.LogRecord
+	for _, r := range live.Snapshot() {
+		protos = append(protos, eventlog.RecordToProto(r))
+	}
+
+	log, _, harness, err := loadJournal("s", protos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if harness != "triage" {
+		t.Fatalf("harness = %q, want triage", harness)
+	}
+	r, err := controller.New(eventlog.AsStore(log), echoagent.Model, controller.WithSessionUID("s"), controller.WithHarness(harness))
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs, err := r.Replay(ctx, echoagent.Harness{})
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if len(outputs) != 1 || outputs[0] != "echo:ping" || r.ModelInvocations() != 0 {
+		t.Fatalf("outputs %v with %d model calls, want [echo:ping] with 0", outputs, r.ModelInvocations())
+	}
+
+	// The harness of the incomplete turn is the one the old loader picked; Replay refuses it.
+	m, err := controller.New(eventlog.AsStore(log), echoagent.Model, controller.WithSessionUID("s"), controller.WithHarness("override"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Replay(ctx, echoagent.Harness{}); !errors.Is(err, controller.ErrHarnessMismatch) {
+		t.Fatalf("Replay on the override = %v, want ErrHarnessMismatch", err)
 	}
 }

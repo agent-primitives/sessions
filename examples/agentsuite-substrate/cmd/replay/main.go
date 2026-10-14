@@ -139,20 +139,28 @@ func modelCalls(ctx context.Context, statsURL string) (int64, error) {
 	return s.Calls, nil
 }
 
-// loadJournal turns the session's records into a verified log and returns the harness its last turn
-// ran on (empty for a journal written before EXECUTION_START named it). A session with no records,
-// or with no completed turn, has nothing to replay and is refused: the controller re-executes only
-// completed turns, so reporting such a replay as OK would claim a re-execution that never ran.
+// loadJournal turns the session's records into a verified log and returns the harness its last
+// completed turn ran on (empty for a journal written before EXECUTION_START named it). The
+// controller's Replay checks the harness only against completed turns, so a later turn that started
+// on another harness (an override) and never reached END does not choose it. A session with no
+// records, or with no completed turn, has nothing to replay and is refused: the controller
+// re-executes only completed turns, so reporting such a replay as OK would claim a re-execution that
+// never ran.
 func loadJournal(uid string, protos []*v1.LogRecord) (*eventlog.Log, []eventlog.Record, string, error) {
 	if len(protos) == 0 {
 		return nil, nil, "", fmt.Errorf("session %s has no journal records: nothing to replay", uid)
 	}
 	recs := make([]eventlog.Record, 0, len(protos))
 	harness := ""
+	// The harness each execution started on, by execution ID ("" for a legacy journal).
+	started := map[string]string{}
 	for _, p := range protos {
 		r := eventlog.RecordFromProto(p)
-		if r.Event.Kind == api.EventExecutionStart && r.Event.ExecutionStart != nil && r.Event.ExecutionStart.Harness != "" {
-			harness = r.Event.ExecutionStart.Harness
+		switch {
+		case r.Event.Kind == api.EventExecutionStart && r.Event.ExecutionStart != nil:
+			started[r.Event.ExecutionID] = r.Event.ExecutionStart.Harness
+		case r.Event.Kind == api.EventEnd && started[r.Event.ExecutionID] != "":
+			harness = started[r.Event.ExecutionID]
 		}
 		recs = append(recs, r)
 	}

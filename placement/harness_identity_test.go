@@ -170,7 +170,7 @@ func TestPlacerResumeDoesNotVersionCheckConfiguredMemoryDescriptor(t *testing.T)
 		ID: "configured-id", Version: "new-image-v2", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot},
 	})
 	p := placement.New(backend, echoModelForIdentity,
-		placement.WithDialer(func(string) (api.Harness, func() error, error) {
+		placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 			return h, func() error { closes.Add(1); return nil }, nil
 		}),
 		placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
@@ -183,7 +183,9 @@ func TestPlacerResumeDoesNotVersionCheckConfiguredMemoryDescriptor(t *testing.T)
 	if h.runs.Load() != 1 || tools.Load() != 1 || closes.Load() != 1 {
 		t.Fatalf("restored recovery Run/tool/close=%d/%d/%d", h.runs.Load(), tools.Load(), closes.Load())
 	}
-	if !reflect.DeepEqual(ctl.calls, []string{"resume:memory-identity:boot=false"}) {
+	// ResumeActor restores the actor's own memory snapshot; a create or clone would mean a fresh
+	// actor from the configured image instead.
+	if !reflect.DeepEqual(ctl.calls, []string{"resume:memory-identity"}) {
 		t.Fatalf("memory recovery did not restore original snapshot: %v", ctl.calls)
 	}
 	if err := log.Verify(); err != nil {

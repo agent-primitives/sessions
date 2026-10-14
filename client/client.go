@@ -146,6 +146,10 @@ type ExecOptions struct {
 	Inputs []string
 	// Harness overrides the session's configured harness for this turn.
 	Harness string
+	// Config is opaque per-execution configuration passed to the harness. It is journaled in
+	// EXECUTION_START and exposed by Replay; do not put credentials here.
+	// Nil sends no config; it is not carried over from earlier turns.
+	Config []byte
 	// ExpectedLastSeq opts into the single-writer compare-and-swap. Nil appends at the current
 	// head. A stale value comes back as codes.Aborted rather than interleaving silently.
 	ExpectedLastSeq *int64
@@ -185,6 +189,7 @@ func (c *Client) Exec(ctx context.Context, opts ExecOptions) (*TurnResult, error
 	req := &v1.ExecRequest{
 		Session:         opts.Session,
 		Harness:         opts.Harness,
+		Config:          opts.Config,
 		ExpectedLastSeq: opts.ExpectedLastSeq,
 	}
 	for _, in := range opts.Inputs {
@@ -293,8 +298,9 @@ func (c *Client) Suspend(ctx context.Context, uid string) (*v1.Session, error) {
 	return c.stub.Suspend(ctx, &v1.SuspendRequest{Session: uid})
 }
 
-// Resume brings a suspended session back. boot cold-boots and replays instead of restoring a
-// snapshot.
+// Resume brings a suspended session back. boot is sent as ResumeRequest.boot, which is deprecated:
+// the reference service ignores it, and the Runtime backend chooses how the session comes back.
+// It is still sent so a server that reads the field sees what the caller asked for.
 func (c *Client) Resume(ctx context.Context, uid string, boot bool) (*v1.Session, error) {
-	return c.stub.Resume(ctx, &v1.ResumeRequest{Session: uid, Boot: boot})
+	return c.stub.Resume(ctx, &v1.ResumeRequest{Session: uid, Boot: boot}) //nolint:staticcheck // SA1019: boot is deprecated but still forwarded, see above.
 }

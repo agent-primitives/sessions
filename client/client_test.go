@@ -1,7 +1,9 @@
 package client_test
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"testing"
 
@@ -84,6 +86,58 @@ func TestExecCreatesSessionAndReturnsOutput(t *testing.T) {
 	}
 	if len(turn.Records) != 5 {
 		t.Fatalf("records = %d, want 5", len(turn.Records))
+	}
+}
+
+func TestExecConfigIsJournaledAndReplayed(t *testing.T) {
+	c := newClient(t)
+	var uid string
+	fromSeq := int64(1)
+	// Order matters: unset follows opaque bytes on the same session to verify no config carry-over.
+	for _, tt := range []struct {
+		name   string
+		config []byte
+	}{
+		{name: "opaque bytes", config: []byte{0, 255, ' ', '\n', '\t'}},
+		{name: "unset"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			turn, err := c.Exec(t.Context(), client.ExecOptions{
+				Session: uid,
+				Inputs:  []string{"hello"},
+				Config:  tt.config,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			uid = turn.Session.GetMetadata().GetUid()
+			replayed, err := c.Replay(t.Context(), uid, fromSeq, turn.LastSeq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fromSeq = turn.LastSeq + 1
+			for name, records := range map[string][]*v1.LogRecord{
+				"exec": turn.Records, "replay": replayed,
+			} {
+				starts := 0
+				for _, rec := range records {
+					if rec.GetEvent().GetKind() != v1.EventKind_EVENT_EXECUTION_START {
+						continue
+					}
+					starts++
+					start := rec.GetEvent().GetExecutionStart()
+					if start == nil {
+						t.Fatalf("%s: EXECUTION_START has no body", name)
+					}
+					if got := start.GetConfig(); !bytes.Equal(got, tt.config) {
+						t.Fatalf("%s: config = %x, want %x", name, got, tt.config)
+					}
+				}
+				if starts != 1 {
+					t.Fatalf("%s: EXECUTION_START count = %d, want 1", name, starts)
+				}
+			}
+		})
 	}
 }
 
@@ -313,5 +367,38 @@ func TestSessionsExposesTheUnderlyingStub(t *testing.T) {
 	}
 	if _, err := c.Sessions().GetSession(t.Context(), &v1.GetSessionRequest{Uid: "sess-missing"}); status.Code(err) != codes.NotFound {
 		t.Fatalf("stub call: want NotFound, got %v", err)
+	}
+}
+
+// ResumeRequest.boot is deprecated and the reference service ignores it, but the SDK still sends
+// the caller's value so a server that reads the field sees it.
+func TestResumeForwardsTheDeprecatedBootField(t *testing.T) {
+	for _, boot := range []bool{true, false} {
+		t.Run(fmt.Sprintf("boot=%t", boot), func(t *testing.T) {
+			var sent *v1.ResumeRequest
+			c, err := client.Dial("passthrough:///unused", client.WithDialOptions(
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithUnaryInterceptor(func(_ context.Context, _ string, req, _ any, _ *grpc.ClientConn, _ grpc.UnaryInvoker, _ ...grpc.CallOption) error {
+					sent, _ = req.(*v1.ResumeRequest)
+					return nil
+				}),
+			))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = c.Close() })
+
+			if _, err := c.Resume(t.Context(), "sess-1", boot); err != nil {
+				t.Fatal(err)
+			}
+			if sent == nil || sent.GetSession() != "sess-1" {
+				t.Fatalf("Resume sent %v, want a ResumeRequest for sess-1", sent)
+			}
+			// Read through reflection: the generated Boot field and GetBoot are deprecated.
+			m := sent.ProtoReflect()
+			if got := m.Get(m.Descriptor().Fields().ByName("boot")).Bool(); got != boot {
+				t.Fatalf("Resume sent boot=%t, want %t", got, boot)
+			}
+		})
 	}
 }

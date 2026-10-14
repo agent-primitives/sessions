@@ -203,11 +203,14 @@ stateDiagram-v2
   `DeleteSession` does not exist yet and a harness with sessions must stay resolvable.
 
 The registry is an admin API. `agentsessionsd` loads stored registrations on every start, even
-without the operator listener: existing sessions on retired harnesses still route to their backend.
+without the operator listener: existing sessions on retired harnesses still route to their backend
+when this host can serve the registration. Both new and stored remote registrations require
+`-model`; without it, stored remote registrations load as unservable and their existing sessions
+fail `FAILED_PRECONDITION`, whether active or retired.
 With `-registry-addr 127.0.0.1:8081` it serves `HarnessRegistry` alone on a separate, literal-loopback
 plaintext gRPC listener; the Sessions listener serves only Sessions. Its factory attaches remote
-harnesses without dialing during registration and requires `-model` for new remote registrations;
-this daemon does not support substrate placements. See [security.md](security.md).
+harnesses without dialing during registration; this daemon does not support substrate placements.
+See [security.md](security.md).
 
 ## Runtime backends (`runtime/`)
 

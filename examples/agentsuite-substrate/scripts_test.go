@@ -32,8 +32,8 @@ type stubs struct {
 // digest is the image digest the ko and docker stubs report.
 const digest = "sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-// emit is cmd/emit, built once for the run, which the go stub runs for up.sh's `go run ./cmd/emit
-// check-model`, so the tests exercise the real check rather than a stand-in.
+// emit is cmd/emit, built once for the run, which the go stub copies into place for up.sh's `go
+// build -o ... ./cmd/emit`, so up.sh's check-model runs the real check rather than a stand-in.
 var emit struct {
 	once sync.Once
 	dir  string
@@ -127,14 +127,17 @@ inspect)
 	;;
 esac
 `)
-	// go runs the real emit check-model. Otherwise it stands in for the first step after the
-	// cluster phase (building kubectl-ate) and stops the run there with a status the tests
-	// recognize, unless STUB_FULL is set: then it succeeds, and emit render writes the files up.sh
-	// reads.
+	// go build of cmd/emit installs the real emit, or fails as a broken build does when
+	// STUB_EMIT_BUILD_FAIL is set. Otherwise go stands in for the first step after the cluster
+	// phase (building kubectl-ate) and stops the run there with a status the tests recognize, unless
+	// STUB_FULL is set: then it succeeds, and emit render writes the files up.sh reads.
 	stub(t, bin, "go", log+`
-if [ "$1 $2 $3" = "run ./cmd/emit check-model" ]; then
-	shift 2
-	exec "`+emitBinary(t)+`" "$@"
+if [ "$1 $2 $4" = "build -o ./cmd/emit" ]; then
+	if [ -n "${STUB_EMIT_BUILD_FAIL:-}" ]; then
+		echo "cmd/emit/main.go:1:1: expected 'package', found broken" >&2
+		exit 1
+	fi
+	exec /bin/cp "`+emitBinary(t)+`" "$3"
 fi
 [ -n "${STUB_FULL:-}" ] || exit 97
 if [ "$1 $2 $3" = "run ./cmd/emit render" ]; then
@@ -547,6 +550,37 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			wantOut: "AGENTSUITE_MODEL_BASE_URL 'api.example.com/v1' with AGENTSUITE_MODEL 'm' would not start agentsessionsd: emit: openai: base URL \"api.example.com/v1\" is not absolute (want scheme://host[/path]); nothing was changed",
 		},
 		{
+			// emit is built and run as a binary, so go run's own "exit status 1" line is not
+			// appended to the reason.
+			name: "a base URL with a port that is not a number, reported alone",
+			env: func(*testing.T) []string {
+				return append(provider, "AGENTSUITE_MODEL_BASE_URL=http://host:abc/v1")
+			},
+			wantOut: "would not start agentsessionsd: emit: openai: base URL: parse \"http://host:abc/v1\": invalid port \":abc\" after host; nothing was changed",
+		},
+		{
+			name:    "an emit that does not build",
+			env:     func(*testing.T) []string { return append(provider, "STUB_EMIT_BUILD_FAIL=1") },
+			wantOut: "cannot build cmd/emit to check AGENTSUITE_MODEL_BASE_URL and AGENTSUITE_MODEL: cmd/emit/main.go:1:1: expected 'package', found broken; nothing was changed",
+		},
+		{
+			name:    "a base URL without a model",
+			env:     func(*testing.T) []string { return []string{"AGENTSUITE_MODEL_BASE_URL=https://llm.example/v1"} },
+			wantOut: "AGENTSUITE_MODEL_BASE_URL is set without AGENTSUITE_MODEL; set the provider's model; nothing was changed",
+		},
+		{
+			// Without a URL the run would pick the fake model, delete the stored key and replace
+			// the daemon's pod, dropping its journal.
+			name:    "a model without a base URL",
+			env:     func(*testing.T) []string { return []string{"AGENTSUITE_MODEL=m"} },
+			wantOut: "AGENTSUITE_MODEL is set without AGENTSUITE_MODEL_BASE_URL; set both for a real provider, or unset AGENTSUITE_MODEL for the fake model; nothing was changed",
+		},
+		{
+			name:    "a key without a base URL",
+			env:     func(*testing.T) []string { return []string{"MODEL_API_KEY=k"} },
+			wantOut: "MODEL_API_KEY is set without AGENTSUITE_MODEL_BASE_URL; set both for a real provider, or unset MODEL_API_KEY for the fake model; nothing was changed",
+		},
+		{
 			name: "a base URL with no host",
 			env: func(*testing.T) []string {
 				return append(provider, "AGENTSUITE_MODEL_BASE_URL=https:///v1")
@@ -595,6 +629,9 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			code, out, calls := s.run(t, "up.sh", append(tc.env(t), "STUB_CLUSTERS="+cluster, "STUB_FULL=1")...)
 			if code != 1 || !strings.Contains(out, tc.wantOut) {
 				t.Fatalf("up.sh exit %d, want 1 with %q\noutput:\n%s", code, tc.wantOut, out)
+			}
+			if strings.Contains(out, "exit status") {
+				t.Errorf("output carries a go run exit status:\n%s", out)
 			}
 			for _, c := range []string{"git ", "kind ", "kubectl", "create-kind-cluster.sh", "ko "} {
 				if strings.Contains(calls, c) {

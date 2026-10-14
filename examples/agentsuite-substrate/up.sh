@@ -44,10 +44,23 @@ unfilled() {
 	echo "${left}"
 }
 
+# Only AGENTSUITE_MODEL_BASE_URL selects a real provider. A model or key without it is a provider run
+# that lost its URL: going on would switch to the fake model, delete the stored key and replace the
+# daemon's pod, dropping its emptyDir journal.
+if [[ -z "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
+	for var in AGENTSUITE_MODEL MODEL_API_KEY; do
+		if [[ -n "${!var:-}" ]]; then
+			refuse "${var} is set without AGENTSUITE_MODEL_BASE_URL; set both for a real provider, or unset ${var} for the fake model"
+		fi
+	done
+fi
 if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	# A real OpenAI-compatible provider.
 	MODEL_BASE_URL="${AGENTSUITE_MODEL_BASE_URL}"
-	MODEL_ID="${AGENTSUITE_MODEL:?set AGENTSUITE_MODEL with AGENTSUITE_MODEL_BASE_URL}"
+	if [[ -z "${AGENTSUITE_MODEL:-}" ]]; then
+		refuse "AGENTSUITE_MODEL_BASE_URL is set without AGENTSUITE_MODEL; set the provider's model"
+	fi
+	MODEL_ID="${AGENTSUITE_MODEL}"
 	# The harness requests the provider's model, not the fixture's.
 	HARNESS_MODEL="${MODEL_ID}"
 	# Both land in a YAML plain scalar: whitespace or a control character would change the YAML
@@ -65,7 +78,12 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	# The Deployment recreates its pod, and the journal is an emptyDir, so letting such a value
 	# through would delete the running daemon's sessions and leave a pod that never starts. emit
 	# check-model builds the client with the daemon's own constructor, and also requires http(s).
-	if ! reason="$(cd "${HERE}" && go run ./cmd/emit check-model -base-url "${AGENTSUITE_MODEL_BASE_URL}" -model "${MODEL_ID}" 2>&1)"; then
+	# It is built first and run as a binary: go run would append its own "exit status 1" to the
+	# reason, and a build failure is not a verdict on the values.
+	if ! reason="$(cd "${HERE}" && go build -o "${WORK}/bin/emit" ./cmd/emit 2>&1)"; then
+		refuse "cannot build cmd/emit to check AGENTSUITE_MODEL_BASE_URL and AGENTSUITE_MODEL: ${reason}"
+	fi
+	if ! reason="$("${WORK}/bin/emit" check-model -base-url "${AGENTSUITE_MODEL_BASE_URL}" -model "${MODEL_ID}" 2>&1)"; then
 		refuse "AGENTSUITE_MODEL_BASE_URL '${AGENTSUITE_MODEL_BASE_URL}' with AGENTSUITE_MODEL '${MODEL_ID}' would not start agentsessionsd: ${reason}"
 	fi
 else

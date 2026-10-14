@@ -98,16 +98,18 @@ AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 AGENTSUITE_MODEL=<model> MOD
 AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 ./demo.sh
 ```
 
-`up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL`, either one with
-whitespace or a control character in it, a URL that is not `http` or `https`, and any pair
-`agentsessionsd` would refuse at startup, before it changes the cluster, so a misconfigured rerun
-leaves the running daemon, its journal and an existing key in place. `emit check-model` makes the
-last check: it builds the model client with the daemon's own constructor (`internal/modelconfig`),
-so it refuses the same URLs (no scheme or host, a bad port or `%` escape). Both values are copied
-into the Deployment as written. A query in the URL (an `api-version`, say) is sent with every
-completion request, after `/chat/completions` is joined to the URL's path; a fragment is dropped.
-It applies the key to the `agentsessionsd-model` Secret through stdin, so it never appears in argv
-or a file, and a failed apply leaves the stored key unchanged. `agentsessionsd` reads the key only when it starts, so `up.sh` stamps the Secret's
+`up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL`, `AGENTSUITE_MODEL` or
+`MODEL_API_KEY` without `AGENTSUITE_MODEL_BASE_URL` (only the URL selects a real provider, so the
+run would otherwise switch to the fake model), either value with whitespace or a control character
+in it, a URL that is not `http` or `https`, and any pair `agentsessionsd` would refuse at startup,
+before it changes the cluster, so a misconfigured rerun leaves the running daemon, its journal and
+an existing key in place. `emit check-model` makes the last check: it builds the model client with
+the daemon's own constructor (`internal/modelconfig`), so it refuses the same URLs (no scheme or
+host, a bad port or `%` escape). Both values are copied into the Deployment as written. A query in
+the URL (an `api-version`, say) is sent with every completion request, after `/chat/completions` is
+joined to the URL's path; a fragment is dropped. It applies the key to the `agentsessionsd-model`
+Secret through stdin, so it never appears in argv or a file, and a failed apply leaves the stored
+key unchanged. `agentsessionsd` reads the key only when it starts, so `up.sh` stamps the Secret's
 version into the Deployment's pod template: a new or deleted key restarts the pod, which also drops
 its emptyDir journal, and an unchanged key leaves it running. It does not build or deploy the fake
 model. It points `agentsessionsd` at the endpoint, and the harness requests `AGENTSUITE_MODEL`

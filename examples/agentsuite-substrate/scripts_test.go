@@ -403,6 +403,12 @@ func TestDown(t *testing.T) {
 			node: "node-1", wantCode: 1, wantOut: "kind get clusters failed", wantKept: true,
 		},
 		{name: "an absent cluster drops the records", wantOut: "nothing to delete"},
+		{
+			// kind may not list a cluster whose container still exists (mid-create, lost labels); the
+			// record is all that lets a later down.sh delete it.
+			name: "an unlisted cluster whose container exists keeps the records", node: "node-1",
+			wantCode: 1, wantOut: "container demo-control-plane exists", wantKept: true,
+		},
 		{name: "an owned cluster is deleted", env: []string{"STUB_CLUSTERS=" + cluster}, node: "node-1", wantDelete: true},
 		{
 			name: "a cluster up.sh did not create is refused", env: []string{"STUB_CLUSTERS=" + cluster},
@@ -516,6 +522,19 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 
 // up.sh renders the agentsessionsd Deployment with every value copied as written: a model URL with
 // '&' and '#' (which a sed s### expression would mangle or choke on) reaches the manifest intact.
+// stdin returns what the scripts piped into kubectl -f - during the last run.
+func stdin(t *testing.T, s *stubs) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(s.dir, "kubectl-stdin"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// The model base URL is copied into the Deployment as written, query and fragment included.
+// model/openai joins the completions path to the URL's path and keeps its query, so such a URL
+// reaches the provider's completions endpoint (TestBaseURLWithAQueryOrFragmentKeepsTheCompletionsPath).
 func TestUpRendersTheDaemon(t *testing.T) {
 	const (
 		url   = "https://llm.example/v1?api-version=2&tenant=a#b"
@@ -579,6 +598,16 @@ func TestUpRendersTheDaemon(t *testing.T) {
 			apply := strings.Index(calls, "apply -f "+path)
 			if secret < 0 || apply < secret {
 				t.Errorf("want %q, then apply -f %s:\n%s", tc.wantSecret, path, calls)
+			}
+			// The fake model is built, deployed and waited for only when it serves the run.
+			fake := tc.env == nil
+			for _, call := range []string{"ko build --base-import-paths ./cmd/fakemodel", "rollout status deploy/fakemodel"} {
+				if got := strings.Contains(calls, call); got != fake {
+					t.Errorf("%q called = %v, want %v:\n%s", call, got, fake, calls)
+				}
+			}
+			if got := strings.Contains(stdin(t, s), "name: fakemodel"); got != fake {
+				t.Errorf("fakemodel manifest applied = %v, want %v", got, fake)
 			}
 			// The kubeconfig and the composition are this cluster's.
 			if !strings.Contains(calls, "kind export kubeconfig --name demo --kubeconfig "+filepath.Join(s.work, "cluster-demo", "kubeconfig")) ||

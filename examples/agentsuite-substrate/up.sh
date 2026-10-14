@@ -120,6 +120,7 @@ if [[ "${stage}" == absent || "${stage}" == incomplete ]]; then
 	# Record ownership as soon as the node exists, even when the script fails, or up.sh is
 	# interrupted, after kind created it, so a rerun can finish the cluster and down.sh can delete it.
 	record_owner() {
+		local id
 		id="$(node_id)"
 		if [[ -n "${id}" ]]; then
 			echo "${id}" >"${OWNED}"
@@ -134,6 +135,7 @@ if [[ "${stage}" == absent || "${stage}" == incomplete ]]; then
 	(cd "${SUBSTRATE}" && hack/create-kind-cluster.sh) || rc=$?
 	trap - EXIT INT TERM
 	record_owner
+	id="$(node_id)"
 	if ((rc != 0)); then
 		echo "create-kind-cluster.sh failed (exit ${rc}); rerun up.sh to recreate the cluster" >&2
 		exit "${rc}"
@@ -209,8 +211,15 @@ done
 }
 echo "golden snapshot tag: ${golden}"
 
-step "fake model and agentsessionsd (substrate build)"
-FAKEMODEL_IMAGE="$(cd "${HERE}" && ko build --base-import-paths ./cmd/fakemodel)"
+# The fake model serves only the fixture run; with a real provider it is neither built nor deployed.
+FAKE_MODEL=true
+if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then FAKE_MODEL=false; fi
+if ${FAKE_MODEL}; then
+	step "fake model and agentsessionsd (substrate build)"
+	FAKEMODEL_IMAGE="$(cd "${HERE}" && ko build --base-import-paths ./cmd/fakemodel)"
+else
+	step "agentsessionsd (substrate build) for ${AGENTSUITE_MODEL_BASE_URL}"
+fi
 DAEMON_IMAGE="$(cd "${ROOT}/integrations/substrate" && ko build --base-import-paths ./cmd/agentsessionsd)"
 # Finish rendering everything but the Secret's version before the Secret changes. The model settings
 # were rendered at the top.
@@ -242,11 +251,15 @@ fi
 # leaves the pod (and its emptyDir journal) alone.
 MODEL_SECRET_VERSION="$("${K[@]}" -n "${NS}" get secret agentsessionsd-model --ignore-not-found -o jsonpath='{.metadata.resourceVersion}')"
 MODEL_SECRET_VERSION="${MODEL_SECRET_VERSION:-none}"
-sed -e "s#FAKEMODEL_IMAGE#${FAKEMODEL_IMAGE}#" "${HERE}/deploy/fakemodel.yaml" | "${K[@]}" apply -f -
+if ${FAKE_MODEL}; then
+	sed -e "s#FAKEMODEL_IMAGE#${FAKEMODEL_IMAGE}#" "${HERE}/deploy/fakemodel.yaml" | "${K[@]}" apply -f -
+fi
 DAEMON_MANIFEST=${DAEMON_MANIFEST//MODEL_SECRET_VERSION/"${MODEL_SECRET_VERSION}"}
 printf '%s\n' "${DAEMON_MANIFEST}" >"${STATE}/agentsessionsd.yaml"
 "${K[@]}" apply -f "${STATE}/agentsessionsd.yaml"
-"${K[@]}" -n "${NS}" rollout status deploy/fakemodel --timeout=180s
+if ${FAKE_MODEL}; then
+	"${K[@]}" -n "${NS}" rollout status deploy/fakemodel --timeout=180s
+fi
 "${K[@]}" -n "${NS}" rollout status deploy/agentsessionsd --timeout=180s
 "${K[@]}" -n "${NS}" logs deploy/agentsessionsd | grep -E 'listening|substrate harness' || true
 

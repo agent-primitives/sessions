@@ -323,11 +323,11 @@ func TestGetActorReportsNotFoundAsSentinel(t *testing.T) {
 	}
 }
 
-// Substrate refuses SuspendActor of a missing actor with NOT_FOUND (controlapi/actor.go
-// RPCService.SuspendActor, from the store lookup in controlapi/workflow_suspend.go). The
-// ControlClient contract requires ErrActorNotFound for it, as from GetActor, so a memory-tier Snapshot
-// can report the session's in-RAM state as lost; it is not ErrActorBusy, and substrate's reason is
-// kept.
+// Substrate refuses SuspendActor of a missing actor with NOT_FOUND (RPCService.SuspendActor in
+// cmd/ateapi/internal/controlapi/actor.go, from the store lookup in
+// cmd/ateapi/internal/controlapi/workflow_suspend.go). The ControlClient contract requires
+// ErrActorNotFound for it, as from GetActor, so a memory-tier Snapshot can report the session's
+// in-RAM state as lost; it is not ErrActorBusy, and substrate's reason is kept.
 func TestSuspendActorReportsNotFoundAsSentinel(t *testing.T) {
 	f := &fakeControl{suspendErr: status.Error(codes.NotFound, "Actor gone not found")}
 	_, err := FromClient(f).SuspendActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: "gone"})

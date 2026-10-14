@@ -83,10 +83,10 @@ func (ad *Adapter) ResumeActor(ctx context.Context, actor substrate.ActorRef) (s
 // the suspend left it: the external snapshot it now holds (see heldSnapshot) and its UID. Substrate
 // refuses a suspend while another operation holds the actor's lease with ABORTED, reported as
 // substrate.ErrActorBusy, and a missing actor with NOT_FOUND (RPCService.SuspendActor in
-// controlapi/actor.go maps the store's ErrNotFound from ActorWorkflow.SuspendActor in
-// controlapi/workflow_suspend.go), reported as substrate.ErrActorNotFound, which the ControlClient
-// contract requires: a memory-tier Snapshot reads it as the session's in-RAM state being gone, not
-// as a transport failure.
+// cmd/ateapi/internal/controlapi/actor.go maps the store's ErrNotFound from
+// ActorWorkflow.SuspendActor in cmd/ateapi/internal/controlapi/workflow_suspend.go), reported as
+// substrate.ErrActorNotFound, which the ControlClient contract requires: a memory-tier Snapshot
+// reads it as the session's in-RAM state being gone, not as a transport failure.
 func (ad *Adapter) SuspendActor(ctx context.Context, actor substrate.ActorRef) (substrate.ActorInfo, error) {
 	resp, err := ad.ctl.SuspendActor(ctx, &atepb.SuspendActorRequest{Actor: objectRef(actor)})
 	if status.Code(err) == codes.NotFound {
@@ -99,8 +99,9 @@ func (ad *Adapter) SuspendActor(ctx context.Context, actor substrate.ActorRef) (
 }
 
 // busy wraps err in substrate.ErrActorBusy when substrate reported ABORTED, which it does when
-// another operation holds the actor's lease (acquireLease in substrate's controlapi/workflow.go) or
-// a concurrent update conflicted. Both settle on their own, so the caller can retry.
+// another operation holds the actor's lease (acquireLease in substrate's
+// cmd/ateapi/internal/controlapi/workflow.go) or a concurrent update conflicted. Both settle on
+// their own, so the caller can retry.
 func busy(actor substrate.ActorRef, err error) error {
 	if status.Code(err) == codes.Aborted {
 		return fmt.Errorf("%w: %s/%s: %w", substrate.ErrActorBusy, actor.Atespace, actor.Name, err)

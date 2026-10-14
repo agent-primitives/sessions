@@ -524,8 +524,9 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (inc api.Inc
 // asks GetActor, whose ControlClient contract reports a missing actor as ErrActorNotFound. The actor
 // is gone when GetActor finds none, or, after a resume that reported it missing (ErrActorNotFound),
 // when the actor GetActor finds does not hold snap.ExternalURI: a replacement created between the
-// two calls holds no snapshot of the session's, while substrate also answers a resume with NOT_FOUND
-// for an actor that still exists (a template volume it cannot find), which keeps the resume error.
+// two calls holds no snapshot of the session's, and the same actor suspended again since (by another
+// host) holds a newer one, while substrate also answers a resume with NOT_FOUND for an actor that
+// still exists (a template volume it cannot find), which keeps the resume error.
 // Without an ExternalURI to compare, that resume's ErrActorNotFound settles it. It returns nil for a
 // stateless harness, whose state is in the journal, and when GetActor fails, so the caller keeps the
 // resume error.
@@ -541,7 +542,7 @@ func (b *Backend) memoryActorGone(ctx context.Context, snap api.SnapshotRef, res
 		return nil
 	case errors.Is(resumeErr, ErrActorNotFound) && (snap.ExternalURI == "" || info.Snapshot != snap.ExternalURI):
 		return fmt.Errorf("%w: actor %s/%s of session %q on harness %q no longer holds the snapshot the session was suspended to "+
-			"(the actor was replaced), so its in-RAM state cannot be restored; no actor was created: resume: %w",
+			"(replaced, or suspended again since), so its in-RAM state cannot be restored; no actor was created: resume: %w",
 			ErrMemoryStateLost, ref.Atespace, ref.Name, snap.Local, b.descriptor.ID, resumeErr)
 	default:
 		return nil

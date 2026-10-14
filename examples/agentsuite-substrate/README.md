@@ -139,11 +139,11 @@ checks: it builds the model client with the daemon's own constructor (`internal/
 refuses the same URLs and paths (no scheme or host, a bad port or `%` escape). The values are copied
 into the Deployment as written. The URL is also printed, the daemon logs the URL and the path, and
 both are written to `${STATE}/agentsessionsd.yaml`, so a credential in either would sit outside the
-Secret. `check-model` refuses the forms listed above that can carry one (userinfo, a query or
-fragment in the URL; a query other than `api-version`, `@` or a fragment in the path), and its
-refusals do not repeat the URL or the path; it cannot tell a credential placed in a path segment,
-which is copied like any other. `up.sh` applies the key to the `agentsessionsd-model` Secret through
-stdin, so it never appears in argv or a file, and a failed apply leaves the stored key unchanged.
+Secret. `check-model` refuses these forms, which can carry one: userinfo, a query or a fragment in
+the URL; a query other than `api-version`, `@` or a fragment in the path. Its refusals do not repeat
+the URL or the path. It cannot tell a credential placed in a path segment, which is copied like any
+other. `up.sh` applies the key to the `agentsessionsd-model` Secret through stdin, so it never
+appears in argv or a file, and a failed apply leaves the stored key unchanged.
 `agentsessionsd` reads the key only when it starts, so `up.sh` stamps the Secret's version into the
 Deployment's pod template: a new or deleted key restarts the pod, which also drops its emptyDir
 journal, and an unchanged key leaves it running. It does not build or deploy the fake model. It

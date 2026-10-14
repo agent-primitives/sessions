@@ -894,7 +894,8 @@ func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 
 // Resume of a memory-tier session whose actor substrate reports missing is FAILED_PRECONDITION even
 // when a third party creates a replacement under the session's name before Restore could ask
-// GetActor: the resume's own ErrActorNotFound settles that the snapshot is gone.
+// GetActor: after the resume's ErrActorNotFound, GetActor finds an actor that does not hold the
+// snapshot the session was suspended to (the replacement holds none), so the state is lost.
 func TestResumeWhoseActorIsReplacedAfterTheFailedResumeIsRefused(t *testing.T) {
 	ctx := context.Background()
 	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}

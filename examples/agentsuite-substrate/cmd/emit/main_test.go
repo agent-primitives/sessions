@@ -117,3 +117,37 @@ func TestCheckModelPathAndAuthHeader(t *testing.T) {
 		t.Fatalf("empty -auth-header: err=%v", err)
 	}
 }
+
+// With -api-key-set, check-model refuses a plain-http URL to a host that is not loopback, localhost
+// or an in-cluster service, as agentsessionsd does with the key, and names the host; without it, or
+// over https, the same URLs pass.
+func TestCheckModelRefusesAKeyOverRemotePlainHTTP(t *testing.T) {
+	for _, tc := range []struct {
+		baseURL string
+		keySet  bool
+		refuse  string // the host the refusal names; "" accepts
+	}{
+		{baseURL: "http://llm.example:8000/v1", keySet: true, refuse: "llm.example"},
+		{baseURL: "http://10.1.2.3/v1", keySet: true, refuse: "10.1.2.3"},
+		{baseURL: "http://ollama.ns.svc:11434/v1", keySet: true},
+		{baseURL: "http://vllm.ns.svc.cluster.local:8000/v1", keySet: true},
+		{baseURL: "http://127.0.0.1:8082/v1", keySet: true},
+		{baseURL: "https://llm.example/v1", keySet: true},
+		{baseURL: "http://llm.example:8000/v1"},
+	} {
+		args := []string{"-base-url", tc.baseURL, "-model", "m"}
+		if tc.keySet {
+			args = append(args, "-api-key-set")
+		}
+		err := checkModel(args)
+		if tc.refuse == "" {
+			if err != nil {
+				t.Errorf("check-model %v: err=%v, want it accepted", args, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), `host "`+tc.refuse+`"`) || !strings.Contains(err.Error(), "use https") {
+			t.Errorf("check-model %v: err=%v, want a refusal naming host %q and asking for https", args, err, tc.refuse)
+		}
+	}
+}

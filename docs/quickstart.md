@@ -273,8 +273,10 @@ agentctl exec --server 127.0.0.1:8080 --session "$CHAT" --input "name three prim
 The server logs which harnesses it registered at startup (`harnesses="[chat echo]"`).
 
 `--model-base-url` points at any endpoint that accepts the chat-completions request body: a
-gateway, a self-hosted server, or a proxy fronting another provider. Endpoints that differ only in
-the envelope are reached with two more flags, rather than by rebuilding the server:
+gateway, a self-hosted server, or a proxy fronting another provider. With a key set, the server
+refuses to start on a plain `http` URL unless its host is a loopback address, `localhost`, or an
+in-cluster service ending in `.svc` or `.svc.cluster.local`. Endpoints that differ only in the
+envelope are reached with two more flags, rather than by rebuilding the server:
 
 ```bash
 agentsessionsd \

@@ -4,7 +4,7 @@
 //	    stage the agent manifest and instructions for the harness image (the image's agent layer)
 //	emit render -suite DIR -agent ID -platform os/arch -binding FILE -image REF@sha256:... [-model ID] -out DIR
 //	    write actortemplate.json, harness-registration.json, agentsessionsd.args and template-name
-//	emit check-model -base-url URL -model ID [-path PATH] [-auth-header NAME]
+//	emit check-model -base-url URL -model ID [-path PATH] [-auth-header NAME] [-api-key-set]
 //	    refuse model settings agentsessionsd would refuse at startup, a URL that is not http(s), or
 //	    a URL or path that could carry a credential
 package main
@@ -131,7 +131,9 @@ func renderCmd(args []string) error {
 // the Deployment replaces the running pod and its emptyDir journal with one that never starts. It
 // builds the client with the constructor the daemon uses (internal/modelconfig), with the same base
 // URL, model, path and auth header up.sh renders into deploy/agentsessionsd.yaml, so it refuses
-// exactly the settings the daemon would.
+// exactly the settings the daemon would. -api-key-set says MODEL_API_KEY is set, without passing
+// the key: the constructor then refuses a plain-http URL to a host that is not loopback, localhost
+// or an in-cluster service, as the daemon does with the key from the Secret.
 //
 // The demo also requires an http or https URL with a host, which the client itself does not, and
 // refuses one with userinfo, a query or a fragment: up.sh prints the URL and renders it into the
@@ -146,6 +148,7 @@ func checkModel(args []string) error {
 	model := fs.String("model", "", "the -model agentsessionsd will be given")
 	path := fs.String("path", "", "the -model-path agentsessionsd will be given; empty is the daemon's default")
 	authHeader := fs.String("auth-header", "Authorization", "the -model-auth-header agentsessionsd will be given")
+	keySet := fs.Bool("api-key-set", false, "agentsessionsd will be given a MODEL_API_KEY")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -167,6 +170,9 @@ func checkModel(args []string) error {
 		return errors.New("check-model: the auth header is not an HTTP header name (letters, digits and '-')")
 	}
 	cfg := modelconfig.Config{Model: *model, BaseURL: *baseURL, Path: *path, AuthHeader: *authHeader}
+	if *keySet {
+		cfg.APIKey = "set" // a stand-in: the constructor only checks that one is present
+	}
 	if _, err := modelconfig.New(cfg); err != nil {
 		return err
 	}

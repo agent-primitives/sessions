@@ -125,30 +125,33 @@ reach, since the daemon sends a static key.
 `up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL`; `AGENTSUITE_MODEL`,
 `AGENTSUITE_MODEL_PATH`, `AGENTSUITE_MODEL_AUTH_HEADER` or `MODEL_API_KEY` without
 `AGENTSUITE_MODEL_BASE_URL` (only the URL selects a real provider, so the run would otherwise switch
-to the fake model); any of the four settings with whitespace or a control character in it, or
-ending with `:` (the manifest would read it as a YAML map key); a URL
-that is not `http` or `https` or that carries userinfo, a query or a fragment; a path that carries
-anything but a date-shaped `api-version`; a header that is not a header name; and any combination
-`agentsessionsd` would refuse at startup. It does so before it changes the cluster, so a
-misconfigured rerun leaves the running daemon, its journal and an existing key in place.
-`emit check-model` makes the last checks: it builds the model client with the daemon's own
-constructor (`internal/modelconfig`), so it refuses the same URLs and paths (no scheme or host, a
-bad port or `%` escape). The values are copied into the Deployment as written. The URL is also
-printed, the daemon logs the URL and the path, and both are written to
-`${STATE}/agentsessionsd.yaml`, so a credential in either would sit outside the Secret;
-`check-model` refuses those without repeating the URL or the path. `up.sh` applies the key to the
-`agentsessionsd-model` Secret through stdin, so it never appears in argv or a file, and a failed
-apply leaves the stored key unchanged. `agentsessionsd` reads the key only when it starts, so
-`up.sh` stamps the Secret's version into the Deployment's pod template: a new or deleted key
-restarts the pod, which also drops its emptyDir journal, and an unchanged key leaves it running. It
-does not build or deploy the fake model. It points `agentsessionsd` at the endpoint, and the harness
-requests `AGENTSUITE_MODEL` instead of the fixture's `triage-model`: the ActorTemplate carries it as
-an env var, so each model gets its own template. `demo.sh` then skips the checks that depend on the
-fake's replies and counter, and does not port-forward the fake. It still checks the journal in both
-modes: the inputs in order, one model call per turn, the suspend and resume records, the fork
-child's prefix, and that the replay re-executed every completed turn; in real-provider mode it
-claims only those, not what the replies say. The replay still fails if the controller sees a model
-call.
+to the fake model); any of the four settings with whitespace or a control character in it, or ending
+with `:` (the manifest would read it as a YAML map key); a URL that is not `http` or `https` or that
+carries userinfo, a query or a fragment; with `MODEL_API_KEY` set, a plain `http` URL whose host is
+not a loopback address, `localhost`, or an in-cluster service ending in `.svc` or
+`.svc.cluster.local`, as `agentsessionsd` does; a path that carries a query other than one
+date-shaped `api-version`; a header that is not a header name; and any combination `agentsessionsd`
+would refuse at startup. It does so before it changes the cluster, so a misconfigured rerun leaves
+the running daemon, its journal and an existing key in place. `emit check-model` makes the last
+checks: it builds the model client with the daemon's own constructor (`internal/modelconfig`), so it
+refuses the same URLs and paths (no scheme or host, a bad port or `%` escape). The values are copied
+into the Deployment as written. The URL is also printed, the daemon logs the URL and the path, and
+both are written to `${STATE}/agentsessionsd.yaml`, so a credential in either would sit outside the
+Secret. `check-model` refuses the forms listed above that can carry one (userinfo, a query or
+fragment in the URL; a query other than `api-version`, `@` or a fragment in the path), and its
+refusals do not repeat the URL or the path; it cannot tell a credential placed in a path segment,
+which is copied like any other. `up.sh` applies the key to the `agentsessionsd-model` Secret through
+stdin, so it never appears in argv or a file, and a failed apply leaves the stored key unchanged.
+`agentsessionsd` reads the key only when it starts, so `up.sh` stamps the Secret's version into the
+Deployment's pod template: a new or deleted key restarts the pod, which also drops its emptyDir
+journal, and an unchanged key leaves it running. It does not build or deploy the fake model. It
+points `agentsessionsd` at the endpoint, and the harness requests `AGENTSUITE_MODEL` instead of the
+fixture's `triage-model`: the ActorTemplate carries it as an env var, so each model gets its own
+template. `demo.sh` then skips the checks that depend on the fake's replies and counter, and does
+not port-forward the fake. It still checks the journal in both modes: the inputs in order, one model
+call per turn, the suspend and resume records, the fork child's prefix, and that the replay
+re-executed every completed turn; in real-provider mode it claims only those, not what the replies
+say. The replay still fails if the controller sees a model call.
 
 The Secret, and so the running daemon, follows the latest `up.sh`. A real-provider `up.sh` without
 `MODEL_API_KEY` deletes any stored key, for endpoints that take none, so export `MODEL_API_KEY`

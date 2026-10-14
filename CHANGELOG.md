@@ -13,6 +13,13 @@ provide.
   a redirect. net/http copied custom headers such as `api-key` to any redirect target, so a provider
   or proxy answering with a cross-host redirect received the credential. A redirect that changes
   scheme, host or port is now refused; same-origin redirects are followed as before.
+- `agentsessionsd` refuses to start when a model API key is set (`MODEL_API_KEY` or
+  `OPENAI_API_KEY`) and `-model-base-url` is plain `http` to a host other than a loopback address,
+  `localhost`, or an in-cluster service name ending in `.svc` or `.svc.cluster.local`
+  (case-insensitive, port ignored): the key and every prompt would cross the network unencrypted.
+  The error names the host and asks for `https`; it never prints the key. `https`, and `http` with
+  no key, are unchanged. The check is in `internal/modelconfig.New`, which the AgentSuite demo's
+  `up.sh` runs too.
 
 ### Fixed
 
@@ -107,6 +114,9 @@ provide.
   `RegisterHarness` reactivates the row for every host sharing the journal.
 - `openai.New` refuses a base URL that is not absolute (no scheme or host), so `agentsessionsd`
   exits at startup with `-model-base-url` set to one. Such a URL used to fail every request.
+- `agentsessionsd` exits at startup with a model API key and a plain-`http` `-model-base-url` to a
+  host that is not loopback, `localhost` or an in-cluster service (see Security). Switch such an
+  endpoint to `https`, or unset the key, before upgrading.
 - `agentsessionsd` now refuses positional arguments, naming them, and exits with status 2. It used
   to ignore them, along with every flag after the first one, since flag parsing stops there.
 - `runtime/substrate` no longer cold-creates an actor for a `REQUIRES_MEMORY_SNAPSHOT` session that

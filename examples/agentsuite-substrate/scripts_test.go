@@ -747,6 +747,15 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			wantOut: "AGENTSUITE_MODEL_AUTH_HEADER is set without AGENTSUITE_MODEL_BASE_URL; set both for a real provider, or unset AGENTSUITE_MODEL_AUTH_HEADER for the fake model; nothing was changed",
 		},
 		{
+			// The key and prompts would cross the network unencrypted. The refusal names the host
+			// and never the key ("secret" is checked below).
+			name: "a key over plain http to a remote host",
+			env: func(*testing.T) []string {
+				return []string{"AGENTSUITE_MODEL_BASE_URL=http://llm.example:8000/v1", "AGENTSUITE_MODEL=m", "MODEL_API_KEY=secret-key"}
+			},
+			wantOut: `would not start agentsessionsd: emit: modelconfig: the model base URL uses plain http to host "llm.example" while a model API key is set`,
+		},
+		{
 			name:    "a binding for another atespace",
 			env:     func(t *testing.T) []string { return []string{"STUB_BINDING=" + binding(t, "other")} },
 			wantOut: "binding.json names atespace 'other', but the demo deploys into atespace agentsuite-demo; nothing was changed",
@@ -817,6 +826,17 @@ func TestUpRendersTheDaemon(t *testing.T) {
 			wantSecret:  "apply --server-side",
 			wantVersion: "7",
 			wantModel:   model,
+		},
+		{
+			// An in-cluster provider may take a key over plain http.
+			name: "in-cluster provider over http with a key",
+			env: []string{"AGENTSUITE_MODEL_BASE_URL=http://vllm.models.svc.cluster.local:8000/v1", "AGENTSUITE_MODEL=m",
+				"MODEL_API_KEY=k", "STUB_SECRET_VERSION=9"},
+			wantLines: []string{"- -model=m", "- -model-base-url=http://vllm.models.svc.cluster.local:8000/v1",
+				"- -model-path=/chat/completions", "- -model-auth-header=Authorization"},
+			wantSecret:  "apply --server-side",
+			wantVersion: "9",
+			wantModel:   "m",
 		},
 		{
 			// An Azure OpenAI deployment: the api-version rides in the path, the key in the api-key

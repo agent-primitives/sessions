@@ -743,3 +743,43 @@ func TestRunRefusesPositionalArguments(t *testing.T) {
 		t.Fatalf("a refused start left a journal behind: %v", statErr)
 	}
 }
+
+// A model API key from either variable makes a plain-http -model-base-url to a remote host a startup
+// error, before the journal is opened; the error names the host and never the key. A loopback or
+// in-cluster host is still accepted, as is any host without a key.
+func TestRunRefusesAKeyOverRemotePlainHTTP(t *testing.T) {
+	const key = "sk-secret-value"
+	for _, env := range []string{"MODEL_API_KEY", "OPENAI_API_KEY"} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv("MODEL_API_KEY", "")
+			t.Setenv("OPENAI_API_KEY", "")
+			t.Setenv(env, key)
+			journal := filepath.Join(t.TempDir(), "journal.db")
+			err := Run([]string{"-journal", journal, "-addr", "127.0.0.1:0", "-model", "m",
+				"-model-base-url", "http://llm.example.com:8000/v1", "-model-auth-header", "api-key"})
+			if err == nil || !strings.Contains(err.Error(), `host "llm.example.com"`) || !strings.Contains(err.Error(), "use https") {
+				t.Fatalf("Run error = %v, want a refusal naming the host and asking for https", err)
+			}
+			if errors.Is(err, ErrUsage) || strings.Contains(err.Error(), key) {
+				t.Fatalf("Run error = %v, want a plain error that does not repeat the key", err)
+			}
+			if _, statErr := os.Stat(journal); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("a refused start left a journal behind: %v", statErr)
+			}
+		})
+	}
+	t.Run("allowed hosts", func(t *testing.T) {
+		for _, tc := range []struct{ baseURL, key string }{
+			{"http://vllm.ns.svc.cluster.local:8000/v1", key},
+			{"http://127.0.0.1:8082/v1", key},
+			{"http://llm.example.com:8000/v1", ""},
+			{"https://llm.example.com/v1", key},
+		} {
+			t.Setenv("MODEL_API_KEY", tc.key)
+			t.Setenv("OPENAI_API_KEY", "")
+			if _, _, _, err := modelFunc("m", tc.baseURL, openai.DefaultPath, "Authorization"); err != nil {
+				t.Errorf("modelFunc(%q, key set %v) = %v, want a model", tc.baseURL, tc.key != "", err)
+			}
+		}
+	})
+}

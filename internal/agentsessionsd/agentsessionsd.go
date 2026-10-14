@@ -525,7 +525,9 @@ func sessionService(store *sqlitelog.Store, registry *placement.Registry, logger
 // The credential is read from MODEL_API_KEY (or OPENAI_API_KEY) rather than taken as a flag,
 // because a flag would put it in the process list and in shell history. An unset key sends no
 // credential header at all, which is what a local endpoint or a gateway that injects its own
-// expects.
+// expects. With a key, modelconfig.New refuses a plain-http base URL to any host but a loopback
+// address, localhost or an in-cluster service, so the daemon does not start rather than send the
+// key unencrypted.
 //
 // -model-path and -model-auth-header exist because endpoints differ in envelope while accepting
 // the same request body: some scope the model into the path or pin an API version, and some

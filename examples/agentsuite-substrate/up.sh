@@ -100,8 +100,13 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	if ! reason="$(cd "${HERE}" && go build -o "${WORK}/bin/emit" ./cmd/emit 2>&1)"; then
 		refuse "cannot build cmd/emit to check AGENTSUITE_MODEL_BASE_URL and AGENTSUITE_MODEL: ${reason}"
 	fi
+	# With a key, check-model refuses a plain-http URL whose host is not loopback, localhost or an
+	# in-cluster service (*.svc, *.svc.cluster.local), as the daemon would. It is told only that a
+	# key is set, never the key.
+	key_set=()
+	if [[ -n "${MODEL_API_KEY:-}" ]]; then key_set=(-api-key-set); fi
 	if ! reason="$("${WORK}/bin/emit" check-model -base-url "${AGENTSUITE_MODEL_BASE_URL}" -model "${MODEL_ID}" \
-		-path "${MODEL_PATH}" -auth-header "${MODEL_AUTH_HEADER}" 2>&1)"; then
+		-path "${MODEL_PATH}" -auth-header "${MODEL_AUTH_HEADER}" ${key_set[@]+"${key_set[@]}"} 2>&1)"; then
 		# Neither the URL nor the path is repeated here: check-model refuses one that could carry a
 		# credential before anything prints it, and its reasons do not quote them either.
 		refuse "the model settings (AGENTSUITE_MODEL_BASE_URL, AGENTSUITE_MODEL '${MODEL_ID}', AGENTSUITE_MODEL_PATH, AGENTSUITE_MODEL_AUTH_HEADER) would not start agentsessionsd: ${reason}"

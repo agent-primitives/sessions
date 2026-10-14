@@ -13,6 +13,7 @@
 #                          mode-0600 file under the work directory and the daemon's Secret, and never
 #                          printed
 #   DEMO_LOGS              directory for the per-step logs (default ${WORK}/demo-logs)
+#   DEMO_KEEP_ON_FAILURE   set to keep the cluster when a step fails (by default down.sh deletes it)
 #   DEMO_PAUSE             seconds to pause after each step's proof (default 12), and
 #   DEMO_RUN_PAUSE         after each command (default 4), so a viewer can read the output; 0 for a
 #                          quick run (record.sh sets 30 and 10)
@@ -108,6 +109,12 @@ cleanup() {
 	fi
 	for p in "${TAILS[@]}" "${PIDS[@]}"; do kill "${p}" 2>/dev/null || true; done
 	rm -f "${TOKEN_FILE}"
+	# A failed run deletes the cluster it created (down.sh refuses one it did not), so a run on a
+	# shared host leaves nothing behind; DEMO_KEEP_ON_FAILURE=1 keeps it for debugging.
+	if ((rc != 0)) && [[ -z "${DEMO_KEEP_ON_FAILURE:-}" ]]; then
+		printf '%s# failed run: down.sh%s\n' "${D}" "${N}"
+		"${DEMO}/../down.sh" 2>&1 | redact | tee -a "${STEP_LOG}" || true
+	fi
 	# Let the redacting filter flush the last lines, for at most 10 seconds: a process that inherited
 	# stdout and outlived its step must not keep the job, and the recording, from ending.
 	exec 1>&- 2>&-
@@ -237,9 +244,22 @@ run cat "${STATE}/render/harness-registration.json"
 run diff "${STATE}/render/actortemplate.json" "${STATE}/render-memory/actortemplate.json" || true
 run cat "${STATE}/render-memory/harness-registration.json" "${STATE}/render/agentsessionsd.args" "${STATE}/render-memory/agentsessionsd.args"
 run "${ATE[@]}" get actor-templates -a "${ATESPACE}"
-grep -q '"model": "example-model"' "${SUITE}/agents/writer.json" || fail "the suite's agent no longer names example-model"
-grep -q "\"value\": \"${AGENTSUITE_MODEL}\"" "${STATE}/render/actortemplate.json" || fail "the template does not override the model with ${AGENTSUITE_MODEL}"
-grep -q '"configName": "microvm"' "${STATE}/render/actortemplate.json" || fail "the template is not on the microvm SandboxConfig"
+# Checked on the parsed JSON: protojson varies its whitespace from build to build, so the rendered
+# file's bytes are not stable.
+template_check() { # file python-expression-over-t
+	python3 -c '
+import json, sys
+def walk(v):
+    yield v
+    for c in (v.values() if isinstance(v, dict) else v if isinstance(v, list) else []):
+        yield from walk(c)
+t = json.load(open(sys.argv[1])); model = sys.argv[3]
+sys.exit(0 if eval(sys.argv[2]) else 1)' "$1" "$2" "${AGENTSUITE_MODEL}"
+}
+template_check "${SUITE}/agents/writer.json" 't.get("model", {}).get("model") == "example-model"' || fail "the suite's agent no longer names example-model"
+template_check "${STATE}/render/actortemplate.json" 'any(isinstance(v, dict) and v.get("name") == "AGENTSUITE_MODEL" and v.get("value") == model for v in walk(t))' ||
+	fail "the template does not override the model with ${AGENTSUITE_MODEL}"
+template_check "${STATE}/render/actortemplate.json" 't.get("sandboxConfig", {}).get("configName") == "microvm"' || fail "the template is not on the microvm SandboxConfig"
 proves "the suite is byte-identical to kaimahi 9c5c993; emit maps its one agent to two micro-VM ActorTemplates (stateless and memory tier) that request ${AGENTSUITE_MODEL} in place of the placeholder example-model, and each template's golden snapshot is built"
 
 # ----------------------------------------------------------------------------------------------

@@ -496,7 +496,9 @@ already supports the same selection with `client.ExecOptions{Harness: "chat", In
 On an existing session, `exec --harness` overrides the harness for that turn only; omitting it
 uses the stored session harness. A registered harness cannot take part in an override: a session
 on one is pinned to it, and one cannot be borrowed for a single turn, so either is
-`FAILED_PRECONDITION`.
+`FAILED_PRECONDITION`. Nor can a `REQUIRES_MEMORY_SNAPSHOT` harness: Suspend and Fork follow the
+session's harness and would not checkpoint or clone the state that turn leaves in RAM, so an
+override onto one is `FAILED_PRECONDITION` before anything is provisioned.
 
 With `--model` set, `agentsessionsd` registers `chat` alongside `echo`, each on its own
 `runtime/local.Backend`, using the configured host-side `model/openai` client. Echo remains the

@@ -303,13 +303,14 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 	if err != nil {
 		return err
 	}
-	name := sessionDefaultName
+	own := sessionDefaultName
+	if own == "" {
+		own = r.defaultHarness
+	}
+	name := own
 	recordedName := invocation != nil && invocation.Harness != ""
 	if recordedName {
 		name = invocation.Harness
-	}
-	if name == "" {
-		name = r.defaultHarness
 	}
 	p, err := r.For(name)
 	if err != nil {
@@ -323,7 +324,16 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 			return err
 		}
 	}
-	return p.resume(ctx, log, sessionUID, resumeConfig{harness: name})
+	// A pending turn recorded on a Placer other than the session's own ran as an override. Suspend
+	// and Fork route by the session's own harness, so a memory-tier harness is refused there
+	// (ErrStatefulOverride). An alias of the session's harness shares its Placer and is not an
+	// override; a session harness this host cannot resolve is treated as another one.
+	override := false
+	if name != own {
+		ownPlacer, err := r.For(own)
+		override = err != nil || ownPlacer != p
+	}
+	return p.resume(ctx, log, sessionUID, resumeConfig{harness: name, override: override})
 }
 
 // Default is the harness used when a caller names none. session.Service records it on a session

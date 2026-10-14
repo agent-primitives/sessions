@@ -68,6 +68,15 @@ var describeTimeout = 10 * time.Second
 // codes.DeadlineExceeded or codes.Canceled. An interruption during Run does not wrap it.
 var ErrAdmissionInterrupted = errors.New("placement: admission interrupted")
 
+// ErrStatefulOverride is returned when a turn or a recovery would run a REQUIRES_MEMORY_SNAPSHOT
+// harness on a session whose own harness is another one (an ExecRequest.harness override, see
+// WithOverride). Suspend and Fork route by the session's own harness, so they would neither
+// checkpoint nor clone the state that turn leaves in RAM. Like ErrUnplaceable it is raised by the
+// admission check, before any compute is provisioned or anything is written to the log, and again
+// on the turn's own connection for a LiveDescriber backend. session.Service surfaces it as
+// codes.FailedPrecondition.
+var ErrStatefulOverride = errors.New("placement: a REQUIRES_MEMORY_SNAPSHOT harness cannot run a turn as an override")
+
 // Backend is the compute Runtime the Placer drives. It exposes the harness DESCRIPTOR so the Placer
 // can gate CanPlace before Create (placement must not provision compute to learn a harness's needs);
 // the harness itself is reached by dialing Incarnation.Address with Incarnation.CallMetadata on every
@@ -163,6 +172,7 @@ type execConfig struct {
 	config        []byte
 	resumeFromSeq int64
 	deadline      time.Time
+	override      bool
 }
 
 // WithHarness records the resolved registry name for this execution. Without a name, the
@@ -172,11 +182,22 @@ func WithHarness(name string) ExecOption {
 	return func(c *execConfig) { c.harness = name }
 }
 
+// WithOverride marks the execution as running on a harness other than the session's own (an
+// ExecRequest.harness override). The Placer then refuses a REQUIRES_MEMORY_SNAPSHOT harness with
+// ErrStatefulOverride before it provisions anything: Suspend and Fork route by the session's own
+// harness and would leave the state this turn builds unsnapshotted and uncloned.
+func WithOverride() ExecOption {
+	return func(c *execConfig) { c.override = true }
+}
+
 // ResumeOption configures one recovery attempt.
 type ResumeOption func(*resumeConfig)
 
 type resumeConfig struct {
 	harness string
+	// override is set when the pending turn was recorded on a harness other than the session's
+	// own; see WithOverride.
+	override bool
 }
 
 // WithResumeHarness identifies the registry entry selected for this recovery attempt. The
@@ -318,7 +339,11 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}
 	defer release()
 
-	if _, err := p.admit(ctx, sessionUID); err != nil {
+	desc, err := p.admit(ctx, sessionUID)
+	if err != nil {
+		return api.Incarnation{}, err
+	}
+	if err := refuseStatefulOverride(desc, cfg.override); err != nil {
 		return api.Incarnation{}, err
 	}
 
@@ -358,7 +383,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	dialFinished(nil)
 	defer p.releaseHarness(ctx, sessionUID, inc.ID, live)
 	har := live.harness
-	if err := p.recheck(ctx, sessionUID, har); err != nil {
+	if err := p.recheck(ctx, sessionUID, har, cfg.override); err != nil {
 		return inc, err
 	}
 
@@ -415,11 +440,16 @@ func (p *Placer) admit(ctx context.Context, sessionUID string) (api.Descriptor, 
 // same address between Describe and Connect, the turn runs on it and this check does not detect
 // it. Registering a harness by address therefore assumes the operator controls what serves that
 // address; docs/security.md states the same limit.
-func (p *Placer) recheck(ctx context.Context, sessionUID string, har api.Harness) error {
+//
+// override repeats the ErrStatefulOverride check on the descriptor the connection reports.
+func (p *Placer) recheck(ctx context.Context, sessionUID string, har api.Harness, override bool) error {
 	if l, ok := p.backend.(LiveDescriber); !ok || !l.DescribesLiveHarness() {
 		return nil
 	}
-	_, err := p.gate(ctx, sessionUID, "verify_execution_harness", har.Describe)
+	desc, err := p.gate(ctx, sessionUID, "verify_execution_harness", har.Describe)
+	if err == nil {
+		err = refuseStatefulOverride(desc, override)
+	}
 	if err != nil && errors.Is(context.Cause(ctx), errSuperseded) {
 		// A checkpoint of the session ended this turn's connection during the check. Report the
 		// checkpoint, as turnError does for a running turn, and format the check's error with %v so
@@ -477,6 +507,16 @@ func (p *Placer) gate(ctx context.Context, sessionUID, op string, describe func(
 		"runtime_memory_snapshot", p.backend.Capabilities().MemorySnapshot,
 	)
 	return desc, nil
+}
+
+// refuseStatefulOverride returns ErrStatefulOverride for a REQUIRES_MEMORY_SNAPSHOT harness that
+// runs as an override of the session's own harness (see WithOverride).
+func refuseStatefulOverride(desc api.Descriptor, override bool) error {
+	if !override || desc.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
+		return nil
+	}
+	return fmt.Errorf("%w: harness %q is %s and the session's own harness is another one; Suspend and Fork follow the session's harness and would not checkpoint or clone this harness's state",
+		ErrStatefulOverride, desc.ID, desc.Capabilities.Resumability)
 }
 
 // controllerError maps only the controller's Describe boundary. Run, model and runtime errors
@@ -902,7 +942,11 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 
 	// Gate before Restore, exactly as Exec does before Create: Resume re-drives an interrupted turn,
 	// so it must not reach a harness the backend cannot host.
-	if _, err := p.admit(ctx, sessionUID); err != nil {
+	desc, err := p.admit(ctx, sessionUID)
+	if err != nil {
+		return err
+	}
+	if err := refuseStatefulOverride(desc, cfg.override); err != nil {
 		return err
 	}
 	sourceFinished := observability.StartDebug(ctx, p.logger, "placement", "resolve_resume_source", "session_uid", sessionUID)
@@ -933,7 +977,7 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	dialFinished(nil)
 	defer p.releaseHarness(ctx, sessionUID, inc.ID, live)
 	har := live.harness
-	if err := p.recheck(ctx, sessionUID, har); err != nil {
+	if err := p.recheck(ctx, sessionUID, har, cfg.override); err != nil {
 		return err
 	}
 	fenceFinished := observability.StartDebug(ctx, p.logger, "placement", "mint_fence", "session_uid", sessionUID)
@@ -989,6 +1033,8 @@ func placementErrorKind(err error) string {
 		return "unplaceable"
 	case errors.Is(err, ErrDescriptorMismatch):
 		return "descriptor_mismatch"
+	case errors.Is(err, ErrStatefulOverride):
+		return "stateful_override"
 	case errors.Is(err, ErrHarnessUnavailable):
 		return "harness_unavailable"
 	case errors.Is(err, ErrCheckpointing):

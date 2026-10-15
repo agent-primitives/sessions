@@ -18,6 +18,7 @@ set -euo pipefail
 DEMO="$(cd "$(dirname "$0")" && pwd)"
 export AGENTSUITE_DEMO_SUITE=suites/coordinator-workers AGENTSUITE_DEMO_AGENT=coordinator AGENTSUITE_DEMO_SANDBOX=microvm
 source "${DEMO}/../common.sh"
+source "${DEMO}/model-token.sh"
 
 MODE="${1:-}"
 case "${MODE}" in
@@ -55,11 +56,45 @@ fail() {
 step() { printf '\n==> %s\n' "$*"; }
 actors() { echo "agentsuite-$1"; }
 
+# The placeholders of deploy/coordinator-agentsessionsd.yaml. render_manifest fills them with literal
+# (not sed) substitution, the computed values first, so an operator value cannot be read as one.
+COORDINATOR_PLACEHOLDERS=(DAEMON_IMAGE MODEL_SECRET_VERSION COORDINATOR_FLAG WRITER_FLAG REVIEWER_FLAG INVOKES_VALUE MODEL_BASE_URL MODEL_PATH MODEL_AUTH_HEADER MODEL_ID)
+# unfilled prints the placeholders the text $1 still contains.
+unfilled() {
+	local p left=""
+	for p in "${COORDINATOR_PLACEHOLDERS[@]}"; do
+		if [[ "$1" == *"${p}"* ]]; then left="${left:+${left} }${p}"; fi
+	done
+	echo "${left}"
+}
+# render_manifest DAEMON_IMAGE SECRET_VERSION COORDINATOR_FLAG WRITER_FLAG REVIEWER_FLAG INVOKES
+render_manifest() {
+	local m
+	m="$(<"${HERE}/deploy/coordinator-agentsessionsd.yaml")"
+	m=${m//DAEMON_IMAGE/"$1"}
+	m=${m//MODEL_SECRET_VERSION/"$2"}
+	m=${m//COORDINATOR_FLAG/"$3"}
+	m=${m//WRITER_FLAG/"$4"}
+	m=${m//REVIEWER_FLAG/"$5"}
+	m=${m//INVOKES_VALUE/"$6"}
+	m=${m//MODEL_BASE_URL/"${AGENTSUITE_MODEL_BASE_URL}"}
+	m=${m//MODEL_PATH/"${AGENTSUITE_MODEL_PATH}"}
+	m=${m//MODEL_AUTH_HEADER/"${AGENTSUITE_MODEL_AUTH_HEADER:-Authorization}"}
+	m=${m//MODEL_ID/"${AGENTSUITE_MODEL}"}
+	printf '%s\n' "${m}"
+}
+
 setup() {
 	local v
 	for v in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH AZURE_MI_CLIENT_ID; do
 		[[ -n "${!v:-}" ]] || fail "${v} is not set"
 	done
+	for v in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH AGENTSUITE_MODEL_AUTH_HEADER; do
+		[[ -z "$(unfilled "${!v:-}")" ]] || fail "${v} contains $(unfilled "${!v:-}"), a placeholder of deploy/coordinator-agentsessionsd.yaml"
+	done
+	# Before the first cluster change: the manifest renders with no placeholder left.
+	[[ -z "$(unfilled "$(render_manifest image 1 c w r i)")" ]] ||
+		fail "deploy/coordinator-agentsessionsd.yaml holds placeholders this script does not fill: $(unfilled "$(render_manifest image 1 c w r i)")"
 	[[ "$(go env GOARCH)" == amd64 ]] || fail "the suite declares linux/amd64 compositions only; run on an amd64 host"
 	# up.sh validates the model settings before its first cluster change, then brings up kind,
 	# ate-system and the micro-VM WorkerPool.
@@ -104,14 +139,7 @@ setup() {
 	done
 
 	step "a model token for the VM's managed identity (never printed)"
-	(
-		umask 077
-		curl -fsS -H Metadata:true "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://cognitiveservices.azure.com&client_id=${AZURE_MI_CLIENT_ID}" |
-			python3 -c "import json, sys; print(json.load(sys.stdin)['${FIELD}'])" >"${TOKEN_FILE}"
-	)
-	echo "token: $(wc -c <"${TOKEN_FILE}" | tr -d ' ') bytes"
-	"${K[@]}" -n "${NS}" create secret generic agentsessionsd-model --from-file=api-key="${TOKEN_FILE}" --dry-run=client -o yaml |
-		"${K[@]}" -n "${NS}" apply --server-side --force-conflicts --field-manager=agentsuite-demo -f - >/dev/null
+	model_secret "${NS}" "${AZURE_MI_CLIENT_ID}" "${TOKEN_FILE}" "${K[@]}"
 	rm -f "${TOKEN_FILE}"
 	local version
 	version="$("${K[@]}" -n "${NS}" get secret agentsessionsd-model -o jsonpath='{.metadata.resourceVersion}')"
@@ -119,17 +147,8 @@ setup() {
 	step "agentsessionsd with the invocation executor (examples/agentsuite-substrate/cmd/agentsessionsd)"
 	local daemon manifest
 	daemon="$(cd "${HERE}" && KO_DOCKER_REPO=localhost:5001 ko build --base-import-paths --platform=linux/amd64 ./cmd/agentsessionsd)"
-	manifest="$(<"${HERE}/deploy/coordinator-agentsessionsd.yaml")"
-	manifest=${manifest//DAEMON_IMAGE/"${daemon}"}
-	manifest=${manifest//MODEL_SECRET_VERSION/"${version}"}
-	manifest=${manifest//COORDINATOR_FLAG/"${flags[0]}"}
-	manifest=${manifest//WRITER_FLAG/"${flags[1]}"}
-	manifest=${manifest//REVIEWER_FLAG/"${flags[2]}"}
-	manifest=${manifest//INVOKES_VALUE/"${INVOKES}"}
-	manifest=${manifest//MODEL_BASE_URL/"${AGENTSUITE_MODEL_BASE_URL}"}
-	manifest=${manifest//MODEL_PATH/"${AGENTSUITE_MODEL_PATH}"}
-	manifest=${manifest//MODEL_AUTH_HEADER/"${AGENTSUITE_MODEL_AUTH_HEADER:-Authorization}"}
-	manifest=${manifest//MODEL_ID/"${AGENTSUITE_MODEL}"}
+	manifest="$(render_manifest "${daemon}" "${version}" "${flags[0]}" "${flags[1]}" "${flags[2]}" "${INVOKES}")"
+	[[ -z "$(unfilled "${manifest}")" ]] || fail "deploy/coordinator-agentsessionsd.yaml still holds the placeholders '$(unfilled "${manifest}")' after rendering"
 	printf '%s\n' "${manifest}" >"${STATE}/coordinator-agentsessionsd.yaml"
 	"${K[@]}" apply -f "${STATE}/coordinator-agentsessionsd.yaml"
 	"${K[@]}" -n "${NS}" rollout status deploy/agentsessionsd-coordinator --timeout=180s
@@ -164,7 +183,9 @@ run_case() {
 	uid="$(sed -n 's/^session //p' "${log}-exec.txt" | head -1)"
 	[[ -n "${uid}" ]] || fail "no session uid in the exec output"
 	ctl get --session "${uid}" | tee "${log}-get.txt"
-	grep -q 'EXEC_AWAITING' "${log}-get.txt" || fail "session ${uid} is not awaiting an approval"
+	# agentctl get prints no exec state; the turn parked when its exec stream committed the approval
+	# request (and approve/deny below refuse a session with no pending approval).
+	grep -q 'EVENT_APPROVAL_REQUEST' "${log}-exec.txt" || fail "session ${uid}: the turn did not park at an approval request"
 	ctl "${decision}" --session "${uid}" --reason "probe ${decision}" --actor operator | tee "${log}-decision.txt"
 	ctl replay --session "${uid}" -v | tee "${log}-journal.txt"
 	ctl list | tee "${log}-list.txt"

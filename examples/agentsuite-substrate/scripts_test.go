@@ -1313,3 +1313,73 @@ func TestDemoTraceHop(t *testing.T) {
 		})
 	}
 }
+
+// coordinator.sh's model_secret (demo/model-token.sh) stores the managed-identity token in the
+// Secret's api-key without the newline a print() adds: agentsessionsd sends MODEL_API_KEY as given,
+// and Go's net/http refuses an Authorization header ending in "\n". The token is never printed, and
+// a metadata endpoint that fails or returns an empty token stops before kubectl runs.
+func TestModelSecretStoresTheTokenWithoutANewline(t *testing.T) {
+	python3, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not found")
+	}
+	const token = "stub-header.stub-payload.stub-signature"
+	for _, tc := range []struct {
+		name, curl string
+		wantErr    string
+	}{
+		{name: "token", curl: `printf '{"token_type": "Bearer", "access_token": "` + token + `"}\n'`},
+		{name: "metadata endpoint fails", curl: "exit 22", wantErr: "no token from the instance metadata endpoint"},
+		{name: "empty token", curl: `printf '{"access_token": ""}'`, wantErr: "returned an empty token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, bin := t.TempDir(), t.TempDir()
+			stub(t, bin, "curl", tc.curl+"\n")
+			// kubectl create copies the --from-file source as the Secret's api-key would hold it.
+			stub(t, bin, "kubectl", `case " $* " in
+*" create secret "*)
+	for a in "$@"; do case "$a" in --from-file=api-key=*) cp "${a#--from-file=api-key=}" "$STUB_DIR/api-key" ;; esac; done
+	echo "kind: Secret" ;;
+*" apply "*) cat >"$STUB_DIR/applied" ;;
+esac
+echo "kubectl $*" >>"$STUB_DIR/calls"
+`)
+			if err := os.Symlink(python3, filepath.Join(bin, "python3")); err != nil {
+				t.Fatal(err)
+			}
+			script := `set -euo pipefail; source demo/model-token.sh; model_secret agentsuite client-id "$STUB_DIR/token" kubectl --kubeconfig k`
+			cmd := exec.Command("bash", "-c", script)
+			cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "STUB_DIR=" + dir, "HOME=" + dir}
+			out, err := cmd.CombinedOutput()
+			if strings.Contains(string(out), token) {
+				t.Fatalf("output prints the token: %s", out)
+			}
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(string(out), tc.wantErr) {
+					t.Fatalf("err = %v, output %q; want %q", err, out, tc.wantErr)
+				}
+				if _, err := os.Stat(filepath.Join(dir, "calls")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("kubectl ran after the token fetch failed")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("model_secret: %v: %s", err, out)
+			}
+			got, err := os.ReadFile(filepath.Join(dir, "api-key"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != token {
+				t.Fatalf("api-key = %q, want %q with no trailing whitespace", got, token)
+			}
+			if want := fmt.Sprintf("token: %d bytes", len(token)); !strings.Contains(string(out), want) {
+				t.Fatalf("output %q, want %q", out, want)
+			}
+			calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
+			if !strings.Contains(string(calls), "kubectl --kubeconfig k -n agentsuite apply --server-side") {
+				t.Fatalf("kubectl calls = %q, want the apply in namespace agentsuite", calls)
+			}
+		})
+	}
+}

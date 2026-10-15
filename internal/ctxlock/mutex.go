@@ -25,15 +25,17 @@ func (m *Mutex) Lock(ctx context.Context) error {
 	}
 	select {
 	case m.held <- struct{}{}:
-		if err := ctx.Err(); err != nil {
-			m.Unlock()
-			return err
-		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-// Unlock releases a held mutex.
-func (m *Mutex) Unlock() { <-m.held }
+// Unlock releases a held mutex. It panics if the mutex is not locked.
+func (m *Mutex) Unlock() {
+	select {
+	case <-m.held:
+	default:
+		panic("ctxlock: unlock of unlocked mutex")
+	}
+}

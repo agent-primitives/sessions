@@ -71,7 +71,7 @@ func TestStreamSinkCanceledContextPreservesTerminalError(t *testing.T) {
 	parked := &api.ApprovalParkedError{Ref: api.ApprovalRef{ExecutionID: "e", ToolCallID: "c", RequestSeq: 2}}
 	failure := errors.New("protocol failure")
 	for _, sink := range []*streamSink{{}, {parked: parked}, {failure: failure}} {
-		var want error = context.Canceled
+		want := context.Canceled
 		if sink.parked != nil {
 			want = parked
 		}

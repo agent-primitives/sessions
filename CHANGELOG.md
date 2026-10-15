@@ -31,7 +31,8 @@ provide.
   the harness side reads it; Replay and Resume serve the `USAGE` recorded directly after the
   completion. A harness built against an older `harnesswire` ignores the field, and an older host
   sends none, which reads as zero usage. If a turn is cut between its `OUTPUT` and its `USAGE`,
-  Resume serves zero usage and that call's usage is not journaled; the model is not re-invoked.
+  Resume serves zero usage and does not re-invoke the model, so that call's usage is journaled as
+  zero (a harness that always reports the usage it was given), or not at all (one that skips zero).
   v0.1.2 journals replay as before, with no usage served.
 
 - `model/openai` joins the completions path to the base URL's path instead of appending it to the

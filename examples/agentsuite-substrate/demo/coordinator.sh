@@ -394,7 +394,7 @@ emit invokes -suite suites/coordinator-workers-v2 -binding $BINDING
 EOF
 	[[ "${SHOWN}" == "coordinator=reviewer:1:1:approval,coordinator=writer:1:1" ]] || fail "emit invokes printed another policy"
 	page "emit render of the new version: one ActorTemplate per agent; the model is the suite's, with no override"
-	run <<'EOF'
+	run -n 8 <<'EOF'
 emit render -suite suites/coordinator-workers-v2 -agent coordinator -platform linux/amd64 -binding $BINDING -image $IMAGE -actors agentsuite-coordinator -out /tmp/render-coordinator
 EOF
 	[[ "${SHOWN}" == *"model ${model}, pinned by the suite and served by the binding"* ]] || fail "emit render did not name the pinned model"
@@ -406,7 +406,7 @@ bat -r $((seq - 4)):$((seq + 1)) /tmp/render-coordinator/actortemplate.json
 EOF
 	lines_hold /tmp/render-coordinator/actortemplate.json "${seq}:AGENTSUITE_APPROVAL" "$((seq + 1)):\"value\": \"reviewer\""
 	page "And the flags that serve it from agentsessionsd: the harness, its actors' atespace, and the binding's model"
-	run <<'EOF'
+	run -n 8 <<'EOF'
 cat /tmp/render-coordinator/agentsessionsd.args /tmp/render-coordinator/agentsessionsd.model-args
 EOF
 	[[ "${SHOWN}" == "-substrate-harness=coordinator=agentsuite-coordinator/${template},actors=agentsuite-coordinator"$'\n'"-model=${model}"$'\n'"-model-base-url="*$'\n'"-model-path="* ]] ||

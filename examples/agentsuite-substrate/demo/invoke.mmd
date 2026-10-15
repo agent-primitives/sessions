@@ -19,7 +19,7 @@ sequenceDiagram
     Wk-->>X: reply
     X-->>C: TOOL_RESULT (child session, reply)
     C->>D: tool call to reviewer, REQUIRES_APPROVAL
-    D-->>Op: APPROVAL_REQUEST; turn parked
+    D-->>Op: APPROVAL_REQUEST, turn parked
     Op->>D: approve / deny
     D->>X: approved: child session on reviewer
     D-->>C: denied: TOOL_RESULT APPROVAL_DENIED

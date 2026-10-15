@@ -14,7 +14,7 @@ type Mutex struct {
 }
 
 // Lock acquires the mutex or returns the contended caller's context error.
-// An uncontended acquisition succeeds even if ctx is canceled, so the caller
+// A successful acquisition returns nil even if ctx is canceled, so the caller
 // can preserve terminal-error precedence while holding the mutex.
 func (m *Mutex) Lock(ctx context.Context) error {
 	m.once.Do(func() { m.held = make(chan struct{}, 1) })

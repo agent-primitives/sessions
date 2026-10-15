@@ -49,10 +49,11 @@ redact() {
 		-e "s/(${FIELD}\"?[[:space:]]*[:=][[:space:]]*\"?)[^\",[:space:]]+/\1[REDACTED]/g"
 }
 # show writes its screens to stdout (through present.awk on a terminal) and each chapter's full
-# output to its own log; the other modes tee everything to <mode>.log.
+# output to its own log; the other modes tee everything to <mode>.log. Each run starts its log
+# afresh, so a log holds the run that last used that mode, not every run on this host.
 STEP_LOG="${LOGS}/${MODE}.log"
+: >"${STEP_LOG}"
 if [[ "${MODE}" == show ]]; then
-	: >"${STEP_LOG}"
 	if [[ -t 1 ]]; then exec > >(redact | awk -f "${DEMO}/present.awk") 2>&1; else exec > >(redact) 2>&1; fi
 else
 	exec > >(redact | tee -a "${STEP_LOG}") 2>&1

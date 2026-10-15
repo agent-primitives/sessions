@@ -304,8 +304,9 @@ func TestCrashAfterUsageDoesNotDuplicateAccounting(t *testing.T) {
 
 // providerUsageHarness reports the usage the model call returned, as a harness wrapping a real
 // provider does. Replay and Resume must serve that usage back with the recorded completion, or the
-// harness reports zero and the recorded USAGE no longer matches.
-type providerUsageHarness struct{}
+// harness reports zero and the recorded USAGE no longer matches. By default it skips a zero usage;
+// with always set it reports whatever it was given, as api.EventSink.Usage's doc asks.
+type providerUsageHarness struct{ always bool }
 
 func (providerUsageHarness) Describe(context.Context) (api.Descriptor, error) {
 	return api.Descriptor{
@@ -314,12 +315,12 @@ func (providerUsageHarness) Describe(context.Context) (api.Descriptor, error) {
 	}, nil
 }
 
-func (providerUsageHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+func (h providerUsageHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
 	resp, err := sink.Model(ctx, api.ModelRequest{Model: "usage", Messages: start.Inputs})
 	if err != nil {
 		return err
 	}
-	if resp.Usage == (api.Usage{}) {
+	if resp.Usage == (api.Usage{}) && !h.always {
 		return nil
 	}
 	return sink.Usage(ctx, resp.Usage)
@@ -382,6 +383,84 @@ func TestReplayServesRecordedProviderUsage(t *testing.T) {
 	}
 	if replay.ModelInvocations() != 0 {
 		t.Fatalf("replay invoked the model %d times", replay.ModelInvocations())
+	}
+}
+
+// A turn cut between its OUTPUT and its USAGE has no recorded usage to serve, so Resume serves the
+// completion with zero usage and does not re-invoke the model. The call's usage is then journaled
+// as zero by a harness that always reports what it was given, or not at all by one that skips a
+// zero usage; either way the provider's real usage is lost, and the result replays.
+func TestResumeCutBeforeUsageJournalsZeroOrNoUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		h    providerUsageHarness
+		want []api.Usage
+	}{
+		{name: "always reports", h: providerUsageHarness{always: true}, want: []api.Usage{{}}},
+		{name: "skips zero", h: providerUsageHarness{}, want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, path := openFile(t)
+			usage := api.Usage{Model: "usage", InputTokens: 11, OutputTokens: 7}
+			model := func(_ context.Context, _ api.ModelRequest) (api.ModelResponse, error) {
+				return api.ModelResponse{Message: *api.TextMessage("assistant", "ok"), Usage: usage}, nil
+			}
+			c, err := controller.New(s.Session("s"), model)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Exec(context.Background(), tc.h, []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
+				t.Fatal(err)
+			}
+			s.Close()
+			// EXECUTION_START, INPUT, MODEL_CALL, OUTPUT survive; USAGE and END are lost.
+			truncateFrom(t, path, "s", 5)
+
+			s2, err := sqlitelog.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s2.Close()
+			log := s2.Session("s")
+			c2, err := controller.New(log, (&countModel{}).call)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resumed, err := c2.Resume(context.Background(), tc.h)
+			if err != nil {
+				t.Fatalf("resume: %v", err)
+			}
+			if !resumed || c2.ModelInvocations() != 0 {
+				t.Fatalf("resume: resumed=%v model invocations=%d, want true and 0", resumed, c2.ModelInvocations())
+			}
+			records, err := log.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var recorded []api.Usage
+			for _, record := range records {
+				if record.Event.Kind == api.EventUsage && record.Event.Usage != nil {
+					recorded = append(recorded, *record.Event.Usage)
+				}
+			}
+			if !reflect.DeepEqual(recorded, tc.want) {
+				t.Fatalf("recorded usage = %+v, want %+v", recorded, tc.want)
+			}
+			if records[len(records)-1].Event.Kind != api.EventEnd {
+				t.Fatal("resume did not append END")
+			}
+
+			replay, err := controller.New(log, (&countModel{}).call)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := replay.Replay(context.Background(), tc.h); err != nil {
+				t.Fatalf("replay: %v", err)
+			}
+			if replay.ModelInvocations() != 0 {
+				t.Fatalf("replay invoked the model %d times", replay.ModelInvocations())
+			}
+		})
 	}
 }
 

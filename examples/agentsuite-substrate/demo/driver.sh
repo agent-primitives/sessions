@@ -139,8 +139,8 @@ trap cleanup EXIT
 # NODE_BEFORE is the control-plane container ID setup saw before up.sh could create the cluster: ""
 # for none, "unknown" when kind listed the cluster but Docker reported no container for it. It is
 # unset until then. created_cluster reports whether this invocation created the cluster: its
-# container now exists and is another than a known one before (up.sh created it, or recreated one
-# whose first setup did not finish). An unknown one before keeps the cluster.
+# control-plane container now exists and differs from the one seen before (up.sh created it, or
+# recreated one whose first setup did not finish). An unknown one before keeps the cluster.
 created_cluster() {
 	local id
 	[[ -n "${NODE_BEFORE+set}" && "${NODE_BEFORE}" != unknown ]] || return 1

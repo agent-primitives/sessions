@@ -29,9 +29,9 @@ source "${DEMO}/model-token.sh"
 
 MODE="${1:-}"
 case "${MODE}" in
-setup | probe | show | reset | teardown) ;;
+setup | probe | lifecycle | crash | show | reset | teardown) ;;
 *)
-	echo "usage: $0 setup|probe|show|reset|teardown" >&2
+	echo "usage: $0 setup|probe|lifecycle|crash|show|reset|teardown" >&2
 	exit 2
 	;;
 esac
@@ -100,7 +100,7 @@ print(" ".join(a["metadata"]["name"] for a in items if a["metadata"]["name"].sta
 
 # The placeholders of deploy/coordinator-agentsessionsd.yaml. render_manifest fills them with literal
 # (not sed) substitution, the computed values first, so an operator value cannot be read as one.
-COORDINATOR_PLACEHOLDERS=(DAEMON_IMAGE MODEL_SECRET_VERSION COORDINATOR_FLAG WRITER_FLAG REVIEWER_FLAG INVOKES_VALUE MODEL_BASE_URL MODEL_AUTH_HEADER MODEL_ID)
+COORDINATOR_PLACEHOLDERS=(DAEMON_IMAGE MODEL_SECRET_VERSION COORDINATOR_FLAG WRITER_FLAG REVIEWER_FLAG INVOKES_VALUE MEMBERS_VALUE MODEL_BASE_URL MODEL_AUTH_HEADER MODEL_ID)
 # unfilled prints the placeholders the text $1 still contains.
 unfilled() {
 	local p left=""
@@ -121,6 +121,7 @@ render_manifest() {
 	m=${m//WRITER_FLAG/"$4"}
 	m=${m//REVIEWER_FLAG/"$5"}
 	m=${m//INVOKES_VALUE/"$6"}
+	m=${m//MEMBERS_VALUE/"${9:-}"}
 	m=${m//MODEL_BASE_URL/"$8"}
 	m=${m//MODEL_AUTH_HEADER/Authorization}
 	m=${m//MODEL_ID/"$7"}
@@ -172,31 +173,52 @@ setup() {
 	INVOKES="$("${WORK}/bin/emit" invokes -suite "${HERE}/${SUITE_DIR}" -binding "${STATE}/binding-coordinator.json")"
 	echo "AGENTSUITE_INVOKES=${INVOKES}"
 
-	local ctx="${STATE}/coordinator-image" out binding flags=()
+	local ctx="${STATE}/coordinator-image" out binding flags=() shared="" members=""
+	case "${COORD_TEMPLATE:-per-agent}" in
+	per-agent) ;;
+	shared)
+		# One image without an agent and one ActorTemplate in its own atespace for all three agents;
+		# each agent's member (instructions, model, approval targets) reaches the harness at session
+		# start from the daemon (AGENTSUITE_MEMBERS_JSON), checked against the digests the template pins.
+		shared=1
+		write_binding "${COORD_BINDING}" "${STATE}/binding-members.json" agentsuite-members
+		members="$("${WORK}/bin/emit" members -suite "${HERE}/${SUITE_DIR}" -binding "${STATE}/binding-members.json")"
+		;;
+	*) fail "COORD_TEMPLATE=${COORD_TEMPLATE}: want per-agent or shared" ;;
+	esac
 	rm -rf "${ctx}" && mkdir -p "${ctx}"
 	(cd "${HERE}" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "${ctx}/harness" ./cmd/harness)
 	for agent in "${AGENTS[@]}"; do
 		step "agent ${agent}: harness image, binding, ActorTemplate"
+		local tspace tag rflags=()
+		tspace="$(actors "${agent}")" tag="${agent}" binding="${STATE}/binding-${agent}.json"
 		rm -rf "${ctx}/agent"
-		"${WORK}/bin/emit" bundle -suite "${HERE}/${SUITE_DIR}" -agent "${agent}" -platform linux/amd64 -out "${ctx}/agent"
-		docker build -q --platform linux/amd64 -f "${HERE}/Dockerfile.harness" -t "localhost:5001/agentsuite-harness:${agent}" "${ctx}" >/dev/null
-		docker push -q "localhost:5001/agentsuite-harness:${agent}" >/dev/null
+		if [[ -n "${shared}" ]]; then
+			tspace=agentsuite-members tag=shared binding="${STATE}/binding-members.json" rflags=(-shared)
+			mkdir -p "${ctx}/agent"
+		else
+			"${WORK}/bin/emit" bundle -suite "${HERE}/${SUITE_DIR}" -agent "${agent}" -platform linux/amd64 -out "${ctx}/agent"
+		fi
+		docker build -q --platform linux/amd64 -f "${HERE}/Dockerfile.harness" -t "localhost:5001/agentsuite-harness:${tag}" "${ctx}" >/dev/null
+		docker push -q "localhost:5001/agentsuite-harness:${tag}" >/dev/null
 		local image
-		image="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:5001/agentsuite-harness:${agent}")"
-		binding="${STATE}/binding-${agent}.json"
+		image="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:5001/agentsuite-harness:${tag}")"
 		out="${STATE}/render-${agent}"
 		"${WORK}/bin/emit" render -suite "${HERE}/${SUITE_DIR}" -agent "${agent}" -platform linux/amd64 -binding "${binding}" \
-			-image "${image}" -actors "$(actors "${agent}")" -out "${out}"
-		"${ATE[@]}" get atespace "$(actors "${agent}")" >/dev/null 2>&1 || "${ATE[@]}" create atespace "$(actors "${agent}")"
+			-image "${image}" -actors "$(actors "${agent}")" "${rflags[@]}" -out "${out}"
+		local space
+		for space in "${tspace}" "$(actors "${agent}")"; do
+			"${ATE[@]}" get atespace "${space}" >/dev/null 2>&1 || "${ATE[@]}" create atespace "${space}"
+		done
 		local template
 		template="$(cat "${out}/template-name")"
-		"${ATE[@]}" get actor-template "${template}" -a "$(actors "${agent}")" >/dev/null 2>&1 || "${ATE[@]}" create actor-template -f "${out}/actortemplate.json"
-		wait_golden "$(actors "${agent}")" "${template}"
+		"${ATE[@]}" get actor-template "${template}" -a "${tspace}" >/dev/null 2>&1 || "${ATE[@]}" create actor-template -f "${out}/actortemplate.json"
+		wait_golden "${tspace}" "${template}"
 		# A template an earlier setup created for this agent (another image or option) is left over;
 		# the atespace holds only the current one, which is what show lists.
 		local old
-		for old in $(ate_names actor-templates "$(actors "${agent}")"); do
-			[[ "${old}" == "${template}" ]] || "${ATE[@]}" delete actor-template "${old}" -a "$(actors "${agent}")"
+		for old in $(ate_names actor-templates "${tspace}"); do
+			[[ "${old}" == "${template}" ]] || "${ATE[@]}" delete actor-template "${old}" -a "${tspace}"
 		done
 		flags+=("$(cat "${out}/agentsessionsd.args")")
 	done
@@ -219,7 +241,7 @@ setup() {
 	step "agentsessionsd with the invocation executor (examples/agentsuite-substrate/cmd/agentsessionsd)"
 	local daemon manifest
 	daemon="$(cd "${HERE}" && KO_DOCKER_REPO=localhost:5001 ko build --base-import-paths --platform=linux/amd64 ./cmd/agentsessionsd)"
-	manifest="$(render_manifest "${daemon}" "${version}" "${flags[0]}" "${flags[1]}" "${flags[2]}" "${INVOKES}" "${model}" "${base}")"
+	manifest="$(render_manifest "${daemon}" "${version}" "${flags[0]}" "${flags[1]}" "${flags[2]}" "${INVOKES}" "${model}" "${base}" "${members}")"
 	[[ -z "$(unfilled "${manifest}")" ]] || fail "deploy/coordinator-agentsessionsd.yaml still holds the placeholders '$(unfilled "${manifest}")' after rendering"
 	printf '%s\n' "${manifest}" >"${STATE}/coordinator-agentsessionsd.yaml"
 	"${K[@]}" apply -f "${STATE}/coordinator-agentsessionsd.yaml"
@@ -285,6 +307,133 @@ probe() {
 	done
 	"${K[@]}" -n "${NS}" logs deploy/agentsessionsd-coordinator >"${LOGS}/agentsessionsd.log" 2>&1 || true
 	echo "PROBE OK"
+}
+
+# =================================================================================================
+# lifecycle: LIFECYCLE_RUNS (default 5) coordinator requests that each delegate to writer and then
+# send that same writer session a follow-up, so each run suspends the child twice and wakes it once.
+# Prints the actors per state before and after, and every delegation's lifecycle from the journals.
+# crash: kills the daemon's process (SIGKILL on its kind node) while a writer child is mid-call, lets
+# the container restart (the journal's emptyDir survives a container restart), resumes the
+# coordinator's turn, and checks the retry reached the same writer child. Both end with ... OK.
+# =================================================================================================
+forward() {
+	local p
+	for p in "${PIDS[@]}"; do kill "${p}" 2>/dev/null || true; done
+	PIDS=()
+	"${K[@]}" -n "${NS}" port-forward svc/agentsessionsd-coordinator "${SERVER##*:}:8080" >/dev/null 2>&1 &
+	PIDS+=($!)
+	for _ in $(seq 60); do
+		if ctl list >/dev/null 2>&1; then return 0; fi
+		sleep 1
+	done
+	fail "the Sessions API did not answer"
+}
+# actor_states: the session actors per state in each agent's atespace.
+actor_states() {
+	local agent
+	for agent in "${AGENTS[@]}"; do
+		printf '%s: ' "$(actors "${agent}")"
+		"${ATE[@]}" get actors -a "$(actors "${agent}")" -o json | python3 -c '
+import collections, json, sys
+d = json.load(sys.stdin)
+items = d if isinstance(d, list) else next((v for v in d.values() if isinstance(v, list)), [])
+c = collections.Counter(a.get("status", {}).get("state", "?") for a in items if a["metadata"]["name"].startswith("sess-"))
+print(" ".join("%s=%d" % kv for kv in sorted(c.items())) or "none")'
+	done
+}
+# lifecycles JOURNAL...: one row per delegation result in agentctl replay -v output.
+lifecycles() {
+	python3 -c '
+import json, re, sys
+rows = []
+for f in sys.argv[1:]:
+    for line in open(f):
+        if "EVENT_TOOL_RESULT" not in line:
+            continue
+        m = re.search(r"\"lifecycle\":(\{[^{}]*\})", line)
+        if m:
+            lc = json.loads(m.group(1))
+            a = re.search(r"\"agent\":\"([a-z]+)\"", line)
+            rows.append((f.rsplit("/", 1)[-1], a.group(1) if a else "?", lc))
+for f, agent, lc in rows:
+    print("%-26s %-8s origin=%-9s turn=%-9s wakeMs=%-6s turnMs=%-6s suspendMs=%-6s suspended=%s" % (f, agent, lc.get("origin"), lc.get("turn"), lc.get("wakeMs", "-"), lc.get("turnMs", "-"), lc.get("suspendMs", "-"), lc.get("suspended")))
+def stats(k):
+    v = sorted(float(lc[k]) for _, _, lc in rows if k in lc)
+    return "n=%d min=%d median=%d max=%d" % (len(v), v[0], v[len(v) // 2], v[-1]) if v else "n=0"
+print("wakeMs " + stats("wakeMs")); print("suspendMs " + stats("suspendMs")); print("turnMs " + stats("turnMs"))
+' "$@"
+}
+
+lifecycle() {
+	rm -f "${LOGS}"/lifecycle-*
+	forward
+	step "session actors before"
+	actor_states | tee "${LOGS}/lifecycle-actors-before.txt"
+	local i uid runs="${LIFECYCLE_RUNS:-5}"
+	for i in $(seq "${runs}"); do
+		step "run ${i}: a writer delegation, then a follow-up to the same writer session"
+		ctl exec --harness coordinator --input "Have the writer write a two-line poem about tides. Then delegate a follow-up to that same writer session (give its session id) asking it to make the two lines rhyme. Do not use the reviewer. Reply with the final poem." >"${LOGS}/lifecycle-${i}-exec.txt"
+		uid="$(sed -n 's/^session //p' "${LOGS}/lifecycle-${i}-exec.txt" | head -1)"
+		[[ -n "${uid}" ]] || fail "run ${i}: no session uid"
+		ctl replay --session "${uid}" -v >"${LOGS}/lifecycle-${i}-journal.txt"
+		actor_states
+	done
+	step "session actors after"
+	actor_states | tee "${LOGS}/lifecycle-actors-after.txt"
+	ctl list >"${LOGS}/lifecycle-list.txt"
+	step "every delegation's child lifecycle, from the coordinators' journals"
+	lifecycles "${LOGS}"/lifecycle-*-journal.txt | tee "${LOGS}/lifecycle-table.txt"
+	"${K[@]}" -n "${NS}" logs deploy/agentsessionsd-coordinator 2>&1 | grep 'agentsuite invocation' >"${LOGS}/lifecycle-daemon.txt" || true
+	grep -q "RUNNING" "${LOGS}/lifecycle-actors-after.txt" && fail "a session actor is still running after its turn"
+	local woke
+	woke="$(grep -c 'origin=follow-up' "${LOGS}/lifecycle-table.txt" || true)"
+	((woke >= runs)) || fail "only ${woke} follow-ups woke a child; want ${runs}"
+	echo "LIFECYCLE OK"
+}
+
+crash() {
+	rm -f "${LOGS}"/crash-*
+	forward
+	local before pod node uid restarts
+	before="$(ctl list | grep -c 'harness=writer	' || true)"
+	pod="$("${K[@]}" -n "${NS}" get pod -l app=agentsessionsd-coordinator -o jsonpath='{.items[0].metadata.name}')"
+	node="$("${K[@]}" -n "${NS}" get pod "${pod}" -o jsonpath='{.spec.nodeName}')"
+	restarts="$("${K[@]}" -n "${NS}" get pod "${pod}" -o jsonpath='{.status.containerStatuses[0].restartCount}')"
+	step "a coordinator request; the daemon is killed once its writer child exists"
+	ctl exec --harness coordinator --input "Have the writer write a two-line poem about tides and reply with it. Do not use the reviewer." >"${LOGS}/crash-exec.txt" 2>&1 &
+	local exec_pid=$! i
+	for i in $(seq 240); do
+		(($(ctl list | grep -c 'harness=writer	' || true) > before)) && break
+		((i < 240)) || fail "no writer child appeared"
+		sleep 0.5
+	done
+	ctl list | grep 'harness=writer	' >"${LOGS}/crash-writers-at-kill.txt" || true
+	docker exec "${node}" pkill -9 -f /ko-app/agentsessionsd
+	echo "killed agentsessionsd (SIGKILL) on ${node} at $(date -u +%T)"
+	wait "${exec_pid}" || true
+	uid="$(sed -n 's/^session //p' "${LOGS}/crash-exec.txt" | head -1)"
+	[[ -n "${uid}" ]] || fail "no coordinator session uid in the exec output"
+	for i in $(seq 120); do
+		(($("${K[@]}" -n "${NS}" get pod "${pod}" -o jsonpath='{.status.containerStatuses[0].restartCount}') > restarts)) &&
+			"${K[@]}" -n "${NS}" wait --for=condition=Ready "pod/${pod}" --timeout=5s >/dev/null 2>&1 && break
+		((i < 120)) || fail "the daemon container did not restart"
+		sleep 1
+	done
+	forward
+	ctl replay --session "${uid}" -v >"${LOGS}/crash-journal-before-resume.txt"
+	step "resume the coordinator's turn on the restarted daemon"
+	ctl resume --session "${uid}" | tee "${LOGS}/crash-resume.txt"
+	ctl replay --session "${uid}" -v >"${LOGS}/crash-journal.txt"
+	ctl list >"${LOGS}/crash-list.txt"
+	lifecycles "${LOGS}/crash-journal.txt" | tee "${LOGS}/crash-table.txt"
+	actor_states | tee "${LOGS}/crash-actors.txt"
+	local after
+	after="$(grep -c 'harness=writer	' "${LOGS}/crash-list.txt" || true)"
+	((after == before + 1)) || fail "writer sessions went from ${before} to ${after}; want exactly one new child"
+	grep -q 'origin=retry' "${LOGS}/crash-table.txt" || fail "the writer result is not a retry of the first child"
+	grep -q 'EVENT_END' "${LOGS}/crash-journal.txt" || fail "the resumed turn did not end"
+	echo "CRASH OK"
 }
 
 # =================================================================================================
@@ -580,6 +729,8 @@ substrate: is a template's golden snapshot usable from another atespace? Here ea
 case "${MODE}" in
 setup) setup ;;
 probe) probe ;;
+lifecycle) lifecycle ;;
+crash) crash ;;
 show)
 	SHOW_START=${SECONDS}
 	show

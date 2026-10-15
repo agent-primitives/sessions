@@ -431,9 +431,10 @@ func (x *Executor) followUp(ctx context.Context, parent, project string, args Ar
 }
 
 // turn runs the call's task in child, unless the child's journal shows an earlier attempt of the
-// same call (its EXECUTION_START names this tool call id): a completed one is served from the
-// child's journal, an interrupted one is re-driven with Resume. lc records what happened and how
-// long each step took, in milliseconds.
+// same call (its EXECUTION_START names this tool call id): a finished one is served from the
+// child's journal (its output, or its failure for a turn that ended with ERROR), an interrupted
+// one is re-driven with Resume. lc records what happened and how long each step took, in
+// milliseconds.
 func (x *Executor) turn(ctx context.Context, child *v1.Session, callID, task string, config []byte) (string, map[string]any, error) {
 	uid := child.GetMetadata().GetUid()
 	lc := map[string]any{}
@@ -472,7 +473,7 @@ func (x *Executor) turn(ctx context.Context, child *v1.Session, callID, task str
 		}
 		return turn.Output, lc, nil
 	}
-	if rec.failed != "" && rec.output == "" {
+	if rec.failed != "" {
 		return "", lc, errors.New(rec.failed)
 	}
 	return rec.output, lc, nil
@@ -501,7 +502,9 @@ const suspendTimeout = time.Minute
 
 func ms(start time.Time) int64 { return time.Since(start).Milliseconds() }
 
-// attempt is what a child's journal holds of one call's turn there.
+// attempt is what a child's journal holds of one call's turn there. A turn ends with END (the
+// controller only writes COMPLETED) or, when it failed, with ERROR and no END; either is terminal,
+// so a retry serves it instead of running the call again. failed is the ERROR's description.
 type attempt struct {
 	started, ended bool
 	output         string
@@ -534,11 +537,12 @@ func (x *Executor) recorded(ctx context.Context, uid, callID string) (attempt, e
 			}
 		case v1.EventKind_EVENT_END:
 			a.ended = true
-			if st := ev.GetEnd().GetState(); st != "" && st != "COMPLETED" && a.failed == "" {
-				a.failed = "the child's turn ended " + st
-			}
 		case v1.EventKind_EVENT_ERROR:
+			a.ended = true
 			a.failed = ev.GetError().GetDescription()
+			if a.failed == "" {
+				a.failed = "the child's turn failed"
+			}
 		}
 	}
 	return a, nil

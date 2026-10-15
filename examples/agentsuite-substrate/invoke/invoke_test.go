@@ -142,6 +142,11 @@ func (f *fakeSessions) Exec(ctx context.Context, o client.ExecOptions) (*client.
 		}
 	}
 	if f.execErr != nil {
+		// As the controller does: a failed turn ends with ERROR and no END, after any output.
+		f.mu.Lock()
+		f.record(o.Session, exec, &v1.Event{Kind: v1.EventKind_EVENT_OUTPUT, Body: &v1.Event_Message{Message: wire.MessageToProto(api.TextMessage("assistant", "partial"))}})
+		f.record(o.Session, exec, &v1.Event{Kind: v1.EventKind_EVENT_ERROR, Body: &v1.Event_Error{Error: &v1.Error{Description: f.execErr.Error()}}})
+		f.mu.Unlock()
 		return nil, f.execErr
 	}
 	out := "done: " + strings.Join(o.Inputs, " ")
@@ -178,7 +183,7 @@ func (f *fakeSessions) Suspend(_ context.Context, uid string) (*v1.Session, erro
 }
 
 // Resume wakes the session and, as the host's crash recovery does, finishes its last turn when it
-// has an EXECUTION_START and no END.
+// has an EXECUTION_START and no END or ERROR.
 func (f *fakeSessions) Resume(_ context.Context, uid string, _ bool) (*v1.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -190,7 +195,7 @@ func (f *fakeSessions) Resume(_ context.Context, uid string, _ bool) (*v1.Sessio
 		switch r.GetEvent().GetKind() {
 		case v1.EventKind_EVENT_EXECUTION_START:
 			exec = r.GetEvent().GetExecutionId()
-		case v1.EventKind_EVENT_END:
+		case v1.EventKind_EVENT_END, v1.EventKind_EVENT_ERROR:
 			exec = ""
 		}
 	}
@@ -658,6 +663,8 @@ func TestInvokeRetryAfterCrashReachesTheSameChild(t *testing.T) {
 		turn  string
 		execs int
 		out   string
+		// failed, when set, is the error the retry must report.
+		failed string
 	}{
 		{
 			name: "after create, before the turn",
@@ -691,6 +698,17 @@ func TestInvokeRetryAfterCrashReachesTheSameChild(t *testing.T) {
 			},
 			turn: "recorded", execs: 1, out: "done: w",
 		},
+		{
+			// The turn failed after some output: its ERROR is terminal, so the retry reports the
+			// failure instead of re-driving the turn or serving the partial output as a success.
+			name: "after the child's turn failed, before the caller's result",
+			crash: func(t *testing.T, f *fakeSessions, fn controller.ToolFunc, c api.ToolCall) {
+				f.execErr = errors.New("model unavailable")
+				run(t, fn, "sess-root", c)
+				f.execErr = nil
+			},
+			turn: "recorded", execs: 1, failed: "model unavailable",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFake()
@@ -699,9 +717,17 @@ func TestInvokeRetryAfterCrashReachesTheSameChild(t *testing.T) {
 			if len(f.created) != 1 {
 				t.Fatalf("the first attempt created %d children", len(f.created))
 			}
+			resumedBefore := len(f.resumed)
 			res := run(t, New(suitePolicy(t), f).For("coordinator"), "sess-root", c)
 			lc := lifecycle(t, res)
-			if res.IsError || res.Output["session"] != "sess-child-1" || res.Output["output"] != tc.out || lc["origin"] != "retry" || lc["turn"] != tc.turn || lc["suspended"] != true {
+			if res.Output["session"] != "sess-child-1" || lc["origin"] != "retry" || lc["turn"] != tc.turn || lc["suspended"] != true {
+				t.Fatalf("retry = %+v", res)
+			}
+			if tc.failed != "" {
+				if !res.IsError || !strings.Contains(res.Error, tc.failed) || len(f.resumed) != resumedBefore {
+					t.Fatalf("retry of a failed turn = %+v, resumed %v; want its failure, not a re-drive", res, f.resumed[resumedBefore:])
+				}
+			} else if res.IsError || res.Output["output"] != tc.out {
 				t.Fatalf("retry = %+v", res)
 			}
 			if len(f.created) != 1 || f.execs != tc.execs {

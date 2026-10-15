@@ -1,4 +1,4 @@
-# vhs tape for the short demo; record.sh record runs it from the repository root.
+# vhs tape for the demo; record.sh record runs it from the repository root.
 #
 # The recording starts hidden: the tape types `record.sh run`, which runs driver.sh show (on the host
 # with the cluster) through present.awk, and shows the terminal from the title card on. Each wait
@@ -9,8 +9,11 @@
 #
 # Wait+Line matches the cursor's line, which present.awk keeps on the newest line; Wait+Screen is not
 # used, since in vhs 0.12.1 it stops the terminal drawing streamed output.
+#
+# At font size 22 the terminal is 130 columns by 39 rows; driver.sh draws 129 x 39 (DEMO_COLS and
+# DEMO_ROWS, which record.sh sets).
 Set Shell "bash"
-Set FontSize 26
+Set FontSize 22
 Set Width 1920
 Set Height 1080
 Set Padding 36
@@ -26,84 +29,84 @@ Enter
 Wait+Line@20m /OpenAI\.|RECORDING FAILED|DEMO FAILED/
 Show
 
-# 1. chapter 3 How a turn flows: the traced turn; the session's micro-VM starts, the model answers
+# 1. chapter 3 In the cluster: the template's golden snapshot
 Wait+Line@5m /⠿|RECORDING FAILED|DEMO FAILED/
 Sleep 500ms
 Hide
 Wait+Line@5m /✓|RECORDING FAILED|DEMO FAILED/
 Show
 
-# 2. chapter 4 Chat: turn 2
+# 2. chapter 4 A turn, end to end: turn 1, the session's micro-VM starts and the model answers
 Wait+Line@5m /⠿|RECORDING FAILED|DEMO FAILED/
 Sleep 500ms
 Hide
 Wait+Line@5m /✓|RECORDING FAILED|DEMO FAILED/
 Show
 
-# 3. chapter 6 Pause and resume: turn 1 of the memory session
+# 3. chapter 5 Chat: turn 2
 Wait+Line@5m /⠿|RECORDING FAILED|DEMO FAILED/
 Sleep 500ms
 Hide
 Wait+Line@5m /✓|RECORDING FAILED|DEMO FAILED/
 Show
 
-# 4. chapter 6 Pause and resume: suspend
+# 4. chapter 7 Pause and resume: turn 1 of the memory session
 Wait+Line@5m /⠿|RECORDING FAILED|DEMO FAILED/
 Sleep 500ms
 Hide
 Wait+Line@5m /✓|RECORDING FAILED|DEMO FAILED/
 Show
 
-# 5. chapter 6 Pause and resume: sizing the snapshot
+# 5. chapter 7 Pause and resume: suspend
 Wait+Line@5m /⠿|RECORDING FAILED|DEMO FAILED/
 Sleep 500ms
 Hide
 Wait+Line@5m /✓|RECORDING FAILED|DEMO FAILED/
 Show
 
-# 6. chapter 6 Pause and resume: resume
+# 6. chapter 7 Pause and resume: resume
 Wait+Line@5m /⠿|RECORDING FAILED|DEMO FAILED/
 Sleep 500ms
 Hide
 Wait+Line@5m /✓|RECORDING FAILED|DEMO FAILED/
 Show
 
-# 7. chapter 6 Pause and resume: the turn after resume
+# 7. chapter 7 Pause and resume: the turn after resume
 Wait+Line@5m /⠿|RECORDING FAILED|DEMO FAILED/
 Sleep 500ms
 Hide
 Wait+Line@5m /✓|RECORDING FAILED|DEMO FAILED/
 Show
 
-# 8. chapter 7 Replay: replay
+# 8. chapter 8 Replay: replay
 Wait+Line@5m /⠿|RECORDING FAILED|DEMO FAILED/
 Sleep 500ms
 Hide
 Wait+Line@5m /✓|RECORDING FAILED|DEMO FAILED/
 Show
 
-# 9. chapter 8 Fork: fork
+# 9. chapter 9 Fork: fork
 Wait+Line@5m /⠿|RECORDING FAILED|DEMO FAILED/
 Sleep 500ms
 Hide
 Wait+Line@5m /✓|RECORDING FAILED|DEMO FAILED/
 Show
 
-# 10. chapter 8 Fork: the child's turn
+# 10. chapter 9 Fork: the child's turn
 Wait+Line@5m /⠿|RECORDING FAILED|DEMO FAILED/
 Sleep 500ms
 Hide
 Wait+Line@5m /✓|RECORDING FAILED|DEMO FAILED/
 Show
 
-# 11. chapter 9 Guarding memory: deleting the actor
+# 11. chapter 10 Guarding memory: deleting the actor
 Wait+Line@5m /⠿|RECORDING FAILED|DEMO FAILED/
 Sleep 500ms
 Hide
 Wait+Line@5m /✓|RECORDING FAILED|DEMO FAILED/
 Show
 
-# 12. chapter 9 Guarding memory: the refused turn
+# 12. chapter 10 Guarding memory: the refused turn
 Wait+Line@5m /⠿|RECORDING FAILED|DEMO FAILED/
 Sleep 500ms
 Hide
@@ -112,6 +115,6 @@ Show
 
 # The recap's last line, held for the end of the video; then wait, hidden, for the logs to be fetched.
 Wait+Line@5m /agentsuite-substrate\.|RECORDING FAILED|DEMO FAILED/
-Sleep 7s
+Sleep 6s
 Hide
 Wait+Line@10m /RECORDING (COMPLETE|FAILED)/

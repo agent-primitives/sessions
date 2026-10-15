@@ -1,0 +1,19 @@
+%%{init: {"theme": "dark", "themeVariables": {"fontSize": "26px", "fontFamily": "Helvetica, Arial, sans-serif", "darkMode": true, "background": "#171717"}, "flowchart": {"nodeSpacing": 60, "rankSpacing": 70, "padding": 14, "wrappingWidth": 360, "useMaxWidth": false}}}%%
+%% Build half: how the AgentSuite files become a substrate ActorTemplate and the agentsessionsd flag.
+%% record.sh renders this to build.png and splices it in at the end of chapter 2. Every arrow is
+%% checked against the code; diagrams.md lists where.
+flowchart LR
+  suite["AgentSuite files<br/>agentsuite.json<br/>agents/writer.json<br/>instructions/writer.md<br/>compositions/"]
+  val["kaimahi's<br/>agentsuite package<br/>ValidateDirectory"]
+  image["harness image<br/>agent files in /agent<br/>pinned by digest"]
+  binding["binding-microvm.json<br/>draft AgentSessionsBinding"]
+  render["emit render"]
+  ate["ActorTemplate<br/>in substrate"]
+  daemon["agentsessionsd<br/>-substrate-harness flag"]
+  suite --> val
+  val -->|"emit bundle"| image
+  val --> render
+  image -->|"image digest"| render
+  binding --> render
+  render -->|"actortemplate.json<br/>created by hand"| ate
+  render -->|"agentsessionsd.args<br/>set by hand"| daemon

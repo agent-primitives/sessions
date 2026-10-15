@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
-"""Splices the turn-flow diagram into a recording of driver.sh show.
+"""Splices the two diagrams into a recording of driver.sh show.
 
-usage: splice.py IN.mp4 DIAGRAM.png OUT.mp4
+usage: splice.py IN.mp4 OUT.mp4 COLOR=DIAGRAM.png...
 
-driver.sh draws a screen of magenta rows where chapter 3 shows the diagram. This finds the frames
-that show that block and its bounding box, then overlays DIAGRAM (scaled to fit the box, centered on
-the terminal's background color) on exactly those frames. Everything else is copied frame for frame
-(re-encoded with the same size and frame rate). Prints the diagram's time span and box.
+driver.sh draws a screen of solid rows in one color where a diagram goes: magenta for the build
+diagram (end of chapter 2), green for the run diagram (start of chapter 4). For each COLOR this
+finds the frames that show its block and the block's bounding box, then overlays DIAGRAM (scaled to
+fit the box, centered on the terminal's background color) on exactly those frames. Everything else
+is copied frame for frame (re-encoded with the same size and frame rate). Prints each diagram's
+time span and box.
 """
 import json
 import subprocess
 import sys
 
 PROBE_W, PROBE_H = 96, 54
+COLORS = {
+    "magenta": lambda r, g, b: r > 200 and g < 70 and b > 200,
+    "green": lambda r, g, b: r < 70 and g > 200 and b < 70,
+}
 
 
 def run(cmd, **kw):
@@ -25,10 +31,6 @@ def probe(path):
     s = json.loads(out)["streams"][0]
     num, den = s["r_frame_rate"].split("/")
     return s["width"], s["height"], float(num) / float(den)
-
-
-def magenta(r, g, b):
-    return r > 200 and g < 70 and b > 200
 
 
 def frames(path, w, h, fps):
@@ -45,41 +47,60 @@ def frames(path, w, h, fps):
         sys.exit(f"ffmpeg exited {p.returncode}")
 
 
-def share(buf):
+def share(buf, is_color):
     n = len(buf) // 3
-    hits = sum(1 for i in range(0, len(buf), 3) if magenta(buf[i], buf[i + 1], buf[i + 2]))
-    return hits / n
+    return sum(1 for i in range(0, len(buf), 3) if is_color(buf[i], buf[i + 1], buf[i + 2])) / n
 
 
 def main():
-    src, diagram, dst = sys.argv[1:4]
+    if len(sys.argv) < 4:
+        sys.exit(__doc__.split("\n\n")[1])
+    src, dst = sys.argv[1:3]
+    diagrams = []
+    for arg in sys.argv[3:]:
+        color, _, png = arg.partition("=")
+        if color not in COLORS or not png:
+            sys.exit(f"splice.py: want COLOR=PNG with COLOR one of {', '.join(COLORS)}, got {arg}")
+        diagrams.append((color, png))
     width, height, fps = probe(src)
-    shown = [n for n, buf in enumerate(frames(src, PROBE_W, PROBE_H, fps)) if share(buf) > 0.2]
-    if not shown:
-        sys.exit("no frame shows the diagram block")
-    first, last = shown[0], shown[-1]
-    if last - first + 1 != len(shown):
-        sys.exit(f"the diagram block is not one span of frames: {len(shown)} frames between {first} and {last}")
-    # The box and the terminal's background, from one full-size frame in the middle of the span.
-    mid = (first + last) // 2
-    raw = run(["ffmpeg", "-v", "error", "-ss", f"{mid / fps:.3f}", "-i", src, "-frames:v", "1",
-               "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True).stdout
-    px = lambda x, y: raw[(y * width + x) * 3:(y * width + x) * 3 + 3]
-    rows = [y for y in range(height) if magenta(*px(width // 2, y))]
-    cols = [x for x in range(width) if magenta(*px(x, rows[len(rows) // 2]))]
-    x0, x1, y0, y1 = cols[0], cols[-1], rows[0], rows[-1]
-    bw, bh = x1 - x0 + 1, y1 - y0 + 1
-    bg = "0x%02x%02x%02x" % tuple(px(width - 4, height - 4))
-    t0, t1 = first / fps, (last + 1) / fps
-    # The background and the looped image never end; shortest=1 ends the output with the recording.
-    graph = (f"color=c={bg}:s={bw}x{bh}[bg];"
-             f"[1:v]scale={bw - 24}:{bh - 24}:force_original_aspect_ratio=decrease[img];"
-             f"[bg][img]overlay=(W-w)/2:(H-h)/2[d];"
-             f"[0:v][d]overlay={x0}:{y0}:shortest=1:enable='between(t,{t0 - 0.001:.3f},{t1 - 0.001:.3f})'[v]")
-    run(["ffmpeg", "-v", "error", "-y", "-i", src, "-loop", "1", "-i", diagram, "-filter_complex", graph,
-         "-map", "[v]", "-r", f"{fps:g}", "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+    shown = {color: [] for color, _ in diagrams}
+    for n, buf in enumerate(frames(src, PROBE_W, PROBE_H, fps)):
+        for color, _ in diagrams:
+            if share(buf, COLORS[color]) > 0.2:
+                shown[color].append(n)
+    inputs, graph, last_label, spans = ["-i", src], [], "0:v", []
+    for k, (color, png) in enumerate(diagrams, 1):
+        hits = shown[color]
+        if not hits:
+            sys.exit(f"no frame shows the {color} block")
+        first, last = hits[0], hits[-1]
+        if last - first + 1 != len(hits):
+            sys.exit(f"the {color} block is not one span of frames: {len(hits)} frames between {first} and {last}")
+        # The box and the terminal's background, from one full-size frame in the middle of the span.
+        mid = (first + last) // 2
+        raw = run(["ffmpeg", "-v", "error", "-ss", f"{mid / fps:.3f}", "-i", src, "-frames:v", "1",
+                   "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True).stdout
+        px = lambda x, y: raw[(y * width + x) * 3:(y * width + x) * 3 + 3]
+        is_color = COLORS[color]
+        rows = [y for y in range(height) if is_color(*px(width // 2, y))]
+        cols = [x for x in range(width) if is_color(*px(x, rows[len(rows) // 2]))]
+        # One pixel in on every side: the encoder blends the block's edge with its neighbors.
+        x0, x1, y0, y1 = cols[0] - 1, cols[-1] + 1, rows[0] - 1, rows[-1] + 1
+        bw, bh = x1 - x0 + 1, y1 - y0 + 1
+        bg = "0x%02x%02x%02x" % tuple(px(width - 4, height - 4))
+        t0, t1 = first / fps, (last + 1) / fps
+        inputs += ["-loop", "1", "-i", png]
+        # The background and the looped image never end; shortest=1 ends the output with the recording.
+        graph.append(f"color=c={bg}:s={bw}x{bh}[bg{k}];"
+                     f"[{k}:v]scale={bw - 24}:{bh - 24}:force_original_aspect_ratio=decrease[img{k}];"
+                     f"[bg{k}][img{k}]overlay=(W-w)/2:(H-h)/2[d{k}];"
+                     f"[{last_label}][d{k}]overlay={x0}:{y0}:shortest=1:enable='between(t,{t0 - 0.001:.3f},{t1 - 0.001:.3f})'[v{k}]")
+        last_label = f"v{k}"
+        spans.append(f"{color}\t{t0:.1f}\t{t1:.1f}\tbox {bw}x{bh}+{x0}+{y0}\tbackground {bg}")
+    run(["ffmpeg", "-v", "error", "-y", *inputs, "-filter_complex", ";".join(graph),
+         "-map", f"[{last_label}]", "-r", f"{fps:g}", "-c:v", "libx264", "-preset", "fast", "-crf", "20",
          "-pix_fmt", "yuv420p", "-movflags", "+faststart", dst])
-    print(f"diagram\t{t0:.1f}\t{t1:.1f}\tbox {bw}x{bh}+{x0}+{y0}\tbackground {bg}")
+    print("\n".join(spans))
 
 
 if __name__ == "__main__":

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """Prints "<chapter>\t<seconds>" for each chapter start in a recording of driver.sh show.
 
-driver.sh draws a progress bar across the top row of each chapter: chapter k of 10 fills k/10 of it
-with cyan, the rest with gray. A chapter starts at the first frame whose bar is k/10 full. The
-geometry matches demo.tape (1920x1080, padding 36, font size 26).
+driver.sh draws a progress bar across the top row of each chapter: chapter k of 11 fills k/11 of it
+with cyan, the rest with gray. A chapter starts at the first frame whose bar is k/11 full. The
+geometry matches demo.tape (1920x1080, padding 36, font size 22).
 
 usage: chapters.py demo.mp4
 """
 import subprocess
 import sys
 
-CHAPTERS = 10
+CHAPTERS = 11
 FPS = 10
-W, X, Y, H = 1920 - 72, 36, 40, 20  # the bar row, inside the padding
+W, X, Y, H = 1920 - 72, 36, 40, 16  # the bar row, inside the padding
 COLS = 224  # samples across the row
 
 

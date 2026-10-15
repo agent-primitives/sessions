@@ -151,3 +151,27 @@ func TestCheckModelRefusesAKeyOverRemotePlainHTTP(t *testing.T) {
 		}
 	}
 }
+
+// validate runs kaimahi's validator over a suite and prints one line naming the suite, its
+// composition and the kaimahi module; a suite the validator refuses is an error, not a report.
+func TestValidate(t *testing.T) {
+	var out strings.Builder
+	if err := validate([]string{"-suite", "../../suites/kaimahi-minimal"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"suite minimal valid (github.com/kaimahi-agents/kaimahi/agentsuite ", "1 agent", "writer linux/amd64 profile default"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("validate printed %q, want it to contain %q", out.String(), want)
+		}
+	}
+	if strings.Count(out.String(), "\n") != 1 {
+		t.Errorf("validate printed %q, want one line", out.String())
+	}
+	dir := t.TempDir()
+	if err := validate([]string{"-suite", dir}, &out); err == nil {
+		t.Error("validate accepted a directory with no agentsuite.json")
+	}
+	if err := validate([]string{"-suite", dir, "extra"}, &out); err == nil || !strings.Contains(err.Error(), "unexpected arguments") {
+		t.Errorf("validate with an extra argument: %v", err)
+	}
+}

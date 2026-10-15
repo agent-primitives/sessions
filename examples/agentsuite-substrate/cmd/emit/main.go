@@ -13,14 +13,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strings"
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/kaimahi-agents/kaimahi/agentsuite"
 
 	"github.com/aramase/agentsessions/examples/agentsuite-substrate/render"
 	"github.com/aramase/agentsessions/internal/modelconfig"
@@ -28,7 +32,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render|check-model> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render|validate|check-model> [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -37,10 +41,12 @@ func main() {
 		err = bundle(os.Args[2:])
 	case "render":
 		err = renderCmd(os.Args[2:])
+	case "validate":
+		err = validate(os.Args[2:], os.Stdout)
 	case "check-model":
 		err = checkModel(os.Args[2:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render|check-model> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render|validate|check-model> [flags]")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -79,6 +85,49 @@ func bundle(args []string) error {
 	}
 	fmt.Printf("staged agent %s of suite %s (%s, composition %s) in %s\n", comp.Agent.ID, comp.Suite, c.platform, comp.Digest, c.out)
 	return nil
+}
+
+// kaimahiModule is the module that provides the agentsuite package.
+const kaimahiModule = "github.com/kaimahi-agents/kaimahi"
+
+// validate runs kaimahi's own validator (agentsuite.ValidateDirectory, from the imported module, not
+// a copy) over a suite directory and prints one line: the suite, its agents and compositions, and
+// the kaimahi module version the binary was built against.
+func validate(args []string, w io.Writer) error {
+	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
+	suite := fs.String("suite", "suite", "AgentSuite content directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("validate: unexpected arguments %q", fs.Args())
+	}
+	report, err := agentsuite.ValidateDirectory(*suite)
+	if err != nil {
+		return fmt.Errorf("validate suite %s: %w", *suite, err)
+	}
+	var comps []string
+	for _, s := range report.CompositionSelections {
+		comps = append(comps, fmt.Sprintf("%s %s/%s profile %s", s.Agent, s.Platform.OS, s.Platform.Architecture, s.BuildProfile))
+	}
+	_, err = fmt.Fprintf(w, "suite %s valid (%s/agentsuite %s): %d agent, compositions: %s\n",
+		report.Name, kaimahiModule, moduleVersion(kaimahiModule), report.Agents, strings.Join(comps, "; "))
+	return err
+}
+
+// moduleVersion is the version of module path this binary was built with, or "(unknown)".
+func moduleVersion(path string) string {
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, d := range bi.Deps {
+			if d.Path == path {
+				if d.Replace != nil {
+					return d.Replace.Version
+				}
+				return d.Version
+			}
+		}
+	}
+	return "(unknown)"
 }
 
 func renderCmd(args []string) error {

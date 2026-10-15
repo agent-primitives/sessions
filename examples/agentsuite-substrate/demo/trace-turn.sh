@@ -2,18 +2,20 @@
 # trace-turn.sh SESSION DIR: the first turn of SESSION, followed through each component's own log.
 #
 # Saves the full logs of every component the turn passes through to DIR, one file each, then prints
-# one row per hop, each the first real log line about the session in that component's log (or the
-# journal record, for the model call), shortened by trace-hop.py to its time, message and a few
+# one row per hop, each the earliest real log line about the session in that component's log (or
+# the journal record, for the model call), shortened by trace-hop.py to its time, message and a few
 # fields:
 #   agentsessionsd   the Sessions.Exec call from agentctl (the daemon's "operation finished" line;
 #                    the substrate adapter runs inside agentsessionsd and logs nothing of its own)
-#   ate-api          the adapter's actor call for the session, in the ate-api server's log
-#   worker           the worker that hosts the session's actor (atelet and the worker pod's ateom)
+#   ate-api          the adapter's CreateActor (or ResumeActor) call for the session, in the ate-api
+#                    server's log, with the actor it names
+#   worker           the worker pod's ateom restoring the session's actor from the golden snapshot
+#                    (RestoreWorkload, sent by the node's atelet), with the actor it names
 #   micro-VM         the actor's own lifecycle log: the actor starting in its micro-VM
 #   atenet-router    the harnesswire stream routed to the actor's worker
 #   harness          the model call the harness made through sink.Model, with its token counts
 #   model call       the call agentsessionsd made to the provider, as its journal records it
-# Fails when a hop has no line for the session.
+# Fails when a hop has no line for the session. Every pod's full log stays in DIR, atelet's included.
 #
 # Runs where the demo's kubeconfig is KUBECONFIG and the kubectl-ate plugin and agentctl are on PATH
 # (driver.sh show sets both); API is the Sessions API address.
@@ -41,9 +43,9 @@ agentctl replay -v --server "${API:?}" --session "${session}" >"${dir}/journal.l
 
 hop() { python3 "${here}/trace-hop.py" "$@"; }
 shopt -s nullglob
-hop agentsessionsd "operation=exec session_uid=${session} .*phase=finish" operation,session_uid,outcome,duration_ms "${dir}/agentsessionsd.log"
-hop ate-api "${session}" method,actor.name,state "${dir}"/ate-system.ate-api*.log
-hop worker "${session}" actor.name,state "${dir}"/ate-system.atelet*.log "${dir}"/agentsuite-demo.*.log
+hop agentsessionsd "operation=exec session_uid=${session} .*phase=finish" operation,session_uid,outcome "${dir}/agentsessionsd.log"
+hop ate-api "\"method\":\"/ateapi\\.Control/(CreateActor|ResumeActor)\".*\"${session}\"" method,actor=req.actor.metadata.name,actor=req.actor.name "${dir}"/ate-system.ate-api*.log
+hop worker "\"method\":\"/ateom\\.Ateom/(RestoreWorkload|RunWorkload)\".*\"actor_name\":\"${session}\"" method,actor=req.actor_name "${dir}"/agentsuite-demo.*.log
 hop micro-VM '"Actor (started|restored)' "" "${dir}/actor-lifecycle.log"
 hop atenet-router "Route ok.*${session}" actor.name,targetAddr "${dir}"/ate-system.atenet-router*.log
 hop harness 'harness: model .* used [0-9]+ input' "" "${dir}/harness.log"

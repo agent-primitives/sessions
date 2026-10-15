@@ -316,7 +316,9 @@ Every claim on screen is also checked, off screen, with the raw output in the lo
 template lines, the actor's record before and after the resume, the journal before and after the
 replay and the guard): the driver stops on the first that does not hold. A wait runs out of
 frame: the driver prints `⠿ <what> …`, runs the step, then replaces the line with `✓ <what> in N s`,
-and `demo.tape` hides the recording between the two. The tape lists those waits in the order the
+and `demo.tape` hides the recording between the two. That status line takes a row on screen but is
+the driver's, not the command's output, so it does not count toward the five output rows. The tape
+lists those waits in the order the
 driver makes them (`scripts_test.go` checks the counts match). `present.awk` renders the driver's
 output for vhs: it holds each line on the cursor's line until the next arrives, since vhs's
 `Wait+Line` matches the cursor's line and Docker's log stream (which `hq remote-test` relays) passes
@@ -360,4 +362,5 @@ top row, k/11 full for chapter k, and `chapters.py` finds the first frame of eac
 machine vhs runs on (`DEMO_REMOTE=local`); `DEMO_REMOTE=hq DEMO_HOST=<host>` drives a remote host
 through `hq remote-test`, a private tool, in the image `Dockerfile.tools` builds there. `DEMO_READ`
 (default 3) is how many seconds a result stays on screen; a caption stays 2.5 s before its first
-command (and on screen through the rest), a file 5.5 s, the title card 5 s and each diagram 9 s.
+command (and on screen through the rest), each page of a file 6.5 s, the title card 5 s and each
+diagram 9 s.

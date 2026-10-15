@@ -1248,3 +1248,68 @@ func TestDemoPresent(t *testing.T) {
 		t.Fatalf("present.awk wrote %q, want %q", out, want)
 	}
 }
+
+// trace-hop.py shows, for one hop of the traced turn, the earliest matching line across the pods'
+// logs (not the first file's), the keys it is asked for under their short names, and a container
+// line's message without the Go log timestamp that repeats the line's own time; it fails, naming
+// the hop, when nothing matches.
+func TestDemoTraceHop(t *testing.T) {
+	python3, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not found")
+	}
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// The first pod's log has the later call; the earliest is in the second's, with a longer fraction.
+	podA := write("a.log", `[pod/api-a/server] {"time":"2026-10-15T05:23:31.1Z","msg":"Handle RPC","method":"/ateapi.Control/ResumeActor","req":{"actor":{"name":"sess-1"}}}`+"\n")
+	podB := write("b.log", `[pod/api-b/server] {"time":"2026-10-15T05:23:29.50412Z","msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":{"name":"sess-1"}}`+"\n"+
+		`[pod/api-b/server] {"time":"2026-10-15T05:23:29.510999Z","msg":"Handle RPC","method":"/ateapi.Control/CreateActor","req":{"actor":{"metadata":{"name":"sess-1"}}}}`+"\n")
+	harness := write("harness.log", `{"time":"2026-10-15T05:23:32.622Z","message":"2026/10/15 05:23:32 harness: model m used 41 input and 37 output tokens"}`+"\n")
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		want    string
+		wantErr string
+	}{
+		{
+			name: "the earliest match across files, keys under their short names",
+			args: []string{"ate-api", `"method":"/ateapi\.Control/(CreateActor|ResumeActor)".*"sess-1"`, "method,actor=req.actor.metadata.name,actor=req.actor.name", podA, podB},
+			want: "ate-api         05:23:29.510 Handle RPC method=/ateapi.Control/CreateActor actor=sess-1\n",
+		},
+		{
+			name: "a message's Go log timestamp is dropped",
+			args: []string{"harness", `harness: model .* used [0-9]+ input`, "", harness},
+			want: "harness         05:23:32.622 harness: model m used 41 input and 37 output tokens\n",
+		},
+		{
+			name:    "no match",
+			args:    []string{"worker", `RestoreWorkload`, "method", podA, podB},
+			wantErr: "trace-hop.py: no worker line matches RestoreWorkload in a.log, b.log",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(python3, append([]string{"-I", "demo/trace-hop.py"}, tc.args...)...)
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(stderr.String(), tc.wantErr) {
+					t.Fatalf("err %v, stderr %q; want a failure saying %q", err, stderr.String(), tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%v: %s", err, stderr.String())
+			}
+			if stdout.String() != tc.want {
+				t.Fatalf("got %q, want %q", stdout.String(), tc.want)
+			}
+		})
+	}
+}

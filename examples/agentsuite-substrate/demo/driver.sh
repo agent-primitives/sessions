@@ -36,8 +36,10 @@
 #                          kept, and nothing prints the token
 #   DEMO_LOGS              directory for the logs (default ${WORK}/demo-logs)
 #   DEMO_KEEP_ON_FAILURE   set to keep the cluster when setup fails (by default down.sh deletes it)
-#   DEMO_READ              seconds a result stays on screen (default 4); a caption stays 4 s before its
-#                          first command, a file 7 s, the title card 5 s and each diagram 10 s
+#   DEMO_READ              seconds a result stays on screen (default 4; record.sh sets 3). The other
+#                          holds are fixed below: a caption 2.5 s before its first command (it stays
+#                          on screen through the results), each page of a file screen 6.5 s, the title
+#                          card 5 s and each diagram 9 s
 #   DEMO_COLS, DEMO_ROWS   the terminal's size (default 129 x 39: demo.tape's terminal is 130 x 39,
 #                          and the driver draws one column fewer so a full row never wraps)
 #
@@ -313,7 +315,8 @@ print(" ".join(a["metadata"]["name"] for a in items if a["metadata"]["name"].sta
 # Every command on screen is the literal command line that runs: run prints it, evaluates it in this
 # shell (so $COPY, $IMAGE and the rest are this shell's variables, set by an earlier command on
 # screen or, for $IMAGE, $TEMPLATE, $MEMTEMPLATE, $API, $API_MEM and $ROUTER, from setup's state
-# before the title card; show.log records their values), writes its complete output to the
+# before the title card; show.log records their values; $CHILD is read from the line agentctl fork
+# prints on screen, and the chapter's log records it), writes its complete output to the
 # chapter's log, and shows that output. A command must exit 0 (run -x: must fail) and write nothing
 # to stderr, which the screen would not show. A screen shows at most MAX_LINES output rows (run -n
 # raises it for the trace); a file screen (run -f) shows its output whole, in pages if it is taller
@@ -323,7 +326,7 @@ print(" ".join(a["metadata"]["name"] for a in items if a["metadata"]["name"].sta
 C=$'\e[1;36m' Y=$'\e[1;33m' G=$'\e[32m' W=$'\e[1;37m' D=$'\e[2m' N=$'\e[0m'
 CHAPTERS=11
 MAX_LINES=5
-CAPTION_HOLD=2.5 TITLE_HOLD=5 DIAGRAM_HOLD=9 FILE_HOLD=5.5
+CAPTION_HOLD=2.5 TITLE_HOLD=5 DIAGRAM_HOLD=9 FILE_HOLD=6.5
 HEADER_ROWS=4
 # wrap TEXT [PREFIX [INDENT]]: TEXT folded to the screen at word boundaries, each line after the
 # first indented by INDENT spaces (default the width of PREFIX).
@@ -368,7 +371,7 @@ show_lines() {
 	((SCREEN_LINES <= max)) || fail "this screen would show ${SCREEN_LINES} output rows, more than ${max}"
 	((SCREEN_ROWS <= ROWS)) || fail "this screen would need ${SCREEN_ROWS} rows, more than the terminal's ${ROWS}"
 	printf '%s\n' "${text}"
-	log "(on screen: ${n} rows, ${SCREEN_LINES} on this screen)"
+	log "(on screen: ${n} rows, ${SCREEN_LINES} on this screen, limit ${max})"
 	sleep "${READ}"
 }
 # show_file TEXT CMDROWS: a file screen. TEXT (bat or split-view.py output, colors kept) is shown
@@ -490,6 +493,13 @@ lines_hold() {
 		[[ "$(sed -n "${c%%:*}p" "${f}")" == *"${c#*:}"* ]] || fail "line ${c%%:*} of ${f} does not hold ${c#*:}"
 	done
 }
+# ends_at FILE N: FILE has exactly N lines, so the bat ranges on screen, which end at N, show it whole.
+ends_at() {
+	local n
+	n="$(python3 -c 'import sys; print(len(open(sys.argv[1]).read().splitlines()))' "$1")"
+	log "(off screen: ${1} has ${n} lines; the screens show 1-${2})"
+	[[ "${n}" == "$2" ]] || fail "${1} has ${n} lines, not the ${2} its screens show"
+}
 # diagram COLOR: a screen the recording replaces with a diagram (record.sh renders the Mermaid
 # source and splice.py overlays it): every row below the caption is COLOR (magenta for the build
 # diagram, green for the run one), which splice.py looks for.
@@ -508,7 +518,7 @@ diagram() {
 show() {
 	[[ -x "${WORK}/bin/agentctl" && -x "${WORK}/bin/replay" && -x "${WORK}/bin/emit" && -x "${WORK}/bin/harness" && -s "${EXPIRY_FILE}" ]] || fail "run driver.sh setup first"
 	rm -f "${LOGS}"/ch-*.log "${LOGS}/timeline.tsv"
-	rm -rf "${LOGS}/trace" /tmp/render /tmp/render-memory /tmp/render-arm64 /tmp/tampered "${TRACE_DIR}" /tmp/turn*.txt /tmp/mem*.txt /tmp/fork.txt /tmp/child*.txt /tmp/parent.txt /tmp/replayed.txt
+	rm -rf "${LOGS}/trace" /tmp/render /tmp/render-memory /tmp/render-arm64 /tmp/tampered "${TRACE_DIR}" /tmp/turn*.txt /tmp/mem*.txt /tmp/child*.txt /tmp/parent.txt /tmp/replayed.txt
 	forwards
 	wait_apis >/dev/null || fail "the Sessions APIs did not answer"
 	STEP_LOG="${LOGS}/show.log"
@@ -547,6 +557,7 @@ show() {
 
 	# ---------------------------------------------------------------------------------------------
 	chapter 1 "What we start with" "kaimahi's minimal AgentSuite (testdata/minimal at 9c5c993): the suite manifest names its agent"
+	ends_at suites/kaimahi-minimal/agentsuite.json 37
 	run -f <<'EOF'
 bat -r 1:16 suites/kaimahi-minimal/agentsuite.json
 EOF
@@ -596,6 +607,7 @@ ls -C /tmp/render
 EOF
 	offscreen "this render against the one setup made (and up.sh deployed the flag of)" diff -r /tmp/render "${STATE}/render" || fail "the render differs from setup's"
 	page "The generated ActorTemplate: its name, the worker selector and the harness container"
+	ends_at /tmp/render/actortemplate.json 65
 	run -f <<'EOF'
 bat -r 1:32 /tmp/render/actortemplate.json
 EOF
@@ -829,13 +841,12 @@ EOF
 	seq="$(python3 -c 'import re, sys; s = [int(m.group(1)) for m in re.finditer(r"^seq=(\d+) +EVENT_END\b", open(sys.argv[1]).read(), re.M)]; print(s[0] if s else "")' "${RAW}")"
 	[[ "${seq}" =~ ^[0-9]+$ ]] || fail "turn 1 has no end record"
 	run -w "copying the history and starting the child's micro-VM" "forked" <<EOF
-agentctl fork --server \$API --session \$COPY --at ${seq} --names haiku-branch >/tmp/fork.txt
+agentctl fork --server \$API --session \$COPY --at ${seq} --names haiku-branch
 EOF
-	run <<'EOF'
-read -r _ CHILD _ </tmp/fork.txt && cat /tmp/fork.txt
-EOF
+	# The child's UID, from the line on screen ("child <uid> parent=... fork_seq=... name=...").
+	CHILD="$(python3 -c 'import sys; w = sys.argv[1].split(); print(w[1] if len(w) > 1 and w[0] == "child" else "")' "${SHOWN}")"
 	[[ "${CHILD}" =~ ^sess-[0-9a-f]+$ ]] || fail "fork printed no child"
-	log "(CHILD=${CHILD})"
+	log "(CHILD=${CHILD}, read off screen from the line agentctl fork printed)"
 	run -w "asking ${model} in the child" "answered" <<'EOF'
 agentctl exec --server $API --session $CHILD --input "Instead, rewrite the blurb as a haiku." >/tmp/child.txt
 EOF
@@ -869,7 +880,7 @@ EOF
 		sleep 2
 	done
 	${gone} || fail "the old actor is still there"
-	page "A new actor under the same name, from the same template: a fresh micro-VM without the chat"
+	page "A new actor under the same name, from the same template, that starts fresh, without the chat"
 	run <<'EOF'
 kubectl ate create actor $MEM -a agentsuite-demo --template $MEMTEMPLATE
 EOF

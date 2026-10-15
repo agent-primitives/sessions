@@ -216,8 +216,17 @@ collect() {
 	scan="$(token_scan "${OUT}/logs" "${OUT}/scripts" "${OUT}/source.txt")"
 	mp4_hits="$(LC_ALL=C grep -c "ey""J" "${mp4}" || true)"
 	local max_rows max_trace max_caption
-	max_rows="$(sed -n 's/^(on screen: [0-9]* rows, \([0-9]*\) on this screen)$/\1/p' "${OUT}"/logs/ch-*.log | sort -n | tail -1)"
-	max_trace="$(sed -n 's/^(on screen: [0-9]* rows, \([0-9]*\) on this screen)$/\1/p' "${OUT}/logs/ch-4.log" | sort -n | tail -1)"
+	# Each screen's row count is logged with its limit: 5, or 7 on the trace screen (run -n 7).
+	max_rows="$(sed -n 's/^(on screen: [0-9]* rows, \([0-9]*\) on this screen, limit 5)$/\1/p' "${OUT}"/logs/ch-*.log | sort -n | tail -1)"
+	max_trace="$(sed -n 's/^(on screen: [0-9]* rows, \([0-9]*\) on this screen, limit 7)$/\1/p' "${OUT}/logs/ch-4.log" | sort -n | tail -1)"
+	[[ -n "${max_rows}" && -n "${max_trace}" ]] || {
+		echo "the chapter logs record no screen with limit 5, or no trace screen with limit 7" >&2
+		exit 1
+	}
+	if sed -n 's/^(on screen: [0-9]* rows, [0-9]* on this screen, limit \([0-9]*\))$/\1/p' "${OUT}"/logs/ch-*.log | grep -qv -e '^5$' -e '^7$'; then
+		echo "a chapter log records a screen limit other than 5 or 7" >&2
+		exit 1
+	fi
 	max_caption="$(sed -n 's/^## screen: //p' "${OUT}"/logs/ch-*.log | awk '{ print length($0) }' | sort -n | tail -1)"
 	load_env
 	{
@@ -242,15 +251,19 @@ collect() {
 		echo
 		echo "- Video: demo.mp4, $(mmss "${dur}") ($(awk -v d="${dur}" 'BEGIN { printf "%.1f", d }') s), sha256 \`$(cut -d' ' -f1 "${OUT}/demo.mp4.sha256")\`"
 		echo "- Recorded $(utc "$(head -1 "${LOGS}/timeline.tsv" | cut -f2)") with \`record.sh\` from ${source}."
+		local head_short scripts_note
+		head_short="$(git -C "${ROOT}" rev-parse --short HEAD)"
 		if ((${#changed[@]} == 0)); then
-			echo "  All ${same} demo files in source.sha256 are byte-identical at $(git -C "${ROOT}" rev-parse --short HEAD)."
+			echo "  All ${same} demo files in source.sha256 are byte-identical at ${head_short}."
+			scripts_note="the demo files at ${head_short}, the same bytes the recording ran"
 		else
-			echo "  At $(git -C "${ROOT}" rev-parse --short HEAD), ${#changed[@]} of the demo files differ from the recording's: ${changed[*]}."
+			echo "  At ${head_short}, ${#changed[@]} of the demo files differ from the recording's: ${changed[*]}."
+			scripts_note="the demo files at ${head_short}; ${changed[*]} differ from the recording's (source.sha256 has the recording's hashes)"
 		fi
 		echo "- logs/: setup.log (off camera), show.log, one ch-N.log per chapter with the full output of every"
 		echo "  command (ch-4.log holds every component's full log for the traced turn), timeline.tsv; frames/: a"
-		echo "  frame 1.5 s into each chapter; build.png and run.png: the diagrams as spliced; scripts/: the demo"
-		echo "  files the recording ran, including the Mermaid sources build.mmd and run.mmd"
+		echo "  frame 1.5 s into each chapter; build.png and run.png: the diagrams as spliced; scripts/:"
+		echo "  ${scripts_note}, including the Mermaid sources build.mmd and run.mmd"
 		echo
 		echo "| Chapter | Starts at | Title |"
 		echo "|---|---|---|"
@@ -277,11 +290,14 @@ collect() {
 		echo "  that does not hold, and writes the full output of each command to logs/ch-N.log. Files are"
 		echo "  printed by bat with scripts/bat.conf (colors, line numbers, wrapping at the terminal's width);"
 		echo "  split screens are scripts/split-view.py. \$IMAGE, \$TEMPLATE, \$MEMTEMPLATE, \$API, \$API_MEM and"
-		echo "  \$ROUTER are set from setup's state before the title card (show.log has their values); the other"
-		echo "  variables are set by a command on screen. Waits longer than a moment are hidden between a \`⠿\`"
+		echo "  \$ROUTER are set from setup's state before the title card (show.log has their values); \$CHILD is"
+		echo "  read from the line \`agentctl fork\` prints on screen (ch-9.log has it); the other variables are"
+		echo "  set by a command on screen. Waits longer than a moment are hidden between a \`⠿\`"
 		echo "  line and its \`✓ ... in N s\` line."
 		echo "- The diagrams (build.mmd, run.mmd) are rendered with ${MERMAID_CLI} and spliced over the blocks"
-		echo "  chapters 2 and 4 draw for them (splice.py): $(tr '\t\n' ' ;' <"${OUT}/splice.tsv")"
+		echo "  chapters 2 and 4 draw for them (splice.py): $(awk -F'\t' '{ printf "%sthe %s diagram %s-%s s", (NR > 1 ? ", " : ""), ($1 == "magenta" ? "build" : $1 == "green" ? "run" : $1), $2, $3 }' "${OUT}/splice.tsv")."
+		echo "- Waits longer than a moment show one status line, \`⠿ <what> …\` and then \`✓ <what> in N s\`; it"
+		echo "  is the driver's, not a command's output, so it does not count toward a screen's output rows."
 		echo "- After recording (\`record.sh teardown\`, logs/teardown.log): the cluster is deleted."
 		echo
 		cat "${DEMO}/diagrams.md"
@@ -290,8 +306,9 @@ collect() {
 		echo
 		echo "- \`ffprobe\`: ${video}, ${dur} s. \`ffmpeg -v error -i demo.mp4 -f null -\`: exit ${decode_rc}, $(printf '%s' "${decode_out}" | grep -c '') lines of output."
 		echo "- Chapter starts: chapters.py found chapters 1-${CHAPTERS}, in order (collect fails otherwise)."
-		echo "- Screens: at most ${max_rows} output rows on any screen outside a file screen, ${max_trace} on chapter 4's"
-		echo "  (the trace); file screens show their file whole. The longest caption is ${max_caption} of $((DEMO_COLS - 2)) columns."
+		echo "- Screens: at most ${max_rows} output rows on any screen outside a file screen and the trace (limit 5),"
+		echo "  ${max_trace} on chapter 4's trace screen (limit 7); file screens show their file whole. The longest"
+		echo "  caption is ${max_caption} of $((DEMO_COLS - 2)) columns."
 		echo "- Token scan (a JWT prefix, the metadata token field, a bearer header) over logs/, scripts/ and"
 		echo "  source.txt: ${scan:-no matches}. The 3-byte JWT prefix in demo.mp4: ${mp4_hits} matches."
 		echo "- Smoke pre-check: \`$(grep -m1 '^SMOKE OK' "${LOGS}/setup.log")\`"

@@ -1,0 +1,25 @@
+%% The coordinator demo's diagram (coordinator.sh show, chapter 4): how one delegation runs.
+sequenceDiagram
+    autonumber
+    participant Op as operator (agentctl)
+    participant D as agentsessionsd
+    participant C as coordinator harness<br/>(micro-VM)
+    participant M as gpt-5.4-mini<br/>(Azure OpenAI)
+    participant X as invocation executor<br/>(in agentsessionsd)
+    participant Wk as writer / reviewer harness<br/>(child session, own micro-VM)
+    Op->>D: Exec(coordinator session, request)
+    D->>C: turn
+    C->>M: model call (through agentsessionsd)
+    M-->>C: {"invoke": "writer", "task": ...}
+    C->>D: tool call agentsuite.invoke
+    D->>X: run the call (journaled TOOL_CALL)
+    X->>X: edge declared? maxConcurrent, maxDepth
+    X->>D: CreateSession + Exec on the writer harness
+    D->>Wk: child turn
+    Wk-->>X: reply
+    X-->>C: TOOL_RESULT (child session, reply)
+    C->>D: tool call to reviewer, REQUIRES_APPROVAL
+    D-->>Op: APPROVAL_REQUEST; turn parked
+    Op->>D: approve / deny
+    D->>X: approved: child session on reviewer
+    D-->>C: denied: TOOL_RESULT APPROVAL_DENIED

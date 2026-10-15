@@ -365,7 +365,7 @@ EOF
 	[[ "${SHOWN}" == "-substrate-harness=coordinator=agentsuite-coordinator/${template},actors=agentsuite-coordinator" ]] || fail "the coordinator's flag is not ${template}"
 
 	# ---------------------------------------------------------------------------------------------
-	chapter 3 "In the cluster" "Created by hand before recording, from the three renders: one ActorTemplate per agent, in its own atespace"
+	chapter 3 "In the cluster" "Created before recording with kubectl ate create, from the three renders: one ActorTemplate per agent"
 	run -n 12 <<'EOF'
 kubectl ate get actor-templates -a agentsuite-coordinator && kubectl ate get actor-templates -a agentsuite-writer && kubectl ate get actor-templates -a agentsuite-reviewer
 EOF
@@ -498,7 +498,7 @@ AgentSuite: maxConcurrent bounds the declaring agent's calls; across runtime rep
 AgentSessions: agent-to-agent calls are a host tool call that creates a child session; should there be a first-class primitive?
 AgentSessions: CreateSession takes no idempotency key, so recovery after a crash mid-call could create a second child.
 AgentSessions: the HarnessRegistry does not take substrate placements yet, so the three harnesses are daemon flags.
-AgentSessions: a child session keeps its micro-VM actor running after its one turn; who releases it?
+AgentSessions: a child session's micro-VM keeps running after its one turn; should the invoking host suspend it?
 substrate: is a template's golden snapshot usable from another atespace? Here each agent's template has its own." 16
 	sleep $((READ * 3))
 	log "DEMO COMPLETE in $((SECONDS - SHOW_START)) s"

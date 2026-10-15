@@ -223,6 +223,9 @@ type Executor struct {
 	policy   Policy
 	sessions Sessions
 	timeout  time.Duration
+	// abortWait is the first wait before a child step refused with ABORTED is tried again; later
+	// waits grow linearly to five times it.
+	abortWait time.Duration
 
 	mu       sync.Mutex
 	inflight map[inflightKey]int
@@ -254,7 +257,7 @@ func WithLogger(l *slog.Logger) Option {
 
 // New returns an executor for policy that drives child sessions through sessions.
 func New(policy Policy, sessions Sessions, opts ...Option) *Executor {
-	x := &Executor{policy: policy, sessions: sessions, timeout: DefaultTimeout, inflight: map[inflightKey]int{}}
+	x := &Executor{policy: policy, sessions: sessions, timeout: DefaultTimeout, abortWait: time.Second, inflight: map[inflightKey]int{}}
 	for _, o := range opts {
 		o(x)
 	}
@@ -435,12 +438,39 @@ func (x *Executor) followUp(ctx context.Context, parent, project string, args Ar
 // child's journal (its output, or its failure for a turn that ended with ERROR), an interrupted
 // one is re-driven with Resume. lc records what happened and how long each step took, in
 // milliseconds.
+//
+// A step refused with ABORTED (the child's actor is mid-transition, for example still being created
+// by a host that crashed during the call) is tried again, from a fresh read of the child's journal
+// and state, until ctx ends; lc["aborted"] counts those refusals. Any other error ends the turn.
 func (x *Executor) turn(ctx context.Context, child *v1.Session, callID, task string, config []byte) (string, map[string]any, error) {
-	uid := child.GetMetadata().GetUid()
 	lc := map[string]any{}
+	aborted := 0
+	for {
+		out, err := x.attempt(ctx, child, callID, task, config, lc)
+		if status.Code(err) != codes.Aborted {
+			return out, lc, err
+		}
+		aborted++
+		lc["aborted"] = aborted
+		select {
+		case <-ctx.Done():
+			return "", lc, fmt.Errorf("%w (gave up after %d ABORTED refusals: %v)", err, aborted, ctx.Err())
+		case <-time.After(min(time.Duration(aborted)*x.abortWait, 5*x.abortWait)):
+		}
+		fresh, getErr := x.sessions.GetSession(ctx, child.GetMetadata().GetUid())
+		if getErr != nil {
+			return "", lc, fmt.Errorf("read the child after an ABORTED step: %w", getErr)
+		}
+		child = fresh
+	}
+}
+
+// attempt is one try of turn.
+func (x *Executor) attempt(ctx context.Context, child *v1.Session, callID, task string, config []byte, lc map[string]any) (string, error) {
+	uid := child.GetMetadata().GetUid()
 	rec, err := x.recorded(ctx, uid, callID)
 	if err != nil {
-		return "", lc, err
+		return "", err
 	}
 	switch {
 	case rec.ended:
@@ -448,20 +478,20 @@ func (x *Executor) turn(ctx context.Context, child *v1.Session, callID, task str
 	case rec.started:
 		start := time.Now()
 		if _, err := x.sessions.Resume(ctx, uid, false); err != nil {
-			return "", lc, fmt.Errorf("re-drive the interrupted turn: %w", err)
+			return "", fmt.Errorf("re-drive the interrupted turn: %w", err)
 		}
 		lc["turn"], lc["resumeMs"] = "re-driven", ms(start)
 		if rec, err = x.recorded(ctx, uid, callID); err != nil {
-			return "", lc, err
+			return "", err
 		}
 		if !rec.ended {
-			return "", lc, errors.New("the re-driven turn did not end")
+			return "", errors.New("the re-driven turn did not end")
 		}
 	default:
 		if child.GetComputeState() == v1.ComputeState_COMPUTE_COLD {
 			start := time.Now()
 			if _, err := x.sessions.Resume(ctx, uid, false); err != nil {
-				return "", lc, fmt.Errorf("wake the child: %w", err)
+				return "", fmt.Errorf("wake the child: %w", err)
 			}
 			lc["wakeMs"] = ms(start)
 		}
@@ -469,14 +499,14 @@ func (x *Executor) turn(ctx context.Context, child *v1.Session, callID, task str
 		turn, err := x.sessions.Exec(ctx, client.ExecOptions{Session: uid, Inputs: []string{task}, Config: config})
 		lc["turn"], lc["turnMs"] = "ran", ms(start)
 		if err != nil {
-			return "", lc, err
+			return "", err
 		}
-		return turn.Output, lc, nil
+		return turn.Output, nil
 	}
 	if rec.failed != "" {
-		return "", lc, errors.New(rec.failed)
+		return "", errors.New(rec.failed)
 	}
-	return rec.output, lc, nil
+	return rec.output, nil
 }
 
 // suspend frees the child's worker unless it is already suspended, and records the outcome in lc.

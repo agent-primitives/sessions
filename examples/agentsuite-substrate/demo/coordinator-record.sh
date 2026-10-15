@@ -11,8 +11,8 @@
 #                                   README.md with chapter times
 #   coordinator-record.sh run       what coordinator.tape types: show through present.awk, then the end marker
 #   coordinator-record.sh setup|probe|lifecycle|crash|teardown   coordinator.sh's own mode on the
-#                                   host, its logs fetched; COORD_TEMPLATE and LIFECYCLE_* are passed
-#                                   through when set
+#                                   host, its logs fetched; COORD_TEMPLATE, LIFECYCLE_* and CRASH_AT
+#                                   are passed through when set
 #
 # coordinator.sh runs on a Linux host with KVM, Docker, kind and the cluster: through `hq remote-test`
 # (a private tool that syncs the checkout to its host and runs the command in a container there) in
@@ -58,7 +58,7 @@ coord() {
 	local env_args=() v
 	for v in "${MODEL_VARS[@]}" DEMO_READ DEMO_COLS DEMO_ROWS; do env_args+=(-e "${v}"); done
 	# Optional settings of coordinator.sh's modes, passed only when set here.
-	for v in COORD_TEMPLATE LIFECYCLE_RUNS LIFECYCLE_PAUSE LIFECYCLE_MIN_WAKES; do
+	for v in COORD_TEMPLATE LIFECYCLE_RUNS LIFECYCLE_PAUSE LIFECYCLE_MIN_WAKES CRASH_AT; do
 		if [[ -n "${!v:-}" ]]; then env_args+=(-e "${v}"); fi
 	done
 	mkdir -p "${ROOT}/_local" && touch "${ROOT}/_local/.hq-remote-keep"

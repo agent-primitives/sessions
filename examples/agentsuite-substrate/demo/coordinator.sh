@@ -317,9 +317,11 @@ probe() {
 # lifecycle: LIFECYCLE_RUNS (default 5) coordinator requests that each delegate to writer and then
 # send that same writer session a follow-up, so each run suspends the child twice and wakes it once.
 # Prints the actors per state before and after, and every delegation's lifecycle from the journals.
-# crash: kills the daemon's process (SIGKILL on its kind node) while a writer child is mid-call, lets
-# the container restart (the journal's emptyDir survives a container restart), resumes the
-# coordinator's turn, and checks the retry reached the same writer child. Both end with ... OK.
+# crash: kills the daemon's process (SIGKILL on its kind node) during a writer delegation, at the
+# child's creation (CRASH_AT=create, the default) or once its turn started (CRASH_AT=turn), lets the
+# container restart (the journal's emptyDir survives a container restart), resumes the coordinator's
+# turn, and checks the retry reached the same writer child and finished the delegation. Both end
+# with ... OK.
 # =================================================================================================
 forward() {
 	local p
@@ -361,7 +363,7 @@ for f in sys.argv[1:]:
             a = re.search(r"\"agent\":\"([a-z]+)\"", line)
             rows.append((f.rsplit("/", 1)[-1], a.group(1) if a else "?", lc))
 for f, agent, lc in rows:
-    print("%-26s %-8s origin=%-9s turn=%-9s wakeMs=%-6s turnMs=%-6s suspendMs=%-6s suspended=%s" % (f, agent, lc.get("origin"), lc.get("turn"), lc.get("wakeMs", "-"), lc.get("turnMs", "-"), lc.get("suspendMs", "-"), lc.get("suspended")))
+    print("%-26s %-8s origin=%-9s turn=%-9s wakeMs=%-6s turnMs=%-6s suspendMs=%-6s suspended=%s aborted=%s" % (f, agent, lc.get("origin"), lc.get("turn"), lc.get("wakeMs", "-"), lc.get("turnMs", "-"), lc.get("suspendMs", "-"), lc.get("suspended"), lc.get("aborted", 0)))
 def stats(k):
     v = sorted(float(lc[k]) for _, _, lc in rows if k in lc)
     return "n=%d min=%d median=%d max=%d" % (len(v), v[0], v[len(v) // 2], v[-1]) if v else "n=0"
@@ -406,22 +408,33 @@ lifecycle() {
 crash() {
 	rm -f "${LOGS}"/crash-*
 	forward
+	# CRASH_AT=create kills the daemon as soon as the writer child session exists (its actor is
+	# still being created); CRASH_AT=turn once the child's turn has started (its journal holds the
+	# EXECUTION_START, last_seq above 0).
+	local at="${CRASH_AT:-create}" want='harness=writer	'
+	case "${at}" in
+	create) ;;
+	turn) want='last_seq=[1-9][0-9]*	compute=[A-Z]*	harness=writer	' ;;
+	*) fail "CRASH_AT=${at}: want create or turn" ;;
+	esac
 	local before pod node uid restarts
 	before="$(ctl list | grep -c 'harness=writer	' || true)"
+	local known
+	known="$(ctl list | grep 'harness=writer	' | cut -f1 | sort || true)"
 	pod="$("${K[@]}" -n "${NS}" get pod -l app=agentsessionsd-coordinator -o jsonpath='{.items[0].metadata.name}')"
 	node="$("${K[@]}" -n "${NS}" get pod "${pod}" -o jsonpath='{.spec.nodeName}')"
 	restarts="$("${K[@]}" -n "${NS}" get pod "${pod}" -o jsonpath='{.status.containerStatuses[0].restartCount}')"
-	step "a coordinator request; the daemon is killed once its writer child exists"
+	step "a coordinator request; the daemon is killed at the writer child's ${at}"
 	ctl exec --harness coordinator --input "Have the writer write a two-line poem about tides and reply with it. Do not use the reviewer." >"${LOGS}/crash-exec.txt" 2>&1 &
 	local exec_pid=$! i
-	for i in $(seq 240); do
-		(($(ctl list | grep -c 'harness=writer	' || true) > before)) && break
-		((i < 240)) || fail "no writer child appeared"
-		sleep 0.5
+	for i in $(seq 480); do
+		ctl list | grep -E "${want}" | grep -v -F -f <(printf '%s\n' "${known:-none}") >"${LOGS}/crash-writers-at-kill.txt" && break
+		((i < 480)) || fail "no writer child reached its ${at}"
+		sleep 0.25
 	done
-	ctl list | grep 'harness=writer	' >"${LOGS}/crash-writers-at-kill.txt" || true
 	docker exec "${node}" pkill -9 -f /ko-app/agentsessionsd
-	echo "killed agentsessionsd (SIGKILL) on ${node} at $(date -u +%T)"
+	echo "killed agentsessionsd (SIGKILL) on ${node} at $(date -u +%T), CRASH_AT=${at}; the new writer child then:"
+	cat "${LOGS}/crash-writers-at-kill.txt"
 	wait "${exec_pid}" || true
 	uid="$(sed -n 's/^session //p' "${LOGS}/crash-exec.txt" | head -1)"
 	[[ -n "${uid}" ]] || fail "no coordinator session uid in the exec output"
@@ -443,8 +456,11 @@ crash() {
 	after="$(grep -c 'harness=writer	' "${LOGS}/crash-list.txt" || true)"
 	((after == before + 1)) || fail "writer sessions went from ${before} to ${after}; want exactly one new child"
 	grep -q 'origin=retry' "${LOGS}/crash-table.txt" || fail "the writer result is not a retry of the first child"
+	grep -q 'suspended=True' "${LOGS}/crash-table.txt" || fail "the retried writer child was not suspended"
+	# The retry must finish the delegation, not just reach the child: the writer's result is no error.
+	grep 'EVENT_TOOL_RESULT' "${LOGS}/crash-journal.txt" | grep -q ' error=' && fail "the retried writer call failed"
 	grep -q 'EVENT_END' "${LOGS}/crash-journal.txt" || fail "the resumed turn did not end"
-	echo "CRASH OK"
+	echo "CRASH OK (CRASH_AT=${at})"
 }
 
 # =================================================================================================

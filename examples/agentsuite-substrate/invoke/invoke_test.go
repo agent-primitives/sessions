@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"slices"
 	"strings"
@@ -46,7 +47,10 @@ type fakeSessions struct {
 	execErr error
 	// execErrBefore fails the next Exec before it journals anything.
 	execErrBefore error
-	suspendErr    error
+	// execAborted refuses that many Execs with ABORTED before they journal anything, as the host
+	// does while the child's actor is mid-transition.
+	execAborted int
+	suspendErr  error
 	// execCtxErr records the ctx error each blocked Exec ended with.
 	execCtxErr []error
 }
@@ -115,6 +119,11 @@ func (f *fakeSessions) Exec(ctx context.Context, o client.ExecOptions) (*client.
 		f.execErrBefore = nil
 		f.mu.Unlock()
 		return nil, err
+	}
+	if f.execAborted > 0 {
+		f.execAborted--
+		f.mu.Unlock()
+		return nil, status.Error(codes.Aborted, "substrate: actor is busy with another operation: actor is mid-transition")
 	}
 	if f.cold[o.Session] {
 		f.mu.Unlock()
@@ -734,6 +743,38 @@ func TestInvokeRetryAfterCrashReachesTheSameChild(t *testing.T) {
 				t.Fatalf("after the retry: %d children and %d turns, want 1 child and %d turns", len(f.created), f.execs, tc.execs)
 			}
 		})
+	}
+}
+
+// On micro-VMs a host killed right after CreateSession leaves the child's actor mid-creation, and
+// the retry's Exec is refused with ABORTED until the actor settles: the executor tries again (and
+// counts the refusals) instead of failing the delegation, and a non-ABORTED error is not retried.
+// When ABORTED outlasts the call's deadline, the delegation fails with the last refusal.
+func TestInvokeRetriesAnAbortedChildStep(t *testing.T) {
+	f := newFake()
+	f.execAborted = 2
+	x := New(suitePolicy(t), f)
+	x.abortWait = time.Millisecond
+	res := run(t, x.For("coordinator"), "sess-root", call("writer", "w", api.MediationControllerMediated))
+	lc := lifecycle(t, res)
+	if res.IsError || res.Output["output"] != "done: w" || lc["aborted"] != 2 || lc["turn"] != "ran" || lc["suspended"] != true {
+		t.Fatalf("result = %+v", res)
+	}
+	if len(f.created) != 1 || f.execs != 1 {
+		t.Fatalf("%d children and %d turns, want 1 and 1", len(f.created), f.execs)
+	}
+
+	f.execErrBefore = errors.New("harness unavailable")
+	if res := run(t, x.For("coordinator"), "sess-root", call("writer", "w", api.MediationControllerMediated)); !res.IsError || lifecycle(t, res)["aborted"] != nil {
+		t.Fatalf("a non-ABORTED error: %+v, want one failed try", res)
+	}
+
+	f.execAborted = math.MaxInt
+	x = New(suitePolicy(t), f, WithTimeout(50*time.Millisecond))
+	x.abortWait = time.Millisecond
+	res = run(t, x.For("coordinator"), "sess-root", call("writer", "w", api.MediationControllerMediated))
+	if !res.IsError || !strings.Contains(res.Error, "mid-transition") || !strings.Contains(res.Error, "gave up after") {
+		t.Fatalf("ABORTED past the deadline: %+v, want the last refusal", res)
 	}
 }
 

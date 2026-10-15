@@ -35,7 +35,8 @@
 #                          it to up.sh (the daemon's Secret) and deletes the file; only its expiry is
 #                          kept, and nothing prints the token
 #   DEMO_LOGS              directory for the logs (default ${WORK}/demo-logs)
-#   DEMO_KEEP_ON_FAILURE   set to keep the cluster when setup fails (by default down.sh deletes it)
+#   DEMO_KEEP_ON_FAILURE   set to keep the cluster when setup fails (by default down.sh deletes it
+#                          if this setup created it; a cluster it reused is always kept)
 #   DEMO_READ              seconds a result stays on screen (default 4; record.sh sets 3). The other
 #                          holds are fixed below: a caption 2.5 s before its first command (it stays
 #                          on screen through the results), each page of a file screen 6.5 s, the title
@@ -114,11 +115,17 @@ cleanup() {
 	fi
 	for p in "${PIDS[@]}"; do kill "${p}" 2>/dev/null || true; done
 	rm -f "${TOKEN_FILE}"
-	# A failed setup deletes the cluster it created (down.sh refuses one it did not), so a run on a
-	# shared host leaves nothing behind; a failed show keeps it, so show can be run again.
+	# A failed setup deletes the cluster only if this invocation created it, so a run on a shared host
+	# leaves nothing behind; a cluster it reused (a rerun of setup on an installed cluster, say) keeps
+	# its daemons and their session journals, as up.sh does, and a failed show keeps it too, so either
+	# can be run again. down.sh still refuses a cluster up.sh did not create.
 	if [[ "${MODE}" == setup ]] && ((rc != 0)) && [[ -z "${DEMO_KEEP_ON_FAILURE:-}" ]]; then
-		printf '# failed setup: down.sh\n'
-		"${DEMO}/../down.sh" 2>&1 | redact | tee -a "${STEP_LOG}" || true
+		if created_cluster; then
+			printf '# failed setup: down.sh\n'
+			"${DEMO}/../down.sh" 2>&1 | redact | tee -a "${STEP_LOG}" || true
+		else
+			printf '# failed setup: this setup created no kind cluster, so down.sh is not run\n' | tee -a "${STEP_LOG}"
+		fi
 	fi
 	# Let the redacting filter flush the last lines, for at most 10 seconds: a process that inherited
 	# stdout and outlived its step must not keep the job, and the recording, from ending.
@@ -129,6 +136,17 @@ cleanup() {
 	done
 }
 trap cleanup EXIT
+# NODE_BEFORE is the control-plane container ID setup saw before up.sh could create the cluster: ""
+# for none, "unknown" when kind listed the cluster but Docker reported no container for it. It is
+# unset until then. created_cluster reports whether this invocation created the cluster: its
+# container now exists and is another than a known one before (up.sh created it, or recreated one
+# whose first setup did not finish). An unknown one before keeps the cluster.
+created_cluster() {
+	local id
+	[[ -n "${NODE_BEFORE+set}" && "${NODE_BEFORE}" != unknown ]] || return 1
+	id="$(node_id)"
+	[[ -n "${id}" && "${id}" != "${NODE_BEFORE}" ]]
+}
 
 ctl() { "${WORK}/bin/agentctl" "$1" --server "$2" "${@:3}"; }
 agentctl_() { ctl "$1" "${SERVER}" "${@:2}"; }
@@ -157,6 +175,13 @@ setup() {
 		printf '    ok in %d s\n' $((SECONDS - t0))
 	}
 	phase "KVM in the Docker host" docker run --rm --device /dev/kvm busybox ls -l /dev/kvm
+	# Before up.sh can create the cluster: what cleanup compares with (see created_cluster).
+	if cluster_listed; then
+		NODE_BEFORE="$(node_id)"
+		NODE_BEFORE="${NODE_BEFORE:-unknown}"
+	else
+		NODE_BEFORE="$(node_id)"
+	fi
 	phase "up.sh --substrate-only: kind, ate-system, the microvm SandboxConfig and WorkerPool" "${DEMO}/../up.sh" --substrate-only
 	# The diagram calls the sandbox a Kata + Cloud Hypervisor micro-VM; substrate's kind install says
 	# so when it enables the class.

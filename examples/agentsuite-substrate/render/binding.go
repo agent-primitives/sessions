@@ -1,8 +1,8 @@
 package render
 
 import (
-	"bytes"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
@@ -23,7 +23,7 @@ const (
 	// KmxCommit is the kaimahi commit (branch aramase/f/kmx_agentsessions_binding) whose
 	// AgentSessionsBinding validation, digest and TemplateName this package was compared against;
 	// render_test.go pins the values kmx's code gave there.
-	KmxCommit = "fc03a7c0bdd098a2f83caf80425324af7fb8209e"
+	KmxCommit = "e005eb7baad25fa9239b6baceeb1d61a36e547a8"
 	// BindingAPIVersion and BindingKind identify an AgentSessionsBinding, as kaimahi's kmx does.
 	BindingAPIVersion = "kmx.kaimahi.dev/v1alpha1"
 	BindingKind       = "AgentSessionsBinding"
@@ -126,21 +126,19 @@ func validSecretKey(s string) bool {
 	return len(s) <= 253 && secretKey.MatchString(s) && s != "." && !strings.HasPrefix(s, "..")
 }
 
-// LoadBinding decodes a binding strictly (unknown fields are refused), validates it, and records
-// its digest (see Digest). Its errors never repeat model.baseURL or model.path.
+// LoadBinding decodes a binding strictly, validates it, and records its digest (see Digest). The
+// decoder is encoding/json/v2's, which refuses what kmx's YAML decoder refuses in a JSON document:
+// an unknown member, a member name in another case ("Kind" for "kind"), a member given twice in one
+// object, invalid UTF-8, and anything after the one document. Its errors name members, never their
+// values, so they never repeat model.baseURL or model.path.
 func LoadBinding(path string) (*Binding, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	var b Binding
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&b); err != nil {
+	if err := jsonv2.Unmarshal(raw, &b, jsonv2.RejectUnknownMembers(true)); err != nil {
 		return nil, fmt.Errorf("binding %s: %w", path, err)
-	}
-	if dec.More() {
-		return nil, fmt.Errorf("binding %s: want one JSON document", path)
 	}
 	if err := b.validate(); err != nil {
 		return nil, fmt.Errorf("binding %s: %w", path, err)

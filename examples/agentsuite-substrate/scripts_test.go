@@ -335,7 +335,8 @@ func TestUpClusterPhase(t *testing.T) {
 			name: "a failed kind listing changes nothing", env: []string{"STUB_KIND_LIST_FAIL=1", "STUB_CLUSTERS=" + cluster},
 			node: "node-0", owned: "node-0", setup: "node-0 installed",
 			wantCode: 1, wantOut: "kind get clusters failed",
-			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl", "go "},
+			// The only go call is the emit build that checks the inputs before the cluster.
+			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl", "go run", "kubectl-ate", "./cmd/harness"},
 			wantOwned: "node-0", wantSetup: "node-0 installed",
 		},
 		{
@@ -659,9 +660,10 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			wantOut: "would not start agentsessionsd: emit: check-model: the base URL is not a valid URL (the value is not shown, since it may hold a credential); nothing was changed",
 		},
 		{
+			// emit is built with the fake model too: it checks the binding against the suite.
 			name:    "an emit that does not build",
-			env:     func(*testing.T) []string { return append(provider, "STUB_EMIT_BUILD_FAIL=1") },
-			wantOut: "cannot build cmd/emit to check AGENTSUITE_MODEL_BASE_URL and AGENTSUITE_MODEL: cmd/emit/main.go:1:1: expected 'package', found broken; nothing was changed",
+			env:     func(*testing.T) []string { return []string{"STUB_EMIT_BUILD_FAIL=1"} },
+			wantOut: "cannot build cmd/emit to check the binding and the model settings: cmd/emit/main.go:1:1: expected 'package', found broken; nothing was changed",
 		},
 		{
 			name:    "a base URL without a model",
@@ -851,7 +853,16 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			// The suite pins triage-model; a provider serving another model is a new suite version.
 			name:    "a provider model the suite does not pin",
 			env:     func(*testing.T) []string { return provider },
-			wantOut: `the provider settings do not serve the suite's model: emit: suite support-desk agent triage pins model "triage-model" but the binding serves "m"; a different model needs a new suite version and a new evaluation; nothing was changed`,
+			wantOut: `this environment's binding (binding-microvm.json with the provider settings) does not fit agent triage of suite: emit: suite support-desk agent triage pins model "triage-model" but the binding serves "m"; a different model needs a new suite version and a new evaluation; nothing was changed`,
+		},
+		{
+			// The fake model's binding serves triage-model; kaimahi's minimal suite pins
+			// example-model, so it is refused before kind, substrate and the image, not after.
+			name: "a suite whose model the fake binding does not serve",
+			env: func(*testing.T) []string {
+				return []string{"STUB_DOCKER_ARCH=amd64", "AGENTSUITE_DEMO_SUITE=suites/kaimahi-minimal", "AGENTSUITE_DEMO_AGENT=writer"}
+			},
+			wantOut: `binding-microvm.json does not fit agent writer of suites/kaimahi-minimal: emit: suite minimal agent writer pins model "example-model" but the binding serves "triage-model"; a different model needs a new suite version and a new evaluation; nothing was changed`,
 		},
 		{
 			name:    "a binding for another atespace",

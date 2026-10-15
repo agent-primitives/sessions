@@ -61,7 +61,10 @@ The suite is validated with kaimahi's `agentsuite` package, imported as a Go mod
 the files `suites/kaimahi-minimal` copies from that commit. `demo.sh` uses its own fixture by default
 because kaimahi's fixtures declare only `linux/amd64`, and a kind node on an arm64 Mac needs an arm64
 image. On amd64, `AGENTSUITE_DEMO_SUITE=suites/kaimahi-minimal AGENTSUITE_DEMO_AGENT=writer` selects
-kaimahi's.
+kaimahi's, which pins `example-model`: the binding must serve that model, so it runs only with a
+real provider whose `AGENTSUITE_MODEL` is `example-model`. With the fake model (`triage-model`),
+`up.sh` refuses it with `emit check-binding` before it touches the cluster, as it refuses any suite
+whose pinned model the binding does not serve.
 
 ### The mapping that `emit render` applies
 
@@ -309,10 +312,11 @@ header has not been run against a live deployment.
 The binding is the per-environment half of a deployment, outside the suite: the suite pins the
 exact model, the binding says where it is served and where sessions are placed, and `emit render`
 refuses a binding whose `model.name` is not exactly the agent's pinned model (no case folding,
-prefix or version matching). A different model is a new suite version and a new evaluation
-(`suites/coordinator-workers-v2`). The shape follows kmx's `AgentSessionsBinding`
-(kaimahi `internal/kmx/runtime/agentsessions_binding.go` and `internal/kmx/agentsessions/render.go`
-on branch `aramase/f/kmx_agentsessions_binding`, compared at `fc03a7c`, `render.KmxCommit`): the same
+prefix or version matching). A different model is a new suite version (`suites/coordinator-workers-v2`)
+and a new evaluation (not run for v2; see the last row of the table). The shape follows kmx's
+`AgentSessionsBinding` (kaimahi `internal/kmx/runtime/agentsessions_binding.go` and
+`internal/kmx/agentsessions/render.go` on branch `aramase/f/kmx_agentsessions_binding`, compared at
+`e005eb7`, `render.KmxCommit`): the same
 `apiVersion`, `kind` and fields, the same required `model` (`name`, `provider: openai`, optional
 `baseURL`, `secretRef`) and required `resources` (`cpu` and `memory`, each a positive quantity of at
 most 32 bytes within substrate's 999.999 cores and 2^63-1 bytes, parsed by apimachinery's
@@ -320,14 +324,20 @@ most 32 bytes within substrate's 999.999 cores and 2^63-1 bytes, parsed by apima
 `resources` as kmx renders them, the same `workerSelector` rule (at most ten labels, qualified names,
 label values), the same cross-field and `snapshot.storageLocation` refusals (`ROOTFS` only on
 `microvm`; an object-storage URI of at most 1024-65 bytes with no credentials, query, fragment or
-`\`, and no empty segments or segments of only `.` and spaces), the same object name, Secret key,
-base URL and harness image rules, the same template name formula (fed this renderer's own version, so
-the names differ; see the table), and the same digest (JCS of the binding's fields, with an empty
-`workerSelector` the same as an omitted one). The results were checked by running kmx's code at
-`fc03a7c` on the same inputs: `AgentSessionsBindingDigest` on `binding-microvm.json` and
-`binding.json`, `TemplateName` on a pinned image and its mirror, and `ValidateAgentSessionsBinding`
-on the boundary values `render_test.go` uses (959 and 960 storage bytes, quantity and label limits);
-`render_test.go` pins the digests and names. Every difference that remains:
+`\`, and no empty segments or segments of only `.` and spaces), the same object name, Secret key and
+base URL rules, the same digest-pinned harness image rule (without kmx's credential-shape scan of the
+reference; see the table), the same decoder refusals (an unknown member, a member name in another
+case, a member given twice in one object, invalid UTF-8, a second document), the same template name
+formula (fed this renderer's own version, so the names differ; see the table), and the same digest
+(JCS of the binding's fields, with an empty `workerSelector` the same as an omitted one). The
+results were checked by running kmx's code on the same inputs. At `e005eb7`:
+`AgentSessionsBindingDigest` on `binding-microvm.json` and `binding.json`, `TemplateName` on a
+pinned image and its mirror, and `ParseAgentSessionsBinding` on the decoder edits `render_test.go`
+makes (a repeated `kind` and label, `Kind` and `model.Name`, invalid UTF-8). At `fc03a7c`, the
+branch's head before its rebase onto kaimahi main, whose binding and render files, `go.mod` and
+`go.sum` are byte-identical to `e005eb7`'s: `ValidateAgentSessionsBinding` on the boundary values
+`render_test.go` uses (959 and 960 storage bytes, quantity and label limits). `render_test.go` pins
+the digests and names. Every difference that remains:
 
 | Difference | Why |
 |---|---|
@@ -338,7 +348,7 @@ on the boundary values `render_test.go` uses (959 and 960 storage bytes, quantit
 | The memory tier refuses a `ROOTFS` or `VOLUMES` binding | kmx renders one stateless chat member, for which any fidelity is valid. The PoC's `-tier memory` keeps the conversation only in RAM, which substrate's `ROOTFS` and `VOLUMES` snapshots do not carry, so it requires `MEMORY`. |
 | The registration names the agent, not `chat` | kmx registers its member with `descriptor_id: chat` (the built-in chat harness in harnessnode); the PoC's harness serves the suite's agent, so `descriptor_id` is the agent id. |
 | Render output, and the substrate revision it targets | kmx lift is plan-only: it prints one JSON document (the ActorTemplate in proto field names, its `templateDigest`, the canonical registration and its `registrationSpecDigest`, and the host model references) checked against substrate `f4f7b806` (`SubstrateAPICommit`). The PoC writes `actortemplate.json` (protojson of the pinned substrate `96dffb2`'s `ateapipb.ActorTemplate`), the registration, the daemon flag and the model flags, and `up.sh`/`coordinator.sh` apply them. Both templates set the same fields; their values differ only in the name and the container env, as above. |
-| JSON only, no credential-shape scan | kmx reads YAML or JSON, refuses anchors, aliases, invalid UTF-8 and credential-shaped values in every field; the PoC decodes strict JSON (which replaces invalid UTF-8) and keeps credentials out by field shape: names, URLs, the model path, the storage location and the Secret key are checked, and errors never repeat a URL or location. |
+| JSON only, no credential-shape scan | kmx reads YAML or JSON, refuses anchors, aliases and merge keys, and scans the binding's text and every value, and its harness image reference (`HarnessImageDigest`), for credential shapes (kaimahi `internal/kmx/secretshapes`, an internal package the PoC cannot import). The PoC decodes JSON only, with `encoding/json/v2`, which refuses what kmx's decoder refuses in a JSON document (unknown members, a member name in another case, a member given twice, invalid UTF-8, a second document), and keeps credentials out by field shape: names, URLs, the model path, the storage location and the Secret key are checked, and the harness image must parse as a digest-pinned reference. A credential-shaped string that still fits a field's shape (a token as a repository path segment of the image) is accepted, which kmx would refuse. Errors never repeat a URL, location or image. |
 | One binding per agent atespace | kmx lift renders one chat member into `binding.atespace`. The coordinator's three agents share one daemon, whose session actors are named by session uid, so `coordinator.sh setup` writes one copy of the binding per agent with `atespace` set to `agentsuite-<agent>` (three digests). |
 | The binding's endpoint is filled in at setup | `binding-coordinator.json` names `https://example.openai.azure.com`; `setup` writes this environment's copy with the operator's `AGENTSUITE_MODEL*` values, so no Azure resource name is committed. |
 | No eval evidence | kmx eval takes one chat member and records the binding digest in its evidence, and kmx lift requires that evidence. A suite with invokes edges has no kmx eval path yet, so this PoC renders without evidence. |
@@ -346,9 +356,13 @@ on the boundary values `render_test.go` uses (959 and 960 storage bytes, quantit
 
 ## Gaps this PoC works around
 
-- **No declarative harness registration.** `agentsessionsd` does not serve the `HarnessRegistry` API
-  (agentsessions#70), so `emit` writes the registration and the daemon flag that applies it, and
-  `up.sh` puts that flag in the Deployment. Registering another agent means a redeploy.
+- **No declarative registration of a substrate harness.** `agentsessionsd` serves the
+  `HarnessRegistry` API when `-registry-addr` is set (agentsessions#70), but that API cannot
+  register a substrate harness: its placer factory refuses a substrate placement
+  (`registeredPlacer` in `internal/agentsessionsd/registry_listener.go`: "substrate placement is not
+  supported by agentsessionsd"). So `emit` writes the registration and the `-substrate-harness`
+  flag that applies it, and `up.sh` puts that flag in the Deployment. Registering another agent
+  means a redeploy.
 - **Replay is not a Sessions API call.** The `Replay` RPC streams the journal; it does not re-run the
   harness. The re-execution (`controller.Replay`) only exists in-process, so `cmd/replay` runs it on
   the client against the session's actor.

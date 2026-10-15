@@ -7,9 +7,9 @@
 // sha256(renderer version + "\n" + image reference + "\n" + binding digest), so the same image under
 // another binding, registry or renderer is another template; the harness speaks harnesswire on port
 // 80 with a /readyz wakeup probe on 8081; the sandbox, snapshot, template resources, worker selector
-// and approval gates come from the binding. The
-// harness requests the model its agent pins, and the binding must serve exactly that model. Model
-// credentials are host configuration and never rendered.
+// and approval gates come from the binding. The harness requests the model its agent pins, and the
+// binding must serve exactly that model. Model credentials are host configuration and never
+// rendered.
 package render
 
 import (
@@ -152,8 +152,10 @@ const maxImageReference = 512
 
 // checkPinnedImage applies kmx's harness image rule (HarnessImageDigest): a reference of at most
 // substrate's 512 bytes that parses as an OCI reference pinned by a sha256 digest, without a tag.
+// Unlike kmx's, it does not scan the reference for credential shapes; like kmx's, its error does
+// not repeat the reference, which may be one.
 func checkPinnedImage(image string) error {
-	err := fmt.Errorf("image %q: substrate requires a digest-pinned reference (name@sha256:<64 hex>) without a tag, of at most %d bytes", image, maxImageReference)
+	err := fmt.Errorf("the harness image is not a digest-pinned reference (name@sha256:<64 hex>) without a tag, of at most %d bytes (the value is not shown, since it may hold a credential)", maxImageReference)
 	if image == "" || len(image) > maxImageReference || strings.TrimSpace(image) != image {
 		return err
 	}
@@ -261,10 +263,9 @@ func Agents(dir string) ([]agentsuite.Agent, error) {
 // Render maps a composition, its digest-pinned harness image and a binding onto an ActorTemplate and
 // a harness registration. The harness registration's name is the agent id, or <agent>-memory for the
 // memory tier (AGENTSUITE_MEMORY=ram, folded into the template name), which needs the binding's
-// MEMORY snapshot fidelity. Render refuses a binding that
-// serves a model other than the one the agent pins (ErrModelMismatch). The binding's approval edges
-// whose caller is this agent are set in the template's env (AGENTSUITE_APPROVAL); each must be one
-// of the agent's invokes edges.
+// MEMORY snapshot fidelity. Render refuses a binding that serves a model other than the one the
+// agent pins (ErrModelMismatch). The binding's approval edges whose caller is this agent are set in
+// the template's env (AGENTSUITE_APPROVAL); each must be one of the agent's invokes edges.
 func Render(c *Composition, image string, b *Binding, o Options) (*Output, error) {
 	// Load checked the agent; check again for a Composition built by hand.
 	if err := supported(c.Agent); err != nil {

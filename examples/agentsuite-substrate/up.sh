@@ -85,6 +85,12 @@ if [[ -z "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 		fi
 	done
 fi
+# emit checks the model settings (check-model) and the binding against the suite (check-binding)
+# before anything changes. It is built first and run as a binary: go run would append its own "exit
+# status 1" to the reason, and a build failure is not a verdict on the values.
+if ! reason="$(cd "${HERE}" && go build -o "${WORK}/bin/emit" ./cmd/emit 2>&1)"; then
+	refuse "cannot build cmd/emit to check the binding and the model settings: ${reason}"
+fi
 if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	# A real OpenAI-compatible provider.
 	MODEL_BASE_URL="${AGENTSUITE_MODEL_BASE_URL}"
@@ -124,11 +130,6 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	# The Deployment recreates its pod, and the journal is an emptyDir, so letting such a value
 	# through would delete the running daemon's sessions and leave a pod that never starts. emit
 	# check-model builds the client with the daemon's own constructor, and also requires http(s).
-	# It is built first and run as a binary: go run would append its own "exit status 1" to the
-	# reason, and a build failure is not a verdict on the values.
-	if ! reason="$(cd "${HERE}" && go build -o "${WORK}/bin/emit" ./cmd/emit 2>&1)"; then
-		refuse "cannot build cmd/emit to check AGENTSUITE_MODEL_BASE_URL and AGENTSUITE_MODEL: ${reason}"
-	fi
 	# With a key, check-model refuses a plain-http URL whose host is not loopback, localhost or an
 	# in-cluster service (*.svc, *.svc.cluster.local), as the daemon would. It is told only that a
 	# key is set, never the key.
@@ -164,17 +165,20 @@ if [[ "${BINDING_ATESPACE}" != "${ATESPACE}" ]]; then
 	refuse "${BINDING_FILE} names atespace '${BINDING_ATESPACE}', but the demo deploys into atespace ${ATESPACE}"
 fi
 
-# The binding says where the suite's pinned model is served. ${BINDING_FILE} serves the fake model;
-# with a real provider, this environment's binding is that file with its model set from the
-# provider settings (common.sh write_binding), and emit refuses it unless the agent pins exactly
-# that model: a different model is a new suite version, not a render-time override.
+# The binding says where the suite's pinned model is served. ${BINDING_FILE} serves the fake model
+# (triage-model); with a real provider, this environment's binding is that file with its model set
+# from the provider settings (common.sh write_binding). Either way emit refuses it, before anything
+# touches the cluster, unless the agent pins exactly that model: a different model is a new suite
+# version, not a render-time override.
 BINDING="${HERE}/${BINDING_FILE}"
+BINDING_WHAT="${BINDING_FILE}"
 if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	BINDING="${STATE}/binding.json"
+	BINDING_WHAT="this environment's binding (${BINDING_FILE} with the provider settings)"
 	write_binding "${HERE}/${BINDING_FILE}" "${BINDING}" || refuse "cannot write this environment's binding"
-	if ! reason="$("${WORK}/bin/emit" check-binding -suite "${HERE}/${SUITE_DIR}" -agent "${AGENT}" -platform "linux/${ARCH}" -binding "${BINDING}" 2>&1)"; then
-		refuse "the provider settings do not serve the suite's model: ${reason}"
-	fi
+fi
+if ! reason="$("${WORK}/bin/emit" check-binding -suite "${HERE}/${SUITE_DIR}" -agent "${AGENT}" -platform "linux/${ARCH}" -binding "${BINDING}" 2>&1)"; then
+	refuse "${BINDING_WHAT} does not fit agent ${AGENT} of ${SUITE_DIR}: ${reason}"
 fi
 
 # The micro-VM class needs /dev/kvm in the containers Docker runs (the kind node is one). Probe it the

@@ -2,10 +2,12 @@
 
 A new version of kaimahi's `agentsuite/testdata/coordinator-workers` at
 [75f27d6](https://github.com/kaimahi-agents/kaimahi/tree/75f27d67f40b8ce9beb23206285cf04255f28a4/agentsuite/testdata/coordinator-workers)
-(vendored unchanged in `../coordinator-workers`). The suite pins the exact model its agents were
-evaluated with; a deployment's `AgentSessionsBinding` says where that model is served, and
-`emit render` refuses a binding that serves another one. A different model is a new suite version
-and a new evaluation, not a render-time override.
+(vendored unchanged in `../coordinator-workers`). The suite pins the exact model its agents run
+with; a deployment's `AgentSessionsBinding` says where that model is served, and `emit render`
+refuses a binding that serves another one. The policy is that a different model is a new suite
+version and a new evaluation, not a render-time override. This version has not been evaluated
+with `gpt-5.4-mini` (see below): it is the new version that policy calls for, not evidence that the
+model passes the suite's evals.
 
 The suite keeps its name. The suite manifest has no version field (an `agents[]` reference has an
 optional `version`, unused in 75f27d6 and here; the spec's suite identity is the JCS digest of the

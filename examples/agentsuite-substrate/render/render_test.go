@@ -1,6 +1,7 @@
 package render
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
@@ -155,6 +156,8 @@ func TestRenderMapsTheComposition(t *testing.T) {
 	} {
 		if _, err := Render(comp, image, b, Options{}); err == nil || !strings.Contains(err.Error(), "digest-pinned reference (name@sha256:<64 hex>) without a tag, of at most 512 bytes") {
 			t.Fatalf("image %q: err = %v, want refused as kmx refuses it", image, err)
+		} else if strings.Contains(err.Error(), strings.TrimSpace(image)) {
+			t.Fatalf("err = %q repeats the image, which may hold a credential", err)
 		}
 	}
 }
@@ -569,7 +572,7 @@ func TestLoadBindingIsStrict(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"apiVersion":"kmx.kaimahi.dev/v1alpha1","kind":"AgentSessionsBinding","atespace":"a","placement":{"backend":"substrate"},"snapshot":{"storageLocation":"gs://x/"},"secret":"x"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadBinding(path); err == nil || !strings.Contains(err.Error(), "unknown field") {
+	if _, err := LoadBinding(path); err == nil || !strings.Contains(err.Error(), `unknown object member name "secret"`) {
 		t.Fatalf("err = %v, want unknown fields refused", err)
 	}
 	const secretish = "s3cr3t-value"
@@ -589,7 +592,7 @@ func TestLoadBindingIsStrict(t *testing.T) {
 		{"a dot-dot secret key", func(m map[string]any) { model(m)["secretRef"].(map[string]any)["key"] = "..k" }, "model.secretRef.key"},
 		{"a base URL with a port and no host", func(m map[string]any) { model(m)["baseURL"] = "https://:443" }, "model.baseURL: the base URL has no host"},
 		{"a target id over 253 bytes", func(m map[string]any) { m["target"].(map[string]any)["id"] = "aa" + strings.Repeat(".a", 126) }, "is not a Kubernetes object name"},
-		{"a credential field", func(m map[string]any) { model(m)["apiKey"] = secretish }, "unknown field"},
+		{"a credential field", func(m map[string]any) { model(m)["apiKey"] = secretish }, `unknown object member name "apiKey" within "/model"`},
 		{"an empty sandbox config", func(m map[string]any) { m["sandbox"].(map[string]any)["configName"] = "" }, "sandbox.configName"},
 		{"no fidelity", func(m map[string]any) { delete(m["snapshot"].(map[string]any), "fidelity") }, "snapshot.fidelity"},
 		{"ROOTFS on gvisor", func(m map[string]any) {
@@ -685,8 +688,40 @@ func TestLoadBindingIsStrict(t *testing.T) {
 	if err := os.WriteFile(trailing, append(raw, []byte(`{}`)...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadBinding(trailing); err == nil || !strings.Contains(err.Error(), "want one JSON document") {
+	if _, err := LoadBinding(trailing); err == nil || !strings.Contains(err.Error(), "after top-level value") {
 		t.Fatalf("a second document: err = %v", err)
+	}
+	// What kmx's YAML decoder refuses in the same JSON text (kaimahi
+	// internal/kmx/runtime.ParseAgentSessionsBinding at KmxCommit refused these edits of
+	// binding-coordinator.json, with its PoC-only fields removed, all but the model given twice): a
+	// member given twice, in the binding or in a map; a member name in another case, which
+	// encoding/json v1 would have matched; invalid UTF-8.
+	for _, tc := range []struct {
+		name, old, new, want string
+	}{
+		{"a member given twice", `"kind": "AgentSessionsBinding"`, `"kind": "AgentSessionsBinding", "kind": "AgentSessionsBinding"`, `duplicate object member name "kind"`},
+		{"a model given twice", `"approval"`, `"model": {"name": "` + secretish + `"}, "approval"`, `duplicate object member name "model"`},
+		{"a label given twice", `{"workload": "agentsuite-demo-microvm"}`, `{"workload": "x", "workload": "y"}`, `duplicate object member name "workload" within "/workerSelector/matchLabels"`},
+		{"a member in another case", `"kind":`, `"Kind":`, `unknown object member name "Kind"`},
+		{"a model member in another case", `"name": "gpt-5.4-mini"`, `"Name": "gpt-5.4-mini"`, `unknown object member name "Name" within "/model"`},
+		{"invalid UTF-8", `"configName": "microvm"`, "\"configName\": \"micro\xffvm\"", `invalid UTF-8 within "/sandbox/configName"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !bytes.Contains(raw, []byte(tc.old)) {
+				t.Fatalf("binding-coordinator.json has no %s", tc.old)
+			}
+			path := filepath.Join(t.TempDir(), "b.json")
+			if err := os.WriteFile(path, bytes.Replace(raw, []byte(tc.old), []byte(tc.new), 1), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadBinding(path)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), secretish) {
+				t.Fatalf("err = %q repeats a value", err)
+			}
+		})
 	}
 }
 

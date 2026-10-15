@@ -156,10 +156,15 @@ and two entries may not share one.
 | `agent/coordinator.go` | The coordinator loop: the model asks for a delegation as one line of JSON; the harness makes the `agentsuite.invoke` call with id `<execution>-invoke-<n>`, stable across replay and resume. |
 | `cmd/agentsessionsd` | The substrate build of `agentsessionsd` plus the executor (`internal/agentsessionsd.WithToolExecutors`). The edges come from `AGENTSUITE_INVOKES`, which `emit invokes -approve reviewer` prints. |
 | `emit render -approve -actors` | Sets `AGENTSUITE_APPROVAL` in the coordinator's template (folded into its name) and `,actors=<atespace>` on each daemon flag. |
-| `demo/coordinator.sh` | `setup`: kind and substrate (`up.sh --substrate-only`), one image, binding atespace and ActorTemplate per agent, one daemon with three `-substrate-harness` flags. `probe`: one request approved and one denied through `agentctl`. |
+| `demo/coordinator.sh` | `setup`: kind and substrate (`up.sh --substrate-only`), one image, binding atespace and ActorTemplate per agent, one daemon with three `-substrate-harness` flags. `probe`: one request approved and one denied through `agentctl`; ends with `PROBE OK`. `show`: the recorded demo's eight chapters (`demo/screen.sh` draws them as `driver.sh` does). `reset`: deletes the session actors and restarts the daemon (its journal is an `emptyDir`), so `show` can run again. |
+| `demo/coordinator-record.sh`, `demo/coordinator.tape`, `demo/invoke.mmd` | The recording: `coordinator.sh show` on the host through `hq remote-test` under vhs, the invocation diagram spliced in, then `collect` writes the video's README, logs and checks. |
 
 ### Gaps in the invocation PoC
 
+- A child session keeps its actor running after its one turn: nothing suspends it, so each
+  delegation holds a micro-VM until the session is suspended or its actor deleted
+  (`coordinator.sh reset` deletes them). Observed in the probe: every child actor was still
+  `ACTOR_STATE_RUNNING` after its turn.
 - Child creation is not idempotent: if the host crashes after the child turn but before the
   `TOOL_RESULT` commits, recovery runs the executor again and creates a second child.
   `CreateSession` has no client-chosen id or idempotency key to deduplicate on.

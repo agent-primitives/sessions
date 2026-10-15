@@ -81,6 +81,14 @@ fail() {
 }
 step() { printf '\n==> %s\n' "$*"; }
 actors() { echo "agentsuite-$1"; }
+# ate_names KIND ATESPACE [PREFIX]: the names of the KIND objects in ATESPACE that start with PREFIX.
+ate_names() {
+	"${ATE[@]}" get "$1" -a "$2" -o json | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+items = d if isinstance(d, list) else next((v for v in d.values() if isinstance(v, list)), [])
+print(" ".join(a["metadata"]["name"] for a in items if a["metadata"]["name"].startswith(sys.argv[1])))' "${3:-}"
+}
 
 # The placeholders of deploy/coordinator-agentsessionsd.yaml. render_manifest fills them with literal
 # (not sed) substitution, the computed values first, so an operator value cannot be read as one.
@@ -161,6 +169,12 @@ setup() {
 		template="$(cat "${out}/template-name")"
 		"${ATE[@]}" get actor-template "${template}" -a "$(actors "${agent}")" >/dev/null 2>&1 || "${ATE[@]}" create actor-template -f "${out}/actortemplate.json"
 		wait_golden "$(actors "${agent}")" "${template}"
+		# A template an earlier setup created for this agent (another image or option) is left over;
+		# the atespace holds only the current one, which is what show lists.
+		local old
+		for old in $(ate_names actor-templates "$(actors "${agent}")"); do
+			[[ "${old}" == "${template}" ]] || "${ATE[@]}" delete actor-template "${old}" -a "$(actors "${agent}")"
+		done
 		flags+=("$(cat "${out}/agentsessionsd.args")")
 	done
 
@@ -247,9 +261,10 @@ probe() {
 reset() {
 	local agent name
 	for agent in "${AGENTS[@]}"; do
-		for name in $("${ATE[@]}" get actors -a "$(actors "${agent}")" -o name 2>/dev/null | sed -n 's|.*/||; /^sess-/p'); do
+		for name in $(ate_names actors "$(actors "${agent}")" sess-); do
 			"${ATE[@]}" delete actor "${name}" -a "$(actors "${agent}")" --any-state
 		done
+		[[ -z "$(ate_names actors "$(actors "${agent}")" sess-)" ]] || fail "session actors remain in $(actors "${agent}")"
 	done
 	"${K[@]}" -n "${NS}" rollout restart deploy/agentsessionsd-coordinator
 	"${K[@]}" -n "${NS}" rollout status deploy/agentsessionsd-coordinator --timeout=180s
@@ -266,8 +281,10 @@ reset() {
 # =================================================================================================
 CHAPTERS=8
 READ="${DEMO_READ:-4}" COLS="${DEMO_COLS:-129}" ROWS="${DEMO_ROWS:-39}"
-# shellcheck source=screen.sh
+# shellcheck source=SCRIPTDIR/screen.sh
 source "${DEMO}/screen.sh"
+# Longer holds than driver.sh's: this demo has fewer screens, most of them journal records to read.
+CAPTION_HOLD=4 FILE_HOLD=9 DIAGRAM_HOLD=15 TITLE_HOLD=8
 
 # nth KIND N: the seq of the Nth record of KIND in RAW's journal (agentctl replay output).
 nth() { python3 -c 'import re, sys; s = [m.group(1) for m in re.finditer(r"^seq=(\d+) +" + sys.argv[1] + r"\b", open(sys.argv[3]).read(), re.M)]; n = int(sys.argv[2]); print(s[n - 1] if len(s) >= n else "")' "$1" "$2" "${RAW}"; }
@@ -300,7 +317,7 @@ show() {
 	wtemplate="$(cat "${STATE}/render-writer/template-name")"
 	rtemplate="$(cat "${STATE}/render-reviewer/template-name")"
 	log "API=${API} IMAGE=${IMAGE} BINDING=${BINDING} templates: ${template} ${wtemplate} ${rtemplate}"
-	local input="Write a two-line poem about tides, then have it reviewed for clarity. Reply with the final poem and one line on the review."
+	local input="Have the writer write a two-line poem about tides, then have the reviewer give a one-sentence clarity review. Reply with the final poem and that sentence."
 
 	printf '\e[?25l\e[2J\e[3J\e[H\n'
 	printf '%s  An AgentSuite coordinator on AgentSessions and micro-VMs%s\n\n' "${C}" "${N}"
@@ -310,7 +327,7 @@ show() {
 	# ---------------------------------------------------------------------------------------------
 	chapter 1 "The suite" "kaimahi's coordinator-workers test suite (agentsuite/testdata at 75f27d6): three agents"
 	run <<'EOF'
-ls suites/coordinator-workers/agents suites/coordinator-workers/instructions
+ls -C suites/coordinator-workers/agents suites/coordinator-workers/instructions
 EOF
 	page "The coordinator may invoke writer and reviewer: one call at a time each, and no deeper chain"
 	ends_at suites/coordinator-workers/agents/coordinator.json 28
@@ -345,7 +362,7 @@ EOF
 	run <<'EOF'
 cat /tmp/render-coordinator/agentsessionsd.args
 EOF
-	[[ "${SHOWN}" == "coordinator=agentsuite-coordinator/${template},actors=agentsuite-coordinator" ]] || fail "the coordinator's flag is not ${template}"
+	[[ "${SHOWN}" == "-substrate-harness=coordinator=agentsuite-coordinator/${template},actors=agentsuite-coordinator" ]] || fail "the coordinator's flag is not ${template}"
 
 	# ---------------------------------------------------------------------------------------------
 	chapter 3 "In the cluster" "Created by hand before recording, from the three renders: one ActorTemplate per agent, in its own atespace"
@@ -378,20 +395,21 @@ EOF
 	call="$(nth EVENT_TOOL_CALL 1)" res="$(nth EVENT_TOOL_RESULT 1)"
 	[[ -n "${call}" && -n "${res}" && "$(line_of "${call}")" == *'"agent":"writer"'* && "$(line_of "${call}")" == *"mediation=CONTROLLER_MEDIATED"* ]] ||
 		fail "the coordinator's first delegation is not to writer"
+	local gated
+	gated="$(nth EVENT_TOOL_CALL 2)" req="$(last_seq EVENT_APPROVAL_REQUEST)"
+	[[ -n "${gated}" && -n "${req}" && "$(line_of "${gated}")" == *'"agent":"reviewer"'* && "$(line_of "${gated}")" == *"mediation=REQUIRES_APPROVAL"* ]] ||
+		fail "the coordinator's second delegation is not a gated call to reviewer"
 	page "The delegation to writer: a tool call the host ran as a child session, and its reply"
 	run -n 8 <<EOF
 agentctl replay --server \$API --session \$S --from ${call} --to ${res}
 EOF
 	[[ "${SHOWN}" == *'"session":"sess-'* ]] || fail "the writer result names no child session"
-	call="$(nth EVENT_TOOL_CALL 2)" req="$(last_seq EVENT_APPROVAL_REQUEST)"
-	[[ -n "${call}" && -n "${req}" && "$(line_of "${call}")" == *'"agent":"reviewer"'* && "$(line_of "${call}")" == *"mediation=REQUIRES_APPROVAL"* ]] ||
-		fail "the coordinator's second delegation is not a gated call to reviewer"
 	[[ "$(sessions reviewer)" == 0 ]] || fail "a reviewer session exists before the approval"
 	page "The call to reviewer needs approval: the host records the request and parks the turn"
 	run -n 8 <<EOF
-agentctl replay --server \$API --session \$S --from ${call}
+agentctl replay --server \$API --session \$S --from ${gated}
 EOF
-	run <<'EOF'
+	run -n 8 <<'EOF'
 agentctl get --server $API --session $S
 EOF
 	[[ "${SHOWN}" == *"compute=COLD"* ]] || fail "the parked session still holds compute"
@@ -405,7 +423,7 @@ EOF
 	[[ -n "${seq}" && -n "${res}" && -n "${out}" && -n "$(last_seq EVENT_END)" ]] || fail "the resumed turn did not finish"
 	[[ "$(line_of "${seq}")" == *"approved=true"* && "$(line_of "${res}")" == *'"agent":"reviewer"'* ]] || fail "the journal does not hold the approval and the reviewer's reply"
 	page "The decision and the reviewer's reply, appended to the same journal"
-	run -n 8 <<EOF
+	run -n 12 <<EOF
 agentctl replay --server \$API --session \$S --from ${seq} --to ${res}
 EOF
 	page "The coordinator's final answer"
@@ -482,6 +500,7 @@ AgentSessions: CreateSession takes no idempotency key, so recovery after a crash
 AgentSessions: the HarnessRegistry does not take substrate placements yet, so the three harnesses are daemon flags.
 AgentSessions: a child session keeps its micro-VM actor running after its one turn; who releases it?
 substrate: is a template's golden snapshot usable from another atespace? Here each agent's template has its own." 16
+	sleep $((READ * 3))
 	log "DEMO COMPLETE in $((SECONDS - SHOW_START)) s"
 	printf '\n%s\n' "agentsuite-substrate coordinator demo."
 }

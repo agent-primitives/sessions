@@ -326,7 +326,7 @@ print(" ".join(a["metadata"]["name"] for a in items if a["metadata"]["name"].sta
 CHAPTERS=11
 # wrap, header, chapter, page, show_lines, show_file, run, offscreen, journal, last_seq, count,
 # lines_hold, ends_at and diagram.
-# shellcheck source=screen.sh
+# shellcheck source=SCRIPTDIR/screen.sh
 source "${DEMO}/screen.sh"
 actor_json() { # session: its actor's record in RAW and the log
 	offscreen "the actor of $1" "${ATE[@]}" get actor "$1" -a "${ATESPACE}" -o json || fail "no actor for $1"

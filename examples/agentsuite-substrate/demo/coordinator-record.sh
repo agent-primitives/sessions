@@ -21,7 +21,7 @@ DEMO="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${DEMO}/../../.." && pwd)"
 OUT="${DEMO_OUT:-${HOME}/.local/state/hq/demos/$(date +%F)-coordinator-poc}"
 ENV_FILE="${AZURE_OPENAI_ENV:-${HOME}/.config/hq/azure-openai.env}"
-export DEMO_COLS=129 DEMO_ROWS=39 DEMO_READ="${DEMO_READ:-3}"
+export DEMO_COLS=129 DEMO_ROWS=39 DEMO_READ="${DEMO_READ:-7}"
 CHAPTERS=8
 IMAGE=agentsuite-demo-tools:3
 MERMAID_CLI="@mermaid-js/mermaid-cli@11.17.0"

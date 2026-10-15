@@ -201,7 +201,9 @@ func decodeActorInfo(t *testing.T, wire []byte) substrate.ActorInfo {
 
 // The held snapshot is the one substrate restores and tags: the highest generation whose durable
 // copy is COMPLETED. A newer PENDING copy (suspend in flight), a node-local pause checkpoint and an
-// older completed generation are all skipped, whatever their order in the list.
+// older completed generation are all skipped, whatever their order in the list. The newest
+// completed generation is the held one even without a URI: the result is then empty (the caller
+// refuses), never an older generation, since that is not the snapshot substrate would tag.
 func TestHeldSnapshotIsLatestCompletedDurable(t *testing.T) {
 	const (
 		completed = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
@@ -228,9 +230,14 @@ func TestHeldSnapshotIsLatestCompletedDurable(t *testing.T) {
 			want:  "uri-4",
 		},
 		{
-			name:  "completed without a uri is skipped",
+			name:  "newest completed without a uri is held, not an older one",
 			snaps: []*atepb.Snapshot{durableSnapshot(2, "uri-2", completed), durableSnapshot(3, "", completed)},
-			want:  "uri-2",
+			want:  "",
+		},
+		{
+			name:  "equal generations: the later entry wins, as in substrate",
+			snaps: []*atepb.Snapshot{durableSnapshot(3, "uri-3a", completed), durableSnapshot(3, "uri-3b", completed)},
+			want:  "uri-3b",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -162,8 +162,11 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 // heldSnapshot returns the object-storage URI of the external snapshot the actor holds: the
 // highest-generation entry of ActorStatus.snapshots whose durable copy is COMPLETED, or "" when there
 // is none. That is the snapshot substrate restores on ResumeActor and copies on CreateTag
-// (findLatestDurableSnapshot in substrate's controlapi), so comparing it before and after a tag
-// proves which snapshot the tag took.
+// (findLatestDurableSnapshot in substrate's cmd/ateapi/internal/controlapi/snapshot_helpers.go), so
+// comparing it before and after a tag proves which snapshot the tag took. The entry is picked by
+// the same rule (on equal generations the later entry wins) before its URI is read: if that entry
+// has no URI the result is "" and the caller refuses, rather than naming an older completed
+// generation the tag would not copy.
 //
 // Entries that are not candidates: a PENDING durable copy is still being written (a suspend in
 // flight), and an entry with no durable copy is a node-local pause checkpoint, which a tag cannot
@@ -176,11 +179,10 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 func heldSnapshot(st *atepb.ActorStatus) string {
 	var held *atepb.Snapshot
 	for _, snap := range st.GetSnapshots() {
-		durable := snap.GetDurableSnapshot()
-		if durable.GetStatus() != atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED || durable.GetObject().GetSnapshotUri() == "" {
+		if snap.GetDurableSnapshot().GetStatus() != atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED {
 			continue
 		}
-		if held == nil || snap.GetGeneration() > held.GetGeneration() {
+		if held == nil || snap.GetGeneration() >= held.GetGeneration() {
 			held = snap
 		}
 	}

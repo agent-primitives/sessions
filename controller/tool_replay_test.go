@@ -736,6 +736,72 @@ func (h *continuesAfterToolFailureHarness) Run(ctx context.Context, _ *api.Start
 	return nil
 }
 
+func TestOrdinaryToolRejectsApprovalReceiptBeforeAppend(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		result api.ToolResult
+	}{
+		{"denial", api.ToolResult{Code: api.ToolResultCodeApprovalDenied, IsError: true}},
+		{"request", api.ToolResult{ApprovalRequestSeq: 3}},
+		{"decision", api.ToolResult{ApprovalDecisionSeq: 4}},
+		{"unknown code", api.ToolResult{Code: api.ToolResultCode(7)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			log := memStore(t)
+			original, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				return test.result, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := []api.ToolCall{recordedToolCall()}
+			h := &continuesAfterToolFailureHarness{calls: calls, interrupt: true}
+			if err := original.Exec(t.Context(), h, []api.Message{msg("read")}, 0); !errors.Is(err, errToolInterrupted) {
+				t.Fatalf("fixture: %v", err)
+			}
+			if !errors.Is(h.toolError, controller.ErrApprovalReceiptReport) {
+				t.Fatalf("ordinary tool result = %+v, error = %v; want receipt refusal", h.toolResult, h.toolError)
+			}
+			records, err := log.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, record := range records {
+				if record.Event.Kind == api.EventToolResult {
+					t.Fatal("invalid ordinary tool result was journaled")
+				}
+			}
+			fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				t.Fatal("handled invalid result repeated an effect")
+				return api.ToolResult{}, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h = &continuesAfterToolFailureHarness{calls: calls}
+			if resumed, err := fresh.Resume(t.Context(), h); !resumed || err != nil {
+				t.Fatalf("invalid result prevented resume: resumed=%v err=%v", resumed, err)
+			}
+			assertRecordedToolFailure(t, h.toolError, false)
+			h = &continuesAfterToolFailureHarness{calls: calls}
+			if _, err := fresh.Replay(t.Context(), h); err != nil {
+				t.Fatalf("invalid result prevented replay: %v", err)
+			}
+			assertRecordedToolFailure(t, h.toolError, false)
+			if fresh.ToolInvocations() != 0 || fresh.ModelInvocations() != 0 {
+				t.Fatal("recovery repeated live effects")
+			}
+			head, err := log.Head()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := fresh.Exec(t.Context(), &callHarness{}, []api.Message{msg("next")}, head); err != nil {
+				t.Fatalf("invalid result blocked a new execution: %v", err)
+			}
+		})
+	}
+}
+
 func TestCompletedTurnReplaysHandledToolFailures(t *testing.T) {
 	for _, keyless := range []bool{false, true} {
 		for _, laterCall := range []bool{false, true} {

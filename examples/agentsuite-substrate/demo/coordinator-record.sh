@@ -10,6 +10,7 @@
 #   coordinator-record.sh collect   the logs, the scripts, the diagram, demo.mp4.sha256, the checks and
 #                                   README.md with chapter times
 #   coordinator-record.sh run       what coordinator.tape types: show through present.awk, then the end marker
+#   coordinator-record.sh setup|probe|teardown   coordinator.sh's own mode on the host, its logs fetched
 #
 # coordinator.sh runs on a Linux host with KVM, Docker, kind and the cluster: through `hq remote-test`
 # (a private tool that syncs the checkout to its host and runs the command in a container there) in
@@ -19,7 +20,7 @@
 set -euo pipefail
 DEMO="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${DEMO}/../../.." && pwd)"
-OUT="${DEMO_OUT:-${HOME}/.local/state/hq/demos/$(date +%F)-coordinator-poc}"
+OUT="${DEMO_OUT:-${HOME}/.local/state/hq/demos/$(date +%F)-coordinator-poc-v2}"
 ENV_FILE="${AZURE_OPENAI_ENV:-${HOME}/.config/hq/azure-openai.env}"
 export DEMO_COLS=129 DEMO_ROWS=39 DEMO_READ="${DEMO_READ:-7}"
 CHAPTERS=8
@@ -138,18 +139,22 @@ collect() {
 		echo
 		echo "To share:"
 		echo
-		echo "> A PoC of the coordinator suite on AgentSessions and agent-substrate micro-VMs. It starts from"
-		echo "> kaimahi's coordinator-workers test suite (agentsuite/testdata at 75f27d6), where agent \`coordinator\`"
-		echo "> may invoke \`writer\` and \`reviewer\`, each with maxConcurrent 1 and maxDepth 1, validated by kaimahi's"
-		echo "> own package. \`emit\`, the PoC's translator, renders one substrate ActorTemplate per agent and the"
-		echo "> daemon's invocation policy; which delegation needs approval is a deployment choice (\`-approve"
-		echo "> reviewer\`). One request to the coordinator (${AGENTSUITE_MODEL} on Azure OpenAI) delegates to writer"
-		echo "> and then reviewer: each delegation is a host-executed tool call that creates a child session on the"
-		echo "> target agent's harness, in its own micro-VM, and is journaled in the coordinator's session. The"
-		echo "> reviewer call parks on AgentSessions' approval gate until an operator approves it with agentctl; in a"
-		echo "> second run the operator denies it, the denial is journaled, and the coordinator finishes without the"
-		echo "> review. The PoC's tests show maxConcurrent and maxDepth refusals, and the video ends with the open"
-		echo "> questions for AgentSuite, AgentSessions and substrate. Everything runs live."
+		echo "> A PoC of the coordinator suite on AgentSessions and agent-substrate micro-VMs, aligned with how kmx"
+		echo "> splits a suite from its environment. It starts from kaimahi's coordinator-workers test suite"
+		echo "> (agentsuite/testdata at 75f27d6), where agent \`coordinator\` may invoke \`writer\` and \`reviewer\`, each"
+		echo "> with maxConcurrent 1 and maxDepth 1. The suite pins the model: a new version of it pins"
+		echo "> ${AGENTSUITE_MODEL} (four files change; kaimahi's validator accepts it, and its digest is the suite version)."
+		echo "> The environment's AgentSessionsBinding, outside the suite and shaped like kmx's, says where that"
+		echo "> model is served (an Azure OpenAI deployment) and which delegation needs approval (coordinator ->"
+		echo "> reviewer). \`emit\`, the PoC's translator, refuses to render kaimahi's original suite against it, since"
+		echo "> that pins example-model, and renders the new version into one substrate ActorTemplate per agent and"
+		echo "> the daemon's invocation policy. One request to the coordinator delegates to writer and then reviewer:"
+		echo "> each delegation is a host-executed tool call that creates a child session on the target agent's"
+		echo "> harness, in its own micro-VM, journaled in the coordinator's session. The reviewer call parks on"
+		echo "> AgentSessions' approval gate until an operator approves it with agentctl; in a second run the operator"
+		echo "> denies it, the denial is journaled, and the coordinator finishes without the review. The PoC's tests"
+		echo "> show maxConcurrent and maxDepth refusals, and the video ends with the open questions for kmx,"
+		echo "> AgentSuite, AgentSessions and substrate. Everything runs live."
 		echo
 		echo "- Video: demo.mp4, $(mmss "${dur}") ($(awk -v d="${dur}" 'BEGIN { printf "%.1f", d }') s), sha256 \`$(cut -d' ' -f1 "${OUT}/demo.mp4.sha256")\`"
 		echo "- Recorded $(utc "$(head -1 "${LOGS}/timeline.tsv" | cut -f2)") with \`coordinator-record.sh\` from ${source}."
@@ -158,9 +163,11 @@ collect() {
 		else
 			echo "  At ${head_short}, ${#changed[@]} of the demo files differ from the recording's: ${changed[*]}."
 		fi
-		echo "- Heads used: the branch is aramase/agentsessions main b0d9e94 plus Tom's approval engine (#131 at"
-		echo "  b9eeb5f) and approval controls (#132 at de57e31), with the v3 demo branch merged (87855f1); the"
-		echo "  suite is kaimahi 75f27d6 (suites/coordinator-workers/SOURCE has each file's blob id and sha256)."
+		echo "- Heads used: the branch is aramase/agentsessions main 7cbc035 (Tom's approval engine, merged) plus"
+		echo "  Tom's approval controls (#132 at de57e31) and the v3 demo branch; the suite is kaimahi 75f27d6"
+		echo "  (suites/coordinator-workers) and its pinned version (suites/coordinator-workers-v2, whose README"
+		echo "  lists every change); the binding follows kmx's AgentSessionsBinding on kaimahi branch"
+		echo "  aramase/f/kmx_agentsessions_binding (6a895a6); examples/agentsuite-substrate/README.md lists every difference."
 		echo "- logs/: setup.log, probe.log (an approve and a deny run through agentctl, off camera), reset.log,"
 		echo "  show.log, one ch-N.log per chapter with the full output of every command, timeline.tsv; frames/:"
 		echo "  a frame 1.5 s into each chapter; invoke.png: the diagram as spliced; scripts/: the demo files."
@@ -176,11 +183,12 @@ collect() {
 		echo
 		echo "## How it was made"
 		echo
-		echo "- Off camera (\`coordinator.sh setup\`, logs/setup.log): a kind cluster on a Linux VM with KVM,"
-		echo "  substrate with Kata + Cloud Hypervisor micro-VMs, the suite validated, one harness image and one"
-		echo "  ActorTemplate per agent (each in its own atespace), a model token from the VM's managed identity"
-		echo "  (only its size is logged), and agentsessionsd with the three -substrate-harness flags and the"
-		echo "  invocation executor. \`$(grep -m1 '^SETUP OK' "${LOGS}/setup.log")\`; probe: \`$(grep -m1 '^PROBE OK' "${LOGS}/probe.log" || echo 'no PROBE OK')\`."
+		echo "- Off camera (\`coordinator.sh setup\`, logs/setup.log): this environment's binding written and checked"
+		echo "  against the suite, a kind cluster on a Linux VM with KVM, substrate with Kata + Cloud Hypervisor"
+		echo "  micro-VMs, the suite validated, one harness image and one ActorTemplate per agent (each in its own"
+		echo "  atespace), a model token from the VM's managed identity piped into the Secret (only its size is"
+		echo "  logged; no file on the host), and agentsessionsd with the three -substrate-harness flags, the"
+		echo "  binding's model flags and the invocation executor. \`$(grep -m1 '^SETUP OK' "${LOGS}/setup.log")\`; probe: \`$(grep -m1 '^PROBE OK' "${LOGS}/probe.log" || echo 'no PROBE OK')\`."
 		echo "- On camera (\`coordinator-record.sh record\`): \`coordinator.sh show\` on the VM through \`hq remote-test\`,"
 		echo "  rendered by vhs here. Each command on screen is the command line that runs; the driver stops on"
 		echo "  any claim that does not hold. \$API, \$IMAGE and \$BINDING are set from setup's state (show.log);"
@@ -210,11 +218,15 @@ reset)
 	load_env
 	coord reset 600
 	;;
+setup | probe | teardown)
+	load_env
+	coord "$1" 2400
+	;;
 record) record ;;
 collect) collect ;;
 run) run_show ;;
 *)
-	echo "usage: $0 show|reset|record|collect|run" >&2
+	echo "usage: $0 setup|probe|show|reset|record|collect|run|teardown" >&2
 	exit 2
 	;;
 esac

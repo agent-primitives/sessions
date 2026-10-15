@@ -83,6 +83,64 @@ the registration is applied as `-substrate-harness=triage=<atespace>/<template>`
 is named `triage-memory`, is `REQUIRES_MEMORY_SNAPSHOT`, and is applied as
 `-substrate-harness=triage-memory=<atespace>/<template>,memory`.
 
+## Agent-to-agent invocation: the coordinator suite
+
+`suites/coordinator-workers/` is kaimahi's `agentsuite/testdata/coordinator-workers` at kaimahi
+`75f27d6`, copied byte for byte (`SOURCE` lists each file's blob id and sha256). `coordinator`
+declares `invokes` edges to `writer` and `reviewer`, each `maxConcurrent: 1`, `maxDepth: 1`
+(kaimahi `agentsuite/spec.md` section 8.1). This section is the design; it was written before the code.
+
+### The primitive: a host-executed tool call that drives a child session
+
+- The coordinator harness asks for a delegation as a tool call, `agentsuite.invoke`, with arguments
+  `{"agent": "<target>", "task": "<text>"}`, through `sink.ToolCall`. The call and its result are
+  `TOOL_CALL` and `TOOL_RESULT` records in the coordinator's journal.
+- The host executes the call (`placement.WithToolExecutor`, a `controller.ToolFunc`). The executor
+  creates a child session on the target's harness through this daemon's own Sessions API and runs one
+  turn there with the task as input. The tool result carries the child's session uid, harness and
+  final output. The child's `EXECUTION_START` config records the parent session, the tool call id, the
+  edge and the remaining depth, so each journal names the other.
+- The executor enforces the suite: an undeclared edge, a call that would exceed the edge's
+  `maxConcurrent` (counted per calling session), and a chain deeper than `maxDepth` are refused with
+  an error result before any child session exists.
+- Replay and resume never re-run a child: the recorded `TOOL_RESULT` is served from the journal, as
+  for any host-mediated tool.
+
+Alternatives considered:
+
+| Option | Why not here |
+|---|---|
+| Exec on a long-lived session of the target, shared across calls | The worker would see every caller's history; one session per call keeps the child's journal to the delegated task. A follow-up call could reuse its child; not needed for this suite. |
+| Fork of the coordinator onto the target harness | A fork carries the parent's history; a worker should get the task only. Fork is also a lineage (`parent_uid`) that means "same conversation", not "called by". |
+| A new Sessions RPC (`Invoke`) or a child-session field on `Session` | A wire and storage change for a PoC; the tool-call path already gives a journaled, replay-safe, approval-capable effect. Recorded as an open question. |
+| The harness calls the target's Sessions API itself | The call would bypass the journal (no `TOOL_CALL`/`TOOL_RESULT`), the approval gate and the edge checks, and the harness would need network access and credentials to the daemon. |
+| Native model function calling (`ModelRequest.Tools`) | `model/openai` refuses tool definitions today (`buildRequest`: "tool definitions and tool choice are not supported yet"). The coordinator asks the model for a one-line JSON delegation instead and turns it into the tool call. |
+
+Registration: the three agents are three `-substrate-harness` entries on one `agentsessionsd`, not
+`HarnessRegistry` registrations. On this base the registry's placer factory refuses a substrate
+placement (`internal/agentsessionsd/registry_listener.go`, `registeredPlacer`: "substrate placement is
+not supported by agentsessionsd"). A daemon used to take one `-substrate-harness`, because actors are
+named by session uid in one atespace; each entry now names its own actor atespace (`,actors=<atespace>`),
+and two entries may not share one.
+
+### Approval of a delegation
+
+- The deployment chooses which edges need approval (`emit render -approve reviewer`). The coordinator
+  harness then sends that call with mediation `REQUIRES_APPROVAL`; others are `CONTROLLER_MEDIATED`.
+- The host's executor refuses a call to an approval edge that arrives without `REQUIRES_APPROVAL`,
+  so a harness cannot skip the gate by choosing its own mediation.
+- On the gated call the host (#131/#132) journals `TOOL_CALL` then `APPROVAL_REQUEST`, closes the
+  harness stream, snapshots the actor and commits `SUSPEND`. The Exec ends with the session
+  `EXEC_AWAITING` and `pending_approval` set.
+- `agentctl approve` or `agentctl deny` commits `APPROVAL_RESULT`, then resumes. On approval the
+  executor runs the reviewer child session and the receipt is the reviewer's output; on denial the
+  receipt is `APPROVAL_DENIED`, no child session is created, and the coordinator's model gets the
+  denial as the tool result and finishes without the review.
+- Tier: the gate exists only for `STATELESS_REPLAY` harnesses (`api/harness.proto`: "The host and
+  bridge implement durable approval/park for STATELESS_REPLAY only"; `controller.ErrApprovalUnavailable`
+  otherwise). The coordinator is therefore rendered stateless. The workers are stateless too: their
+  sessions are one-turn children and nothing needs their RAM.
+
 ## Requirements
 
 - docker, kind, kubectl, ko, go 1.27, git, python3 and curl.

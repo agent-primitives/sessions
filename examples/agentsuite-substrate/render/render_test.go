@@ -262,6 +262,23 @@ func TestRenderCoordinatorSuite(t *testing.T) {
 	if plain.Template.GetMetadata().GetName() == gated.Template.GetMetadata().GetName() {
 		t.Fatal("the approval choice must change the template name")
 	}
+	// The order and repeats of the targets change neither the name nor the env.
+	ab, _ := Render(comp, image, b, Options{Approval: []string{"reviewer", "writer"}})
+	ba, _ := Render(comp, image, b, Options{Approval: []string{"writer", "reviewer", "writer"}})
+	if ab.Template.GetMetadata().GetName() != ba.Template.GetMetadata().GetName() {
+		t.Fatalf("template names differ by approval order: %s, %s", ab.Template.GetMetadata().GetName(), ba.Template.GetMetadata().GetName())
+	}
+	for _, out := range []*Output{ab, ba} {
+		var got string
+		for _, e := range out.Template.GetContainers()[0].GetEnv() {
+			if e.GetName() == agent.ApprovalEnv {
+				got = e.GetValue()
+			}
+		}
+		if got != "reviewer,writer" {
+			t.Fatalf("%s = %q, want reviewer,writer", agent.ApprovalEnv, got)
+		}
+	}
 	for _, tc := range []struct {
 		o    Options
 		want string

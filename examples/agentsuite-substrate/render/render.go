@@ -235,8 +235,9 @@ type Options struct {
 // TemplateName is <suite>-<agent>-<hash8>: hash8 is the first 8 hex of
 // sha256(imageDigest + "\n" + bindingDigest), with "\n" + model appended when o.Model is not empty
 // (the template then carries a model override in its env), "\nmemory" when o.Memory is set (the
-// template then selects the memory tier in its env) and "\napproval=" + the comma-joined targets
-// when o.Approval is set. The result is a DNS label of at most 63 characters; suite and agent are
+// template then selects the memory tier in its env) and "\napproval=" + the comma-joined targets,
+// sorted and deduplicated, when o.Approval is set (so their order and repeats do not change the
+// name). The result is a DNS label of at most 63 characters; suite and agent are
 // lowercased, sanitized and truncated to fit, never hash8.
 func TemplateName(suite, agent, imageDigest, bindingDigest string, o Options) string {
 	content := imageDigest + "\n" + bindingDigest
@@ -246,8 +247,8 @@ func TemplateName(suite, agent, imageDigest, bindingDigest string, o Options) st
 	if o.Memory {
 		content += "\nmemory"
 	}
-	if len(o.Approval) > 0 {
-		content += "\napproval=" + strings.Join(o.Approval, ",")
+	if targets := approvalTargets(o); len(targets) > 0 {
+		content += "\napproval=" + strings.Join(targets, ",")
 	}
 	sum := sha256.Sum256([]byte(content))
 	hash8 := hex.EncodeToString(sum[:])[:8]
@@ -297,6 +298,13 @@ func Agents(dir string) ([]agentsuite.Agent, error) {
 		agents = append(agents, a)
 	}
 	return agents, nil
+}
+
+// approvalTargets returns o.Approval sorted and deduplicated, the form the template name and env use.
+func approvalTargets(o Options) []string {
+	targets := slices.Clone(o.Approval)
+	slices.Sort(targets)
+	return slices.Compact(targets)
 }
 
 // Render maps a composition, its digest-pinned harness image and a binding onto an ActorTemplate and
@@ -356,8 +364,8 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.MemoryEnv, Value: agent.MemoryRAM})
 		harness, resumability, tier = c.Agent.ID+"-memory", v1.Resumability_RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT, ",memory"
 	}
-	if len(o.Approval) > 0 {
-		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.ApprovalEnv, Value: strings.Join(o.Approval, ",")})
+	if targets := approvalTargets(o); len(targets) > 0 {
+		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.ApprovalEnv, Value: strings.Join(targets, ",")})
 	}
 	if o.ActorAtespace != "" {
 		tier += ",actors=" + o.ActorAtespace

@@ -84,9 +84,13 @@ def main():
         is_color = COLORS[color]
         rows = [y for y in range(height) if is_color(*px(width // 2, y))]
         cols = [x for x in range(width) if is_color(*px(x, rows[len(rows) // 2]))]
-        # One pixel in on every side: the encoder blends the block's edge with its neighbors.
-        x0, x1, y0, y1 = cols[0] - 1, cols[-1] + 1, rows[0] - 1, rows[-1] + 1
-        bw, bh = x1 - x0 + 1, y1 - y0 + 1
+        # Out past the block on every side, on even rows and columns: the encoder blends the block's
+        # edge into the next rows (the recording showed them green two rows below the block), and
+        # overlay places a yuv420p image on even coordinates only, so an odd box start moved the cover
+        # up a row. The top margin stays small: the caption is the row above.
+        x0, y0 = (cols[0] - 2) & ~1, (rows[0] - 2) & ~1
+        x1, y1 = min(cols[-1] + 2, width - 1), min(rows[-1] + 4, height - 1)
+        bw, bh = (x1 - x0 + 2) & ~1, (y1 - y0 + 2) & ~1
         bg = "0x%02x%02x%02x" % tuple(px(width - 4, height - 4))
         t0, t1 = first / fps, (last + 1) / fps
         inputs += ["-loop", "1", "-i", png]

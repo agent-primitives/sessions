@@ -289,6 +289,11 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 	if err != nil {
 		return nil, err
 	}
+	// The memory tier keeps the conversation only in RAM, which only a MEMORY snapshot carries across
+	// a suspend: a ROOTFS or VOLUMES template would resume the actor without it.
+	if o.Memory && fidelity != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+		return nil, fmt.Errorf("snapshot.fidelity %q: the memory tier keeps the conversation in RAM, so it needs MEMORY", b.Snapshot.Fidelity)
+	}
 	name := TemplateName(c.Suite, c.Agent.ID, m[1], b.Digest(), o)
 	container := &atepb.Container{
 		Name:  "harness",

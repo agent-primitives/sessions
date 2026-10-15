@@ -1175,3 +1175,45 @@ func TestDemoRealProviderJournalChecks(t *testing.T) {
 		})
 	}
 }
+
+// demo.tape hides the recording around each wait driver.sh show runs out of frame, so it must list
+// one hidden pair (the "⠿" start and the "✓" end) per offcam call: a call the tape does not
+// know shifts every later cut onto the wrong wait. driver.sh keeps offcam out of loops, so the
+// count of calls is the count of waits.
+func TestDemoTapeMatchesDriverWaits(t *testing.T) {
+	driver, err := os.ReadFile("demo/driver.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tape, err := os.ReadFile("demo/demo.tape")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	for _, line := range strings.Split(string(driver), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "offcam() {") || strings.HasPrefix(line, "#") {
+			continue
+		}
+		calls += strings.Count(line, `offcam "`)
+	}
+	starts := strings.Count(string(tape), "\nWait+Line@5m /⠿")
+	ends := strings.Count(string(tape), "\nWait+Line@5m /✓")
+	if calls == 0 || starts != calls || ends != calls {
+		t.Fatalf("driver.sh makes %d offcam calls; demo.tape waits for %d starts and %d ends", calls, starts, ends)
+	}
+}
+
+// present.awk holds each line's newline until the next line, so vhs's Wait+Line sees the newest
+// line, and a line starting with "@@R " overwrites the line before it.
+func TestDemoPresent(t *testing.T) {
+	cmd := exec.Command("awk", "-f", "demo/present.awk")
+	cmd.Stdin = strings.NewReader("title\n  ⠿ waiting …\n@@R   ✓ done in 3 s\nnext\n")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "title\n  ⠿ waiting …\r\x1b[K  ✓ done in 3 s\nnext\n"; string(out) != want {
+		t.Fatalf("present.awk wrote %q, want %q", out, want)
+	}
+}

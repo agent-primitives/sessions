@@ -175,6 +175,11 @@ func TestFormatRecordVerbose(t *testing.T) {
 			Kind: v1.EventKind_EVENT_TOOL_RESULT, Body: &v1.Event_Result{Result: &v1.ToolResult{Id: "call-2", Output: mustStruct(t, map[string]any{"session": "sess-1", "agent": "writer"})}},
 		}},
 		want: `seq=8   EVENT_TOOL_RESULT    hash=c8 prev=c7  id=call-2 output={"agent":"writer","session":"sess-1"}`,
+	}, {
+		r: &v1.LogRecord{Seq: 1, ContentHash: "c9", Event: &v1.Event{
+			Kind: v1.EventKind_EVENT_EXECUTION_START, ExecutionId: "e2", Body: &v1.Event_ExecutionStart{ExecutionStart: &v1.ExecutionStart{Config: []byte(`{"parent":"sess-0"}`)}},
+		}},
+		want: `seq=1   EVENT_EXECUTION_START hash=c9 prev=- exec=e2  config={"parent":"sess-0"}`,
 	}} {
 		if got := formatRecordVerbose(tt.r); got != tt.want {
 			t.Errorf("got  %q\nwant %q", got, tt.want)

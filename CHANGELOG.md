@@ -63,6 +63,11 @@ provide.
 
 ### Added
 
+- `agentctl replay --to <seq>` stops at that record. `agentctl replay` (with or without `-v`) and
+  `agentctl exec` print the body of records that carry no message: an execution start's config, a
+  tool call's id, tool, mediation and arguments, a tool result's code, error and output, and an
+  approval request's or decision's fields. Scripts that parse these lines see the new fields.
+
 - Controller `InspectApproval` and decision-only `Approve` validate durable request/decision/receipt
   evidence, including exact retries and session-owned versus inherited effects. The internal
   approval engine supports captured-head repair and correlated denial/executor-error receipts.

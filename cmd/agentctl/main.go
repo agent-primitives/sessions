@@ -297,10 +297,11 @@ func cmdReplay(args []string) error {
 	fs := flag.NewFlagSet("replay", flag.ExitOnError)
 	cfg := commonFlags(fs)
 	var sess string
-	var from int64
+	var from, to int64
 	var verbose bool
 	fs.StringVar(&sess, "session", "", "session UID")
 	fs.Int64Var(&from, "from", 1, "replay from this seq")
+	fs.Int64Var(&to, "to", 0, "replay up to and including this seq (0: to the end)")
 	fs.BoolVar(&verbose, "v", false, "also print each record's hash and previous hash, a model call's model and input hash, and token usage")
 	_ = fs.Parse(args)
 	c, cleanup, err := dial(cfg)
@@ -308,7 +309,7 @@ func cmdReplay(args []string) error {
 		return err
 	}
 	defer cleanup()
-	records, err := c.Replay(context.Background(), sess, from, 0)
+	records, err := c.Replay(context.Background(), sess, from, to)
 	if err != nil {
 		return err
 	}
@@ -386,6 +387,7 @@ func lifecycle(args []string, which string) error {
 func printRecord(r *v1.LogRecord) {
 	ev := r.GetEvent()
 	line := fmt.Sprintf("seq=%-3d %s", r.GetSeq(), ev.GetKind())
+	line += recordDetail(ev)
 	if msg := ev.GetMessage(); msg != nil {
 		line += "  " + partsText(msg)
 	}
@@ -409,6 +411,21 @@ func formatRecordVerbose(r *v1.LogRecord) string {
 		line += fmt.Sprintf("  model=%s input_tokens=%d output_tokens=%d reasoning_tokens=%d",
 			u.GetModel(), u.GetInputTokens(), u.GetOutputTokens(), u.GetReasoningTokens())
 	}
+	line += recordDetail(ev)
+	if msg := ev.GetMessage(); msg != nil {
+		line += "  " + partsText(msg)
+	}
+	return line
+}
+
+// recordDetail is the body fields of a record that carries no message, for both replay forms: an
+// execution start's config, a tool call's tool, mediation and arguments, a tool result's code, error
+// and output, and an approval request's or decision's fields. It is empty for other records.
+func recordDetail(ev *v1.Event) string {
+	var line string
+	if s := ev.GetExecutionStart(); len(s.GetConfig()) > 0 {
+		line += "  config=" + string(s.GetConfig())
+	}
 	if c := ev.GetTool(); c != nil {
 		line += fmt.Sprintf("  id=%s tool=%s mediation=%s args=%s", c.GetId(), c.GetTool(),
 			strings.TrimPrefix(c.GetMediation().String(), "MEDIATION_"), compactJSON(c.GetArgs()))
@@ -430,9 +447,6 @@ func formatRecordVerbose(r *v1.LogRecord) string {
 	}
 	if a := ev.GetApprovalResult(); a != nil {
 		line += fmt.Sprintf("  tool_call=%s approved=%t reason=%q request_seq=%d", a.GetToolCallId(), a.GetApproved(), a.GetReason(), a.GetRequestSeq())
-	}
-	if msg := ev.GetMessage(); msg != nil {
-		line += "  " + partsText(msg)
 	}
 	return line
 }

@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/kaimahi-agents/kaimahi/agentsuite"
@@ -37,7 +38,13 @@ type Harness struct {
 	ID           string
 	Model        string
 	Instructions string
-	memory       *transcript
+	// Invokes are the agents the manifest's invokes edges let this agent delegate to. A harness
+	// with any runs the coordinator loop (see coordinator.go).
+	Invokes []string
+	// Approval are the invoke targets the deployment gates (ApprovalEnv): the harness sends calls
+	// to them as REQUIRES_APPROVAL.
+	Approval []string
+	memory   *transcript
 }
 
 // transcript is the conversation a memory-tier harness holds in RAM: one actor serves one session,
@@ -69,7 +76,23 @@ func Load(dir string) (Harness, error) {
 	if got := "sha256:" + hex.EncodeToString(sum[:]); got != a.Instructions.Digest {
 		return Harness{}, fmt.Errorf("instructions digest %s does not match the agent manifest's %s", got, a.Instructions.Digest)
 	}
-	return Harness{ID: a.ID, Model: a.Model.Model, Instructions: string(instructions)}, nil
+	h := Harness{ID: a.ID, Model: a.Model.Model, Instructions: string(instructions)}
+	for _, inv := range a.Invokes {
+		h.Invokes = append(h.Invokes, inv.Agent)
+	}
+	return h, nil
+}
+
+// WithApproval returns h sending its calls to the named invoke targets as REQUIRES_APPROVAL. Every
+// name must be one of h.Invokes, so a typo cannot leave a delegation ungated.
+func (h Harness) WithApproval(targets []string) (Harness, error) {
+	for _, t := range targets {
+		if !slices.Contains(h.Invokes, t) {
+			return h, fmt.Errorf("approval for %q: agent %s has no invokes edge to it", t, h.ID)
+		}
+	}
+	h.Approval = slices.Clone(targets)
+	return h, nil
 }
 
 // WithModel returns h requesting model instead of the manifest's model. An empty model keeps the
@@ -116,6 +139,9 @@ func (h Harness) Describe(context.Context) (api.Descriptor, error) {
 func (h Harness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
 	if h.memory != nil {
 		return h.runFromMemory(ctx, start, sink)
+	}
+	if len(h.Invokes) > 0 {
+		return h.runCoordinator(ctx, start, sink)
 	}
 	messages := make([]api.Message, 0, 1+len(start.History)+len(start.Inputs))
 	if h.Instructions != "" {

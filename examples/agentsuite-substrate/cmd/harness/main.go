@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"google.golang.org/grpc"
@@ -37,9 +38,18 @@ func main() {
 	switch m := os.Getenv(agent.MemoryEnv); m {
 	case "":
 	case agent.MemoryRAM:
+		if len(h.Invokes) > 0 {
+			// Delegations are host-mediated tool calls, and the approval gate is stateless-replay only.
+			log.Fatalf("harness: agent %q has invokes edges; it runs in the stateless tier only", h.ID)
+		}
 		h, tier = h.WithMemory(), "memory (conversation in RAM)"
 	default:
 		log.Fatalf("harness: %s=%q: the only value is %q", agent.MemoryEnv, m, agent.MemoryRAM)
+	}
+	if v := os.Getenv(agent.ApprovalEnv); v != "" {
+		if h, err = h.WithApproval(strings.Split(v, ",")); err != nil {
+			log.Fatalf("harness: %s: %v", agent.ApprovalEnv, err)
+		}
 	}
 	addr, readyzAddr := env("HARNESS_ADDR", ":80"), env("HARNESS_READYZ", ":8081")
 	lis, err := net.Listen("tcp", addr)
@@ -64,7 +74,7 @@ func main() {
 		srv.GracefulStop()
 		_ = readyz.Close()
 	}()
-	log.Printf("harness: agent %q (model %q, tier %s) serving harnesswire on %s, readyz on %s", h.ID, h.Model, tier, addr, readyzAddr)
+	log.Printf("harness: agent %q (model %q, tier %s, invokes %v, approval %v) serving harnesswire on %s, readyz on %s", h.ID, h.Model, tier, h.Invokes, h.Approval, addr, readyzAddr)
 	if err := srv.Serve(lis); err != nil {
 		log.Fatalf("harness: serve: %v", err)
 	}

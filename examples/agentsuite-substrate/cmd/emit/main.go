@@ -30,13 +30,14 @@ import (
 
 	"github.com/kaimahi-agents/kaimahi/agentsuite"
 
+	"github.com/aramase/agentsessions/examples/agentsuite-substrate/invoke"
 	"github.com/aramase/agentsessions/examples/agentsuite-substrate/render"
 	"github.com/aramase/agentsessions/internal/modelconfig"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render|validate|check-model> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render|invokes|validate|check-model> [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -45,12 +46,14 @@ func main() {
 		err = bundle(os.Args[2:])
 	case "render":
 		err = renderCmd(os.Args[2:])
+	case "invokes":
+		err = invokesCmd(os.Args[2:], os.Stdout)
 	case "validate":
 		err = validate(os.Args[2:], os.Stdout)
 	case "check-model":
 		err = checkModel(os.Args[2:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render|validate|check-model> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render|invokes|validate|check-model> [flags]")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -156,12 +159,44 @@ func depVersion(deps []*debug.Module, path string) string {
 	return "(unknown)"
 }
 
+// splitList splits a comma-separated flag value, dropping empty items.
+func splitList(v string) []string {
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// invokesCmd prints the suite's invocation edges as agentsessionsd's AGENTSUITE_INVOKES value:
+// caller=target:maxConcurrent:maxDepth[:approval], comma-separated, sorted.
+func invokesCmd(args []string, w io.Writer) error {
+	fs := flag.NewFlagSet("invokes", flag.ExitOnError)
+	suite := fs.String("suite", "suite", "AgentSuite content directory")
+	approve := fs.String("approve", "", "comma-separated invoke targets whose calls need approval")
+	_ = fs.Parse(args)
+	agents, err := render.Agents(*suite)
+	if err != nil {
+		return err
+	}
+	policy, err := invoke.FromAgents(agents, splitList(*approve))
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(w, strings.Join(policy.Flag(), ","))
+	return err
+}
+
 func renderCmd(args []string) error {
 	fs, c := flags("render")
 	binding := fs.String("binding", "binding.json", "AgentSessionsBinding file")
 	image := fs.String("image", "", "digest-pinned harness image, name@sha256:...")
 	model := fs.String("model", "", "provider model the harness requests instead of the agent's own; empty keeps the agent's")
 	tier := fs.String("tier", "stateless", "stateless (STATELESS_REPLAY, harness <agent>) or memory (REQUIRES_MEMORY_SNAPSHOT, conversation in RAM, harness <agent>-memory)")
+	approve := fs.String("approve", "", "comma-separated invoke targets whose calls need approval (REQUIRES_APPROVAL)")
+	actors := fs.String("actors", "", "atespace agentsessionsd creates this harness's session actors in (,actors= on the daemon flag); empty uses the daemon's -substrate-atespace")
 	_ = fs.Parse(args)
 	comp, err := render.Load(c.suite, c.agent, c.platform)
 	if err != nil {
@@ -174,7 +209,7 @@ func renderCmd(args []string) error {
 	if *tier != "stateless" && *tier != "memory" {
 		return fmt.Errorf("-tier %q: want stateless or memory", *tier)
 	}
-	out, err := render.Render(comp, *image, b, render.Options{Model: *model, Memory: *tier == "memory"})
+	out, err := render.Render(comp, *image, b, render.Options{Model: *model, Memory: *tier == "memory", Approval: splitList(*approve), ActorAtespace: *actors})
 	if err != nil {
 		return err
 	}

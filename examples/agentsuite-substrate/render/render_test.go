@@ -1,8 +1,10 @@
 package render
 
 import (
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/kaimahi-agents/kaimahi/agentsuite"
 
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/examples/agentsuite-substrate/agent"
@@ -204,8 +207,110 @@ func TestKaimahiFixtures(t *testing.T) {
 	if comp.Suite != "minimal" || string(comp.Instructions) != "Write clearly.\n" {
 		t.Fatalf("composition = %+v", comp)
 	}
-	if _, err := Load(filepath.Join(testdata, "coordinator-workers"), "coordinator", "linux/amd64"); err == nil || !strings.Contains(err.Error(), "tool-free") {
-		t.Fatalf("coordinator: err = %v, want the v0 refusal", err)
+	if coord, err := Load(filepath.Join(testdata, "coordinator-workers"), "coordinator", "linux/amd64"); err != nil || len(coord.Agent.Invokes) != 2 {
+		t.Fatalf("coordinator: %+v, %v; want it loaded with its two invokes edges", coord, err)
+	}
+}
+
+// The vendored coordinator suite renders three templates. The coordinator's carries the approval
+// targets in its env and in its name; each daemon flag names its own actor atespace.
+func TestRenderCoordinatorSuite(t *testing.T) {
+	const dir = "../suites/coordinator-workers"
+	b, err := LoadBinding("../binding-microvm.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := "localhost:5001/agentsuite-harness@" + digestA
+	names := map[string]bool{}
+	for _, id := range []string{"coordinator", "writer", "reviewer"} {
+		comp, err := Load(dir, id, "linux/amd64")
+		if err != nil {
+			t.Fatal(err)
+		}
+		o := Options{Model: "gpt-5.4-mini", ActorAtespace: "agentsuite-" + id}
+		if id == "coordinator" {
+			o.Approval = []string{"reviewer"}
+		}
+		out, err := Render(comp, image, b, o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := out.Template.GetMetadata().GetName()
+		names[name] = true
+		if want := id + "=" + b.Atespace + "/" + name + ",actors=agentsuite-" + id; out.DaemonFlag != want {
+			t.Fatalf("%s: daemon flag = %q, want %q", id, out.DaemonFlag, want)
+		}
+		var approval string
+		for _, e := range out.Template.GetContainers()[0].GetEnv() {
+			if e.GetName() == agent.ApprovalEnv {
+				approval = e.GetValue()
+			}
+		}
+		if id == "coordinator" && approval != "reviewer" || id != "coordinator" && approval != "" {
+			t.Fatalf("%s: %s = %q", id, agent.ApprovalEnv, approval)
+		}
+	}
+	if len(names) != 3 {
+		t.Fatalf("template names = %v, want three", names)
+	}
+	comp, err := Load(dir, "coordinator", "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, _ := Render(comp, image, b, Options{Model: "gpt-5.4-mini"})
+	gated, _ := Render(comp, image, b, Options{Model: "gpt-5.4-mini", Approval: []string{"reviewer"}})
+	if plain.Template.GetMetadata().GetName() == gated.Template.GetMetadata().GetName() {
+		t.Fatal("the approval choice must change the template name")
+	}
+	for _, tc := range []struct {
+		o    Options
+		want string
+	}{
+		{Options{Approval: []string{"publisher"}}, `approval for "publisher": agent coordinator has no invokes edge to it`},
+		{Options{Memory: true}, "delegations need the approval-capable stateless tier"},
+		{Options{ActorAtespace: "Bad_Space"}, "is not a DNS label"},
+	} {
+		if _, err := Render(comp, image, b, tc.o); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("Render(%+v): err = %v, want %q", tc.o, err, tc.want)
+		}
+	}
+	withTools := *comp
+	withTools.Agent.ToolProviders = []agentsuite.ToolProviderRequirement{{}}
+	if _, err := Render(&withTools, image, b, Options{}); err == nil || !strings.Contains(err.Error(), "tool providers") {
+		t.Fatalf("tool providers: err = %v", err)
+	}
+}
+
+// Each vendored coordinator-workers file has the git blob id and sha256 SOURCE records for kaimahi
+// 75f27d6.
+func TestVendoredKaimahiCoordinatorWorkers(t *testing.T) {
+	const dir = "../suites/coordinator-workers"
+	src, err := os.ReadFile(filepath.Join(dir, "SOURCE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(src)), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 3 || strings.HasPrefix(line, "#") {
+			continue
+		}
+		files++
+		b, err := os.ReadFile(filepath.Join(dir, f[2]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		blob := sha1.Sum( //nolint:gosec // a git blob id is SHA-1
+			append([]byte(fmt.Sprintf("blob %d\x00", len(b))), b...))
+		if hex.EncodeToString(blob[:]) != f[0] {
+			t.Errorf("%s: git blob id differs from SOURCE", f[2])
+		}
+		if sum := sha256.Sum256(b); hex.EncodeToString(sum[:]) != f[1] {
+			t.Errorf("%s: sha256 differs from SOURCE", f[2])
+		}
+	}
+	if files != 15 {
+		t.Fatalf("SOURCE lists %d files, want 15", files)
 	}
 }
 

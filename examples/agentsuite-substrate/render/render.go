@@ -115,10 +115,11 @@ var reservedHarnesses = []string{"chat", "echo"}
 
 // supported reports whether this v0 renderer can deploy the agent.
 func supported(a agentsuite.Agent) error {
-	// v0 renders tool-free, invoke-free agents only: the harness protocol has no tool parts wired
-	// to suite tools yet, and invokes need host-mediated child sessions.
-	if len(a.ToolProviders) > 0 || len(a.Invokes) > 0 {
-		return fmt.Errorf("agent %s declares tool providers or invokes; this v0 renderer supports tool-free single agents only", a.ID)
+	// v0 renders agents without tool providers: the harness protocol has no tool parts wired to
+	// suite tools yet. Invokes edges are served by the coordinator harness and the host's
+	// agentsuite.invoke executor (package invoke).
+	if len(a.ToolProviders) > 0 {
+		return fmt.Errorf("agent %s declares tool providers; this v0 renderer supports agents without tool providers only", a.ID)
 	}
 	if a.Model.Protocol != ModelProtocol {
 		return fmt.Errorf("agent %s: model protocol %q: the host serves an %s model only", a.ID, a.Model.Protocol, ModelProtocol)
@@ -223,13 +224,20 @@ type Options struct {
 	// (agent.MemoryEnv=agent.MemoryRAM) and is registered as REQUIRES_MEMORY_SNAPSHOT under the name
 	// <agent>-memory.
 	Memory bool
+	// Approval lists the invoke targets whose calls the harness sends as REQUIRES_APPROVAL
+	// (agent.ApprovalEnv). Each must be one of the agent's invokes edges.
+	Approval []string
+	// ActorAtespace, when set, is where agentsessionsd creates this harness's session actors: the
+	// daemon flag gets ,actors=<atespace>, so several agents can share one daemon.
+	ActorAtespace string
 }
 
 // TemplateName is <suite>-<agent>-<hash8>: hash8 is the first 8 hex of
 // sha256(imageDigest + "\n" + bindingDigest), with "\n" + model appended when o.Model is not empty
-// (the template then carries a model override in its env) and "\nmemory" when o.Memory is set (the
-// template then selects the memory tier in its env). The result is a DNS label of at most 63
-// characters; suite and agent are lowercased, sanitized and truncated to fit, never hash8.
+// (the template then carries a model override in its env), "\nmemory" when o.Memory is set (the
+// template then selects the memory tier in its env) and "\napproval=" + the comma-joined targets
+// when o.Approval is set. The result is a DNS label of at most 63 characters; suite and agent are
+// lowercased, sanitized and truncated to fit, never hash8.
 func TemplateName(suite, agent, imageDigest, bindingDigest string, o Options) string {
 	content := imageDigest + "\n" + bindingDigest
 	if o.Model != "" {
@@ -237,6 +245,9 @@ func TemplateName(suite, agent, imageDigest, bindingDigest string, o Options) st
 	}
 	if o.Memory {
 		content += "\nmemory"
+	}
+	if len(o.Approval) > 0 {
+		content += "\napproval=" + strings.Join(o.Approval, ",")
 	}
 	sum := sha256.Sum256([]byte(content))
 	hash8 := hex.EncodeToString(sum[:])[:8]
@@ -262,9 +273,30 @@ func TemplateName(suite, agent, imageDigest, bindingDigest string, o Options) st
 type Output struct {
 	Template     *atepb.ActorTemplate
 	Registration *v1.HarnessRegistration
-	// DaemonFlag is how agentsessionsd registers the harness today, while it does not serve the
-	// HarnessRegistry API: -substrate-harness name=atespace/template.
+	// DaemonFlag is how agentsessionsd registers the harness: -substrate-harness
+	// name=atespace/template[,memory][,actors=<atespace>]. The HarnessRegistry API does not take a
+	// substrate placement on this base (internal/agentsessionsd registeredPlacer refuses one).
 	DaemonFlag string
+}
+
+// Agents validates the suite directory and returns every agent manifest it lists, in suite order.
+func Agents(dir string) ([]agentsuite.Agent, error) {
+	if _, err := agentsuite.ValidateDirectory(dir); err != nil {
+		return nil, fmt.Errorf("validate suite %s: %w", dir, err)
+	}
+	var suite agentsuite.Suite
+	if err := readStrict(filepath.Join(dir, "agentsuite.json"), &suite); err != nil {
+		return nil, err
+	}
+	agents := make([]agentsuite.Agent, 0, len(suite.Agents))
+	for _, ref := range suite.Agents {
+		var a agentsuite.Agent
+		if err := readStrict(filepath.Join(dir, filepath.FromSlash(ref.Path)), &a); err != nil {
+			return nil, err
+		}
+		agents = append(agents, a)
+	}
+	return agents, nil
 }
 
 // Render maps a composition, its digest-pinned harness image and a binding onto an ActorTemplate and
@@ -276,6 +308,17 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 	// Load checked the agent; check again for a Composition built by hand.
 	if err := supported(c.Agent); err != nil {
 		return nil, err
+	}
+	for _, t := range o.Approval {
+		if !slices.ContainsFunc(c.Agent.Invokes, func(inv agentsuite.AgentInvoke) bool { return inv.Agent == t }) {
+			return nil, fmt.Errorf("approval for %q: agent %s has no invokes edge to it", t, c.Agent.ID)
+		}
+	}
+	if len(c.Agent.Invokes) > 0 && o.Memory {
+		return nil, fmt.Errorf("agent %s has invokes edges: delegations need the approval-capable stateless tier", c.Agent.ID)
+	}
+	if o.ActorAtespace != "" && !dnsLabel.MatchString(o.ActorAtespace) {
+		return nil, fmt.Errorf("actor atespace %q is not a DNS label", o.ActorAtespace)
 	}
 	m := pinnedImage.FindStringSubmatch(image)
 	if m == nil {
@@ -312,6 +355,12 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 	if o.Memory {
 		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.MemoryEnv, Value: agent.MemoryRAM})
 		harness, resumability, tier = c.Agent.ID+"-memory", v1.Resumability_RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT, ",memory"
+	}
+	if len(o.Approval) > 0 {
+		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.ApprovalEnv, Value: strings.Join(o.Approval, ",")})
+	}
+	if o.ActorAtespace != "" {
+		tier += ",actors=" + o.ActorAtespace
 	}
 	var limits []*atepb.Limits
 	if b.Resources.CPU != "" {

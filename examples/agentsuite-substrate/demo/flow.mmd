@@ -1,0 +1,37 @@
+%%{init: {"theme": "dark", "themeVariables": {"fontSize": "26px", "fontFamily": "Helvetica, Arial, sans-serif", "darkMode": true, "background": "#171717"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 50, "padding": 12, "wrappingWidth": 400}}}%%
+%% How an AgentSuite agent becomes a substrate ActorTemplate, and how one turn travels at run time.
+%% record.sh renders this to flow.png and splices it into chapter 3. Every arrow is checked against
+%% the code; ../README.md ("How a turn flows") lists where.
+flowchart TB
+  subgraph build["Build: AgentSuite into substrate"]
+    direction LR
+    suite["AgentSuite agent<br/>kaimahi testdata/minimal, writer"]
+    binding["AgentSessionsBinding<br/>(draft type, this PoC)"]
+    bundle["emit bundle<br/>harness image, /agent layer"]
+    render["emit render"]
+    tmpl["ActorTemplate<br/>minimal-writer-hash8"]
+    reg["harness registration"]
+    flag["agentsessionsd flag<br/>-substrate-harness=writer=..."]
+    suite --> bundle --> render
+    binding --> render
+    render --> tmpl
+    render --> reg --> flag
+  end
+  subgraph turn["Run: one turn"]
+    direction LR
+    ctl["agentctl"]
+    d["agentsessionsd<br/>journal, controller"]
+    ad["substrate adapter<br/>ateadapter"]
+    api["ate-api"]
+    vm["actor from the ActorTemplate<br/>Kata + Cloud Hypervisor micro-VM"]
+    r["atenet-router"]
+    h["harness container<br/>harnesswire :80"]
+    m["gpt-5.4-mini<br/>Azure OpenAI"]
+    ctl -->|"Sessions.Exec gRPC"| d
+    d --> ad -->|"Create, Resume, GetActor"| api --> vm
+    d -->|"harnesswire stream"| r -->|"via the worker; resumes the actor if needed"| h
+    vm -.-|"runs"| h
+    h -. "sink.Model on the same stream" .-> d
+    d -->|"chat completions"| m
+  end
+  build ==>|"template applied to substrate; flag on agentsessionsd"| turn

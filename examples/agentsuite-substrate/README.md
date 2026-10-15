@@ -50,7 +50,7 @@ The recipe is for a disposable kind cluster you trust: nothing in it authenticat
 | `binding-microvm.json`, `binding.json` | Draft `AgentSessionsBinding`s (`kmx.kaimahi.dev/v1alpha1`) for kind: atespace, the micro-VM (`microvm`) or gVisor sandbox, MEMORY snapshots, worker selector. `up.sh` refuses an atespace other than `agentsuite-demo`, the one `deploy/` uses. |
 | `render/`, `cmd/emit` | `emit bundle` stages the agent layer (manifest and instructions) for the image. `emit render` writes the ActorTemplate, the harness registration and the daemon flag; `-tier memory` renders the memory tier. `emit validate` runs kaimahi's `agentsuite.ValidateDirectory` over a suite and prints the kaimahi module version it ran. `emit check-model` refuses model settings `agentsessionsd` would refuse at startup. |
 | `agent/`, `cmd/harness`, `Dockerfile.harness` | The harness image. It serves harnesswire on :80 and `/readyz` on :8081. The instructions are the system prompt, and the harness checks them against the digest in the agent manifest. Each model call is `sink.Model`. With `AGENTSUITE_MEMORY=ram` it keeps the conversation in RAM, ignores the history the host sends, and describes itself as `REQUIRES_MEMORY_SNAPSHOT`. |
-| `demo/` | The recorded demo: `driver.sh`, `smoke-microvm.sh`, `present.awk`, `demo.tape`, `record.sh`, `chapters.py` and the tools image (`Dockerfile.tools`). |
+| `demo/` | The recorded demo: `driver.sh`, `smoke-microvm.sh`, `present.awk`, `demo.tape`, `record.sh`, `chapters.py`, the turn-flow diagram (`flow.mmd`, spliced in by `splice.py`), the helpers its screens run (`trace-turn.sh`, `snapshot-size.sh`, `journal.awk`, `fields.jq`, `template.jq`, `side_by_side.py`) and the tools image (`Dockerfile.tools`). |
 | `fakemodel/`, `cmd/fakemodel` | A deterministic OpenAI-compatible endpoint. Its reply lists the user's issues so far, and `GET /stats` reports how many calls it has served. |
 | `cmd/replay` | Reads the journal over the Sessions API, verifies the chain, and runs the controller's replay against the session's actor through the router. |
 | `deploy/` | The micro-VM and gVisor WorkerPools, the fake model, and `agentsessionsd` (substrate build), rendered once per tier. |
@@ -273,37 +273,68 @@ header has not been run against a live deployment.
 
 ## The recorded demo
 
-`demo/driver.sh` is a short demo for a recording: kaimahi's minimal suite (agent `writer`) on
-micro-VMs, with a real model on Azure OpenAI. It runs on a Linux host with KVM and Docker (all of it
-there: kind, the cluster, the port-forwards), in two parts:
+`demo/driver.sh` is a short demo for a recording: how kaimahi's minimal suite (agent `writer`)
+becomes a substrate ActorTemplate, how one turn flows, and the session lifecycle on micro-VMs, with a
+real model on Azure OpenAI. It runs on a Linux host with KVM and Docker (all of it there: kind, the
+cluster, the port-forwards), in two parts:
 
-- `driver.sh setup`, off camera: `up.sh --substrate-only`, the micro-VM smoke test
-  (`smoke-microvm.sh`: substrate's counter-microvm actor boots, suspends to a MEMORY snapshot and
-  resumes with its RAM count and UID; it must print `SMOKE OK`), the suite's files against `SOURCE`,
-  `up.sh --templates-only`, an Entra token from the instance metadata endpoint (never printed; only
-  its expiry is kept), `up.sh`, and the `agentctl` and `replay` binaries. It ends with `SETUP OK`;
-  the full output is `setup.log`.
-- `driver.sh show`, on camera: eight chapters, each a one-line caption and the few lines that prove
-  it. The full output of every command goes to `ch-N.log`.
+- `driver.sh setup`, off camera: `up.sh --substrate-only` (its output must say substrate enabled
+  `micro-VM (kata + cloud-hypervisor)`), the micro-VM smoke test (`smoke-microvm.sh`: substrate's
+  counter-microvm actor boots, suspends to a MEMORY snapshot and resumes with its RAM count and UID;
+  it must print `SMOKE OK`), the suite's files against `SOURCE`, `up.sh --templates-only`, an Entra
+  token from the instance metadata endpoint (never printed; only its expiry is kept), `up.sh`, and the
+  `agentctl` and `replay` binaries. It ends with `SETUP OK`; the full output is `setup.log`.
+- `driver.sh show`, on camera: ten chapters. Each screen is a one-line caption, the commands, and at
+  most five output lines; the full output of every command goes to `ch-N.log`.
 
 | Chapter | What it shows |
 |---|---|
-| 1 | The suite (6 files matching kaimahi 9c5c993), the model and its token's expiry, the ActorTemplate's SandboxConfig `microvm` |
-| 2 | A `writer` session: two turns and their answers, and the session's actor |
-| 3 | The journal's totals (turns, model calls, tokens) and the last records with their hashes |
-| 4 | A `writer-memory` session told a codename, suspended (a MEMORY snapshot and its size in the object store) and resumed: same actor UID, the codename recalled, and the harness's log showing the second turn of the same process answered from RAM |
-| 5 | `cmd/replay` of the `writer` session: chain verified, 2 turns re-run, 0 model calls |
-| 6 | A fork at the end of turn 1 driven another way; parent and child side by side |
-| 7 | The memory session's actor replaced out of band: the next turn is refused with `FAILED_PRECONDITION` and no turn completes |
-| 8 | A one-line recap |
+| 1 | The AgentSuite: its files, the agent's instructions digest and model (`example-model`), the composition; the files' sha256 against kaimahi 9c5c993, and `emit validate` (kaimahi's own `agentsuite` package) |
+| 2 | Into substrate: the draft `AgentSessionsBinding`; `emit render` run live (the same template setup applied); the template's image, env, sandbox, workers and snapshot settings; how `-model` changes the name's hash; the daemon's `-substrate-harness` flag; the template in substrate equals the render |
+| 3 | How a turn flows: the diagram (`flow.mmd`), then one real turn followed through each component's log (`trace-turn.sh`) |
+| 4 | Chat: turn 1's answer and a second turn that builds on it |
+| 5 | The journal's totals (turns, model calls, tokens) and the last records with their hashes |
+| 6 | A `writer-memory` session told a codename, suspended (a MEMORY snapshot and its size in the object store) and resumed: the codename recalled, and the harness's log showing the second turn of the same process answered from RAM |
+| 7 | `cmd/replay` of the `writer` session: chain verified, 2 turns re-run, 0 model calls, the journal's count unchanged |
+| 8 | A fork at the end of turn 1 with a different second turn; parent and child side by side |
+| 9 | The memory session's actor replaced out of band: the next turn is refused with `FAILED_PRECONDITION` and no turn completes |
+| 10 | A one-line recap |
 
-Every claim on screen is also checked: the driver stops on the first that does not hold. A wait runs
-out of frame: the driver prints `⠿ <what> …`, runs the step, then replaces the line with `✓ <what>
-in N s`, and `demo.tape` hides the recording between the two, so the video cuts the wait and says
-how long it took. The tape lists those waits in the order the driver makes them (`scripts_test.go`
-checks the counts match). `present.awk` renders the driver's output for vhs: it holds each line on
-the cursor's line until the next arrives, since vhs's `Wait+Line` matches the cursor's line and
-Docker's log stream (which `hq remote-test` relays) passes only whole lines.
+Every command on screen is the command line that runs: the driver evaluates it as shown, saves its
+full output to the chapter's log, and applies the filter shown after `|` to that output. The helpers
+it shows are committed files: `trace-turn.sh`, `snapshot-size.sh`, `journal.awk`, `fields.jq`,
+`template.jq` and `side_by_side.py`. Every claim on screen is also checked, off screen, with the raw
+output in the log (the actor's record before and after the resume, journal counts before and after
+the replay and the guard): the driver stops on the first that does not hold. A wait runs out of
+frame: the driver prints `⠿ <what> …`, runs the step, then replaces the line with `✓ <what> in N s`,
+and `demo.tape` hides the recording between the two. The tape lists those waits in the order the
+driver makes them (`scripts_test.go` checks the counts match). `present.awk` renders the driver's
+output for vhs: it holds each line on the cursor's line until the next arrives, since vhs's
+`Wait+Line` matches the cursor's line and Docker's log stream (which `hq remote-test` relays) passes
+only whole lines.
+
+### How a turn flows
+
+Each arrow in `demo/flow.mmd`, and where the code does it:
+
+- `emit bundle` stages `agent.json` and `instructions.md` into the harness image's `/agent` layer;
+  `emit render` maps the suite and binding to the ActorTemplate, the harness registration and the
+  `-substrate-harness` flag (`render/render.go`, `cmd/emit`). The registration is not applied as an
+  API object: agentsessionsd does not serve the HarnessRegistry API yet, so only the flag reaches it.
+- agentctl calls `Sessions.Exec` (gRPC) on agentsessionsd (`session/service.go`).
+- agentsessionsd's substrate runtime (`runtime/substrate`) calls the adapter
+  (`integrations/substrate/adapter.go`), which calls ate-api's `CreateActor`, `ResumeActor` and
+  `GetActor`; the actor runs from the ActorTemplate in a Kata + Cloud Hypervisor micro-VM.
+- agentsessionsd reaches the harness through the atenet-router (`-atenet-router`), with the
+  `ate-target-actor` metadata naming the actor; the router resumes the actor if needed and forwards
+  through the worker to harnesswire on port 80 (`runtime/substrate/substrate.go`).
+- The harness's model calls are `sink.Model` events on the same harnesswire stream
+  (`harnesswire/harnesswire.go`); agentsessionsd makes the chat completions call to the provider.
+
+The trace shows one log line per component for the same turn: agentsessionsd's `operation=exec`
+line, the actor's lifecycle line from ateom, the router's `Route ok` line, the harness's token line
+and the journal's `EVENT_MODEL_CALL` record. The adapter and the model client log nothing per call,
+so they have no line of their own.
 
 ```bash
 # On the KVM host, in a checkout, with the tools Dockerfile.tools installs:
@@ -317,16 +348,21 @@ examples/agentsuite-substrate/demo/driver.sh teardown
 
 The token comes from the host's instance metadata endpoint, so the driver needs an Azure VM with
 that user-assigned identity. Every line it prints, and every log (`DEMO_LOGS`), passes through a
-filter that redacts bearer tokens, JWTs and the metadata response's token field. Chapter 4 sizes the
-snapshot by listing it in the kind install's rustfs bucket from the node's network namespace, with
-the install's fixed rustfs credentials, as substrate's `hack/microvm-assets/stage-to-rustfs.sh` does.
+filter that redacts bearer tokens, JWTs and the metadata response's token field. Chapter 6 sizes the
+snapshot (`snapshot-size.sh`) by listing it in the kind install's rustfs bucket from the node's
+network namespace, with the install's fixed rustfs credentials, as substrate's
+`hack/microvm-assets/stage-to-rustfs.sh` does. The on-screen commands find the tools on `PATH` and
+the cluster through the demo's own kubeconfig (`KUBECONFIG`), whose current context the driver checks
+is the demo's kind cluster before the first chapter.
 
-`demo/record.sh` runs setup, records `show` with vhs (`demo.tape`, 1920x1080, font size 26), then
-writes the video, the logs, its sha256 and a README with each chapter's start to `DEMO_OUT`, and
-tears the cluster down (`DEMO_KEEP=1` keeps it; `record.sh setup|record|collect|teardown` runs one
-part). The chapter starts come from the video: each chapter draws a progress bar across the top row,
-k/8 full for chapter k, and `chapters.py` finds the first frame of each. By default it runs the
-driver on the machine vhs runs on (`DEMO_REMOTE=local`); `DEMO_REMOTE=hq DEMO_HOST=<host>` drives a
-remote host through `hq remote-test`, a private tool, in the image `Dockerfile.tools` builds there.
-`DEMO_READ` (default 7) is how many seconds a result stays on screen; it sets the video's length,
-about five and a half minutes by default.
+`demo/record.sh` runs setup, records `show` with vhs (`demo.tape`, 1920x1080, font size 26), renders
+`flow.mmd` with mermaid-cli (through `npx`) and splices it over the block chapter 3 draws for it
+(`splice.py`), then writes the video, the logs, its sha256, a frame from each chapter and a README
+with each chapter's start and the checks to `DEMO_OUT`, and tears the cluster down (`DEMO_KEEP=1`
+keeps it; `record.sh setup|show|record|collect|teardown` runs one part, `show` being a dry run). The
+chapter starts come from the video: each chapter draws a progress bar across the top row, k/10 full
+for chapter k, and `chapters.py` finds the first frame of each. By default it runs the driver on the
+machine vhs runs on (`DEMO_REMOTE=local`); `DEMO_REMOTE=hq DEMO_HOST=<host>` drives a remote host
+through `hq remote-test`, a private tool, in the image `Dockerfile.tools` builds there. `DEMO_READ`
+(default 4) is how many seconds a result stays on screen; a caption stays 4.5 s, the title card 5 s
+and the diagram 9 s.

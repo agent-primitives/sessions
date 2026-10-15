@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Prints "<chapter>\t<seconds>" for each chapter start in a recording of driver.sh show.
 
-driver.sh draws a progress bar across the top row of each chapter: chapter k of 8 fills k/8 of it
-with cyan, the rest with gray. A chapter starts at the first frame whose bar is k/8 full. The
+driver.sh draws a progress bar across the top row of each chapter: chapter k of 10 fills k/10 of it
+with cyan, the rest with gray. A chapter starts at the first frame whose bar is k/10 full. The
 geometry matches demo.tape (1920x1080, padding 36, font size 26).
 
 usage: chapters.py demo.mp4
@@ -10,7 +10,7 @@ usage: chapters.py demo.mp4
 import subprocess
 import sys
 
-CHAPTERS = 8
+CHAPTERS = 10
 FPS = 10
 W, X, Y, H = 1920 - 72, 36, 40, 20  # the bar row, inside the padding
 COLS = 224  # samples across the row
@@ -31,7 +31,7 @@ def frames(path):
 
 
 def level(row):
-    """The bar's fill in eighths, or None when the row is not a bar."""
+    """The bar's fill in tenths, or None when the row is not a bar."""
     cyan = gray = 0
     for i in range(0, len(row), 3):
         r, g, b = row[i], row[i + 1], row[i + 2]

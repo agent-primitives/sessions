@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-# The recorded demo: kaimahi's minimal AgentSuite (agent `writer`) as an AgentSessions harness on
-# agent-substrate micro-VMs, driven by a real model on Azure OpenAI.
+# The recorded demo: kaimahi's minimal AgentSuite (agent `writer`) turned into an agent-substrate
+# ActorTemplate and run as AgentSessions sessions on micro-VMs, with a real model on Azure OpenAI.
 #
 #   driver.sh setup      off camera: the kind cluster, substrate, the micro-VM smoke test (must pass),
 #                        the harness image and ActorTemplates, the model token and both agentsessionsd
-#                        Deployments, and the agentctl and replay binaries; ends with SETUP OK
-#   driver.sh show       on camera: eight short chapters, each a caption and the few lines that prove
-#                        it, while the full output of every command goes to the chapter's log
+#                        Deployments, and the agentctl, replay and emit binaries; ends with SETUP OK
+#   driver.sh show       on camera: ten short chapters, each one or more screens of a one-line caption
+#                        and at most five output lines, while the full output of every command goes to
+#                        the chapter's log
 #   driver.sh teardown   down.sh
 #
-# show checks every claim it prints and stops on the first that does not hold. Every wait longer than
-# a moment runs out of frame: the driver prints a "⠿ <what> …" line, runs the step, then replaces
-# that line with "✓ <what> in N s"; demo.tape hides the recording between the two, so the video cuts
-# the wait and the line says how long it took. demo.tape lists those waits in order, so a new offcam
-# call needs a matching pair of waits in the tape (scripts_test.go checks the counts match).
+# Every command show prints is the command line that runs (see run below), and show checks every
+# claim it prints and stops on the first that does not hold. A wait longer than a moment runs out of
+# frame: the driver prints a "⠿ <what> …" line, runs the step, then replaces that line with
+# "✓ <what> in N s"; demo.tape hides the recording between the two. demo.tape lists those waits in
+# order, so a new `run -w` needs a matching pair of waits in the tape (scripts_test.go checks the
+# counts match).
 #
 # Output protocol: show prints plain lines, plus lines starting with "@@R " that replace the line
 # before them. present.awk renders them, and holds each line without its newline until the next one
@@ -30,7 +32,8 @@
 #                          kept, and nothing prints the token
 #   DEMO_LOGS              directory for the logs (default ${WORK}/demo-logs)
 #   DEMO_KEEP_ON_FAILURE   set to keep the cluster when setup fails (by default down.sh deletes it)
-#   DEMO_READ              seconds a result stays on screen before the next command (default 7)
+#   DEMO_READ              seconds a result stays on screen (default 4); a caption stays 4.5 s, the
+#                          title card 5 s and the diagram 9 s
 #   DEMO_COLS              the terminal's width in columns (default 112: demo.tape is 113 wide)
 #
 # Every line the script prints, on the terminal and in the logs, goes through redact first.
@@ -48,7 +51,7 @@ setup | show | teardown) ;;
 	;;
 esac
 LOGS="${DEMO_LOGS:-${WORK}/demo-logs}"
-READ="${DEMO_READ:-7}"
+READ="${DEMO_READ:-4}"
 COLS="${DEMO_COLS:-112}"
 [[ "${READ}" =~ ^[0-9]+$ && "${COLS}" =~ ^[0-9]+$ ]] || {
 	echo "DEMO_READ and DEMO_COLS are whole numbers" >&2
@@ -79,7 +82,7 @@ REDACT_PID=$!
 
 STEP_LOG="${LOGS}/${MODE}.log"
 : >"${STEP_LOG}"
-log() { printf '%s\n' "$*" | redact >>"${STEP_LOG}"; }
+log() { printf '%s\n' "$@" | redact >>"${STEP_LOG}"; }
 fail() {
 	FAILED=1
 	printf 'DEMO FAILED: %s\n' "$*"
@@ -113,12 +116,8 @@ cleanup() {
 trap cleanup EXIT
 
 ctl() { "${WORK}/bin/agentctl" "$1" --server "$2" "${@:3}"; }
-agentctl() { ctl "$1" "${SERVER}" "${@:2}"; }
+agentctl_() { ctl "$1" "${SERVER}" "${@:2}"; }
 memctl() { ctl "$1" "${MEMSERVER}" "${@:2}"; }
-actor_json() { "${ATE[@]}" get actor "$1" -a "${ATESPACE}" -o json; }
-records() { # ctl session kind -> how many records of that kind its journal holds
-	"$1" replay --session "$2" | awk -v k="$3" '$2 == k { n++ } END { print n + 0 }'
-}
 
 # ================================================================================================
 # setup: everything the recording does not show. The full output is setup.log.
@@ -143,6 +142,10 @@ setup() {
 	}
 	phase "KVM in the Docker host" docker run --rm --device /dev/kvm busybox ls -l /dev/kvm
 	phase "up.sh --substrate-only: kind, ate-system, the microvm SandboxConfig and WorkerPool" "${DEMO}/../up.sh" --substrate-only
+	# The diagram calls the sandbox a Kata + Cloud Hypervisor micro-VM; substrate's kind install says
+	# so when it enables the class.
+	grep -q 'micro-VM (kata + cloud-hypervisor)' "${STEP_LOG}" || fail "the substrate install did not enable kata + cloud-hypervisor micro-VMs"
+	log "kata + cloud-hypervisor: $(grep -c 'micro-VM (kata + cloud-hypervisor)' "${STEP_LOG}") lines in the install output say so"
 	phase "micro-VM smoke: an actor boots, suspends to a memory snapshot and resumes with its RAM" "${DEMO}/smoke-microvm.sh"
 	grep -q '^SMOKE OK' "${STEP_LOG}" || fail "the smoke test did not print SMOKE OK"
 	grep '^SMOKE OK' "${STEP_LOG}" | tail -1
@@ -159,7 +162,8 @@ setup() {
 	unset MODEL_API_KEY
 	rm -f "${TOKEN_FILE}"
 	phase "agentctl and replay binaries" build_tools
-	# The object store client show uses to size a snapshot, pulled now so show does not wait on it.
+	[[ -x "${WORK}/bin/emit" && -x "${WORK}/bin/kubectl-ate" ]] || fail "up.sh did not leave emit and kubectl-ate in ${WORK}/bin"
+	# The object store client snapshot-size.sh uses, pulled now so show does not wait on it.
 	phase "pull the S3 client image" docker pull -q "${AWS_CLI_IMAGE}"
 	forwards
 	phase "both Sessions APIs answer" wait_apis
@@ -208,7 +212,7 @@ build_tools() {
 	(cd "${ROOT}" && go build -o "${WORK}/bin/agentctl" ./cmd/agentctl)
 	(cd "${HERE}" && go build -o "${WORK}/bin/replay" ./cmd/replay)
 }
-# Keep in sync with the image substrate's kind install uses for its bucket (manifests/ate-install/kind/rustfs.yaml).
+# Keep in sync with snapshot-size.sh.
 AWS_CLI_IMAGE="amazon/aws-cli:2.17.0@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73"
 forwards() {
 	local spec
@@ -221,7 +225,7 @@ forwards() {
 }
 wait_apis() {
 	for _ in $(seq 60); do
-		if agentctl list >/dev/null 2>&1 && memctl list >/dev/null 2>&1; then return 0; fi
+		if agentctl_ list >/dev/null 2>&1 && memctl list >/dev/null 2>&1; then return 0; fi
 		sleep 1
 	done
 	echo "the Sessions APIs did not answer through the port-forwards"
@@ -229,23 +233,22 @@ wait_apis() {
 }
 
 # ================================================================================================
-# show: the recording. Each chapter clears the screen, draws a progress bar (chapter k of 8 fills
-# k/8 of the top row; record.sh finds the chapter starts in the video from it), a title and a
-# caption, then runs its commands. The full output of each command goes to that chapter's log.
+# show: the recording. A chapter clears the screen, draws a progress bar (chapter k of 10 fills k/10
+# of the top row; chapters.py finds each chapter's start in the video from it), its title and a
+# one-line caption. `page` starts another screen of the same chapter with its own caption.
+#
+# Every command on screen is the literal command line that runs: run prints it, evaluates it in this
+# shell (so $COPY, $API and the rest are this shell's variables), writes its complete output to the
+# chapter's log, then runs the filter shown after " | " (the second line of its input) over that
+# output; the filter's output is what the screen shows. A command must exit 0 (run -x: must fail)
+# and write nothing to stderr, which the screen would show. No screen shows more than MAX_LINES
+# output lines and no caption is wider than the screen: show fails rather than show either. Checks
+# the screen does not show run through offscreen, with their output in the log too.
 # ================================================================================================
 C=$'\e[1;36m' Y=$'\e[1;33m' G=$'\e[32m' W=$'\e[1;37m' D=$'\e[2m' N=$'\e[0m'
-CHAPTERS=8
-chapter() { # n title caption
-	STEP_LOG="${LOGS}/$(printf 'ch-%d' "$1").log"
-	printf '%s\t%s\t%s\n' "$1" "$(date -u +%s)" "$2" >>"${LOGS}/timeline.tsv"
-	printf '# CHAPTER %s  %s  (%s)\n# %s\n' "$1" "$2" "$(date -u +%FT%TZ)" "$3" >"${STEP_LOG}"
-	local fill=$((COLS * $1 / CHAPTERS))
-	printf '\e[2J\e[3J\e[H\e[48;2;0;175;215m%*s\e[48;2;58;58;58m%*s\e[0m\n' "${fill}" '' $((COLS - fill)) ''
-	printf '\n%s %d/%d  %s%s\n' "${C}" "$1" "${CHAPTERS}" "$2" "${N}"
-	wrap "$3" "" | sed "s/^/${W}/; s/\$/${N}/"
-	printf '\n'
-	sleep $((READ + 4))
-}
+CHAPTERS=10
+MAX_LINES=5
+CAPTION_HOLD=4.5 TITLE_HOLD=5 DIAGRAM_HOLD=9
 # wrap TEXT [PREFIX [INDENT]]: TEXT folded to the screen at word boundaries, each line after the
 # first indented by INDENT spaces (default the width of PREFIX).
 wrap() {
@@ -255,315 +258,381 @@ text, prefix, cols = sys.argv[1], sys.argv[2], int(sys.argv[3])
 indent = " " * (int(sys.argv[4]) if sys.argv[4] else len(prefix))
 lines = []
 for para in text.split("\n"):
-    lines += textwrap.wrap(para, cols - len(prefix) - 2, break_on_hyphens=False) or [""]
-print("\n".join((prefix if i == 0 else indent) + l for i, l in enumerate(lines)))' "$1" "${2:-}" "${COLS}" "${3:-}"
+    lines += textwrap.wrap(para, cols - len(prefix) - 2, break_on_hyphens=False, drop_whitespace=False) or [""]
+print("\n".join((prefix if i == 0 else indent) + l.rstrip() for i, l in enumerate(lines)))' "$1" "${2:-}" "${COLS}" "${3:-}"
 }
-# cmd TEXT: the command the next lines run, as typed.
-cmd() {
-	wrap "$1" "\$ " 6 | sed "s/^/${Y}/; s/\$/${N}/"
-	log "\$ $1"
-	sleep 1.5
+# header CAPTION: a fresh screen for the current chapter, with CAPTION.
+header() {
+	[[ "$1" =~ ^[[:print:]]+$ ]] || fail "a caption is not one line of printable characters: $1"
+	((${#1} <= COLS - 2)) || fail "a caption is ${#1} characters, wider than the screen's $((COLS - 2)): $1"
+	SCREEN_LINES=0
+	local fill=$((COLS * CH / CHAPTERS))
+	printf '\e[2J\e[3J\e[H\e[48;2;0;175;215m%*s\e[48;2;58;58;58m%*s\e[0m\n' "${fill}" '' $((COLS - fill)) ''
+	printf '\n%s %d/%d  %s%s\n' "${C}" "${CH}" "${CHAPTERS}" "${TITLE}" "${N}"
+	printf '%s%s%s\n' "${W}" "$1" "${N}"
+	log "" "## screen: $1"
+	sleep "${CAPTION_HOLD}"
 }
-# say LINE...: result lines, indented.
-say() {
-	local l text=""
-	for l in "$@"; do text+="$(wrap "${l}" "  ")"$'\n'; done
-	printf '%s' "${text}"
-	hold "${text}"
+chapter() { # n title caption
+	CH=$1 TITLE=$2
+	STEP_LOG="${LOGS}/ch-$1.log"
+	printf '%s\t%s\t%s\n' "$1" "$(date -u +%s)" "$2" >>"${LOGS}/timeline.tsv"
+	printf '# CHAPTER %s  %s  (%s)\n' "$1" "$2" "$(date -u +%FT%TZ)" >"${STEP_LOG}"
+	header "$3"
 }
-# hold TEXT: pause for READ seconds, plus one for each line of TEXT after the first.
-hold() { sleep $((READ + $(printf '%s' "$1" | grep -c '') - 1)); }
-# offcam WHAT DONE FN ARGS...: run FN out of frame (demo.tape hides the wait) with its output in OUT
-# and the chapter log, then print how long it took. FN's exit status is returned.
-offcam() {
-	local what="$1" done="$2" t0=${SECONDS} rc=0
-	shift 2
-	printf '  %s⠿ %s …%s\n' "${D}" "${what}" "${N}"
-	sleep 1
-	OUT="$("$@" 2>&1)" || rc=$?
-	printf '%s\n' "${OUT}" | redact >>"${STEP_LOG}"
-	log "(exit ${rc} after $((SECONDS - t0)) s)"
-	# The tape shows the first half second of the wait line and cuts the rest.
-	HIDDEN=$((HIDDEN + SECONDS - t0))
-	printf '@@R   %s✓ %s in %d s%s\n' "${G}" "${done}" $((SECONDS - t0)) "${N}"
-	sleep 2
+page() { header "$1"; } # caption: another screen of the current chapter
+# show_lines TEXT: output lines on screen, two spaces in, then held long enough to read.
+show_lines() {
+	local text n
+	text="$(wrap "$1" "  ")"
+	n="$(printf '%s\n' "${text}" | wc -l)"
+	SCREEN_LINES=$((SCREEN_LINES + n))
+	((SCREEN_LINES <= MAX_LINES)) || fail "this screen would show ${SCREEN_LINES} output lines, more than ${MAX_LINES}"
+	printf '%s\n' "${text}"
+	log "(on screen: ${n} lines, ${SCREEN_LINES} on this screen)"
+	sleep "${READ}"
+}
+# run [-w WHAT DONE] [-x] <<CMD: the command on the first line of stdin, shown with the filter on the
+# second line (if any) after " | ". -w runs it out of frame: it prints "⠿ WHAT …" and, once the
+# command is done, replaces that with "✓ DONE in N s"; demo.tape hides the recording between the
+# two. -x: the command must fail.
+RAW="${WORK}/run.out" RAW_ERR="${WORK}/run.err"
+run() {
+	local what="" done="" expect_fail=false
+	while (($#)); do
+		case "$1" in
+		-w) what="$2" done="$3" && shift 3 ;;
+		-x) expect_fail=true && shift ;;
+		*) fail "run: unknown option $1" ;;
+		esac
+	done
+	local cmdline="" filter="" line rc=0 t0 took var shown rows
+	IFS= read -r cmdline || [[ -n "${cmdline}" ]] || fail "run: no command"
+	IFS= read -r filter || true
+	line="${cmdline}${filter:+ | ${filter}}"
+	# As a terminal shows a long command line: cut at the screen's width, not at words.
+	shown="$(python3 -c 'import sys; s, w = sys.argv[1], int(sys.argv[2]); print("\n".join(s[i:i + w] for i in range(0, len(s), w)))' "\$ ${line}" "${COLS}")"
+	rows="$(printf '%s\n' "${shown}" | wc -l)"
+	printf '%s\n' "${shown}" | sed "s/^/${Y}/; s/\$/${N}/"
+	log "\$ ${line}"
+	sleep "1.$((rows > 1 ? 9 : 2))"
+	if [[ -n "${what}" ]]; then
+		printf '  %s⠿ %s …%s\n' "${D}" "${what}" "${N}"
+		sleep 1
+	fi
+	t0=${SECONDS}
+	eval "${cmdline}" >"${RAW}" 2>"${RAW_ERR}" || rc=$?
+	took=$((SECONDS - t0))
+	redact <"${RAW}" >>"${STEP_LOG}"
+	if [[ -s "${RAW_ERR}" ]]; then
+		log "(stderr:)"
+		redact <"${RAW_ERR}" >>"${STEP_LOG}"
+	fi
+	if [[ "${cmdline}" =~ ^([A-Z_]+)=\$\( ]]; then
+		var="${BASH_REMATCH[1]}"
+		log "(${var}=${!var})"
+	fi
+	log "(exit ${rc} after ${took} s)"
+	if [[ -n "${what}" ]]; then
+		printf '@@R   %s✓ %s in %d s%s\n' "${G}" "${done}" "${took}" "${N}"
+		sleep 1.5
+	fi
+	if ${expect_fail}; then
+		((rc != 0)) || fail "this command was to fail and did not: ${line}"
+	else
+		((rc == 0)) || fail "exit ${rc}: ${line}"
+	fi
+	[[ ! -s "${RAW_ERR}" ]] || fail "this command wrote to stderr, which the screen does not show: ${line}"
+	if [[ -n "${filter}" ]]; then
+		SHOWN="$(eval "${filter}" <"${RAW}")" || fail "the filter found nothing: ${filter}"
+		log "(through | ${filter}:)" "${SHOWN}"
+	else
+		SHOWN="$(cat "${RAW}")"
+	fi
+	if [[ -n "${SHOWN}" ]]; then show_lines "${SHOWN}"; fi
+}
+# offscreen WHAT CMD...: a check the screen does not show; its output goes to RAW and the log.
+offscreen() {
+	local what="$1" rc=0
+	shift
+	log "(off screen, ${what}: $*)"
+	"$@" >"${RAW}" 2>&1 || rc=$?
+	redact <"${RAW}" >>"${STEP_LOG}"
+	log "(exit ${rc})"
 	return "${rc}"
 }
-# answer: the assistant text of the exec output in OUT (the streamed lines between the model call
-# and the output record), wrapped under "agent │".
-answer() {
-	REPLY="$(awk '/^seq=[0-9]+ +EVENT_MODEL_CALL/ { on = 1; next } /^seq=/ { on = 0 } on' <<<"${OUT}" | sed '/^[[:space:]]*$/d')"
-	[[ -n "${REPLY}" ]] || fail "the turn produced no assistant output"
-	local text
-	text="$(wrap "${REPLY}" "agent │ " | head -6)"
-	printf '%s\n' "${text}" | sed "s/^/  /; s/agent │/${G}agent │${N}/"
-	hold "${text}"
-	sleep 1
+journal_count() { # server session kind: how many records of that kind the session's journal holds
+	offscreen "the journal of $2" "${WORK}/bin/agentctl" replay --server "$1" --session "$2" || fail "agentctl replay $2 failed"
+	awk -v k="$3" '$2 == k { n++ } END { print n + 0 }' "${RAW}"
 }
-exec_turn() { # ctl session input
-	"$1" exec --session "$2" --input "$3"
+actor_uid() { # session: its actor's UID, with the actor's full record in the log
+	offscreen "the actor of $1" "${ATE[@]}" get actor "$1" -a "${ATESPACE}" -o json || fail "no actor for $1"
+	jq -r .metadata.uid "${RAW}"
 }
-quote() { printf '"%s"' "$1"; }
-mib() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1048576 }'; }
-short() { printf '%.13s…' "$1"; }
+# diagram: a screen the recording replaces with the turn-flow diagram (flow.mmd, which record.sh
+# renders and splices in): every row below the caption is magenta, which splice.py looks for.
+diagram() {
+	local _
+	for _ in $(seq 24); do printf '\e[48;2;255;0;255m%*s\e[0m\n' "${COLS}" ''; done
+	log "(on screen: the turn-flow diagram, demo/flow.mmd)"
+	sleep "${DIAGRAM_HOLD}"
+}
 
 show() {
-	[[ -x "${WORK}/bin/agentctl" && -x "${WORK}/bin/replay" && -s "${EXPIRY_FILE}" ]] || fail "run driver.sh setup first"
+	[[ -x "${WORK}/bin/agentctl" && -x "${WORK}/bin/replay" && -x "${WORK}/bin/emit" && -s "${EXPIRY_FILE}" ]] || fail "run driver.sh setup first"
 	rm -f "${LOGS}"/ch-*.log "${LOGS}/timeline.tsv"
+	rm -rf /tmp/render /tmp/render-example-model /tmp/agent /tmp/trace /tmp/turn1.txt /tmp/mem1.txt /tmp/fork.txt /tmp/child.txt
 	forwards
 	wait_apis >/dev/null || fail "the Sessions APIs did not answer"
-	local template memtemplate
-	SHOW_START=${SECONDS} HIDDEN=0
-	template="$(cat "${STATE}/render/template-name")"
-	memtemplate="$(cat "${STATE}/render-memory/template-name")"
+	STEP_LOG="${LOGS}/show.log"
+	: >"${STEP_LOG}"
+	local expires_min
+	expires_min=$((($(cat "${EXPIRY_FILE}") - $(date +%s)) / 60))
+	log "model token: expires in ${expires_min} min"
+	((expires_min > 15)) || fail "the model token expires in ${expires_min} min; run driver.sh setup again"
+	# The commands on screen run as typed: the tools from PATH (the kubectl-ate plugin included), the
+	# demo's own kubeconfig (exported by common.sh) whose current context must be the demo's cluster,
+	# and paths relative to this directory.
+	export PATH="${WORK}/bin:${PATH}"
+	[[ "$(kubectl config current-context)" == "kind-${CLUSTER}" ]] || fail "the kubeconfig's current context is not kind-${CLUSTER}"
+	cd "${HERE}"
+	export API="${SERVER}" API_MEM="${MEMSERVER}" ROUTER
+	TEMPLATE="$(cat "${STATE}/render/template-name")"
+	MEMTEMPLATE="$(cat "${STATE}/render-memory/template-name")"
+	IMAGE="$(jq -r '.containers[0].image' "${STATE}/render/actortemplate.json")"
+	[[ "${IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]] || fail "the harness image is not digest-pinned: ${IMAGE}"
+	log "TEMPLATE=${TEMPLATE} MEMTEMPLATE=${MEMTEMPLATE} IMAGE=${IMAGE} API=${API} API_MEM=${API_MEM} ROUTER=${ROUTER}"
+	SHOW_START=${SECONDS}
+	local model="${AGENTSUITE_MODEL}" uid_before uid_after turns_before calls_before fork_seq
 
 	# ---------------------------------------------------------------------------------------------
 	# Hide the cursor: the terminal only shows what the driver prints.
 	printf '\e[?25l\e[2J\e[3J\e[H\n'
 	printf '%s  Durable agent sessions on micro-VMs%s\n\n' "${C}" "${N}"
-	wrap "An agent defined with AgentSuite runs as AgentSessions sessions, each in its own agent-substrate micro-VM on Kubernetes, talking to a real model." "  " | sed "s/^/${W}/; s/\$/${N}/"
-	printf '\n'
-	wrap "Everything runs live on a kind cluster on an Azure VM with KVM. Waits longer than a moment are cut from the video; each one says how long it took." "  "
-	sleep $((READ + 5))
+	wrap "An agent defined with AgentSuite becomes an agent-substrate ActorTemplate and runs as AgentSessions sessions, each in its own micro-VM, with ${model} on Azure OpenAI." "  " | sed "s/^/${W}/; s/\$/${N}/"
+	sleep "${TITLE_HOLD}"
 
 	# ---------------------------------------------------------------------------------------------
-	chapter 1 "What's running" "One agent definition, one model and one kind of sandbox. Everything that follows uses exactly these."
-	local files expires_min sandbox
-	cmd "verify_suite   # each file's git blob id and sha256 against kaimahi commit 9c5c993"
-	verify_suite >"${WORK}/verify.out" 2>&1 || fail "the vendored suite differs from kaimahi 9c5c993"
-	log "$(cat "${WORK}/verify.out")"
-	files="$(grep -c '^OK' "${WORK}/verify.out")"
-	say "suite    kaimahi testdata/minimal, agent \"writer\": ${files} files, all match upstream"
-	cmd "kubectl -n ${NS} get deploy agentsessionsd -o json | jq -r '.spec.template.spec.containers[0].args[]' | grep model="
-	"${K[@]}" -n "${NS}" get deploy agentsessionsd -o json >"${WORK}/deploy.json"
-	jq -r '.spec.template.spec.containers[0].args[]' "${WORK}/deploy.json" | redact >>"${STEP_LOG}"
-	jq -e --arg m "-model=${AGENTSUITE_MODEL}" '.spec.template.spec.containers[0].args | index($m)' "${WORK}/deploy.json" >/dev/null ||
-		fail "agentsessionsd does not run model ${AGENTSUITE_MODEL}"
-	expires_min=$((($(cat "${EXPIRY_FILE}") - $(date +%s)) / 60))
-	((expires_min > 10)) || fail "the model token expires in ${expires_min} min"
-	say "model    ${AGENTSUITE_MODEL} on Azure OpenAI; token from the VM's managed identity: acquired, expires in ${expires_min} min"
-	cmd "kubectl ate get actor-template ${template} -o json | jq -c .sandboxConfig"
-	"${ATE[@]}" get actor-template "${template}" -a "${ATESPACE}" -o json >"${WORK}/template.json"
-	log "$(cat "${WORK}/template.json")"
-	sandbox="$(jq -r '"\(.sandboxConfig.configName) \(.sandboxConfig.sandboxClass)"' "${WORK}/template.json")"
-	[[ "${sandbox}" == "microvm SANDBOX_CLASS_MICROVM" ]] || fail "ActorTemplate ${template} is on sandbox '${sandbox}', want microvm SANDBOX_CLASS_MICROVM"
-	say "sandbox  ActorTemplate ${template}, rendered from the suite: SandboxConfig microvm, class SANDBOX_CLASS_MICROVM (Kata + Cloud Hypervisor micro-VMs)"
+	chapter 1 "The AgentSuite" "kaimahi's minimal AgentSuite: a manifest, one agent (writer), its instructions and one composition"
+	run <<'EOF'
+(cd suites/kaimahi-minimal && echo agentsuite.json */*)
+EOF
+	run <<'EOF'
+jq -r '"instructions  \(.instructions.path)  \(.instructions.digest[:23])…", "model         \(.model.protocol) \(.model.model)"' suites/kaimahi-minimal/agents/writer.json
+EOF
+	[[ "${SHOWN}" == *"model         openai-compatible example-model" ]] || fail "the agent no longer names example-model"
+	run <<'EOF'
+jq -c '{agent, platform, buildProfile}' suites/kaimahi-minimal/compositions/writer-linux-amd64.json
+EOF
+	page "These are kaimahi's testdata/minimal files at 9c5c993, and kaimahi's own agentsuite package validates them"
+	run <<'EOF'
+grep ^commit suites/kaimahi-minimal/SOURCE
+EOF
+	[[ "${SHOWN}" == "commit 9c5c993"* ]] || fail "SOURCE does not name kaimahi 9c5c993"
+	run <<'EOF'
+(cd suites/kaimahi-minimal && awk 'NF == 3 && !/^#/ { print $2 "  " $3 }' SOURCE | sha256sum -c)
+awk '{ print $NF }' | uniq -c
+EOF
+	[[ "$(grep -c ': OK$' "${RAW}")" == 6 && "$(wc -l <"${RAW}")" == 6 ]] || fail "not every suite file matches SOURCE"
+	offscreen "each file's git blob id and sha256 against SOURCE" verify_suite || fail "the suite differs from kaimahi 9c5c993"
+	run <<'EOF'
+emit validate -suite suites/kaimahi-minimal
+EOF
+	[[ "${SHOWN}" == "suite minimal valid: 1 agent; compositions: writer linux/amd64 profile default"*"kaimahi/agentsuite v"*"-9c5c993"* ]] ||
+		fail "emit validate did not report kaimahi 9c5c993's validator"
 
 	# ---------------------------------------------------------------------------------------------
-	chapter 2 "Chat with the agent" "Start a session and talk to the agent. The session gets its own micro-VM, and every model call goes through AgentSessions, which records it."
-	local copy t1 t2
-	cmd "COPY=\$(agentctl create --server \$API --harness writer --name launch-copy)"
-	copy="$(agentctl create --harness writer --name launch-copy | tail -1 | tr -d '[:space:]')"
-	log "${copy}"
-	[[ "${copy}" =~ ^sess-[0-9a-f]+$ ]] || fail "agentctl create did not print a session UID"
-	say "session launch-copy: ${copy}"
-	t1="Write a two-sentence product blurb for Ledger, an open API that keeps AI agent sessions durable across crashes, suspends and forks."
-	t2="Make it punchier and add a one-line tagline."
-	cmd "agentctl exec --server \$API --session \$COPY --input $(quote "${t1}")"
-	offcam "starting the session's micro-VM and asking ${AGENTSUITE_MODEL}" "answered" exec_turn agentctl "${copy}" "${t1}" || fail "turn 1 failed"
-	answer
-	cmd "agentctl exec --server \$API --session \$COPY --input $(quote "${t2}")"
-	offcam "asking ${AGENTSUITE_MODEL}" "answered" exec_turn agentctl "${copy}" "${t2}" || fail "turn 2 failed"
-	answer
-	cmd "kubectl ate get actor \$COPY -o json | jq -r '.status.state, .status.workerAssignment.workerPod'"
-	actor_json "${copy}" >"${WORK}/actor.json"
-	log "$(cat "${WORK}/actor.json")"
-	[[ "$(jq -r .status.state "${WORK}/actor.json")" == ACTOR_STATE_RUNNING ]] || fail "the session's actor is not running"
-	say "actor ${copy} (named after the session): RUNNING on worker $(jq -r .status.workerAssignment.workerPod "${WORK}/actor.json"), from template $(jq -r .actorTemplate.name "${WORK}/actor.json")"
+	chapter 2 "Into substrate" "binding-microvm.json, a draft AgentSessionsBinding type this PoC adds, says where and how it runs"
+	run <<'EOF'
+jq -c '{atespace, workerSelector}, {sandbox, resources}, {snapshot}' binding-microvm.json
+EOF
+	run <<EOF
+emit render -suite suites/kaimahi-minimal -agent writer -platform linux/amd64 -binding binding-microvm.json -image \$IMAGE -model ${model} -out /tmp/render
+sed 's/ (.*//'
+EOF
+	[[ "${SHOWN}" == "ActorTemplate ${ATESPACE}/${TEMPLATE}"$'\n'"harness writer -> -substrate-harness=writer=${ATESPACE}/${TEMPLATE}" ]] ||
+		fail "the render on screen is not template ${TEMPLATE}"
+	offscreen "this render against the one setup applied" diff -r /tmp/render "${STATE}/render" || fail "the render differs from the one setup applied"
+	page "The ActorTemplate: a digest-pinned image with the agent's files, a micro-VM, MEMORY snapshots, no model keys"
+	run <<'EOF'
+emit bundle -suite suites/kaimahi-minimal -agent writer -platform linux/amd64 -out /tmp/agent >/dev/null && ls -C /tmp/agent
+EOF
+	offscreen "the bundle against the harness image's /agent layer setup built" diff -r /tmp/agent "${STATE}/harness-image/agent" ||
+		fail "the bundle differs from the harness image's agent layer"
+	run <<'EOF'
+jq -r -f demo/fields.jq /tmp/render/actortemplate.json
+EOF
+	jq -e --arg m "${model}" '[.containers[0].env[] | select(.name == "AGENTSUITE_MODEL" and .value == $m)] | length == 1' /tmp/render/actortemplate.json >/dev/null ||
+		fail "the template does not override the model with ${model}"
+	jq -e '[.containers[0].env[].name | select(test("KEY|TOKEN|SECRET|AUTH|PASSWORD"; "i"))] | length == 0' /tmp/render/actortemplate.json >/dev/null ||
+		fail "the template's env names a credential"
+	jq -e '.sandboxConfig.sandboxClass == "SANDBOX_CLASS_MICROVM" and .snapshotConfig.preferredFidelity == "SNAPSHOT_FIDELITY_MEMORY"' /tmp/render/actortemplate.json >/dev/null ||
+		fail "the template is not a micro-VM with MEMORY snapshots"
+	page "The name's hash covers image digest, binding and -model: gpt-5.4-mini replaces the suite's example-model"
+	run <<'EOF'
+emit render -suite suites/kaimahi-minimal -agent writer -platform linux/amd64 -binding binding-microvm.json -image $IMAGE -out /tmp/render-example-model
+head -1 | sed 's/ (.*//'
+EOF
+	[[ "${SHOWN}" == "ActorTemplate ${ATESPACE}/minimal-writer-"* && "${SHOWN}" != *"${TEMPLATE}" ]] || fail "without -model the template name does not change"
+	jq -e '[.containers[0].env[] | select(.name == "AGENTSUITE_MODEL")] | length == 0' /tmp/render-example-model/actortemplate.json >/dev/null ||
+		fail "without -model the template still overrides the model"
+	run <<'EOF'
+kubectl get deploy agentsessionsd -n agentsuite-demo -o json | jq -r '.spec.template.spec.containers[0].args[]'
+grep -e '^-substrate-harness=' -e '^-model='
+EOF
+	[[ "${SHOWN}" == *"-substrate-harness=writer=${ATESPACE}/${TEMPLATE}"* && "${SHOWN}" == *"-model=${model}"* ]] || fail "agentsessionsd does not serve ${TEMPLATE} with ${model}"
+	run <<'EOF'
+diff <(jq -S -f demo/template.jq /tmp/render/actortemplate.json) <(kubectl ate get actor-template $TEMPLATE -a agentsuite-demo -o json | jq -S -f demo/template.jq) && echo "the ActorTemplate in substrate is this render"
+EOF
 
 	# ---------------------------------------------------------------------------------------------
-	chapter 3 "The journal" "Every input, model call, answer and token count is one record in an append-only journal. Each record carries the hash of the one before it, so the history cannot be edited quietly."
-	cmd "agentctl replay -v --server \$API --session \$COPY | summarize"
-	agentctl replay -v --session "${copy}" >"${WORK}/journal.out"
-	log "$(cat "${WORK}/journal.out")"
-	local sum turns calls usage tin tout nrec head
-	sum="$(summarize <"${WORK}/journal.out")"
-	read -r nrec turns calls usage tin tout head <<<"${sum}"
-	((turns == 2 && calls == 2 && usage == 2 && tin > 0 && tout > 0)) ||
+	chapter 3 "How a turn flows" "One turn: agentctl to AgentSessions, the substrate adapter, the micro-VM's harness, the model, and back"
+	diagram
+	page "A real turn, followed by its session id through each component's own log"
+	run <<'EOF'
+COPY=$(agentctl create --server $API --harness writer --name launch-copy)
+EOF
+	[[ "${COPY}" =~ ^sess-[0-9a-f]+$ ]] || fail "agentctl create did not print a session UID"
+	run -w "starting the session's micro-VM and asking ${model}" "answered" <<'EOF'
+agentctl exec --server $API --session $COPY --input "Write a one-sentence product blurb for Ledger, an open API that keeps AI agent sessions durable across crashes, suspends and forks." >/tmp/turn1.txt
+EOF
+	offscreen "turn 1's output" cat /tmp/turn1.txt
+	grep -q '^seq=[0-9]* *EVENT_END' /tmp/turn1.txt || fail "turn 1 did not end"
+	run <<'EOF'
+demo/trace-turn.sh $COPY /tmp/trace
+EOF
+	local f
+	for f in /tmp/trace/*.log; do offscreen "the full log of ${f##*/}" cat "${f}"; done
+
+	# ---------------------------------------------------------------------------------------------
+	chapter 4 "Chat with the agent" "A second turn in the same session builds on the first answer"
+	run <<'EOF'
+awk '/EVENT_OUTPUT/ { sub(/.*assistant: /, ""); on = 1 } /EVENT_USAGE/ { on = 0 } on && NF' /tmp/turn1.txt | tr -d '*'
+EOF
+	run -w "asking ${model}" "answered" <<'EOF'
+agentctl exec --server $API --session $COPY --input "Make it punchier, under 15 words, and add a short tagline."
+awk '/EVENT_OUTPUT/ { sub(/.*assistant: /, ""); on = 1 } /EVENT_USAGE/ { on = 0 } on && NF' | tr -d '*'
+EOF
+
+	# ---------------------------------------------------------------------------------------------
+	chapter 5 "The journal" "Every input, model call, answer and token count is a record that carries the previous record's hash"
+	run <<'EOF'
+agentctl replay -v --server $API --session $COPY
+awk -f demo/journal.awk
+EOF
+	local sum
+	sum="$(grep -E '^seq=' "${RAW}" | awk '$2 == "EVENT_END" { t++ } $2 == "EVENT_MODEL_CALL" { c++ } $2 == "EVENT_USAGE" { u++ } END { print t + 0, c + 0, u + 0 }')"
+	[[ "${sum}" == "2 2 2" && "${SHOWN}" == "2 turns, 2 model calls (${model}), "* && "${SHOWN}" != *" 0 tokens in"* ]] ||
 		fail "the journal does not hold 2 turns with one model call and one usage record each: ${sum}"
-	say "${turns} turns, ${calls} model calls (${AGENTSUITE_MODEL}), ${tin} tokens in / ${tout} out, ${nrec} records, chain head ${head:0:16}"
-	cmd "agentctl replay -v --server \$API --session \$COPY | grep ^seq= | tail -4   # turn 2's last records"
-	grep '^seq=' "${WORK}/journal.out" | grep -E 'EVENT_(MODEL_CALL|OUTPUT|USAGE|END) ' | tail -4 |
-		python3 -c '
-import re, sys
-for l in sys.stdin:
-    f = l.split()
-    kv = dict(x.split("=", 1) for x in f if "=" in x and not x.startswith("seq="))
-    kind = f[1].replace("EVENT_", "")
-    text = l.split("assistant: ", 1)[1].strip().replace("**", "") if "assistant: " in l else ""
-    extra = {"MODEL_CALL": "model=%s" % kv.get("model", ""), "OUTPUT": "\"%s\"" % (text[:32] + "…" if len(text) > 32 else text),
-             "USAGE": "input_tokens=%s output_tokens=%s" % (kv.get("input_tokens", ""), kv.get("output_tokens", ""))}.get(kind, "")
-    print("  %-8s %-11s hash=%s  prev=%s  %s" % (f[0], kind, kv.get("hash", "")[:12], kv.get("prev", "")[:12], extra))'
-	sleep $((READ + 2))
 
 	# ---------------------------------------------------------------------------------------------
-	chapter 4 "Pause and resume, memory included" "This copy of the agent keeps the conversation only in its memory. We snapshot the micro-VM's memory and free its machine, resume it, and the conversation picks up where it left off."
-	local mem m1 m3 uid_before uid_after snap size
-	cmd "MEM=\$(agentctl create --server \$API_MEM --harness writer-memory --name codename)"
-	mem="$(memctl create --harness writer-memory --name codename | tail -1 | tr -d '[:space:]')"
-	log "${mem}"
-	[[ "${mem}" =~ ^sess-[0-9a-f]+$ ]] || fail "agentctl create did not print a session UID"
-	m1="Remember this release codename: BLUE-HERON-42. Reply with one short sentence."
-	cmd "agentctl exec --server \$API_MEM --session \$MEM --input $(quote "${m1}")"
-	offcam "starting the session's micro-VM and asking ${AGENTSUITE_MODEL}" "answered" exec_turn memctl "${mem}" "${m1}" || fail "the memory session's first turn failed"
-	answer
-	uid_before="$(actor_json "${mem}" | jq -r .metadata.uid)"
-	cmd "agentctl suspend --server \$API_MEM --session \$MEM"
-	offcam "snapshotting the micro-VM's memory and freeing its machine" "suspended" memctl suspend --session "${mem}" || fail "suspend failed"
-	actor_json "${mem}" >"${WORK}/actor.json"
-	log "$(cat "${WORK}/actor.json")"
-	[[ "$(jq -r .status.state "${WORK}/actor.json")" == ACTOR_STATE_SUSPENDED ]] || fail "the actor is not suspended"
-	snap="$(jq -r '[.status.snapshots[]? | select(.durableSnapshot.status == "SNAPSHOT_STORAGE_STATUS_COMPLETED")] | max_by(.generation) // empty | "\(.fidelity) \(.durableSnapshot.object.snapshotUri)"' "${WORK}/actor.json")"
-	[[ "${snap}" == SNAPSHOT_FIDELITY_MEMORY\ * ]] || fail "the suspended actor holds no completed memory snapshot: ${snap}"
-	cmd "aws s3 ls --recursive --summarize s3://<the actor's snapshotUri>/"
-	offcam "measuring the snapshot" "measured" snapshot_size "${snap#* }" || fail "could not size the snapshot"
-	local objects mem_bytes
-	size="$(sed -n 's/^ *Total Size: *\([0-9][0-9]*\).*/\1/p' <<<"${OUT}" | tail -1)"
-	objects="$(sed -n 's/^ *Total Objects: *\([0-9][0-9]*\).*/\1/p' <<<"${OUT}" | tail -1)"
-	mem_bytes="$(awk '$4 ~ /\/memory-ranges[^/]*$/ { print $3 }' <<<"${OUT}" | tail -1)"
-	if [[ ! "${size}" =~ ^[0-9]+$ ]] || ((size == 0)) || [[ ! "${mem_bytes}" =~ ^[0-9]+$ ]]; then fail "the snapshot has no memory object: ${OUT}"; fi
-	say "snapshot: MEMORY, ${objects} objects, $(mib "${size}") MiB in the cluster's object store; $(mib "${mem_bytes}") MiB of it is memory-ranges.zstd, the guest's memory, compressed" \
-		"actor: SUSPENDED, no worker assigned"
-	cmd "agentctl resume --server \$API_MEM --session \$MEM"
-	offcam "restoring the micro-VM from its snapshot" "resumed" memctl resume --session "${mem}" || fail "resume failed"
-	uid_after="$(actor_json "${mem}" | jq -r .metadata.uid)"
-	[[ -n "${uid_before}" && "${uid_before}" == "${uid_after}" ]] || fail "the actor UID changed across suspend and resume"
-	say "actor uid ${uid_after} before the suspend and after the resume: the same micro-VM"
-	m3="What release codename did I give you earlier? Answer with the codename only."
-	cmd "agentctl exec --server \$API_MEM --session \$MEM --input $(quote "${m3}")"
-	offcam "asking ${AGENTSUITE_MODEL}" "answered" exec_turn memctl "${mem}" "${m3}" || fail "the turn after resume failed"
-	answer
-	[[ "${REPLY}" == *BLUE-HERON-42* ]] || fail "the resumed turn did not recall the codename: ${REPLY}"
-	cmd "kubectl ate logs actor \$MEM --source containers | grep 'memory tier' | tail -1"
-	local memline
-	memline="$("${ATE[@]}" logs actor "${mem}" -a "${ATESPACE}" --source containers 2>&1 | redact | tee -a "${STEP_LOG}" | grep -o 'memory tier: turn [0-9]* of this process; [^"]*' | tail -1)"
-	[[ "${memline}" == "memory tier: turn 2 of this process; 2 messages in RAM"* ]] || fail "the harness did not answer from the RAM it held before the suspend: ${memline}"
-	say "harness: ${memline}" "(turn 2 of the same process: the answer came from memory the snapshot carried, not from the journal)"
+	chapter 6 "Pause and resume, memory included" "This copy keeps the chat only in RAM: suspend snapshots the micro-VM's memory and resume restores it"
+	run <<'EOF'
+MEM=$(agentctl create --server $API_MEM --harness writer-memory --name codename)
+EOF
+	[[ "${MEM}" =~ ^sess-[0-9a-f]+$ ]] || fail "agentctl create did not print a session UID"
+	run -w "starting the session's micro-VM and asking ${model}" "answered" <<'EOF'
+agentctl exec --server $API_MEM --session $MEM --input "Remember this release codename: BLUE-HERON-42. Reply with one short sentence." >/tmp/mem1.txt
+EOF
+	offscreen "the memory session's turn 1" cat /tmp/mem1.txt
+	uid_before="$(actor_uid "${MEM}")"
+	run -w "snapshotting the micro-VM's memory" "suspended" <<'EOF'
+agentctl suspend --server $API_MEM --session $MEM
+EOF
+	offscreen "the suspended actor" "${ATE[@]}" get actor "${MEM}" -a "${ATESPACE}" -o json || fail "no actor for ${MEM}"
+	[[ "$(jq -r .status.state "${RAW}")" == ACTOR_STATE_SUSPENDED ]] || fail "the actor is not suspended"
+	run -w "measuring the snapshot" "measured" <<'EOF'
+demo/snapshot-size.sh $MEM
+tail -1
+EOF
+	[[ "${SHOWN}" == "MEMORY snapshot: "* ]] || fail "the suspended actor holds no completed memory snapshot"
+	run -w "restoring the micro-VM from its snapshot" "resumed" <<'EOF'
+agentctl resume --server $API_MEM --session $MEM
+EOF
+	uid_after="$(actor_uid "${MEM}")"
+	[[ -n "${uid_before}" && "${uid_before}" == "${uid_after}" ]] || fail "the session's actor changed across suspend and resume"
+	run -w "asking ${model}" "answered" <<'EOF'
+agentctl exec --server $API_MEM --session $MEM --input "What release codename did I give you earlier? Answer with the codename only."
+awk '/EVENT_OUTPUT/ { sub(/.*assistant: /, ""); on = 1 } /EVENT_USAGE/ { on = 0 } on && NF' | tr -d '*'
+EOF
+	[[ "${SHOWN}" == *BLUE-HERON-42* ]] || fail "the resumed turn did not recall the codename"
+	run <<'EOF'
+kubectl ate logs actor $MEM -a agentsuite-demo --source containers
+grep -o 'memory tier: turn [0-9]* of this process; [0-9]* messages in RAM' | tail -1
+EOF
+	[[ "${SHOWN}" == "memory tier: turn 2 of this process; 2 messages in RAM" ]] || fail "the harness did not answer from the RAM it held before the suspend"
 
 	# ---------------------------------------------------------------------------------------------
-	chapter 5 "Replay without the model" "Replay re-runs the agent's turns in its micro-VM and answers every model call from the journal. The model is never called, so a session can be re-checked for free and with the same result."
-	local before after
-	before="$(records agentctl "${copy}" EVENT_MODEL_CALL)"
-	cmd "replay -session \$COPY -model-base-url http://127.0.0.1:18089/v1  # nothing listens there, no key"
-	offcam "re-running the session's turns in its micro-VM" "replayed" "${WORK}/bin/replay" -server "${SERVER}" -session "${copy}" -router "${ROUTER}" \
-		-atespace "${ATESPACE}" -model-base-url "http://127.0.0.1:18089/v1" -stats-url "" || fail "replay failed"
-	grep -q '^re-executed 2 completed turns' <<<"${OUT}" || fail "the replay did not re-execute the 2 turns"
-	grep -q '^model calls: controller=0$' <<<"${OUT}" || fail "the replay made a model call"
-	after="$(records agentctl "${copy}" EVENT_MODEL_CALL)"
-	[[ "${before}" == "${after}" ]] || fail "the journal's model-call count changed"
-	local verified
-	verified="$(grep '^journal: ' <<<"${OUT}" | sed 's/ (head.*//')"
-	say "${verified}" "re-executed 2 completed turns" "model calls: 0   (the journal still records ${after}, as before the replay)"
+	chapter 7 "Replay without the model" "Replay re-runs the session's turns in its micro-VM and answers each model call from the journal"
+	calls_before="$(journal_count "${SERVER}" "${COPY}" EVENT_MODEL_CALL)"
+	run -w "re-running the session's turns in its micro-VM" "replayed" <<'EOF'
+replay -server $API -session $COPY -router $ROUTER -atespace agentsuite-demo -model-base-url http://127.0.0.1:18089/v1 -stats-url ""
+grep -e '^journal: ' -e '^re-executed' -e '^model calls'
+EOF
+	grep -q '^re-executed 2 completed turns' "${RAW}" || fail "the replay did not re-execute the 2 turns"
+	grep -q '^model calls: controller=0$' "${RAW}" || fail "the replay made a model call"
+	run <<'EOF'
+agentctl replay --server $API --session $COPY
+grep -c EVENT_MODEL_CALL
+EOF
+	[[ "${SHOWN}" == "${calls_before}" ]] || fail "the journal's model-call count changed"
 
 	# ---------------------------------------------------------------------------------------------
-	chapter 6 "Fork" "Fork copies a session's history up to any point into a new session with its own micro-VM. Both go on independently: here, two different second turns."
-	local fork_seq child c2
-	fork_seq="$(agentctl replay --session "${copy}" | awk '/EVENT_END/ { sub("seq=", "", $1); print $1; exit }')"
-	cmd "CHILD=\$(agentctl fork --server \$API --session \$COPY --at ${fork_seq} --names haiku-branch)   # seq ${fork_seq} = end of turn 1"
-	offcam "copying the history and starting the child's micro-VM" "forked" agentctl fork --session "${copy}" --at "${fork_seq}" --names haiku-branch || fail "fork failed"
-	child="$(awk '/^child / { print $2 }' <<<"${OUT}" | tail -1)"
-	[[ "${child}" =~ ^sess-[0-9a-f]+$ ]] || fail "fork printed no child"
-	c2="Instead, rewrite the blurb as a haiku."
-	cmd "agentctl exec --server \$API --session \$CHILD --input $(quote "${c2}")"
-	offcam "asking ${AGENTSUITE_MODEL} in the child" "answered" exec_turn agentctl "${child}" "${c2}" || fail "the child's turn failed"
-	grep -q '^seq=[0-9]* *EVENT_OUTPUT  assistant: .' <<<"${OUT}" || fail "the child's turn produced no answer"
-	cmd "agentctl replay --server \$API --session \$COPY; … --session \$CHILD   # side by side"
-	agentctl replay --session "${copy}" >"${WORK}/parent.out"
-	agentctl replay --session "${child}" >"${WORK}/child.out"
-	log "parent:" "$(cat "${WORK}/parent.out")" "child:" "$(cat "${WORK}/child.out")"
-	[[ "$(records agentctl "${copy}" EVENT_END)" == 2 && "$(records agentctl "${child}" EVENT_END)" == 2 ]] || fail "parent and child do not hold 2 turns each"
-	[[ "$(sed -n 's/^seq=[0-9]* *EVENT_INPUT  user: //p' "${WORK}/child.out" | head -1)" == "${t1}" ]] || fail "the child does not start with the parent's turn 1"
-	[[ "$(sed -n 's/^seq=[0-9]* *EVENT_INPUT  user: //p' "${WORK}/child.out" | tail -1)" == "${c2}" ]] || fail "the child's second turn is not its own"
-	side_by_side "parent launch-copy" "${WORK}/parent.out" "child haiku-branch" "${WORK}/child.out"
-	sleep $((READ + 8))
+	chapter 8 "Fork" "Fork copies a session's history up to a point into a new session with its own micro-VM"
+	fork_seq="$(journal_count "${SERVER}" "${COPY}" EVENT_END >/dev/null && awk '/EVENT_END/ { sub("seq=", "", $1); print $1; exit }' "${RAW}")"
+	[[ "${fork_seq}" =~ ^[0-9]+$ ]] || fail "turn 1 has no end record"
+	run -w "copying the history and starting the child's micro-VM" "forked" <<EOF
+CHILD=\$(agentctl fork --server \$API --session \$COPY --at ${fork_seq} --names haiku-branch | tee /tmp/fork.txt | awk '/^child / { print \$2 }')
+EOF
+	offscreen "the fork's output" cat /tmp/fork.txt
+	[[ "${CHILD}" =~ ^sess-[0-9a-f]+$ ]] || fail "fork printed no child"
+	run -w "asking ${model} in the child" "answered" <<'EOF'
+agentctl exec --server $API --session $CHILD --input "Instead, rewrite the blurb as a haiku." >/tmp/child.txt
+EOF
+	offscreen "the child's turn 2" cat /tmp/child.txt
+	grep -q '^seq=[0-9]* *EVENT_OUTPUT  assistant: .' /tmp/child.txt || fail "the child's turn produced no answer"
+	run <<'EOF'
+python3 demo/side_by_side.py "parent launch-copy" <(agentctl replay --server $API --session $COPY) "child haiku-branch" <(agentctl replay --server $API --session $CHILD)
+EOF
+	[[ "$(journal_count "${SERVER}" "${COPY}" EVENT_END)" == 2 && "$(journal_count "${SERVER}" "${CHILD}" EVENT_END)" == 2 ]] || fail "parent and child do not hold 2 turns each"
+	[[ "$(sed -n 's/^seq=[0-9]* *EVENT_INPUT  user: //p' "${RAW}" | tail -1)" == "Instead, rewrite the blurb as a haiku." ]] || fail "the child's second turn is not its own"
 
 	# ---------------------------------------------------------------------------------------------
-	chapter 7 "Guarding memory" "If the micro-VM holding a session's memory is swapped behind AgentSessions' back, the next turn is refused instead of answered from an empty memory."
-	local new_uid turns_before m4 refusal
-	cmd "kubectl ate delete actor \$MEM --any-state; kubectl ate create actor \$MEM --template ${memtemplate}"
-	offcam "replacing the session's micro-VM out of band" "replaced" replace_actor "${mem}" "${memtemplate}" || fail "could not replace the actor"
-	new_uid="$(actor_json "${mem}" | jq -r .metadata.uid)"
-	[[ -n "${new_uid}" && "${new_uid}" != "${uid_after}" ]] || fail "the replacement kept the UID"
-	say "actor uid the session's turns ran on ${uid_after}, actor under that name now ${new_uid}"
-	turns_before="$(records memctl "${mem}" EVENT_END)"
-	m4="And what was the codename again?"
-	cmd "agentctl exec --server \$API_MEM --session \$MEM --input $(quote "${m4}")"
-	if offcam "asking the session to continue" "refused" exec_turn memctl "${mem}" "${m4}"; then
-		fail "the turn ran on the replaced actor"
-	fi
-	[[ "${OUT}" == *"code = FailedPrecondition"* ]] || fail "the refusal is not FAILED_PRECONDITION: ${OUT}"
-	refusal="$(grep -o 'code = FailedPrecondition desc = [^:]*: [^:]*' <<<"${OUT}" | head -1)"
-	[[ "$(records memctl "${mem}" EVENT_END)" == "${turns_before}" ]] || fail "a turn completed on the replaced actor"
-	say "${refusal}" "completed turns in the journal: ${turns_before} before, ${turns_before} after: nothing ran on the empty micro-VM"
-
-	# ---------------------------------------------------------------------------------------------
-	chapter 8 "Recap" "One AgentSuite agent ran as durable sessions on micro-VMs: its chat was journaled with token counts, paused and resumed with its memory, replayed with zero model calls, forked, and protected from a swapped micro-VM."
-	printf '  %sThe full output of every command is in the logs that come with this video.%s\n' "${D}" "${N}"
-	sleep $((READ + 6))
-	log "DEMO COMPLETE"
-	printf 'DEMO COMPLETE in %d s, about %d s of it on screen\n' $((SECONDS - SHOW_START)) $((SECONDS - SHOW_START - HIDDEN))
-}
-# summarize: totals over the journal's records (the seq= lines; an assistant message can span lines).
-summarize() {
-	awk '
-		!/^seq=/ { next }
-		{ n++; for (i = 3; i <= NF; i++) if ($i ~ /^hash=/) head = substr($i, 6) }
-		$2 == "EVENT_END" { turns++ }
-		$2 == "EVENT_MODEL_CALL" { calls++ }
-		$2 == "EVENT_USAGE" { usage++; for (i = 3; i <= NF; i++) { split($i, kv, "="); if (kv[1] == "input_tokens") in_ += kv[2]; if (kv[1] == "output_tokens") out += kv[2] } }
-		END { printf "%d %d %d %d %d %d %s\n", n, turns + 0, calls + 0, usage + 0, in_ + 0, out + 0, head }'
-}
-# snapshot_size URI: the object store's listing of the snapshot's objects, with their total size.
-# The kind install's rustfs is reached from the node's network namespace, as substrate's
-# hack/microvm-assets/stage-to-rustfs.sh does; its credentials are the install's fixed defaults.
-snapshot_size() {
-	local path="${1#*://}" endpoint
-	endpoint="http://$("${K[@]}" -n ate-system get svc rustfs -o jsonpath='{.spec.clusterIP}'):9000"
-	docker run --rm --network "container:${CLUSTER}-control-plane" -e AWS_ACCESS_KEY_ID=rustfsadmin \
-		-e AWS_SECRET_ACCESS_KEY=rustfsadmin -e AWS_REGION=us-east-1 -e "AWS_ENDPOINT_URL=${endpoint}" \
-		"${AWS_CLI_IMAGE}" s3 ls --recursive --summarize "s3://${path%/}/"
-}
-replace_actor() { # name template
-	"${ATE[@]}" delete actor "$1" -a "${ATESPACE}" --any-state || return
+	chapter 9 "Guarding memory" "If a session's micro-VM is swapped behind AgentSessions' back, its next turn is refused"
+	turns_before="$(journal_count "${MEMSERVER}" "${MEM}" EVENT_END)"
+	run -w "deleting the session's micro-VM out of band" "deleted" <<'EOF'
+kubectl ate delete actor $MEM -a agentsuite-demo --any-state
+EOF
+	local gone=false
 	for _ in $(seq 60); do
-		"${ATE[@]}" get actor "$1" -a "${ATESPACE}" >/dev/null 2>&1 || break
+		if ! offscreen "is the old actor gone" "${ATE[@]}" get actor "${MEM}" -a "${ATESPACE}"; then
+			gone=true
+			break
+		fi
 		sleep 2
 	done
-	"${ATE[@]}" create actor "$1" -a "${ATESPACE}" --template "$2"
-}
-# side_by_side LTITLE LFILE RTITLE RFILE: each session's turns (inputs) and its last answer, in two
-# columns.
-side_by_side() {
-	python3 -c '
-import re, sys, textwrap
-cols = int(sys.argv[5]); w = (cols - 7) // 2
-def turns(path):
-    inputs, outputs, cur = [], [], None
-    for line in open(path):
-        line = line.rstrip("\n")
-        m = re.match(r"seq=\d+ +EVENT_(\w+)(?:  (\w+): (.*))?$", line)
-        if m:
-            cur = None
-            if m.group(1) == "INPUT": inputs.append(m.group(3))
-            if m.group(1) == "OUTPUT": outputs.append(m.group(3)); cur = len(outputs) - 1
-        elif cur is not None:
-            outputs[cur] += "\n" + line
-    return inputs, outputs
-def column(title, path):
-    inputs, outputs = turns(path)
-    rows = [title, "-" * min(w, len(title))]
-    for i, t in enumerate(inputs):
-        rows += textwrap.wrap("turn %d: %s" % (i + 1, t), w, subsequent_indent="  ")
-    rows.append("")
-    rows.append("last answer:")
-    for para in outputs[-1].replace("**", "").split("\n"):
-        rows += textwrap.wrap(para.strip(), w - 2, initial_indent="  ", subsequent_indent="  ") if para.strip() else []
-    return rows[:16]
-l, r = column(sys.argv[1], sys.argv[2]), column(sys.argv[3], sys.argv[4])
-for i in range(max(len(l), len(r))):
-    a = l[i] if i < len(l) else ""
-    b = r[i] if i < len(r) else ""
-    print("  %s │ %s" % (a.ljust(w), b))' "$1" "$2" "$3" "$4" "${COLS}"
+	${gone} || fail "the old actor is still there"
+	run <<'EOF'
+kubectl ate create actor $MEM -a agentsuite-demo --template $MEMTEMPLATE
+awk 'NR > 1 { print $2, $4 }'
+EOF
+	[[ "$(actor_uid "${MEM}")" != "${uid_after}" ]] || fail "the new actor has the old UID"
+	run -x -w "asking the session to continue" "refused" <<'EOF'
+agentctl exec --server $API_MEM --session $MEM --input "And what was the codename again?" 2>&1
+grep -o 'code = FailedPrecondition desc = [^:]*: [^:]*'
+EOF
+	run <<'EOF'
+agentctl replay --server $API_MEM --session $MEM
+grep -c EVENT_END
+EOF
+	[[ "${SHOWN}" == "${turns_before}" ]] || fail "a turn completed on the replaced actor"
+
+	# ---------------------------------------------------------------------------------------------
+	chapter 10 "Recap" "An AgentSuite agent became an ActorTemplate and ran as durable, journaled sessions on micro-VMs"
+	printf '\n  %sCode: github.com/aramase/agentsessions, examples/agentsuite-substrate.%s\n' "${D}" "${N}"
+	sleep $((READ + 6))
+	log "DEMO COMPLETE"
+	printf 'DEMO COMPLETE in %d s\n' $((SECONDS - SHOW_START))
 }
 
 case "${MODE}" in

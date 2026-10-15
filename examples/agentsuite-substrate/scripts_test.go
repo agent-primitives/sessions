@@ -1448,3 +1448,50 @@ esac
 		})
 	}
 }
+
+// coordinator.sh renders the daemon with the managed identity's token in Authorization, so its
+// setup refuses an AGENTSUITE_MODEL_AUTH_HEADER naming another header (which up.sh would honor)
+// before it runs any tool, and lets an unset or Authorization value through to the next check.
+func TestCoordinatorSetupRefusesAnotherAuthHeader(t *testing.T) {
+	s := newStubs(t)
+	const refused = "COORDINATOR FAILED: AGENTSUITE_MODEL_AUTH_HEADER names a header other than Authorization"
+	model := []string{
+		"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com", "AGENTSUITE_MODEL=gpt-5.4-mini",
+		"AGENTSUITE_MODEL_PATH=/openai/deployments/gpt-5.4-mini/chat/completions?api-version=2025-04-01-preview",
+		"AZURE_MI_CLIENT_ID=00000000-0000-0000-0000-000000000000",
+	}
+	for _, tc := range []struct {
+		name    string
+		env     []string
+		refused bool
+	}{
+		{name: "api-key", env: []string{"AGENTSUITE_MODEL_AUTH_HEADER=api-key"}, refused: true},
+		{name: "authorization in lowercase", env: []string{"AGENTSUITE_MODEL_AUTH_HEADER=authorization"}, refused: true},
+		{name: "unset"},
+		{name: "empty", env: []string{"AGENTSUITE_MODEL_AUTH_HEADER="}},
+		{name: "Authorization", env: []string{"AGENTSUITE_MODEL_AUTH_HEADER=Authorization"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Remove(filepath.Join(s.dir, "calls")); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("./demo/coordinator.sh", "setup")
+			cmd.Env = append(append(append([]string{}, s.env...), model...), tc.env...)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("setup succeeded against stubs: %s", out)
+			}
+			calls, _ := os.ReadFile(filepath.Join(s.dir, "calls"))
+			if tc.refused {
+				if !strings.Contains(string(out), refused) || len(calls) != 0 {
+					t.Fatalf("output %q, calls %q: want %q before any tool runs", out, calls, refused)
+				}
+				return
+			}
+			// The go stub reports no GOARCH, so setup stops at the next check, past the header.
+			if strings.Contains(string(out), refused) || !strings.Contains(string(out), "run on an amd64 host") {
+				t.Fatalf("output %q: want the header accepted and the amd64 check reached", out)
+			}
+		})
+	}
+}

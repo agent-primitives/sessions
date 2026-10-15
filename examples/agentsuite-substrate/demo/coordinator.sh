@@ -15,7 +15,9 @@
 # served model, written into this environment's binding: binding-coordinator.json with them, see
 # common.sh write_binding) and AZURE_MI_CLIENT_ID, the user-assigned managed identity whose token is
 # the model API key; it is fetched from the instance metadata endpoint, piped into the
-# agentsessionsd-model Secret with no file on the host, and never printed. Logs go to COORD_LOGS
+# agentsessionsd-model Secret with no file on the host, and never printed; the daemon sends it in
+# Authorization, so AGENTSUITE_MODEL_AUTH_HEADER (which up.sh honors) must be unset or Authorization.
+# Logs go to COORD_LOGS
 # (default ${WORK}/coordinator-logs), one file per step, through a filter that redacts tokens.
 set -euo pipefail
 DEMO="$(cd "$(dirname "$0")" && pwd)"
@@ -133,6 +135,12 @@ setup() {
 	for v in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH; do
 		[[ -z "$(unfilled "${!v:-}")" ]] || fail "${v} contains $(unfilled "${!v:-}"), a placeholder of deploy/coordinator-agentsessionsd.yaml"
 	done
+	# The key is a managed identity's Entra token, which Azure OpenAI takes as a bearer token in
+	# Authorization; the daemon is rendered with that header, so refuse another one (up.sh's api-key).
+	case "${AGENTSUITE_MODEL_AUTH_HEADER:-Authorization}" in
+	Authorization) ;;
+	*) fail "AGENTSUITE_MODEL_AUTH_HEADER names a header other than Authorization; this demo sends the managed identity's token in Authorization, so unset it" ;;
+	esac
 	# Before the first cluster change: the manifest renders with no placeholder left.
 	[[ -z "$(unfilled "$(render_manifest image 1 c w r i m u p)")" ]] ||
 		fail "deploy/coordinator-agentsessionsd.yaml holds placeholders this script does not fill: $(unfilled "$(render_manifest image 1 c w r i m u p)")"
@@ -498,6 +506,13 @@ EOF
 kubectl ate get actors -a agentsuite-writer && kubectl ate get actors -a agentsuite-reviewer
 EOF
 	[[ "${SHOWN}" == *"${CHILD}"*"${wtemplate}"* && "${SHOWN}" == *"${rtemplate}"* ]] || fail "the child sessions' actors are not from the workers' templates"
+	# Chapter 8 asks whether the invoking host should suspend a child after its one turn: check that
+	# nothing does on this run, so the question still stands when it is recorded.
+	local row running=""
+	while IFS= read -r row; do
+		if [[ "${row}" == *"${CHILD}"*"${wtemplate}"*ACTOR_STATE_RUNNING* ]]; then running=1; fi
+	done <<<"${SHOWN}"
+	[[ -n "${running}" ]] || fail "the writer child's actor is not running after its turn; revisit chapter 8's suspend question"
 
 	# ---------------------------------------------------------------------------------------------
 	chapter 6 "Delegation, denied" "The same request in a new session; this time the operator denies the reviewer call"
@@ -549,6 +564,7 @@ AgentSuite: maxConcurrent bounds the declaring agent's calls; across runtime rep
 AgentSessions: agent-to-agent calls are a host tool call that creates a child session; should there be a first-class primitive?
 AgentSessions: CreateSession takes no idempotency key, so recovery after a crash mid-call could create a second child.
 AgentSessions: the HarnessRegistry does not take substrate placements yet, so the three harnesses are daemon flags.
+AgentSessions: a child session's micro-VM keeps running after its one turn; should the invoking host suspend it?
 substrate: is a template's golden snapshot usable from another atespace? Here each agent's template has its own." 16
 	sleep $((READ * 3))
 	log "DEMO COMPLETE in $((SECONDS - SHOW_START)) s"

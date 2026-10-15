@@ -216,8 +216,8 @@ collect() {
 	scan="$(token_scan "${OUT}/logs" "${OUT}/scripts" "${OUT}/source.txt")"
 	# A JWT in the MP4's bytes is its prefix and at least 8 more base64url characters; the bare 3-byte
 	# prefix also turns up by chance in compressed video, so it is counted but is not a finding.
-	mp4_hits="$(LC_ALL=C grep -a -o -E "ey""J[A-Za-z0-9_-]{8,}" "${mp4}" | wc -l | tr -d ' ')"
-	mp4_prefix="$(LC_ALL=C grep -a -o "ey""J" "${mp4}" | wc -l | tr -d ' ')"
+	mp4_hits="$({ LC_ALL=C grep -a -o -E "ey""J[A-Za-z0-9_-]{8,}" "${mp4}" || true; } | wc -l | tr -d ' ')"
+	mp4_prefix="$({ LC_ALL=C grep -a -o "ey""J" "${mp4}" || true; } | wc -l | tr -d ' ')"
 	local max_rows max_trace max_caption
 	# Each screen's row count is logged with its limit: 5, or 7 on the trace screen (run -n 7).
 	max_rows="$(sed -n 's/^(on screen: [0-9]* rows, \([0-9]*\) on this screen, limit 5)$/\1/p' "${OUT}"/logs/ch-*.log | sort -n | tail -1)"

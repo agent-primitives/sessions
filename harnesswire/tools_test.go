@@ -114,6 +114,25 @@ func TestModelCallCarriesToolsAcrossWire(t *testing.T) {
 	}
 }
 
+// The provider's usage crosses Harness.Connect with the completion, so a remote harness can report
+// it; a completion with no usage reaches the harness as the zero Usage.
+func TestModelResultCarriesUsageAcrossWire(t *testing.T) {
+	for _, usage := range []api.Usage{
+		{Model: "m", InputTokens: 12, OutputTokens: 5, ReasoningTokens: 2},
+		{},
+	} {
+		served := api.ModelResponse{Message: *api.TextMessage("assistant", "hi"), Usage: usage}
+		var got api.ModelResponse
+		h := dial(t, harnesswire.NewServer(modelHarness{req: api.ModelRequest{Model: "m"}, got: &got}))
+		if err := h.Run(t.Context(), &api.Start{ExecutionID: "e1"}, &hostSink{resp: served}); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if got.Usage != usage {
+			t.Fatalf("harness was served usage %+v, want %+v", got.Usage, usage)
+		}
+	}
+}
+
 // A harness-side tool choice this build cannot encode fails the call rather than going out as the
 // provider default.
 func TestModelCallRejectsUnknownToolChoiceFromHarness(t *testing.T) {

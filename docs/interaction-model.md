@@ -155,8 +155,8 @@ use `Suspend` to retry the recorded route's cold transition when needed.
 All Session replies use the same durable append-transaction projection, read atomically with
 metadata and `last_seq`; no query decodes journal events. An owned unanswered request in the latest
 first-seen execution exposes `pending_approval` and `EXEC_AWAITING`. Requests/decisions match
-execution ID, call ID and request sequence. A child's FORK excludes executions first seen before
-that marker, including their later calls/requests; a new child execution can own a request.
+execution ID, call ID and request sequence. A child's FORK excludes calls whose TOOL_CALL precedes
+that marker; a later call in an inherited execution can own a request.
 
 Malformed approval-bearing history withholds references even for a valid latest request, matching
 strict command inspection; malformed nongated history does not. Undecodable v2 journals are isolated

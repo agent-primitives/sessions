@@ -45,7 +45,7 @@ WORK_REL=_local/demo-work
 LOGS="${ROOT}/${WORK_REL}/demo-logs"
 MODEL_VARS=(AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH AZURE_MI_CLIENT_ID)
 # The files the recording runs or shows, hashed at record time (source.sha256) and copied by collect.
-DEMO_FILES=(driver.sh present.awk demo.tape record.sh chapters.py splice.py build.mmd run.mmd bat.conf
+DEMO_FILES=(driver.sh screen.sh present.awk demo.tape record.sh chapters.py splice.py build.mmd run.mmd bat.conf
 	split-view.py trace-turn.sh trace-hop.py image-files.sh wait-golden.sh smoke-microvm.sh Dockerfile.tools diagrams.md)
 
 load_env() {

@@ -30,6 +30,7 @@ func delegationPrompt(targets []string) string {
 You can delegate to these agents: %s.
 To delegate, reply with only one line of JSON and nothing else: {"invoke": "<agent>", "task": "<the complete task for that agent>"}
 The next message gives you that agent's reply, or says why the delegation did not run.
+If a delegation did not run, do not do that agent's task yourself: continue without it and say in your final answer which task was not done and why.
 Delegate one task at a time. When you have what you need, reply with the final answer as plain text, not JSON.`, strings.Join(targets, ", "))
 }
 

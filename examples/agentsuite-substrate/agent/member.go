@@ -69,11 +69,12 @@ func Digest(instructions string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// Inject returns the host's execution-config hook for the shared harness: for a turn on a member's
-// harness (named by its agent id) it adds that member under MemberConfigKey to the config, which
-// must be empty or a JSON object, so the member is journaled in the turn's EXECUTION_START. A config
-// that already names a member is refused: only the host chooses it. Other harnesses' configs pass
-// through unchanged.
+// Inject returns the host's execution-config hook for the shared harness: for every Exec on a
+// member's harness (named by its agent id), with or without inputs, it adds that member under
+// MemberConfigKey to the config, which must be empty or a JSON object, so the member is journaled in
+// the turn's EXECUTION_START. A config that already names a member is refused: only the host chooses
+// it. Other harnesses' configs pass through unchanged. The template pins only the member's
+// instructions digest; its model, invokes and approval are the host's configuration.
 func Inject(members map[string]Member) func(harness string, config []byte) ([]byte, error) {
 	return func(harness string, config []byte) ([]byte, error) {
 		m, ok := members[harness]

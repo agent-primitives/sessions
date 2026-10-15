@@ -76,7 +76,7 @@ type Option func(*options)
 type options struct {
 	substrate SubstrateControlFunc
 	executors ToolExecutorFunc
-	// execConfig, when set, rewrites each new turn's execution config (WithExecConfig).
+	// execConfig, when set, rewrites every Exec's execution config (WithExecConfig).
 	execConfig ExecConfigFunc
 	// output receives command-line errors and the usage; nil is os.Stderr. Tests set it.
 	output io.Writer
@@ -98,10 +98,11 @@ func WithToolExecutors(f ToolExecutorFunc) Option {
 }
 
 // ExecConfigFunc rewrites the execution config of a turn that starts on the named harness: the
-// daemon calls it for every Sessions Exec that carries inputs, before the turn runs, so what it
+// daemon calls it for every Sessions Exec, with or without inputs, before the turn runs, so what it
 // returns is journaled in the turn's EXECUTION_START and reaches the harness in Start. An error
-// refuses the Exec with INVALID_ARGUMENT. Input-less recovery Execs, which run a recorded turn with
-// its recorded config, are not passed to it.
+// refuses the Exec with INVALID_ARGUMENT. An input-less Exec is a new turn unless the session has an
+// unfinished approval, so it is passed too; the approval recovery path resumes the recorded turn
+// with its recorded config and ignores the rewritten one.
 type ExecConfigFunc func(harness string, config []byte) ([]byte, error)
 
 // WithExecConfig installs f. It lets a host hand a harness per-harness settings at session start
@@ -137,9 +138,6 @@ func (s *execConfigStream) RecvMsg(m any) error {
 		return nil
 	}
 	s.seen = true
-	if len(req.GetInputs()) == 0 {
-		return nil
-	}
 	name, err := s.harnessOf(req)
 	if err != nil {
 		return err

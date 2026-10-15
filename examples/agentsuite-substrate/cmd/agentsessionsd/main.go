@@ -34,8 +34,8 @@ const InvokesEnv = "AGENTSUITE_INVOKES"
 
 // MembersEnv names the environment variable that serves the suite's agents from one shared harness
 // template: base64 of a JSON object mapping each agent id (its harness name) to its agent.Member,
-// as emit members prints it. The daemon adds the member to every new turn's execution config on
-// that harness, where the shared harness reads it.
+// as emit members prints it. The daemon adds the member to the execution config of every Exec on
+// that harness, with or without inputs, where the shared harness reads it.
 const MembersEnv = "AGENTSUITE_MEMBERS_JSON"
 
 func main() {

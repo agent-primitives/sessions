@@ -67,15 +67,15 @@ kaimahi's.
 
 | ActorTemplate field | Value |
 |---|---|
-| `metadata.name` | `<suite>-<agent>-<hash8>`, where `hash8` is the first 8 hex of `sha256(image digest + "\n" + binding digest)` (kmx's formula), with `"\nmemory"` appended for `-tier memory`. The binding digest covers the served model and the approval edges. The name is a DNS label of at most 63 characters, and only suite and agent are truncated. |
+| `metadata.name` | `<suite>-<agent>-<hash8>`, where `hash8` is the first 8 hex of `sha256(rendererVersion + "\n" + image + "\n" + binding digest)` (kmx's formula), `rendererVersion` is `agentsessions-poc.actortemplate/v2` and `image` the full digest-pinned reference (the same digest under another registry is another template), with `"\nmemory"` appended for `-tier memory`. The binding digest covers the served model, the resources and the approval edges. The name is a DNS label of at most 63 characters, and only suite and agent are truncated. |
 | `metadata.atespace` | `binding.atespace` |
-| `containers[0].image` | The harness image, which must be digest-pinned. |
+| `containers[0].image` | The harness image: an OCI reference of at most 512 bytes, pinned by a sha256 digest, without a tag. |
 | `containers[0].env` | `HARNESS_ADDR=:80`, `HARNESS_READYZ=:8081`, `AGENT_DIR=/agent`, `AGENTSUITE_APPROVAL` (the binding's gated targets for this agent) and `AGENTSUITE_MEMORY=ram` for `-tier memory`. No model override: the harness requests the model its agent pins, and refuses to start if the retired `AGENTSUITE_MODEL` is set. No model credentials: they stay with the host. |
 | `containers[0].wakeupProbe` | `GET /readyz` on 8081 |
 | `containers[0].securityContext` | `capabilities: {}`, adding none |
-| `containers[0].resources` | `binding.resources` |
+| `resources` | `binding.resources` (`cpu` and `memory`, both required), on the template, not the container: substrate books these limits against worker capacity and sizes the sandbox by them (a micro-VM gets that many vCPUs, rounded up, and that much RAM less the VMM reserve, 128 MiB by default; a gVisor sandbox gets them as its cgroup limits), per `cmd/ateapi/internal/controlapi/workflow_resume.go` `actorResourceLimits` and `internal/sizing/sizing.go` at the pinned substrate. |
 | `sandboxConfig` | `binding.sandbox`: `SANDBOX_CLASS_MICROVM`, `microvm` (or `SANDBOX_CLASS_GVISOR`, `gvisor-default`) |
-| `snapshotConfig` | `preferredFidelity` from `binding.snapshot.fidelity`. `storageLocation` is `binding.snapshot.storageLocation` + `<name>/`. |
+| `snapshotConfig` | `preferredFidelity` from `binding.snapshot.fidelity`; `-tier memory` refuses any fidelity but `MEMORY`, since substrate cold-boots `ROOTFS` and `VOLUMES` snapshots without the RAM that tier keeps its conversation in. `storageLocation` is `binding.snapshot.storageLocation` + `<name>/`. |
 | `workerSelector` | `binding.workerSelector` |
 
 The harness registration is a `HarnessRegistration` with `spec.substrate {atespace, template}`,
@@ -311,24 +311,34 @@ exact model, the binding says where it is served and where sessions are placed, 
 refuses a binding whose `model.name` is not exactly the agent's pinned model (no case folding,
 prefix or version matching). A different model is a new suite version and a new evaluation
 (`suites/coordinator-workers-v2`). The shape follows kmx's `AgentSessionsBinding`
-(kaimahi `internal/kmx/runtime/agentsessions_binding.go` on branch `aramase/f/kmx_agentsessions_binding`,
-compared at `6610c37`): the same `apiVersion`, `kind` and fields, the same required `model` (`name`,
-`provider: openai`, optional `baseURL`, `secretRef`), the same cross-field and `snapshot.storageLocation`
-refusals (`ROOTFS` only on `microvm`; an object-storage URI with no credentials, query, fragment, or
-empty, `.` or `..` segments), the same template name formula (fed this renderer's own version, so
-the names differ; see the table), and the same digest (JCS of the
-binding's fields, with an empty `workerSelector` the same as an omitted one). The digest was
-cross-checked by running kmx's `AgentSessionsBindingDigest` at `6610c37` on `binding-microvm.json` and
-`binding.json`, and the formula by running kmx's `TemplateName`; `render_test.go` pins both results.
-Every difference that remains:
+(kaimahi `internal/kmx/runtime/agentsessions_binding.go` and `internal/kmx/agentsessions/render.go`
+on branch `aramase/f/kmx_agentsessions_binding`, compared at `fc03a7c`, `render.KmxCommit`): the same
+`apiVersion`, `kind` and fields, the same required `model` (`name`, `provider: openai`, optional
+`baseURL`, `secretRef`) and required `resources` (`cpu` and `memory`, each a positive quantity of at
+most 32 bytes within substrate's 999.999 cores and 2^63-1 bytes, parsed by apimachinery's
+`resource.ParseQuantity`, as kmx and substrate parse them), rendered as the ActorTemplate's
+`resources` as kmx renders them, the same `workerSelector` rule (at most ten labels, qualified names,
+label values), the same cross-field and `snapshot.storageLocation` refusals (`ROOTFS` only on
+`microvm`; an object-storage URI of at most 1024-65 bytes with no credentials, query, fragment or
+`\`, and no empty segments or segments of only `.` and spaces), the same object name, Secret key,
+base URL and harness image rules, the same template name formula (fed this renderer's own version, so
+the names differ; see the table), and the same digest (JCS of the binding's fields, with an empty
+`workerSelector` the same as an omitted one). The results were checked by running kmx's code at
+`fc03a7c` on the same inputs: `AgentSessionsBindingDigest` on `binding-microvm.json` and
+`binding.json`, `TemplateName` on a pinned image and its mirror, and `ValidateAgentSessionsBinding`
+on the boundary values `render_test.go` uses (959 and 960 storage bytes, quantity and label limits);
+`render_test.go` pins the digests and names. Every difference that remains:
 
 | Difference | Why |
 |---|---|
 | `model.path` (PoC only) | An Azure OpenAI deployment's completions path carries its `api-version` query, and kmx's `model.baseURL` refuses a query. `TODO(spike): does Azure's v1 endpoint (<resource>/openai/v1, model in the body) work for this deployment with the managed-identity token, so kmx's shape needs no path?` |
 | `approval.invokes` (PoC only) | kmx has no approval field, and AgentSuite has none on an invokes edge. The PoC treats which delegation needs an operator as per-environment policy. kmx's strict parser refuses both PoC-only fields. |
 | `approval.invokes` is sorted before the digest | It is a set; kmx has no such field to order. |
-| Template names differ from kmx's for the same image and binding | The formula is kmx's, `sha256(rendererVersion + "\n" + imageDigest + "\n" + bindingDigest)`, but the renderer version is the PoC's own (`agentsessions-poc.actortemplate/v1`, kmx's is `kmx.agentsessions-actortemplate/v1`): this renderer's ActorTemplate is not kmx's (its container env sets `AGENT_DIR` and `AGENTSUITE_APPROVAL`; kmx's sets `HARNESS_KIND` and `HARNESS_MODEL`), and kmx folds the version in so that two mappings never share a name. The memory tier also appends `"\nmemory"`; kmx has no memory tier. |
-| JSON only | kmx reads YAML or JSON, refuses anchors, aliases and credential-shaped values, and checks Kubernetes quantities and label syntax; the PoC decodes strict JSON and checks names, URLs, the storage location and the secret key shape, not quantities or labels (that would add `k8s.io/apimachinery` to the example module). |
+| Template names differ from kmx's for the same image and binding | The formula is kmx's, `sha256(rendererVersion + "\n" + image + "\n" + bindingDigest)` over the full image reference, but the renderer version is the PoC's own (`agentsessions-poc.actortemplate/v2`, kmx's is `kmx.agentsessions-actortemplate/v2`): this renderer's ActorTemplate is not kmx's (its container env sets `AGENT_DIR` and `AGENTSUITE_APPROVAL`; kmx's sets `HARNESS_KIND` and `HARNESS_MODEL`), and kmx folds the version in so that two mappings never share a name. The memory tier also appends `"\nmemory"`; kmx has no memory tier. |
+| The memory tier refuses a `ROOTFS` or `VOLUMES` binding | kmx renders one stateless chat member, for which any fidelity is valid. The PoC's `-tier memory` keeps the conversation only in RAM, which substrate's `ROOTFS` and `VOLUMES` snapshots do not carry, so it requires `MEMORY`. |
+| The registration names the agent, not `chat` | kmx registers its member with `descriptor_id: chat` (the built-in chat harness in harnessnode); the PoC's harness serves the suite's agent, so `descriptor_id` is the agent id. |
+| Render output, and the substrate revision it targets | kmx lift is plan-only: it prints one JSON document (the ActorTemplate in proto field names, its `templateDigest`, the canonical registration and its `registrationSpecDigest`, and the host model references) checked against substrate `f4f7b806` (`SubstrateAPICommit`). The PoC writes `actortemplate.json` (protojson of the pinned substrate `96dffb2`'s `ateapipb.ActorTemplate`), the registration, the daemon flag and the model flags, and `up.sh`/`coordinator.sh` apply them. Both templates set the same fields; their values differ only in the name and the container env, as above. |
+| JSON only, no credential-shape scan | kmx reads YAML or JSON, refuses anchors, aliases, invalid UTF-8 and credential-shaped values in every field; the PoC decodes strict JSON (which replaces invalid UTF-8) and keeps credentials out by field shape: names, URLs, the model path, the storage location and the Secret key are checked, and errors never repeat a URL or location. |
 | One binding per agent atespace | kmx lift renders one chat member into `binding.atespace`. The coordinator's three agents share one daemon, whose session actors are named by session uid, so `coordinator.sh setup` writes one copy of the binding per agent with `atespace` set to `agentsuite-<agent>` (three digests). |
 | The binding's endpoint is filled in at setup | `binding-coordinator.json` names `https://example.openai.azure.com`; `setup` writes this environment's copy with the operator's `AGENTSUITE_MODEL*` values, so no Azure resource name is committed. |
 | No eval evidence | kmx eval takes one chat member and records the binding digest in its evidence, and kmx lift requires that evidence. A suite with invokes edges has no kmx eval path yet, so this PoC renders without evidence. |
@@ -410,8 +420,10 @@ This section describes the v3 recording. Its real-model run does not run on this
 `driver.sh setup` stops at its first `up.sh`, whose `emit check-binding` refuses the binding before
 any cluster change, because `suites/kaimahi-minimal` pins `example-model` and the Azure deployment
 serves `gpt-5.4-mini`, and the render no longer overrides the model. It runs again once
-kaimahi-minimal has a version pinning the served model. The current recording is the coordinator
-demo (`demo/coordinator.sh`, `demo/coordinator-record.sh`).
+kaimahi-minimal has a version pinning the served model. Its `show` also predates the v2 renderer:
+it checks `actortemplate.json` by line number and captions the binding's resources as container
+limits, where the template now carries them as its own `resources`. The current recording is the
+coordinator demo (`demo/coordinator.sh`, `demo/coordinator-record.sh`).
 
 `demo/driver.sh` is a short demo for a recording: how kaimahi's minimal suite (agent `writer`)
 becomes a substrate ActorTemplate, how one turn flows, and the session lifecycle on micro-VMs, with a

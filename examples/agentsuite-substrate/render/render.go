@@ -4,9 +4,10 @@
 //
 // The field mapping follows the AgentSuite to ActorTemplate design (v0): the template name is
 // content-addressed, <suite>-<agent>-<hash8> with hash8 the first 8 hex of
-// sha256(image digest + "\n" + binding digest), so the same image under another binding is another
-// template; the harness speaks harnesswire on port 80 with a /readyz wakeup probe on 8081; the
-// sandbox, snapshot, resources, worker selector and approval gates come from the binding. The
+// sha256(renderer version + "\n" + image reference + "\n" + binding digest), so the same image under
+// another binding, registry or renderer is another template; the harness speaks harnesswire on port
+// 80 with a /readyz wakeup probe on 8081; the sandbox, snapshot, template resources, worker selector
+// and approval gates come from the binding. The
 // harness requests the model its agent pins, and the binding must serve exactly that model. Model
 // credentials are host configuration and never rendered.
 package render
@@ -23,6 +24,7 @@ import (
 	"strings"
 
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/distribution/reference"
 	"github.com/kaimahi-agents/kaimahi/agentsuite"
 
 	v1 "github.com/aramase/agentsessions/api/genpb"
@@ -141,10 +143,30 @@ func readStrict(path string, out any) error {
 }
 
 var (
-	dnsLabel    = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
-	pinnedImage = regexp.MustCompile(`^[^@\s]+@(sha256:[0-9a-f]{64})$`)
-	notLabel    = regexp.MustCompile(`[^a-z0-9-]+`)
+	dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+	notLabel = regexp.MustCompile(`[^a-z0-9-]+`)
 )
+
+// maxImageReference is substrate's Container.image bound.
+const maxImageReference = 512
+
+// checkPinnedImage applies kmx's harness image rule (HarnessImageDigest): a reference of at most
+// substrate's 512 bytes that parses as an OCI reference pinned by a sha256 digest, without a tag.
+func checkPinnedImage(image string) error {
+	err := fmt.Errorf("image %q: substrate requires a digest-pinned reference (name@sha256:<64 hex>) without a tag, of at most %d bytes", image, maxImageReference)
+	if image == "" || len(image) > maxImageReference || strings.TrimSpace(image) != image {
+		return err
+	}
+	ref, perr := reference.Parse(image)
+	if perr != nil {
+		return err
+	}
+	digested, ok := ref.(reference.Canonical)
+	if _, tagged := ref.(reference.Tagged); !ok || tagged || digested.Digest().Algorithm() != "sha256" || !agentsuite.IsValidDigest(digested.Digest().String()) {
+		return err
+	}
+	return nil
+}
 
 // Options are what a render sets beyond the composition, image and binding.
 type Options struct {
@@ -159,23 +181,27 @@ type Options struct {
 
 // RendererVersion identifies this PoC's binding-to-ActorTemplate mapping and is part of hash8, as
 // kmx's RendererVersion is part of its own: a mapping change names a new template instead of reusing
-// a name whose rendered spec differs. It is not kmx's value, because this renderer's template is not
-// kmx's (its env sets AGENT_DIR, AGENTSUITE_APPROVAL and the memory tier; kmx's sets HARNESS_KIND
-// and HARNESS_MODEL), so the PoC and kmx never give one name two specs.
-const RendererVersion = "agentsessions-poc.actortemplate/v1"
+// a name whose rendered spec differs. v2 hashes the full image reference and sizes the actor from
+// the template's resources (v1 hashed the image digest and set container limits). It is not kmx's
+// value, because this renderer's template is not kmx's (its env sets AGENT_DIR, AGENTSUITE_APPROVAL
+// and the memory tier; kmx's sets HARNESS_KIND and HARNESS_MODEL), so the PoC and kmx never give
+// one name two specs.
+const RendererVersion = "agentsessions-poc.actortemplate/v2"
 
 // TemplateName is <suite>-<agent>-<hash8>: hash8 is the first 8 hex of
-// sha256(RendererVersion + "\n" + imageDigest + "\n" + bindingDigest), kmx's formula, with
-// "\nmemory" appended when o.Memory is set (the template then selects the memory tier in its env;
-// kmx has no memory tier). The binding digest covers the served model and the approval gates, so
-// changing either names another template. The result is a DNS label of at most 63 characters; suite
-// and agent are lowercased, sanitized and truncated to fit, never hash8.
-func TemplateName(suite, agent, imageDigest, bindingDigest string, o Options) string {
-	return templateName(RendererVersion, suite, agent, imageDigest, bindingDigest, o)
+// sha256(RendererVersion + "\n" + image + "\n" + bindingDigest), kmx's formula, where image is the
+// full digest-pinned reference the template runs (the same digest under another registry or
+// repository is another template), with "\nmemory" appended when o.Memory is set (the template then
+// selects the memory tier in its env; kmx has no memory tier). The binding digest covers the served
+// model, resources and the approval gates, so changing any of them names another template. The
+// result is a DNS label of at most 63 characters; suite and agent are lowercased, sanitized and
+// truncated to fit, never hash8.
+func TemplateName(suite, agent, image, bindingDigest string, o Options) string {
+	return templateName(RendererVersion, suite, agent, image, bindingDigest, o)
 }
 
-func templateName(renderer, suite, agent, imageDigest, bindingDigest string, o Options) string {
-	content := renderer + "\n" + imageDigest + "\n" + bindingDigest
+func templateName(renderer, suite, agent, image, bindingDigest string, o Options) string {
+	content := renderer + "\n" + image + "\n" + bindingDigest
 	if o.Memory {
 		content += "\nmemory"
 	}
@@ -234,7 +260,8 @@ func Agents(dir string) ([]agentsuite.Agent, error) {
 
 // Render maps a composition, its digest-pinned harness image and a binding onto an ActorTemplate and
 // a harness registration. The harness registration's name is the agent id, or <agent>-memory for the
-// memory tier (AGENTSUITE_MEMORY=ram, folded into the template name). Render refuses a binding that
+// memory tier (AGENTSUITE_MEMORY=ram, folded into the template name), which needs the binding's
+// MEMORY snapshot fidelity. Render refuses a binding that
 // serves a model other than the one the agent pins (ErrModelMismatch). The binding's approval edges
 // whose caller is this agent are set in the template's env (AGENTSUITE_APPROVAL); each must be one
 // of the agent's invokes edges.
@@ -255,12 +282,17 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 	if len(c.Agent.Invokes) > 0 && o.Memory {
 		return nil, fmt.Errorf("agent %s has invokes edges: delegations need the approval-capable stateless tier", c.Agent.ID)
 	}
+	// The memory tier keeps the conversation only in RAM and is registered as
+	// REQUIRES_MEMORY_SNAPSHOT; substrate cold-boots a ROOTFS or VOLUMES snapshot on resume, without
+	// process memory, so a resumed or forked session would come back empty with nothing to say so.
+	if o.Memory && b.Snapshot.Fidelity != "MEMORY" {
+		return nil, fmt.Errorf("the memory tier needs snapshot.fidelity MEMORY, the binding gives %s: substrate cold-boots that fidelity on resume, without the conversation the harness keeps in RAM", b.Snapshot.Fidelity)
+	}
 	if o.ActorAtespace != "" && !dnsLabel.MatchString(o.ActorAtespace) {
 		return nil, fmt.Errorf("actor atespace %q is not a DNS label", o.ActorAtespace)
 	}
-	m := pinnedImage.FindStringSubmatch(image)
-	if m == nil {
-		return nil, fmt.Errorf("image %q: substrate requires a digest-pinned reference (name@sha256:<64 hex>)", image)
+	if err := checkPinnedImage(image); err != nil {
+		return nil, err
 	}
 	class, err := sandboxClass(b.Sandbox.Class)
 	if err != nil {
@@ -270,7 +302,7 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 	if err != nil {
 		return nil, err
 	}
-	name := TemplateName(c.Suite, c.Agent.ID, m[1], b.Digest(), o)
+	name := TemplateName(c.Suite, c.Agent.ID, image, b.Digest(), o)
 	container := &atepb.Container{
 		Name:  "harness",
 		Image: image,
@@ -297,16 +329,6 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 	if o.ActorAtespace != "" {
 		tier += ",actors=" + o.ActorAtespace
 	}
-	var limits []*atepb.Limits
-	if b.Resources.CPU != "" {
-		limits = append(limits, &atepb.Limits{Name: "cpu", Quantity: b.Resources.CPU})
-	}
-	if b.Resources.Memory != "" {
-		limits = append(limits, &atepb.Limits{Name: "memory", Quantity: b.Resources.Memory})
-	}
-	if len(limits) > 0 {
-		container.Resources = &atepb.Resources{Limits: limits}
-	}
 	tmpl := &atepb.ActorTemplate{
 		Metadata:   &atepb.ResourceMetadata{Atespace: b.Atespace, Name: name},
 		Containers: []*atepb.Container{container},
@@ -315,6 +337,13 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 			StorageLocation:   strings.TrimSuffix(b.Snapshot.StorageLocation, "/") + "/" + name + "/",
 		},
 		SandboxConfig: &atepb.SandboxConfig{SandboxClass: class, ConfigName: b.Sandbox.ConfigName},
+		// The actor's size, as kmx renders it: substrate books these limits against worker capacity
+		// and sizes the sandbox by them (a micro-VM's vCPUs, and its RAM less the VMM reserve). No
+		// container limits: inside a micro-VM they would have to fit under that reduced guest RAM.
+		Resources: &atepb.Resources{Limits: []*atepb.Limits{
+			{Name: "cpu", Quantity: b.Resources.CPU},
+			{Name: "memory", Quantity: b.Resources.Memory},
+		}},
 	}
 	if len(b.WorkerSelector.MatchLabels) > 0 {
 		tmpl.WorkerSelector = &atepb.Selector{MatchLabels: b.WorkerSelector.MatchLabels}

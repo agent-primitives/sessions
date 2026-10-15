@@ -22,38 +22,50 @@ import (
 
 const digestA = "sha256:" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+const imageA = "localhost:5001/agentsuite-harness@" + digestA
+
 func TestTemplateNameIsContentAddressed(t *testing.T) {
-	base := TemplateName("support-desk", "triage", digestA, "sha256:b", Options{})
+	base := TemplateName("support-desk", "triage", imageA, "sha256:b", Options{})
 	if !strings.HasPrefix(base, "support-desk-triage-") || len(base) != len("support-desk-triage-")+8 {
 		t.Fatalf("name = %q", base)
 	}
-	if TemplateName("support-desk", "triage", digestA, "sha256:b", Options{}) != base {
+	if TemplateName("support-desk", "triage", imageA, "sha256:b", Options{}) != base {
 		t.Fatal("same inputs must give the same name")
 	}
-	if TemplateName("support-desk", "triage", digestA, "sha256:c", Options{}) == base {
+	if TemplateName("support-desk", "triage", imageA, "sha256:c", Options{}) == base {
 		t.Fatal("another binding must give another template")
 	}
-	if TemplateName("support-desk", "triage", "sha256:"+strings.Repeat("c", 64), "sha256:b", Options{}) == base {
+	if TemplateName("support-desk", "triage", "localhost:5001/agentsuite-harness@sha256:"+strings.Repeat("c", 64), "sha256:b", Options{}) == base {
 		t.Fatal("another image must give another template")
 	}
-	// The formula is kmx's: sha256(renderer version + "\n" + image digest + "\n" + binding digest).
-	sum := sha256.Sum256([]byte(RendererVersion + "\n" + digestA + "\n" + "sha256:b"))
+	// The image reference, not only its digest, is a spec input: a mirror of the same bits is another
+	// template, so a render never reuses a template that pulls from the old registry.
+	if TemplateName("support-desk", "triage", "mirror.example/agentsuite-harness@"+digestA, "sha256:b", Options{}) == base {
+		t.Fatal("the same digest under another registry must give another template")
+	}
+	// The formula is kmx's: sha256(renderer version + "\n" + image reference + "\n" + binding digest).
+	sum := sha256.Sum256([]byte(RendererVersion + "\n" + imageA + "\n" + "sha256:b"))
 	if want := "support-desk-triage-" + hex.EncodeToString(sum[:])[:8]; base != want {
 		t.Fatalf("name = %q, want %q", base, want)
 	}
-	if templateName("agentsessions-poc.actortemplate/v2", "support-desk", "triage", digestA, "sha256:b", Options{}) == base {
+	if templateName("agentsessions-poc.actortemplate/v1", "support-desk", "triage", imageA, "sha256:b", Options{}) == base {
 		t.Fatal("another renderer version must give another template")
 	}
-	// Given kmx's renderer version, the formula gives the name kmx's TemplateName gives: this value
-	// came from kaimahi internal/kmx/agentsessions.TemplateName at 6610c37 on these inputs.
+	// Given kmx's renderer version, the formula gives the names kmx's TemplateName gives: these
+	// values came from kaimahi internal/kmx/agentsessions.TemplateName at KmxCommit on these inputs.
 	digestB := "sha256:" + strings.Repeat("b", 64)
-	if got := templateName("kmx.agentsessions-actortemplate/v1", "support-desk", "triage", digestA, digestB, Options{}); got != "support-desk-triage-03ac8c2a" {
-		t.Fatalf("with kmx's renderer version: name = %q, want kmx's support-desk-triage-03ac8c2a", got)
+	for image, want := range map[string]string{
+		imageA: "support-desk-triage-5b6c8065",
+		"mirror.example/agentsuite-harness@" + digestA: "support-desk-triage-539aba30",
+	} {
+		if got := templateName("kmx.agentsessions-actortemplate/v2", "support-desk", "triage", image, digestB, Options{}); got != want {
+			t.Errorf("with kmx's renderer version, image %s: name = %q, want kmx's %s", image, got, want)
+		}
 	}
-	if TemplateName("support-desk", "triage", digestA, "sha256:b", Options{Memory: true}) == base {
+	if TemplateName("support-desk", "triage", imageA, "sha256:b", Options{Memory: true}) == base {
 		t.Fatal("the memory tier must give another template")
 	}
-	long := TemplateName(strings.Repeat("Suite_", 20), strings.Repeat("agent.", 20), digestA, "sha256:b", Options{})
+	long := TemplateName(strings.Repeat("Suite_", 20), strings.Repeat("agent.", 20), imageA, "sha256:b", Options{})
 	if len(long) > 63 || !dnsLabel.MatchString(long) || long[len(long)-8:] != base[len(base)-8:] {
 		t.Fatalf("long name = %q (%d chars): want a DNS label of at most 63 that keeps hash8", long, len(long))
 	}
@@ -68,15 +80,27 @@ func TestRenderMapsTheComposition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	image := "localhost:5001/agentsuite-harness@" + digestA
+	image := imageA
 	out, err := Render(comp, image, b, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	tmpl := out.Template
-	name := TemplateName("support-desk", "triage", digestA, b.Digest(), Options{})
+	name := TemplateName("support-desk", "triage", image, b.Digest(), Options{})
 	if tmpl.GetMetadata().GetName() != name || tmpl.GetMetadata().GetAtespace() != "agentsuite-demo" {
 		t.Fatalf("metadata = %v, want agentsuite-demo/%s", tmpl.GetMetadata(), name)
+	}
+	// The binding's resources size the actor: template-level limits, as kmx renders them, which
+	// substrate books and sizes the sandbox by; the container sets none.
+	limits := map[string]string{}
+	for _, l := range tmpl.GetResources().GetLimits() {
+		limits[l.GetName()] = l.GetQuantity()
+	}
+	if len(limits) != 2 || limits["cpu"] != b.Resources.CPU || limits["memory"] != b.Resources.Memory {
+		t.Fatalf("template resources = %v, want the binding's cpu %s and memory %s", tmpl.GetResources(), b.Resources.CPU, b.Resources.Memory)
+	}
+	if r := tmpl.GetContainers()[0].GetResources(); r != nil {
+		t.Fatalf("container resources = %v, want none", r)
 	}
 	c := tmpl.GetContainers()[0]
 	if c.GetImage() != image || c.GetWakeupProbe().GetHttpGet().GetPort() != ReadyzPort || c.GetWakeupProbe().GetHttpGet().GetPath() != "/readyz" {
@@ -120,6 +144,18 @@ func TestRenderMapsTheComposition(t *testing.T) {
 	}
 	if _, err := Render(comp, "localhost:5001/agentsuite-harness:latest", b, Options{}); err == nil {
 		t.Fatal("a tag-only image must be refused: substrate requires a digest-pinned reference")
+	}
+	long := "localhost:5001/" + strings.Repeat("a", maxImageReference) + "@" + digestA
+	for _, image := range []string{
+		long, // over substrate's 512 bytes
+		"localhost:5001/agentsuite-harness:v1@" + digestA, // a tag beside the digest
+		"localhost:5001/Agentsuite-Harness@" + digestA,    // not a reference: uppercase repository
+		"localhost:5001/agentsuite-harness@sha512:" + strings.Repeat("a", 128),
+		" " + imageA,
+	} {
+		if _, err := Render(comp, image, b, Options{}); err == nil || !strings.Contains(err.Error(), "digest-pinned reference (name@sha256:<64 hex>) without a tag, of at most 512 bytes") {
+			t.Fatalf("image %q: err = %v, want refused as kmx refuses it", image, err)
+		}
 	}
 }
 
@@ -221,8 +257,8 @@ func TestRenderMemoryTier(t *testing.T) {
 	if len(got) != 1 || got[0] != agent.MemoryRAM {
 		t.Fatalf("%s in the template env = %v, want [%s]", agent.MemoryEnv, got, agent.MemoryRAM)
 	}
-	name := TemplateName("support-desk", "triage", digestA, b.Digest(), Options{Memory: true})
-	if name == TemplateName("support-desk", "triage", digestA, b.Digest(), Options{}) {
+	name := TemplateName("support-desk", "triage", image, b.Digest(), Options{Memory: true})
+	if name == TemplateName("support-desk", "triage", image, b.Digest(), Options{}) {
 		t.Fatal("memory and stateless tiers share a template name")
 	}
 	if out.Template.GetMetadata().GetName() != name || out.DaemonFlag != "triage-memory=agentsuite-demo/"+name+",memory" {
@@ -232,6 +268,39 @@ func TestRenderMemoryTier(t *testing.T) {
 	if reg.GetMetadata().GetName() != "triage-memory" || reg.GetSpec().GetDescriptorId() != "triage" ||
 		reg.GetSpec().GetCapabilities().GetResumability() != v1.Resumability_RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT {
 		t.Fatalf("registration = %v", reg)
+	}
+}
+
+// The memory tier keeps the conversation only in RAM, and substrate cold-boots a ROOTFS or VOLUMES
+// snapshot on resume, so the memory tier refuses either fidelity, which the stateless tier (rebuilt
+// from the journal) takes.
+func TestRenderMemoryTierNeedsMemorySnapshots(t *testing.T) {
+	comp, err := Load("../suite", "triage", "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ file, fidelity string }{
+		{"../binding-microvm.json", "ROOTFS"},
+		{"../binding-microvm.json", "VOLUMES"},
+		{"../binding.json", "VOLUMES"},
+	} {
+		t.Run(tc.fidelity+" "+filepath.Base(tc.file), func(t *testing.T) {
+			b, err := LoadBinding(writeBinding(t, tc.file, func(m map[string]any) { m["snapshot"].(map[string]any)["fidelity"] = tc.fidelity }))
+			if err != nil {
+				t.Fatalf("the binding is valid: %v", err)
+			}
+			out, err := Render(comp, imageA, b, Options{Memory: true})
+			if want := "the memory tier needs snapshot.fidelity MEMORY, the binding gives " + tc.fidelity; err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("memory tier: out %v, err = %v, want %q", out, err, want)
+			}
+			out, err = Render(comp, imageA, b, Options{})
+			if err != nil {
+				t.Fatalf("stateless tier: %v", err)
+			}
+			if got, want := out.Template.GetSnapshotConfig().GetPreferredFidelity().String(), "SNAPSHOT_FIDELITY_"+tc.fidelity; got != want {
+				t.Fatalf("stateless tier fidelity = %s, want %s", got, want)
+			}
+		})
 	}
 }
 
@@ -516,6 +585,10 @@ func TestLoadBindingIsStrict(t *testing.T) {
 		{"userinfo in the base URL", func(m map[string]any) { model(m)["baseURL"] = "https://u:" + secretish + "@h.example" }, "model.baseURL: the base URL carries userinfo"},
 		{"a key in the path", func(m map[string]any) { model(m)["path"] = "/chat?api-key=" + secretish }, "model.path: the model path carries a query parameter other than api-version"},
 		{"no secretRef", func(m map[string]any) { delete(model(m), "secretRef") }, "model.secretRef.name"},
+		{"a dot secret key", func(m map[string]any) { model(m)["secretRef"].(map[string]any)["key"] = "." }, "model.secretRef.key"},
+		{"a dot-dot secret key", func(m map[string]any) { model(m)["secretRef"].(map[string]any)["key"] = "..k" }, "model.secretRef.key"},
+		{"a base URL with a port and no host", func(m map[string]any) { model(m)["baseURL"] = "https://:443" }, "model.baseURL: the base URL has no host"},
+		{"a target id over 253 bytes", func(m map[string]any) { m["target"].(map[string]any)["id"] = "aa" + strings.Repeat(".a", 126) }, "is not a Kubernetes object name"},
 		{"a credential field", func(m map[string]any) { model(m)["apiKey"] = secretish }, "unknown field"},
 		{"an empty sandbox config", func(m map[string]any) { m["sandbox"].(map[string]any)["configName"] = "" }, "sandbox.configName"},
 		{"no fidelity", func(m map[string]any) { delete(m["snapshot"].(map[string]any), "fidelity") }, "snapshot.fidelity"},
@@ -537,6 +610,37 @@ func TestLoadBindingIsStrict(t *testing.T) {
 		}, "snapshot.storageLocation must be an object-storage URI"},
 		{"storage with no bucket", func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "gs:///" + secretish }, "snapshot.storageLocation must be an object-storage URI"},
 		{"a storage path, not a URI", func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "/var/" + secretish }, "snapshot.storageLocation must be an object-storage URI"},
+		{"a backslash in storage", func(m map[string]any) {
+			m["snapshot"].(map[string]any)["storageLocation"] = `gs://b/x\` + secretish + "/"
+		}, "snapshot.storageLocation must be an object-storage URI"},
+		{"an encoded backslash in storage", func(m map[string]any) {
+			m["snapshot"].(map[string]any)["storageLocation"] = "gs://b/x%5C" + secretish + "/"
+		}, "snapshot.storageLocation must be an object-storage URI"},
+		{"a dots-only storage segment", func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "gs://b/.../" + secretish }, "snapshot.storageLocation must be an object-storage URI"},
+		{"a dot-and-space storage segment", func(m map[string]any) {
+			m["snapshot"].(map[string]any)["storageLocation"] = "gs://b/.%20./" + secretish
+		}, "snapshot.storageLocation must be an object-storage URI"},
+		// 960 bytes with no trailing slash, plus "/<63-byte template>/", would pass substrate's 1024.
+		{"a 960-byte storage location", func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = storageOf(960) }, "snapshot.storageLocation must be an object-storage URI"},
+		{"no resources", func(m map[string]any) { delete(m, "resources") }, "resources.cpu is required"},
+		{"no cpu", func(m map[string]any) { delete(m["resources"].(map[string]any), "cpu") }, "resources.cpu is required"},
+		{"no memory", func(m map[string]any) { delete(m["resources"].(map[string]any), "memory") }, "resources.memory is required"},
+		{"zero cpu", func(m map[string]any) { m["resources"].(map[string]any)["cpu"] = "0" }, "resources.cpu must be a positive Kubernetes quantity of at most 999.999 cores"},
+		{"negative cpu", func(m map[string]any) { m["resources"].(map[string]any)["cpu"] = "-1" }, "resources.cpu must be a positive Kubernetes quantity"},
+		{"cpu over substrate's bound", func(m map[string]any) { m["resources"].(map[string]any)["cpu"] = "1000" }, "resources.cpu must be a positive Kubernetes quantity"},
+		{"cpu not a quantity", func(m map[string]any) { m["resources"].(map[string]any)["cpu"] = "one" }, "resources.cpu must be a positive Kubernetes quantity"},
+		{"memory over 32 bytes", func(m map[string]any) { m["resources"].(map[string]any)["memory"] = strings.Repeat("0", 30) + "1Mi" }, "resources.memory must be a positive Kubernetes quantity of at most 9223372036854775807 bytes"},
+		{"eleven worker labels", func(m map[string]any) {
+			labels := map[string]any{}
+			for i := range 11 {
+				labels[fmt.Sprintf("k%d", i)] = "v"
+			}
+			m["workerSelector"] = map[string]any{"matchLabels": labels}
+		}, "workerSelector.matchLabels has more than 10 labels"},
+		{"a worker label key", func(m map[string]any) { m["workerSelector"] = map[string]any{"matchLabels": map[string]any{"-k": "v"}} }, "workerSelector.matchLabels key is not a qualified label name"},
+		{"a worker label value", func(m map[string]any) {
+			m["workerSelector"] = map[string]any{"matchLabels": map[string]any{"k": "a b"}}
+		}, "workerSelector.matchLabels value is not a label value"},
 		{"a repeated gate", func(m map[string]any) {
 			m["approval"] = map[string]any{"invokes": []any{map[string]any{"caller": "coordinator", "agent": "reviewer"}, map[string]any{"caller": "coordinator", "agent": "reviewer"}}}
 		}, "coordinator -> reviewer is given more than once"},
@@ -558,6 +662,19 @@ func TestLoadBindingIsStrict(t *testing.T) {
 		func(m map[string]any) { m["snapshot"].(map[string]any)["fidelity"] = "ROOTFS" }, // on microvm
 		func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "gs://bucket" },
 		func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "s3://bucket/a/b" },
+		func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "gs://bucket/a.b/c..d/" },
+		func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = storageOf(959) },
+		func(m map[string]any) {
+			m["resources"] = map[string]any{"cpu": "999.999", "memory": strings.Repeat("0", 29) + "1Mi"}
+		},
+		func(m map[string]any) { m["resources"] = map[string]any{"cpu": "500m", "memory": "1Gi"} },
+		func(m map[string]any) {
+			labels := map[string]any{"ate.dev/pool": "x", "empty": ""}
+			for i := range 8 {
+				labels[fmt.Sprintf("k%d", i)] = "v"
+			}
+			m["workerSelector"] = map[string]any{"matchLabels": labels}
+		},
 	} {
 		if _, err := LoadBinding(writeBinding(t, "../binding-coordinator.json", ok)); err != nil {
 			t.Errorf("a binding kmx accepts was refused: %v", err)
@@ -574,6 +691,32 @@ func TestLoadBindingIsStrict(t *testing.T) {
 }
 
 func model(m map[string]any) map[string]any { return m["model"].(map[string]any) }
+
+// storageOf is a gs:// storage location of n bytes with no trailing slash.
+func storageOf(n int) string { return "gs://b/" + strings.Repeat("x", n-len("gs://b/")) }
+
+// A render's storage location stays within substrate's 1024 bytes for the longest location the
+// binding accepts and the longest template name.
+func TestStorageLocationFitsSubstrate(t *testing.T) {
+	comp, err := Load("../suite", "triage", "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	comp.Suite = strings.Repeat("s", 80)
+	b, err := LoadBinding(writeBinding(t, "../binding-microvm.json", func(m map[string]any) {
+		m["snapshot"].(map[string]any)["storageLocation"] = storageOf(maxStorageLocation)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Render(comp, imageA, b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, loc := len(out.Template.GetMetadata().GetName()), out.Template.GetSnapshotConfig().GetStorageLocation(); n != 63 || len(loc) != 1024 {
+		t.Fatalf("template name %d bytes, storage location %d bytes: want 63 and exactly substrate's 1024", n, len(loc))
+	}
+}
 
 // The binding digest is kmx's: the JCS digest of the binding's fields, so key order, whitespace and
 // an empty workerSelector do not change it, and every field does.
@@ -603,7 +746,7 @@ func TestBindingDigest(t *testing.T) {
 		t.Fatal("the served model must change the digest")
 	}
 	// kmx computes the same digest: these values came from kaimahi
-	// internal/kmx/runtime.AgentSessionsBindingDigest at 6610c37 on the committed files.
+	// internal/kmx/runtime.AgentSessionsBindingDigest at KmxCommit on the committed files.
 	for file, want := range map[string]string{
 		"../binding-microvm.json": "sha256:a8ce35e86590c6e1708907fd054718f8d5fc5a1b7ff838df0f065bc0c4b2ffa4",
 		"../binding.json":         "sha256:dea63034f38fb9f8b597c889143bc414e29c013368ca35c713019d733eb7863a",

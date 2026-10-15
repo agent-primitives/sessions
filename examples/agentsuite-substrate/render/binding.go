@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"regexp"
@@ -12,11 +13,17 @@ import (
 	"strings"
 
 	"github.com/kaimahi-agents/kaimahi/agentsuite"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/aramase/agentsessions/examples/agentsuite-substrate/invoke"
 )
 
 const (
+	// KmxCommit is the kaimahi commit (branch aramase/f/kmx_agentsessions_binding) whose
+	// AgentSessionsBinding validation, digest and TemplateName this package was compared against;
+	// render_test.go pins the values kmx's code gave there.
+	KmxCommit = "fc03a7c0bdd098a2f83caf80425324af7fb8209e"
 	// BindingAPIVersion and BindingKind identify an AgentSessionsBinding, as kaimahi's kmx does.
 	BindingAPIVersion = "kmx.kaimahi.dev/v1alpha1"
 	BindingKind       = "AgentSessionsBinding"
@@ -31,9 +38,10 @@ const (
 //
 // Its fields and refusals follow kmx's AgentSessionsBinding (kaimahi
 // internal/kmx/runtime/agentsessions_binding.go on branch aramase/f/kmx_agentsessions_binding, at
-// 6610c37), with two additions this PoC needs: model.path (an Azure OpenAI deployment's completions
-// path, which carries its api-version query) and approval (the invokes edges this environment
-// gates). The README section "The binding and kmx" lists every difference, these two included.
+// KmxCommit), with two additions this PoC needs: model.path (an Azure OpenAI deployment's
+// completions path, which carries its api-version query) and approval (the invokes edges this
+// environment gates). The README section "The binding and kmx" lists every difference, these two
+// included.
 type Binding struct {
 	APIVersion     string                `json:"apiVersion"`
 	Kind           string                `json:"kind"`
@@ -42,7 +50,7 @@ type Binding struct {
 	Atespace       string                `json:"atespace"`
 	Sandbox        BindingSandbox        `json:"sandbox"`
 	Snapshot       BindingSnapshot       `json:"snapshot"`
-	Resources      BindingResources      `json:"resources,omitzero"`
+	Resources      BindingResources      `json:"resources"`
 	WorkerSelector BindingWorkerSelector `json:"workerSelector,omitzero"`
 	Model          BindingModel          `json:"model"`
 	Approval       BindingApproval       `json:"approval,omitzero"`
@@ -69,9 +77,12 @@ type BindingSnapshot struct {
 	StorageLocation string `json:"storageLocation"`
 }
 
+// BindingResources is the actor's compute size, rendered as the ActorTemplate's resources: substrate
+// books both limits against worker capacity and sizes the sandbox (a micro-VM's vCPUs and RAM) by
+// them, so both are required, as in kmx.
 type BindingResources struct {
-	CPU    string `json:"cpu,omitempty"`
-	Memory string `json:"memory,omitempty"`
+	CPU    string `json:"cpu"`
+	Memory string `json:"memory"`
 }
 
 type BindingWorkerSelector struct {
@@ -105,6 +116,15 @@ var (
 	dnsSubdomain = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
 	secretKey    = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
 )
+
+// objectName is kmx's Kubernetes object name rule: an RFC 1123 subdomain of at most 253 bytes.
+func objectName(s string) bool { return len(s) <= 253 && dnsSubdomain.MatchString(s) }
+
+// validSecretKey is kmx's Secret key rule: 1-253 letters, digits, '-', '_' or '.', not "." and not
+// starting with "..".
+func validSecretKey(s string) bool {
+	return len(s) <= 253 && secretKey.MatchString(s) && s != "." && !strings.HasPrefix(s, "..")
+}
 
 // LoadBinding decodes a binding strictly (unknown fields are refused), validates it, and records
 // its digest (see Digest). Its errors never repeat model.baseURL or model.path.
@@ -163,7 +183,7 @@ func (b Binding) validate() error {
 		return fmt.Errorf("want %s %s, got %q %q", BindingAPIVersion, BindingKind, b.APIVersion, b.Kind)
 	case b.Target.Platform != "kubernetes":
 		return errors.New("target.platform must be kubernetes")
-	case !dnsSubdomain.MatchString(b.Target.ID):
+	case !objectName(b.Target.ID):
 		return fmt.Errorf("target.id %q is not a Kubernetes object name", b.Target.ID)
 	case b.Placement.Backend != "substrate":
 		return fmt.Errorf("placement.backend %q: only substrate is rendered", b.Placement.Backend)
@@ -171,7 +191,7 @@ func (b Binding) validate() error {
 		return fmt.Errorf("atespace %q is not a DNS label", b.Atespace)
 	case b.Sandbox.Class != "microvm" && b.Sandbox.Class != "gvisor":
 		return fmt.Errorf("sandbox.class %q: want microvm or gvisor", b.Sandbox.Class)
-	case !dnsSubdomain.MatchString(b.Sandbox.ConfigName):
+	case !objectName(b.Sandbox.ConfigName):
 		return fmt.Errorf("sandbox.configName %q is not a Kubernetes object name", b.Sandbox.ConfigName)
 	case b.Snapshot.Fidelity != "MEMORY" && b.Snapshot.Fidelity != "ROOTFS" && b.Snapshot.Fidelity != "VOLUMES":
 		return errors.New("snapshot.fidelity: want MEMORY, ROOTFS or VOLUMES")
@@ -180,6 +200,12 @@ func (b Binding) validate() error {
 		return errors.New("snapshot.fidelity ROOTFS requires sandbox.class microvm")
 	}
 	if err := checkStorageLocation(b.Snapshot.StorageLocation); err != nil {
+		return err
+	}
+	if err := b.Resources.validate(); err != nil {
+		return err
+	}
+	if err := b.WorkerSelector.validate(); err != nil {
 		return err
 	}
 	if err := b.Model.validate(); err != nil {
@@ -204,9 +230,9 @@ func (m BindingModel) validate() error {
 		return errors.New("model.name must be one exact model identifier without whitespace")
 	case m.Provider != ModelProvider:
 		return fmt.Errorf("model.provider %q: want %s (an OpenAI-compatible endpoint)", m.Provider, ModelProvider)
-	case !dnsSubdomain.MatchString(m.SecretRef.Name):
+	case !objectName(m.SecretRef.Name):
 		return fmt.Errorf("model.secretRef.name %q is not a Secret name", m.SecretRef.Name)
-	case !secretKey.MatchString(m.SecretRef.Key):
+	case !validSecretKey(m.SecretRef.Key):
 		return fmt.Errorf("model.secretRef.key %q is not a Secret key", m.SecretRef.Key)
 	}
 	if m.BaseURL != "" {
@@ -222,18 +248,71 @@ func (m BindingModel) validate() error {
 	return nil
 }
 
+const (
+	// maxQuantity and maxWorkerLabels are substrate's Limits.quantity and Selector.match_labels
+	// bounds, as kmx applies them.
+	maxQuantity     = 32
+	maxWorkerLabels = 10
+)
+
+// resourceBounds are substrate's cpuLimitMax and memoryLimitMax, as kmx applies them.
+var resourceBounds = []struct {
+	path  string
+	max   resource.Quantity
+	bound string
+}{
+	{"resources.cpu", resource.MustParse("999.999"), "999.999 cores"},
+	{"resources.memory", resource.MustParse("9223372036854775807"), "9223372036854775807 bytes"},
+}
+
+// validate applies kmx's resources rule with the parser substrate uses (apimachinery's
+// resource.ParseQuantity): both limits are required, positive and within substrate's bounds.
+func (r BindingResources) validate() error {
+	for i, value := range []string{r.CPU, r.Memory} {
+		b := resourceBounds[i]
+		if value == "" {
+			return fmt.Errorf("%s is required", b.path)
+		}
+		q, err := resource.ParseQuantity(value)
+		if len(value) > maxQuantity || err != nil || q.Sign() <= 0 || q.Cmp(b.max) > 0 {
+			return fmt.Errorf("%s must be a positive Kubernetes quantity of at most %s", b.path, b.bound)
+		}
+	}
+	return nil
+}
+
+// validate applies kmx's workerSelector rule: at most ten labels, each a qualified label name with
+// a label value.
+func (s BindingWorkerSelector) validate() error {
+	if len(s.MatchLabels) > maxWorkerLabels {
+		return fmt.Errorf("workerSelector.matchLabels has more than %d labels", maxWorkerLabels)
+	}
+	keys := slices.Sorted(maps.Keys(s.MatchLabels))
+	for _, k := range keys {
+		if errs := validation.IsQualifiedName(k); len(errs) != 0 {
+			return fmt.Errorf("workerSelector.matchLabels key is not a qualified label name: %s", strings.Join(errs, "; "))
+		}
+		if errs := validation.IsValidLabelValue(s.MatchLabels[k]); len(errs) != 0 {
+			return fmt.Errorf("workerSelector.matchLabels value is not a label value: %s", strings.Join(errs, "; "))
+		}
+	}
+	return nil
+}
+
 // maxStorageLocation is kmx's limit: it leaves room under substrate's 1024-byte storage_location
-// for the "<template>/" suffix a render appends.
-const maxStorageLocation = 1024 - 64
+// for the "/<template>/" a render appends to a location with no trailing slash (a template name is
+// at most 63 bytes).
+const maxStorageLocation = 1024 - 65
 
 var uriScheme = regexp.MustCompile(`^[a-z][a-z0-9+.-]*$`)
 
 // checkStorageLocation applies kmx's snapshot.storageLocation rule: an object-storage base URI
-// (gs://bucket/prefix/) with a scheme and bucket, no credentials, query or fragment, and no empty,
-// "." or ".." path segments (object keys are not filesystem paths, so they are refused rather than
-// resolved; one trailing '/' is allowed). Its errors never contain the location.
+// (gs://bucket/prefix/) with a scheme and bucket, no credentials, query or fragment, no '\', and no
+// empty path segments or segments of only '.' and ' '. Object keys are not filesystem paths, and
+// some storage backends trim dots and spaces from segments or treat '\' as a separator, so these are
+// refused rather than resolved; one trailing '/' is allowed. Its errors never contain the location.
 func checkStorageLocation(location string) error {
-	const msg = "snapshot.storageLocation must be an object-storage URI with a scheme and bucket, no credentials, query or fragment, and no empty, \".\" or \"..\" path segments"
+	const msg = "snapshot.storageLocation must be an object-storage URI with a scheme and bucket, no credentials, query or fragment, no '\\', and no empty path segments or segments of only '.' and ' '"
 	if location == "" {
 		return errors.New("snapshot.storageLocation is required")
 	}
@@ -244,10 +323,13 @@ func checkStorageLocation(location string) error {
 	if err != nil || !uriScheme.MatchString(u.Scheme) || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(location, "#") {
 		return errors.New(msg)
 	}
-	// u.Path is decoded, so percent-encoded dot segments are refused too.
+	// u.Path is decoded, so percent-encoded dots, spaces and '\' are refused too.
+	if strings.Contains(u.Path, `\`) {
+		return errors.New(msg)
+	}
 	if u.Path != "" && u.Path != "/" {
 		for _, segment := range strings.Split(strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), "/"), "/") {
-			if segment == "" || segment == "." || segment == ".." {
+			if strings.Trim(segment, ". ") == "" {
 				return errors.New(msg)
 			}
 		}
@@ -332,7 +414,8 @@ func CheckModelBaseURL(raw string) error {
 	case u.Scheme != "http" && u.Scheme != "https":
 		// url.Parse lowercases the scheme. A value like "user:secret@host" parses as scheme "user".
 		return errors.New("the base URL is not http or https" + hidden)
-	case u.Host == "":
+	case u.Hostname() == "":
+		// Hostname, not Host, as kmx checks it: "https://:443" has a port and no host.
 		return errors.New("the base URL has no host (want scheme://host[/path])" + hidden)
 	}
 	return nil

@@ -587,6 +587,50 @@ func TestForkOfMemoryHarnessAtHistoricalSeqIsRefused(t *testing.T) {
 	}
 }
 
+// A memory-capable runtime whose checkpoint yields no external handle cannot clone: the substrate
+// adapter reports none against an ate-api older than f03327bd. The Placer records the checkpoint it
+// took, then refuses as unplaceable before tagging, so no child is cloned from a snapshot it cannot
+// name and the caller gets FAILED_PRECONDITION rather than the backend's ErrNoSnapshotToClone.
+func TestForkOfMemoryHarnessWithoutExternalHandleIsUnplaceable(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	parent, child := store.Session("parent"), store.Session("child")
+
+	fence, err := parent.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parent.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "hi")}); err != nil {
+		t.Fatal(err)
+	}
+	head, _ := parent.Head()
+
+	ctl := &cloningControl{} // every suspend reports no held snapshot
+	err = memorySubstratePlacer(ctl).Fork(context.Background(), parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, head)
+	if !errors.Is(err, placement.ErrUnplaceable) || errors.Is(err, substrate.ErrNoSnapshotToClone) {
+		t.Fatalf("err=%v want ErrUnplaceable, not ErrNoSnapshotToClone", err)
+	}
+	for _, c := range ctl.calls {
+		if strings.HasPrefix(c, "tag:") || strings.HasPrefix(c, "clone:") {
+			t.Fatalf("a fork with no external handle must not tag or clone, got %v", ctl.calls)
+		}
+	}
+	recs, _ := parent.Read(1)
+	last := recs[len(recs)-1].Event
+	if last.Kind != api.EventLifecycle || last.Lifecycle == nil || last.Lifecycle.Kind != api.LifecycleSuspend {
+		t.Fatalf("the checkpoint the fork took must be recorded as a SUSPEND event, got %v", last.Kind)
+	}
+	if h, _ := child.Head(); h != 0 {
+		t.Fatalf("a refused fork must not write the child log, head=%d", h)
+	}
+	if err := parent.Verify(); err != nil {
+		t.Fatalf("verify parent: %v", err)
+	}
+}
+
 // A STATELESS_REPLAY session forks without checkpointing its parent: the journal already holds
 // everything the child needs, so the parent keeps its worker and nothing is appended to its log.
 func TestForkOfStatelessHarnessLeavesParentRunning(t *testing.T) {

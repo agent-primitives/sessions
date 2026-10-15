@@ -164,7 +164,8 @@ func TestGetActorDecodesCurrentWireFormat(t *testing.T) {
 
 // A server older than substrate f03327bd sends the held snapshot as ActorStatus.external_snapshot
 // (field 4), which this client does not read. It must report no snapshot rather than fail to decode,
-// so a stateful fork against such a server refuses with ErrNoSnapshotToClone instead of tagging.
+// so a stateful fork against such a server refuses (unplaceable through the Placer,
+// ErrNoSnapshotToClone from a direct Backend.Fork) instead of tagging.
 func TestGetActorIgnoresPreSnapshotsListField(t *testing.T) {
 	var st []byte
 	st = protowire.AppendVarint(protowire.AppendTag(st, 1, protowire.VarintType), 4) // SUSPENDED

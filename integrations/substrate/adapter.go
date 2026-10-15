@@ -175,7 +175,8 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 //
 // Substrate f03327bd replaced the single ActorStatus.external_snapshot (field 4) with this list. A
 // server older than that still sends field 4, which this client does not read, so it reports "" and
-// a stateful fork refuses with ErrNoSnapshotToClone rather than tagging a snapshot it cannot name.
+// a stateful fork refuses rather than tagging a snapshot it cannot name: through the Placer as
+// unplaceable (no external snapshot handle), and a direct Backend.Fork with ErrNoSnapshotToClone.
 func heldSnapshot(st *atepb.ActorStatus) string {
 	var held *atepb.Snapshot
 	for _, snap := range st.GetSnapshots() {

@@ -192,7 +192,11 @@ backend, model and tool executor. An unserved recorded name or mismatched versio
 retrying. A new Exec can supersede an ordinary interrupted turn and records its own invocation
 identity; an owned approval call blocks new inputs until its receipt commits.
 An override is still per-turn: session metadata is unchanged and a later Exec with no override uses
-the stored default. Completed Resume, ordinary Suspend and Fork retain their existing session-default
+the stored default. An override onto a `REQUIRES_MEMORY_SNAPSHOT` harness other than the session's
+own is `FAILED_PRECONDITION` before any compute is provisioned (`placement.ErrStatefulOverride`):
+Suspend and Fork follow the session's harness, so they would neither checkpoint nor clone the RAM
+state that turn leaves behind. `Sessions.Resume` of a pending turn recorded that way is refused the
+same way. Completed Resume, ordinary Suspend and Fork retain their existing session-default
 routing. An unreceipted approval's Suspend uses its recorded invocation route, including retry after
 a failed automatic snapshot or append.
 

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "1.0.0-draft",
+  "mediaType": "application/vnd.agentsuite.agent.v1+json",
+  "id": "triage",
+  "description": "Tracks a customer's open support issues and names the next step.",
+  "instructions": {
+    "path": "instructions/triage.md",
+    "digest": "sha256:d05159648bd58f56a4151aef398991d857f9d69f51f46d896e44cbdd4ad2d948"
+  },
+  "model": {
+    "protocol": "openai-compatible",
+    "model": "triage-model"
+  },
+  "toolProviders": [],
+  "invokes": [],
+  "extensions": []
+}

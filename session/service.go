@@ -277,10 +277,14 @@ func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest)
 // FailedPrecondition when either one is registered: an override onto a registered harness would
 // let any session run turns on it, retired or not, and a session created on a registration keeps
 // its turns on that registration. Between harnesses that are not registered, the documented
-// per-turn override is unchanged.
-func (s *Service) placerFor(uid, override string) (*placement.Placer, string, error) {
+// per-turn override is unchanged, except that the override's Placer refuses a
+// REQUIRES_MEMORY_SNAPSHOT harness (placement.WithOverride): Fork and Suspend route by the stored
+// harness, so they would neither checkpoint nor clone the RAM state that turn leaves behind. The
+// returned bool reports that case, a turn on a Placer other than the stored harness's; an alias of
+// the stored harness shares its Placer and is not one.
+func (s *Service) placerFor(uid, override string) (*placement.Placer, string, bool, error) {
 	if uid == "" {
-		return nil, "", status.Error(codes.InvalidArgument, "session is required")
+		return nil, "", false, status.Error(codes.InvalidArgument, "session is required")
 	}
 	info, err := s.store.SessionInfo(uid)
 	if err != nil {
@@ -288,10 +292,10 @@ func (s *Service) placerFor(uid, override string) (*placement.Placer, string, er
 			// With no session there is no pin, so an unknown override is the caller's first
 			// mistake and stays InvalidArgument.
 			if _, rerr := s.registry.For(override); rerr != nil {
-				return nil, "", harnessError(rerr)
+				return nil, "", false, harnessError(rerr)
 			}
 		}
-		return nil, "", sessionStoreError(err, uid)
+		return nil, "", false, sessionStoreError(err, uid)
 	}
 	harness := info.Harness
 	if harness == "" {
@@ -299,7 +303,7 @@ func (s *Service) placerFor(uid, override string) (*placement.Placer, string, er
 		harness = s.registry.Default()
 	}
 	if err := s.checkStatic(harness); err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 	if override != "" && override != harness {
 		// The pin is checked before the override is resolved, so a session on a registered
@@ -307,38 +311,43 @@ func (s *Service) placerFor(uid, override string) (*placement.Placer, string, er
 		// harness or not.
 		pinned, err := s.isRegistered(harness)
 		if err != nil {
-			return nil, "", err
+			return nil, "", false, err
 		}
 		if !pinned {
 			if pinned, err = s.isRegistered(override); err != nil {
-				return nil, "", err
+				return nil, "", false, err
 			}
 		}
 		if pinned {
-			return nil, "", status.Errorf(codes.FailedPrecondition, "session %q is pinned to harness %q; a turn cannot run on %q", uid, harness, override)
+			return nil, "", false, status.Errorf(codes.FailedPrecondition, "session %q is pinned to harness %q; a turn cannot run on %q", uid, harness, override)
 		}
 		if s.afterPinCheck != nil {
 			s.afterPinCheck()
 		}
 		if _, err := s.registry.For(override); err != nil {
-			return nil, "", harnessError(err)
+			return nil, "", false, harnessError(err)
 		}
 		// A registration can commit and load between the pin check and the lookup. Every
 		// non-static entry in the registry was loaded from a committed registration, so this
 		// recheck closes that window without another store read.
 		if !s.registry.Static(override) {
-			return nil, "", status.Errorf(codes.FailedPrecondition, "session %q is pinned to harness %q; a turn cannot run on %q", uid, harness, override)
+			return nil, "", false, status.Errorf(codes.FailedPrecondition, "session %q is pinned to harness %q; a turn cannot run on %q", uid, harness, override)
 		}
 		if err := s.checkStatic(override); err != nil {
-			return nil, "", err
+			return nil, "", false, err
 		}
-		harness = override
+		own, err := s.registry.For(harness)
+		p, perr := s.registry.For(override)
+		if perr != nil {
+			return nil, "", false, harnessError(perr)
+		}
+		return p, override, err != nil || own != p, nil
 	}
 	p, err := s.registry.For(harness)
 	if err != nil {
-		return nil, "", harnessError(err)
+		return nil, "", false, harnessError(err)
 	}
-	return p, harness, nil
+	return p, harness, false, nil
 }
 
 // checkResumedHarness applies the routing rules to the harness Resume resolved for a session whose
@@ -485,9 +494,10 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	}
 	var placer *placement.Placer
 	var harness string
+	var overrides bool
 	if recoveryInfo == nil {
 		var err error
-		placer, harness, err = s.placerFor(uid, req.GetHarness())
+		placer, harness, overrides, err = s.placerFor(uid, req.GetHarness())
 		if err != nil {
 			return err
 		}
@@ -599,6 +609,9 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		operationErr = s.registry.Resume(ctx, log, uid, recoveryInfo.Harness,
 			placement.WithResolvedHarnessCheck(check), placement.WithRegistryResumeObserver(observer))
 	} else {
+		if overrides {
+			execOpts = append(execOpts, placement.WithOverride())
+		}
 		_, operationErr = placer.Exec(ctx, log, uid, inputs, expected, execOpts...)
 	}
 	if sendErr != nil {
@@ -701,7 +714,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		return nil, status.Error(codes.InvalidArgument, "ForkRequest.identity is unsupported: per-child principals are not enforced")
 	}
 
-	placer, _, err := s.placerFor(req.GetSession(), "")
+	placer, _, _, err := s.placerFor(req.GetSession(), "")
 	if err != nil {
 		return nil, err
 	}
@@ -793,19 +806,21 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 // forkError surfaces a refused fork as FailedPrecondition rather than Internal. A fork is refused
 // when the harness's capabilities cannot realize it — e.g. a REQUIRES_MEMORY_SNAPSHOT session forked
 // at a historical seq, which no memory snapshot can reproduce — which is a caller-visible
-// precondition, not a host fault. A concurrent writer that invalidated the fork point, a parent that
-// no longer holds the snapshot the fork took (api.ErrSnapshotSuperseded), or another stateful fork
-// that is checkpointing the parent is Aborted, so the caller knows a retry is meaningful.
+// precondition, not a host fault, and so is a parent whose compute was replaced and no longer holds
+// its in-RAM state (api.ErrMemoryStateLost). A concurrent writer that invalidated the fork point, a
+// parent that no longer holds the snapshot the fork took (api.ErrSnapshotSuperseded), compute busy
+// with another operation (api.ErrComputeBusy), or another stateful fork that is checkpointing the
+// parent is Aborted, so the caller knows a retry is meaningful.
 func forkError(err error) error {
 	switch {
-	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch):
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, api.ErrMemoryStateLost):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return status.Error(codes.Unavailable, err.Error())
 	case errors.Is(err, placement.ErrAdmissionInterrupted):
 		return status.Error(admissionInterruptedCode(err), err.Error())
 	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing),
-		errors.Is(err, api.ErrSnapshotSuperseded):
+		errors.Is(err, api.ErrSnapshotSuperseded), errors.Is(err, api.ErrComputeBusy):
 		return status.Error(codes.Aborted, err.Error())
 	default:
 		return status.Errorf(codes.Internal, "fork: %v", err)
@@ -919,9 +934,9 @@ func isParkUnwind(err error, ref api.ApprovalRef) bool {
 
 func suspendError(err error) error {
 	switch {
-	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, placement.ErrCheckpointing), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
+	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, placement.ErrCheckpointing), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, api.ErrComputeBusy):
 		return status.Error(codes.Aborted, err.Error())
-	case errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, controller.ErrReplayDiverged):
+	case errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, controller.ErrReplayDiverged), errors.Is(err, api.ErrMemoryStateLost):
 		return status.Errorf(codes.FailedPrecondition, "suspend: %v", err)
 	case errors.Is(err, placement.ErrUnknownHarness):
 		return harnessError(err)
@@ -942,7 +957,8 @@ func resumeError(err error) error {
 		return status.Errorf(codes.FailedPrecondition, "resume: %v; the incomplete turn never reached the harness and you should call Exec again with all inputs", err)
 	case errors.Is(err, controller.ErrInvalidExecutionLog):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
-	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch):
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrStatefulOverride), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch),
+		errors.Is(err, api.ErrMemoryStateLost):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
 	case errors.Is(err, placement.ErrUnknownHarness):
 		return harnessError(err)
@@ -950,8 +966,9 @@ func resumeError(err error) error {
 		return status.Errorf(codes.Unavailable, "resume: %v", err)
 	case errors.Is(err, placement.ErrAdmissionInterrupted):
 		return status.Errorf(admissionInterruptedCode(err), "resume: %v", err)
-	case errors.Is(err, placement.ErrCheckpointing):
-		// A stateful Fork of this session superseded this Resume's turn; retry once it completes.
+	case errors.Is(err, placement.ErrCheckpointing), errors.Is(err, api.ErrComputeBusy):
+		// A stateful Fork of this session superseded this Resume's turn, or the session's compute
+		// is in the middle of another operation; retry once it completes.
 		return status.Errorf(codes.Aborted, "resume: %v", err)
 	default:
 		return status.Errorf(codes.Internal, "resume: %v", err)
@@ -972,13 +989,15 @@ func execError(err error) error {
 	switch {
 	case errors.Is(err, placement.ErrSessionBusy):
 		return status.Error(codes.Aborted, err.Error())
-	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport), errors.Is(err, placement.ErrUnplaceable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch):
+	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport), errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrStatefulOverride), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch),
+		errors.Is(err, api.ErrMemoryStateLost):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return status.Error(codes.Unavailable, err.Error())
 	case errors.Is(err, placement.ErrAdmissionInterrupted):
 		return status.Error(admissionInterruptedCode(err), err.Error())
-	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing):
+	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing),
+		errors.Is(err, api.ErrComputeBusy):
 		return status.Error(codes.Aborted, err.Error())
 	default:
 		return status.Error(codes.Internal, err.Error())

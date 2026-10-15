@@ -76,6 +76,11 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	if len(recs) == 0 {
 		return false, nil
 	}
+	// A Resume restores the session's compute whether or not a turn is pending, and the host records
+	// the resume afterwards, so refuse a replaced instance even when there is nothing to re-drive.
+	if err := c.checkComputeInstance(recs); err != nil {
+		return false, err
+	}
 
 	events := make([]api.Event, 0, len(recs))
 	for _, record := range recs {
@@ -246,7 +251,13 @@ func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 		if out.Message != nil {
 			msg = *out.Message
 		}
-		return api.ModelResponse{Message: msg}, nil // served — model NOT re-invoked
+		// served — model NOT re-invoked. The recorded usage rides along as it does on replay;
+		// v0.1.2 did not serve usage, so a legacy recovery serves none.
+		var usage api.Usage
+		if !s.live.legacyRecovery {
+			usage = usageAt(s.stream, s.i)
+		}
+		return api.ModelResponse{Message: msg, Usage: usage}, nil
 	}
 	return s.live.model(ctx, req) // past the crash point: first-ever execution
 }

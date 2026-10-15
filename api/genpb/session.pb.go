@@ -812,7 +812,9 @@ type ExecRequest struct {
 	ResumeFromSeq int64 `protobuf:"varint,3,opt,name=resume_from_seq,json=resumeFromSeq,proto3" json:"resume_from_seq,omitempty"`
 	// Empty = the session's harness. A different harness runs this turn only, unless either one is
 	// a registered harness (see HarnessRegistry): then the session is pinned and the call is
-	// FAILED_PRECONDITION.
+	// FAILED_PRECONDITION. A different REQUIRES_MEMORY_SNAPSHOT harness is FAILED_PRECONDITION too,
+	// before any compute is provisioned: Suspend and Fork follow the session's harness, so they would
+	// not checkpoint or clone the state that turn leaves in RAM.
 	Harness string `protobuf:"bytes,4,opt,name=harness,proto3" json:"harness,omitempty"`
 	// Opaque per-execution config, passed through to Start.config. Non-empty bytes are journaled
 	// verbatim in EXECUTION_START before the harness runs, and restored for controller replay/resume.

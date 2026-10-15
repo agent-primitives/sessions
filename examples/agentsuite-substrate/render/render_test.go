@@ -177,6 +177,29 @@ func TestRenderMemoryTier(t *testing.T) {
 	}
 }
 
+// The memory tier needs a MEMORY snapshot, so a binding with another fidelity is refused for it and
+// still renders the stateless tier.
+func TestRenderMemoryTierNeedsMemoryFidelity(t *testing.T) {
+	comp, err := Load("../suite", "triage", "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := "localhost:5001/agentsuite-harness@" + digestA
+	for _, fidelity := range []string{"ROOTFS", "VOLUMES"} {
+		b, err := LoadBinding("../binding.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Snapshot.Fidelity = fidelity
+		if _, err := Render(comp, image, b, Options{Memory: true}); err == nil || !strings.Contains(err.Error(), "needs MEMORY") {
+			t.Errorf("%s, memory tier: err = %v, want the fidelity refused", fidelity, err)
+		}
+		if _, err := Render(comp, image, b, Options{}); err != nil {
+			t.Errorf("%s, stateless tier: %v", fidelity, err)
+		}
+	}
+}
+
 func TestLoadSelectsAPlatform(t *testing.T) {
 	if _, err := Load("../suite", "triage", "linux/s390x"); err == nil || !strings.Contains(err.Error(), "no composition") {
 		t.Fatalf("err = %v, want no composition", err)

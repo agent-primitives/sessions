@@ -74,7 +74,7 @@ kaimahi's.
 | `containers[0].securityContext` | `capabilities: {}`, adding none |
 | `containers[0].resources` | `binding.resources` |
 | `sandboxConfig` | `binding.sandbox`: `SANDBOX_CLASS_MICROVM`, `microvm` (or `SANDBOX_CLASS_GVISOR`, `gvisor-default`) |
-| `snapshotConfig` | `preferredFidelity` from `binding.snapshot.fidelity`. `storageLocation` is `binding.snapshot.storageLocation` + `<name>/`. |
+| `snapshotConfig` | `preferredFidelity` from `binding.snapshot.fidelity`, which must be `MEMORY` (or unset) for `-tier memory`: that tier keeps the conversation in RAM. `storageLocation` is `binding.snapshot.storageLocation` + `<name>/`. |
 | `workerSelector` | `binding.workerSelector` |
 
 The harness registration is a `HarnessRegistration` with `spec.substrate {atespace, template}`,

@@ -7,9 +7,10 @@ evaluated with; a deployment's `AgentSessionsBinding` says where that model is s
 `emit render` refuses a binding that serves another one. A different model is a new suite version
 and a new evaluation, not a render-time override.
 
-The suite keeps its name. AgentSuite manifests have no version field (the spec's suite identity is
-the JCS digest of the graph rooted at `agentsuite.json`, and OCI tags are discovery names only), so
-this version is its digest, which `emit validate` prints:
+The suite keeps its name. The suite manifest has no version field (an `agents[]` reference has an
+optional `version`, unused in 75f27d6 and here; the spec's suite identity is the JCS digest of the
+graph rooted at `agentsuite.json`, and OCI tags are discovery names only), so this version is its
+digest, which `emit validate` prints:
 
 | | `agentsuite.json` digest |
 |---|---|

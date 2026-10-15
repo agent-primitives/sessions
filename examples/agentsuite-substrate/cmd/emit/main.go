@@ -125,8 +125,9 @@ const kaimahiModule = "github.com/kaimahi-agents/kaimahi"
 // validate runs kaimahi's own validator (agentsuite.ValidateDirectory, from the imported module, not
 // a copy) over a suite directory and prints three lines: the suite with its agents and compositions,
 // the suite's digest, then the kaimahi module version the binary was built against. The digest is
-// the JCS digest of agentsuite.json, which commits to every manifest under it: AgentSuite manifests
-// have no version field, so it is the suite version.
+// the JCS digest of agentsuite.json, which commits to every manifest under it: the suite manifest
+// has no version field (an agents[] reference's optional version is not the suite's), so it is the
+// suite version.
 func validate(args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	suite := fs.String("suite", "suite", "AgentSuite content directory")

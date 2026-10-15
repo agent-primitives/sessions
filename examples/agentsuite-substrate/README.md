@@ -406,6 +406,13 @@ Every difference that remains:
 
 ## The recorded demo
 
+This section describes the v3 recording. Its real-model run does not run on this branch:
+`driver.sh setup` stops at its first `up.sh`, whose `emit check-binding` refuses the binding before
+any cluster change, because `suites/kaimahi-minimal` pins `example-model` and the Azure deployment
+serves `gpt-5.4-mini`, and the render no longer overrides the model. It runs again once
+kaimahi-minimal has a version pinning the served model. The current recording is the coordinator
+demo (`demo/coordinator.sh`, `demo/coordinator-record.sh`).
+
 `demo/driver.sh` is a short demo for a recording: how kaimahi's minimal suite (agent `writer`)
 becomes a substrate ActorTemplate, how one turn flows, and the session lifecycle on micro-VMs, with a
 real model on Azure OpenAI. It runs on a Linux host with KVM and Docker (all of it there: kind, the

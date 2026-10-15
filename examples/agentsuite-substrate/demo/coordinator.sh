@@ -16,7 +16,8 @@
 # common.sh write_binding) and AZURE_MI_CLIENT_ID, the user-assigned managed identity whose token is
 # the model API key; it is fetched from the instance metadata endpoint, piped into the
 # agentsessionsd-model Secret with no file on the host, and never printed; the daemon sends it in
-# Authorization, so AGENTSUITE_MODEL_AUTH_HEADER (which up.sh honors) must be unset or Authorization.
+# Authorization, so AGENTSUITE_MODEL_AUTH_HEADER (which up.sh honors) must be unset or Authorization
+# (in any case).
 # Logs go to COORD_LOGS
 # (default ${WORK}/coordinator-logs), one file per step, through a filter that redacts tokens.
 set -euo pipefail
@@ -138,10 +139,9 @@ setup() {
 	done
 	# The key is a managed identity's Entra token, which Azure OpenAI takes as a bearer token in
 	# Authorization; the daemon is rendered with that header, so refuse another one (up.sh's api-key).
-	case "${AGENTSUITE_MODEL_AUTH_HEADER:-Authorization}" in
-	Authorization) ;;
-	*) fail "AGENTSUITE_MODEL_AUTH_HEADER names a header other than Authorization; this demo sends the managed identity's token in Authorization, so unset it" ;;
-	esac
+	# Header names are case-insensitive, so any spelling of Authorization is that header.
+	[[ "$(printf '%s' "${AGENTSUITE_MODEL_AUTH_HEADER:-Authorization}" | tr '[:upper:]' '[:lower:]')" == authorization ]] ||
+		fail "AGENTSUITE_MODEL_AUTH_HEADER names a header other than Authorization; this demo sends the managed identity's token in Authorization, so unset it"
 	# Before the first cluster change: the manifest renders with no placeholder left.
 	[[ -z "$(unfilled "$(render_manifest image 1 c w r i m u p)")" ]] ||
 		fail "deploy/coordinator-agentsessionsd.yaml holds placeholders this script does not fill: $(unfilled "$(render_manifest image 1 c w r i m u p)")"
@@ -265,6 +265,8 @@ run_case() {
 }
 
 probe() {
+	# Only this probe's files: a previous probe's would read as this one's evidence.
+	rm -f "${LOGS}"/probe-*
 	"${K[@]}" -n "${NS}" port-forward svc/agentsessionsd-coordinator "${SERVER##*:}:8080" >/dev/null 2>&1 &
 	PIDS+=($!)
 	for _ in $(seq 60); do

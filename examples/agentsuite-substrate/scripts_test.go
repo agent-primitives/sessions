@@ -1451,7 +1451,8 @@ esac
 
 // coordinator.sh renders the daemon with the managed identity's token in Authorization, so its
 // setup refuses an AGENTSUITE_MODEL_AUTH_HEADER naming another header (which up.sh would honor)
-// before it runs any tool, and lets an unset or Authorization value through to the next check.
+// before it runs any tool, and lets an unset value or any spelling of Authorization through to the
+// next check.
 func TestCoordinatorSetupRefusesAnotherAuthHeader(t *testing.T) {
 	s := newStubs(t)
 	const refused = "COORDINATOR FAILED: AGENTSUITE_MODEL_AUTH_HEADER names a header other than Authorization"
@@ -1466,10 +1467,13 @@ func TestCoordinatorSetupRefusesAnotherAuthHeader(t *testing.T) {
 		refused bool
 	}{
 		{name: "api-key", env: []string{"AGENTSUITE_MODEL_AUTH_HEADER=api-key"}, refused: true},
-		{name: "authorization in lowercase", env: []string{"AGENTSUITE_MODEL_AUTH_HEADER=authorization"}, refused: true},
+		{name: "authorization with a suffix", env: []string{"AGENTSUITE_MODEL_AUTH_HEADER=Authorization2"}, refused: true},
 		{name: "unset"},
 		{name: "empty", env: []string{"AGENTSUITE_MODEL_AUTH_HEADER="}},
 		{name: "Authorization", env: []string{"AGENTSUITE_MODEL_AUTH_HEADER=Authorization"}},
+		// Header names are case-insensitive: any spelling is the Authorization header.
+		{name: "authorization in lowercase", env: []string{"AGENTSUITE_MODEL_AUTH_HEADER=authorization"}},
+		{name: "AUTHORIZATION", env: []string{"AGENTSUITE_MODEL_AUTH_HEADER=AUTHORIZATION"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.Remove(filepath.Join(s.dir, "calls")); err != nil && !errors.Is(err, os.ErrNotExist) {

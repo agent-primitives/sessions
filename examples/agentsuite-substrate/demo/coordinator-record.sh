@@ -108,9 +108,10 @@ token_scan() {
 
 collect() {
 	local mp4="${OUT}/demo.mp4" dur n at title f
+	# Fresh directories: files from an earlier recording (another run's probe) would read as this one's.
+	rm -rf "${OUT}/logs" "${OUT}/frames" "${OUT}/scripts"
 	mkdir -p "${OUT}/logs" "${OUT}/frames" "${OUT}/scripts"
-	rm -f "${OUT}"/logs/*.log "${OUT}"/logs/*.tsv
-	cp "${LOGS}"/setup.log "${LOGS}"/probe.log "${LOGS}"/reset.log "${LOGS}"/show.log "${LOGS}"/ch-*.log "${LOGS}/timeline.tsv" "${OUT}/logs/"
+	cp "${LOGS}"/setup.log "${LOGS}"/probe.log "${LOGS}"/probe-*.txt "${LOGS}"/reset.log "${LOGS}"/show.log "${LOGS}"/ch-*.log "${LOGS}/timeline.tsv" "${OUT}/logs/"
 	(cd "${DEMO}" && cp "${DEMO_FILES[@]}" "${OUT}/scripts/")
 	local same=0 changed=() sum
 	while read -r sum f; do
@@ -133,6 +134,13 @@ collect() {
 	scan="$(token_scan "${OUT}/logs" "${OUT}/scripts" "${OUT}/source.txt")"
 	mp4_hits="$({ LC_ALL=C grep -a -o -E "ey""J[A-Za-z0-9_-]{8,}" "${mp4}" || true; } | wc -l | tr -d ' ')"
 	head_short="$(git -C "${ROOT}" rev-parse --short HEAD)"
+	# The kmx commit the binding was compared at: render.KmxCommit, the one value the tests pin.
+	local KMX_COMMIT
+	KMX_COMMIT="$(sed -n 's/^[[:space:]]*KmxCommit = "\([0-9a-f]\{40\}\)"$/\1/p' "${DEMO}/../render/binding.go")"
+	[[ -n "${KMX_COMMIT}" ]] || {
+		echo "no KmxCommit in render/binding.go" >&2
+		exit 1
+	}
 	load_env
 	{
 		echo "# AgentSuite coordinator on AgentSessions and agent-substrate micro-VMs: demo"
@@ -167,9 +175,11 @@ collect() {
 		echo "  Tom's approval controls (#132 at de57e31) and the v3 demo branch; the suite is kaimahi 75f27d6"
 		echo "  (suites/coordinator-workers) and its pinned version (suites/coordinator-workers-v2, whose README"
 		echo "  lists every change); the binding follows kmx's AgentSessionsBinding on kaimahi branch"
-		echo "  aramase/f/kmx_agentsessions_binding, compared at 6610c37 (kmx's own digest function gives the same"
-		echo "  binding digest); examples/agentsuite-substrate/README.md lists every difference."
-		echo "- logs/: setup.log, probe.log (an approve and a deny run through agentctl, off camera), reset.log,"
+		echo "  aramase/f/kmx_agentsessions_binding, compared at ${KMX_COMMIT:0:7} (kmx's own code gives the same"
+		echo "  binding digests and, with kmx's renderer version, the same template names);"
+		echo "  examples/agentsuite-substrate/README.md lists every difference."
+		echo "- logs/: setup.log, probe.log and probe-{approve,deny}-*.txt (an approve and a deny run through"
+		echo "  agentctl, off camera: exec, get, decision, journal and list), reset.log,"
 		echo "  show.log, one ch-N.log per chapter with the full output of every command, timeline.tsv; frames/:"
 		echo "  a frame 1.5 s into each chapter; invoke.png: the diagram as spliced; scripts/: the demo files."
 		echo
@@ -219,9 +229,14 @@ reset)
 	load_env
 	coord reset 600
 	;;
-setup | probe | teardown)
+setup | teardown)
 	load_env
 	coord "$1" 2400
+	;;
+probe)
+	load_env
+	rm -f "${LOGS}"/probe-*
+	coord probe 2400
 	;;
 record) record ;;
 collect) collect ;;

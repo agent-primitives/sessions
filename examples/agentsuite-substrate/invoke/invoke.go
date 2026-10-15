@@ -52,24 +52,29 @@ type Edge struct {
 // Policy is the suite's invocation graph: the calling agent's id to its edges.
 type Policy map[string][]Edge
 
-// FromAgents builds the policy from the suite's agent manifests. approve names the targets whose
-// invocations need approval; a name that no edge targets is refused, so a typo cannot leave a
-// delegation ungated.
-func FromAgents(agents []agentsuite.Agent, approve []string) (Policy, error) {
+// Gate names one invokes edge, caller -> agent, whose calls need approval. The deployment chooses
+// the gates (the AgentSessionsBinding's approval.invokes); the suite declares the edges.
+type Gate struct {
+	Caller string `json:"caller"`
+	Agent  string `json:"agent"`
+}
+
+// FromAgents builds the policy from the suite's agent manifests. gates are the edges whose
+// invocations need approval; a gate on an edge the suite does not declare is refused, so a typo
+// cannot leave a delegation ungated.
+func FromAgents(agents []agentsuite.Agent, gates []Gate) (Policy, error) {
 	p := Policy{}
-	targeted := map[string]bool{}
 	for _, a := range agents {
 		for _, inv := range a.Invokes {
-			e := Edge{Target: inv.Agent, MaxConcurrent: inv.MaxConcurrent, MaxDepth: inv.MaxDepth, Approval: slices.Contains(approve, inv.Agent)}
+			e := Edge{Target: inv.Agent, MaxConcurrent: inv.MaxConcurrent, MaxDepth: inv.MaxDepth, Approval: slices.Contains(gates, Gate{Caller: a.ID, Agent: inv.Agent})}
 			if err := p.add(a.ID, e); err != nil {
 				return nil, err
 			}
-			targeted[inv.Agent] = true
 		}
 	}
-	for _, name := range approve {
-		if !targeted[name] {
-			return nil, fmt.Errorf("approval for %q: no invokes edge targets it", name)
+	for _, g := range gates {
+		if _, ok := p.edge(g.Caller, g.Agent); !ok {
+			return nil, fmt.Errorf("approval for %s -> %s: the suite declares no such invokes edge", g.Caller, g.Agent)
 		}
 	}
 	return p, nil

@@ -4,6 +4,8 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -34,13 +36,13 @@ func TestTemplateNameIsContentAddressed(t *testing.T) {
 	if TemplateName("support-desk", "triage", "sha256:"+strings.Repeat("c", 64), "sha256:b", Options{}) == base {
 		t.Fatal("another image must give another template")
 	}
-	// No model keeps the original formula, so an existing template keeps its name.
+	// The formula is kmx's: sha256(image digest + "\n" + binding digest).
 	sum := sha256.Sum256([]byte(digestA + "\n" + "sha256:b"))
 	if want := "support-desk-triage-" + hex.EncodeToString(sum[:])[:8]; base != want {
 		t.Fatalf("name = %q, want %q", base, want)
 	}
-	if TemplateName("support-desk", "triage", digestA, "sha256:b", Options{Model: "gpt-x"}) == base || TemplateName("support-desk", "triage", digestA, "sha256:b", Options{Memory: true}) == base {
-		t.Fatal("a model override must give another template")
+	if TemplateName("support-desk", "triage", digestA, "sha256:b", Options{Memory: true}) == base {
+		t.Fatal("the memory tier must give another template")
 	}
 	long := TemplateName(strings.Repeat("Suite_", 20), strings.Repeat("agent.", 20), digestA, "sha256:b", Options{})
 	if len(long) > 63 || !dnsLabel.MatchString(long) || long[len(long)-8:] != base[len(base)-8:] {
@@ -75,8 +77,11 @@ func TestRenderMapsTheComposition(t *testing.T) {
 	for _, e := range c.GetEnv() {
 		env[e.GetName()] = e.GetValue()
 	}
-	if _, ok := env[agent.ModelEnv]; ok {
-		t.Fatalf("env = %v: without a model override the harness must keep the agent's model", env)
+	if _, ok := env[agent.RetiredModelEnv]; ok {
+		t.Fatalf("env = %v: the harness requests the model its agent pins, with no override", env)
+	}
+	if got := strings.Join(out.ModelFlags, " "); got != "-model=triage-model -model-base-url=http://fakemodel.agentsuite-demo.svc:8080/v1" {
+		t.Fatalf("model flags = %q, want the binding's model and base URL", got)
 	}
 	if env["HARNESS_ADDR"] != ":80" || env["AGENT_DIR"] != AgentDir {
 		t.Fatalf("env = %v, want harnesswire on :80", env)
@@ -109,35 +114,76 @@ func TestRenderMapsTheComposition(t *testing.T) {
 	}
 }
 
-// A real provider serves its own model IDs, not the fixture's. The override reaches the harness
-// through the template's env, and the template name changes with it, so a rerun with another model
-// creates another template instead of reusing one whose harness requests the old model.
-func TestRenderOverridesTheModel(t *testing.T) {
-	comp, err := Load("../suite", "triage", "linux/arm64")
+// writeBinding writes the binding at src with edit applied to its JSON object, and returns the path.
+func writeBinding(t *testing.T, src string, edit func(m map[string]any)) string {
+	t.Helper()
+	raw, err := os.ReadFile(src)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := LoadBinding("../binding.json")
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	edit(m)
+	out, err := json.Marshal(m)
 	if err != nil {
 		t.Fatal(err)
 	}
+	path := filepath.Join(t.TempDir(), "binding.json")
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The suite pins the model and the binding says where it is served: a render refuses a binding
+// that serves any other model, compared exactly. The coordinator binding serves gpt-5.4-mini, which
+// the new suite version pins and kaimahi's original (example-model) does not.
+func TestRenderRefusesAModelTheBindingDoesNotServe(t *testing.T) {
 	image := "localhost:5001/agentsuite-harness@" + digestA
-	out, err := Render(comp, image, b, Options{Model: "gpt-x"})
+	b, err := LoadBinding("../binding-coordinator.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got []string
+	pinned, err := Load("../suites/coordinator-workers-v2", "writer", "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Render(pinned, image, b, Options{})
+	if err != nil {
+		t.Fatalf("the suite pins gpt-5.4-mini and the binding serves it: %v", err)
+	}
+	if got := strings.Join(out.ModelFlags, " "); got != "-model=gpt-5.4-mini -model-base-url=https://example.openai.azure.com -model-path=/openai/deployments/gpt-5.4-mini/chat/completions?api-version=2025-04-01-preview" {
+		t.Fatalf("model flags = %q", got)
+	}
 	for _, e := range out.Template.GetContainers()[0].GetEnv() {
-		if e.GetName() == agent.ModelEnv {
-			got = append(got, e.GetValue())
+		if e.GetName() == agent.RetiredModelEnv {
+			t.Fatalf("the template sets %s; the harness must request the pinned model", agent.RetiredModelEnv)
 		}
 	}
-	if len(got) != 1 || got[0] != "gpt-x" {
-		t.Fatalf("%s in the template env = %v, want [gpt-x]", agent.ModelEnv, got)
+
+	original, err := Load("../suites/coordinator-workers", "writer", "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
 	}
-	name := TemplateName("support-desk", "triage", digestA, b.Digest(), Options{Model: "gpt-x"})
-	if out.Template.GetMetadata().GetName() != name || out.DaemonFlag != "triage=agentsuite-demo/"+name {
-		t.Fatalf("template %q, daemon flag %q: want both on %s", out.Template.GetMetadata().GetName(), out.DaemonFlag, name)
+	_, err = Render(original, image, b, Options{})
+	var mismatch *ModelMismatchError
+	if !errors.Is(err, ErrModelMismatch) || !errors.As(err, &mismatch) || mismatch.Pinned != "example-model" || mismatch.Served != "gpt-5.4-mini" {
+		t.Fatalf("err = %v, want the model mismatch naming both models", err)
+	}
+	if want := `suite coordinator-workers agent writer pins model "example-model" but the binding serves "gpt-5.4-mini"; a different model needs a new suite version and a new evaluation`; err.Error() != want {
+		t.Fatalf("err = %q, want %q", err, want)
+	}
+	// No case folding, prefix or version matching.
+	for _, served := range []string{"GPT-5.4-mini", "gpt-5.4", "gpt-5.4-mini-2026-01-01"} {
+		other, err := LoadBinding(writeBinding(t, "../binding-coordinator.json", func(m map[string]any) { m["model"].(map[string]any)["name"] = served }))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Render(pinned, image, other, Options{}); !errors.Is(err, ErrModelMismatch) {
+			t.Fatalf("served %q: err = %v, want the model mismatch", served, err)
+		}
 	}
 }
 
@@ -212,26 +258,31 @@ func TestKaimahiFixtures(t *testing.T) {
 	}
 }
 
-// The vendored coordinator suite renders three templates. The coordinator's carries the approval
-// targets in its env and in its name; each daemon flag names its own actor atespace.
+// The pinned coordinator suite renders three templates from one binding. The binding's approval edge
+// coordinator -> reviewer reaches only the coordinator's template env; each daemon flag names its
+// own actor atespace.
 func TestRenderCoordinatorSuite(t *testing.T) {
-	const dir = "../suites/coordinator-workers"
-	b, err := LoadBinding("../binding-microvm.json")
+	const dir = "../suites/coordinator-workers-v2"
+	b, err := LoadBinding("../binding-coordinator.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	image := "localhost:5001/agentsuite-harness@" + digestA
+	approvalEnv := func(out *Output) string {
+		for _, e := range out.Template.GetContainers()[0].GetEnv() {
+			if e.GetName() == agent.ApprovalEnv {
+				return e.GetValue()
+			}
+		}
+		return ""
+	}
 	names := map[string]bool{}
 	for _, id := range []string{"coordinator", "writer", "reviewer"} {
 		comp, err := Load(dir, id, "linux/amd64")
 		if err != nil {
 			t.Fatal(err)
 		}
-		o := Options{Model: "gpt-5.4-mini", ActorAtespace: "agentsuite-" + id}
-		if id == "coordinator" {
-			o.Approval = []string{"reviewer"}
-		}
-		out, err := Render(comp, image, b, o)
+		out, err := Render(comp, image, b, Options{ActorAtespace: "agentsuite-" + id})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -240,13 +291,7 @@ func TestRenderCoordinatorSuite(t *testing.T) {
 		if want := id + "=" + b.Atespace + "/" + name + ",actors=agentsuite-" + id; out.DaemonFlag != want {
 			t.Fatalf("%s: daemon flag = %q, want %q", id, out.DaemonFlag, want)
 		}
-		var approval string
-		for _, e := range out.Template.GetContainers()[0].GetEnv() {
-			if e.GetName() == agent.ApprovalEnv {
-				approval = e.GetValue()
-			}
-		}
-		if id == "coordinator" && approval != "reviewer" || id != "coordinator" && approval != "" {
+		if approval := approvalEnv(out); id == "coordinator" && approval != "reviewer" || id != "coordinator" && approval != "" {
 			t.Fatalf("%s: %s = %q", id, agent.ApprovalEnv, approval)
 		}
 	}
@@ -257,37 +302,64 @@ func TestRenderCoordinatorSuite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plain, _ := Render(comp, image, b, Options{Model: "gpt-5.4-mini"})
-	gated, _ := Render(comp, image, b, Options{Model: "gpt-5.4-mini", Approval: []string{"reviewer"}})
-	if plain.Template.GetMetadata().GetName() == gated.Template.GetMetadata().GetName() {
-		t.Fatal("the approval choice must change the template name")
-	}
-	// The order and repeats of the targets change neither the name nor the env.
-	ab, _ := Render(comp, image, b, Options{Approval: []string{"reviewer", "writer"}})
-	ba, _ := Render(comp, image, b, Options{Approval: []string{"writer", "reviewer", "writer"}})
-	if ab.Template.GetMetadata().GetName() != ba.Template.GetMetadata().GetName() {
-		t.Fatalf("template names differ by approval order: %s, %s", ab.Template.GetMetadata().GetName(), ba.Template.GetMetadata().GetName())
-	}
-	for _, out := range []*Output{ab, ba} {
-		var got string
-		for _, e := range out.Template.GetContainers()[0].GetEnv() {
-			if e.GetName() == agent.ApprovalEnv {
-				got = e.GetValue()
+	gates := func(edges ...[2]string) func(m map[string]any) {
+		return func(m map[string]any) {
+			var list []any
+			for _, e := range edges {
+				list = append(list, map[string]any{"caller": e[0], "agent": e[1]})
 			}
+			if list == nil {
+				delete(m, "approval")
+				return
+			}
+			m["approval"] = map[string]any{"invokes": list}
 		}
-		if got != "reviewer,writer" {
-			t.Fatalf("%s = %q, want reviewer,writer", agent.ApprovalEnv, got)
+	}
+	render := func(edit func(m map[string]any)) (*Output, *Binding) {
+		t.Helper()
+		bb, err := LoadBinding(writeBinding(t, "../binding-coordinator.json", edit))
+		if err != nil {
+			t.Fatal(err)
 		}
+		out, err := Render(comp, image, bb, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out, bb
+	}
+	plain, _ := render(gates())
+	gated, _ := render(gates([2]string{"coordinator", "reviewer"}))
+	if approvalEnv(plain) != "" || plain.Template.GetMetadata().GetName() == gated.Template.GetMetadata().GetName() {
+		t.Fatal("the binding's approval edges must reach the template env and change the template name")
+	}
+	// The edges are a set: their order changes neither the binding digest nor the env.
+	ab, bab := render(gates([2]string{"coordinator", "reviewer"}, [2]string{"coordinator", "writer"}))
+	ba, bba := render(gates([2]string{"coordinator", "writer"}, [2]string{"coordinator", "reviewer"}))
+	if bab.Digest() != bba.Digest() || ab.Template.GetMetadata().GetName() != ba.Template.GetMetadata().GetName() {
+		t.Fatalf("binding digests differ by approval order: %s, %s", bab.Digest(), bba.Digest())
+	}
+	if approvalEnv(ab) != "reviewer,writer" || approvalEnv(ba) != "reviewer,writer" {
+		t.Fatalf("%s = %q and %q, want reviewer,writer", agent.ApprovalEnv, approvalEnv(ab), approvalEnv(ba))
+	}
+	// A gate on another caller's edge does not reach this agent's template.
+	other, _ := render(gates([2]string{"writer", "reviewer"}))
+	if approvalEnv(other) != "" {
+		t.Fatalf("%s = %q for a gate whose caller is writer", agent.ApprovalEnv, approvalEnv(other))
+	}
+	publisher, err := LoadBinding(writeBinding(t, "../binding-coordinator.json", gates([2]string{"coordinator", "publisher"})))
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, tc := range []struct {
+		b    *Binding
 		o    Options
 		want string
 	}{
-		{Options{Approval: []string{"publisher"}}, `approval for "publisher": agent coordinator has no invokes edge to it`},
-		{Options{Memory: true}, "delegations need the approval-capable stateless tier"},
-		{Options{ActorAtespace: "Bad_Space"}, "is not a DNS label"},
+		{publisher, Options{}, `approval for "publisher": agent coordinator has no invokes edge to it`},
+		{b, Options{Memory: true}, "delegations need the approval-capable stateless tier"},
+		{b, Options{ActorAtespace: "Bad_Space"}, "is not a DNS label"},
 	} {
-		if _, err := Render(comp, image, b, tc.o); err == nil || !strings.Contains(err.Error(), tc.want) {
+		if _, err := Render(comp, image, tc.b, tc.o); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("Render(%+v): err = %v, want %q", tc.o, err, tc.want)
 		}
 	}
@@ -298,10 +370,87 @@ func TestRenderCoordinatorSuite(t *testing.T) {
 	}
 }
 
-// Each vendored coordinator-workers file has the git blob id and sha256 SOURCE records for kaimahi
-// 75f27d6.
-func TestVendoredKaimahiCoordinatorWorkers(t *testing.T) {
-	const dir = "../suites/coordinator-workers"
+// The new suite version differs from kaimahi 75f27d6 only as its README says: the three agents pin
+// gpt-5.4-mini instead of example-model, and agentsuite.json carries their recomputed digests.
+// SOURCE records each file's git blob id and sha256.
+func TestCoordinatorWorkersV2(t *testing.T) {
+	const v1, v2 = "../suites/coordinator-workers", "../suites/coordinator-workers-v2"
+	checkSource(t, v2, 15)
+	changed := map[string]bool{"agents/coordinator.json": true, "agents/writer.json": true, "agents/reviewer.json": true, "agentsuite.json": true}
+	digests := map[string]string{}
+	for _, id := range []string{"coordinator", "writer", "reviewer"} {
+		for _, dir := range []string{v1, v2} {
+			raw, err := os.ReadFile(filepath.Join(dir, "agents", id+".json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			d, err := agentsuite.Digest(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digests[dir+id] = d
+		}
+	}
+	err := filepath.WalkDir(v1, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || d.Name() == "SOURCE" {
+			return err
+		}
+		rel, _ := filepath.Rel(v1, path)
+		old, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		cur, err := os.ReadFile(filepath.Join(v2, rel))
+		if err != nil {
+			return err
+		}
+		if !changed[filepath.ToSlash(rel)] {
+			if string(cur) != string(old) {
+				t.Errorf("%s differs from 75f27d6", rel)
+			}
+			return nil
+		}
+		back := strings.ReplaceAll(string(cur), `"model": "gpt-5.4-mini"`, `"model": "example-model"`)
+		for _, id := range []string{"coordinator", "writer", "reviewer"} {
+			back = strings.ReplaceAll(back, digests[v2+id], digests[v1+id])
+		}
+		if back == string(cur) || back != string(old) {
+			t.Errorf("%s: want 75f27d6's bytes with only the model and the agent digests changed", rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// And it adds no file but its SOURCE and README.md.
+	err = filepath.WalkDir(v2, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || d.Name() == "SOURCE" || d.Name() == "README.md" {
+			return err
+		}
+		rel, _ := filepath.Rel(v2, path)
+		if _, err := os.Stat(filepath.Join(v1, rel)); err != nil {
+			t.Errorf("%s is not in 75f27d6", rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"coordinator", "writer", "reviewer"} {
+		comp, err := Load(v2, id, "linux/amd64")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if comp.Suite != "coordinator-workers" || comp.Agent.Model.Model != "gpt-5.4-mini" || comp.Agent.Model.Protocol != ModelProtocol {
+			t.Fatalf("%s: suite %q, model %+v", id, comp.Suite, comp.Agent.Model)
+		}
+	}
+}
+
+// checkSource checks every "<git blob id> <sha256> <path>" line of dir/SOURCE against the file and
+// that it lists want files.
+func checkSource(t *testing.T, dir string, want int) {
+	t.Helper()
 	src, err := os.ReadFile(filepath.Join(dir, "SOURCE"))
 	if err != nil {
 		t.Fatal(err)
@@ -326,9 +475,15 @@ func TestVendoredKaimahiCoordinatorWorkers(t *testing.T) {
 			t.Errorf("%s: sha256 differs from SOURCE", f[2])
 		}
 	}
-	if files != 15 {
-		t.Fatalf("SOURCE lists %d files, want 15", files)
+	if files != want {
+		t.Fatalf("%s/SOURCE lists %d files, want %d", dir, files, want)
 	}
+}
+
+// Each vendored coordinator-workers file has the git blob id and sha256 SOURCE records for kaimahi
+// 75f27d6.
+func TestVendoredKaimahiCoordinatorWorkers(t *testing.T) {
+	checkSource(t, "../suites/coordinator-workers", 15)
 }
 
 func TestLoadBindingIsStrict(t *testing.T) {
@@ -338,6 +493,78 @@ func TestLoadBindingIsStrict(t *testing.T) {
 	}
 	if _, err := LoadBinding(path); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("err = %v, want unknown fields refused", err)
+	}
+	const secretish = "s3cr3t-value"
+	for _, tc := range []struct {
+		name string
+		edit func(m map[string]any)
+		want string
+	}{
+		{"no model", func(m map[string]any) { delete(m, "model") }, "model.name must be one exact model identifier"},
+		{"model name with a space", func(m map[string]any) { model(m)["name"] = "gpt 5" }, "model.name must be one exact model identifier"},
+		{"another provider", func(m map[string]any) { model(m)["provider"] = "anthropic" }, `model.provider "anthropic": want openai`},
+		{"a key in the base URL query", func(m map[string]any) { model(m)["baseURL"] = "https://h.example?api-key=" + secretish }, "model.baseURL: the base URL carries a query"},
+		{"userinfo in the base URL", func(m map[string]any) { model(m)["baseURL"] = "https://u:" + secretish + "@h.example" }, "model.baseURL: the base URL carries userinfo"},
+		{"a key in the path", func(m map[string]any) { model(m)["path"] = "/chat?api-key=" + secretish }, "model.path: the model path carries a query parameter other than api-version"},
+		{"no secretRef", func(m map[string]any) { delete(model(m), "secretRef") }, "model.secretRef.name"},
+		{"a credential field", func(m map[string]any) { model(m)["apiKey"] = secretish }, "unknown field"},
+		{"an empty sandbox config", func(m map[string]any) { m["sandbox"].(map[string]any)["configName"] = "" }, "sandbox.configName"},
+		{"no fidelity", func(m map[string]any) { delete(m["snapshot"].(map[string]any), "fidelity") }, "snapshot.fidelity"},
+		{"a repeated gate", func(m map[string]any) {
+			m["approval"] = map[string]any{"invokes": []any{map[string]any{"caller": "coordinator", "agent": "reviewer"}, map[string]any{"caller": "coordinator", "agent": "reviewer"}}}
+		}, "coordinator -> reviewer is given more than once"},
+		{"a gate with no caller", func(m map[string]any) {
+			m["approval"] = map[string]any{"invokes": []any{map[string]any{"agent": "reviewer"}}}
+		}, "caller and agent must be agent ids"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadBinding(writeBinding(t, "../binding-coordinator.json", tc.edit))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), secretish) {
+				t.Fatalf("err = %q repeats the value", err)
+			}
+		})
+	}
+	trailing := filepath.Join(t.TempDir(), "b.json")
+	raw, _ := os.ReadFile("../binding-coordinator.json")
+	if err := os.WriteFile(trailing, append(raw, []byte(`{}`)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadBinding(trailing); err == nil || !strings.Contains(err.Error(), "want one JSON document") {
+		t.Fatalf("a second document: err = %v", err)
+	}
+}
+
+func model(m map[string]any) map[string]any { return m["model"].(map[string]any) }
+
+// The binding digest is kmx's: the JCS digest of the binding's fields, so key order, whitespace and
+// an empty workerSelector do not change it, and every field does.
+func TestBindingDigest(t *testing.T) {
+	base, err := LoadBinding("../binding-microvm.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile("../binding-microvm.json")
+	if d, _ := agentsuite.Digest(raw); d != base.Digest() {
+		t.Fatalf("digest %s, want the JCS digest of the file %s (it spells every field)", base.Digest(), d)
+	}
+	same, err := LoadBinding(writeBinding(t, "../binding-microvm.json", func(map[string]any) {}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if same.Digest() != base.Digest() {
+		t.Fatal("re-encoding the binding changed its digest")
+	}
+	noSel, _ := LoadBinding(writeBinding(t, "../binding-microvm.json", func(m map[string]any) { delete(m, "workerSelector") }))
+	emptySel, _ := LoadBinding(writeBinding(t, "../binding-microvm.json", func(m map[string]any) { m["workerSelector"] = map[string]any{"matchLabels": map[string]any{}} }))
+	if noSel.Digest() != emptySel.Digest() || noSel.Digest() == base.Digest() {
+		t.Fatal("an empty workerSelector must be the omitted one, and dropping the selector must change the digest")
+	}
+	served, _ := LoadBinding(writeBinding(t, "../binding-microvm.json", func(m map[string]any) { model(m)["name"] = "other" }))
+	if served.Digest() == base.Digest() {
+		t.Fatal("the served model must change the digest")
 	}
 }
 

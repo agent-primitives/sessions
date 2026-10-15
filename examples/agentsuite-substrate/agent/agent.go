@@ -19,10 +19,10 @@ import (
 	"github.com/aramase/agentsessions/api"
 )
 
-// ModelEnv names the environment variable that overrides the model the agent's manifest declares.
-// The ActorTemplate sets it when the host is pointed at a real provider, which serves its own model
-// IDs rather than the fixture's.
-const ModelEnv = "AGENTSUITE_MODEL"
+// RetiredModelEnv named the environment variable that overrode the model the agent's manifest
+// declares. The suite now pins the model and the binding must serve exactly that one, so the
+// harness refuses to start when it is set.
+const RetiredModelEnv = "AGENTSUITE_MODEL"
 
 // MemoryEnv names the environment variable that selects the memory tier: set to MemoryRAM, the
 // harness keeps the conversation in its own RAM instead of rebuilding it from the journal.
@@ -93,15 +93,6 @@ func (h Harness) WithApproval(targets []string) (Harness, error) {
 	}
 	h.Approval = slices.Clone(targets)
 	return h, nil
-}
-
-// WithModel returns h requesting model instead of the manifest's model. An empty model keeps the
-// manifest's.
-func (h Harness) WithModel(model string) Harness {
-	if model != "" {
-		h.Model = model
-	}
-	return h
 }
 
 // WithMemory returns h as a REQUIRES_MEMORY_SNAPSHOT harness: it builds each model request from the

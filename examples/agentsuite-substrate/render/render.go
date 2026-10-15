@@ -4,18 +4,16 @@
 //
 // The field mapping follows the AgentSuite to ActorTemplate design (v0): the template name is
 // content-addressed, <suite>-<agent>-<hash8> with hash8 the first 8 hex of
-// sha256(image digest + "\n" + binding digest), with "\n" + model appended when the harness's model
-// is overridden, so the same image under another binding or model is another template; the harness
-// speaks harnesswire on port 80 with a /readyz wakeup probe on 8081; the sandbox, snapshot,
-// resources and worker selector come from the binding. Model credentials are host configuration and
-// never rendered.
+// sha256(image digest + "\n" + binding digest), so the same image under another binding is another
+// template; the harness speaks harnesswire on port 80 with a /readyz wakeup probe on 8081; the
+// sandbox, snapshot, resources, worker selector and approval gates come from the binding. The
+// harness requests the model its agent pins, and the binding must serve exactly that model. Model
+// credentials are host configuration and never rendered.
 package render
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -106,7 +104,7 @@ func Load(dir, agentID, platform string) (*Composition, error) {
 }
 
 // ModelProtocol is the only model protocol an agent can declare: agentsessionsd answers the
-// harness's model calls with its -model, an OpenAI-compatible endpoint.
+// harness's model calls through an OpenAI-compatible endpoint (the binding's model).
 const ModelProtocol = "openai-compatible"
 
 // reservedHarnesses are the harness names agentsessionsd serves itself (echo, and chat with -model);
@@ -142,73 +140,6 @@ func readStrict(path string, out any) error {
 	return nil
 }
 
-// Binding is the deploy-target half of the mapping: the draft AgentSessionsBinding
-// (kmx.kaimahi.dev/v1alpha1), restricted to the fields a substrate placement reads. It is a
-// proposal; kaimahi does not define the kind yet.
-type Binding struct {
-	APIVersion string `json:"apiVersion"`
-	Kind       string `json:"kind"`
-	Target     struct {
-		Platform string `json:"platform"`
-		ID       string `json:"id"`
-	} `json:"target"`
-	Placement struct {
-		Backend string `json:"backend"`
-	} `json:"placement"`
-	Atespace string `json:"atespace"`
-	Sandbox  struct {
-		Class      string `json:"class"`
-		ConfigName string `json:"configName"`
-	} `json:"sandbox"`
-	Snapshot struct {
-		Fidelity        string `json:"fidelity"`
-		StorageLocation string `json:"storageLocation"`
-	} `json:"snapshot"`
-	Resources struct {
-		CPU    string `json:"cpu,omitempty"`
-		Memory string `json:"memory,omitempty"`
-	} `json:"resources"`
-	WorkerSelector struct {
-		MatchLabels map[string]string `json:"matchLabels,omitempty"`
-	} `json:"workerSelector"`
-
-	digest string
-}
-
-// LoadBinding decodes a binding strictly (unknown fields are refused) and records its digest, the
-// SHA-256 of its JCS form, so the template name covers exactly what is rendered.
-func LoadBinding(path string) (*Binding, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var b Binding
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&b); err != nil {
-		return nil, fmt.Errorf("binding %s: %w", path, err)
-	}
-	if b.APIVersion != "kmx.kaimahi.dev/v1alpha1" || b.Kind != "AgentSessionsBinding" {
-		return nil, fmt.Errorf("binding %s: want kmx.kaimahi.dev/v1alpha1 AgentSessionsBinding, got %s %s", path, b.APIVersion, b.Kind)
-	}
-	if b.Placement.Backend != "substrate" {
-		return nil, fmt.Errorf("binding %s: placement.backend %q: only substrate is rendered", path, b.Placement.Backend)
-	}
-	if !dnsLabel.MatchString(b.Atespace) {
-		return nil, fmt.Errorf("binding %s: atespace %q is not a DNS label", path, b.Atespace)
-	}
-	if b.Snapshot.StorageLocation == "" {
-		return nil, fmt.Errorf("binding %s: snapshot.storageLocation is required", path)
-	}
-	if b.digest, err = agentsuite.Digest(raw); err != nil {
-		return nil, fmt.Errorf("binding %s: %w", path, err)
-	}
-	return &b, nil
-}
-
-// Digest is the binding's content digest.
-func (b *Binding) Digest() string { return b.digest }
-
 var (
 	dnsLabel    = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 	pinnedImage = regexp.MustCompile(`^[^@\s]+@(sha256:[0-9a-f]{64})$`)
@@ -217,38 +148,24 @@ var (
 
 // Options are what a render sets beyond the composition, image and binding.
 type Options struct {
-	// Model is the provider model the harness requests in place of the agent's own; empty keeps
-	// the agent's.
-	Model string
 	// Memory renders the memory tier: the harness keeps the conversation in RAM
 	// (agent.MemoryEnv=agent.MemoryRAM) and is registered as REQUIRES_MEMORY_SNAPSHOT under the name
 	// <agent>-memory.
 	Memory bool
-	// Approval lists the invoke targets whose calls the harness sends as REQUIRES_APPROVAL
-	// (agent.ApprovalEnv). Each must be one of the agent's invokes edges.
-	Approval []string
 	// ActorAtespace, when set, is where agentsessionsd creates this harness's session actors: the
 	// daemon flag gets ,actors=<atespace>, so several agents can share one daemon.
 	ActorAtespace string
 }
 
 // TemplateName is <suite>-<agent>-<hash8>: hash8 is the first 8 hex of
-// sha256(imageDigest + "\n" + bindingDigest), with "\n" + model appended when o.Model is not empty
-// (the template then carries a model override in its env), "\nmemory" when o.Memory is set (the
-// template then selects the memory tier in its env) and "\napproval=" + the comma-joined targets,
-// sorted and deduplicated, when o.Approval is set (so their order and repeats do not change the
-// name). The result is a DNS label of at most 63 characters; suite and agent are
-// lowercased, sanitized and truncated to fit, never hash8.
+// sha256(imageDigest + "\n" + bindingDigest), with "\nmemory" appended when o.Memory is set (the
+// template then selects the memory tier in its env). The binding digest covers the served model and
+// the approval gates, so changing either names another template. The result is a DNS label of at
+// most 63 characters; suite and agent are lowercased, sanitized and truncated to fit, never hash8.
 func TemplateName(suite, agent, imageDigest, bindingDigest string, o Options) string {
 	content := imageDigest + "\n" + bindingDigest
-	if o.Model != "" {
-		content += "\n" + o.Model
-	}
 	if o.Memory {
 		content += "\nmemory"
-	}
-	if targets := approvalTargets(o); len(targets) > 0 {
-		content += "\napproval=" + strings.Join(targets, ",")
 	}
 	sum := sha256.Sum256([]byte(content))
 	hash8 := hex.EncodeToString(sum[:])[:8]
@@ -278,6 +195,9 @@ type Output struct {
 	// name=atespace/template[,memory][,actors=<atespace>]. The HarnessRegistry API does not take a
 	// substrate placement on this base (internal/agentsessionsd registeredPlacer refuses one).
 	DaemonFlag string
+	// ModelFlags are the agentsessionsd flags that serve the binding's model (-model and, when the
+	// binding sets them, -model-base-url and -model-path).
+	ModelFlags []string
 }
 
 // Agents validates the suite directory and returns every agent manifest it lists, in suite order.
@@ -300,24 +220,22 @@ func Agents(dir string) ([]agentsuite.Agent, error) {
 	return agents, nil
 }
 
-// approvalTargets returns o.Approval sorted and deduplicated, the form the template name and env use.
-func approvalTargets(o Options) []string {
-	targets := slices.Clone(o.Approval)
-	slices.Sort(targets)
-	return slices.Compact(targets)
-}
-
 // Render maps a composition, its digest-pinned harness image and a binding onto an ActorTemplate and
 // a harness registration. The harness registration's name is the agent id, or <agent>-memory for the
-// memory tier. A non-empty o.Model is the provider model the harness requests in place of the
-// agent's own: it is set in the template's env (AGENTSUITE_MODEL) and folded into the template name,
-// as o.Memory is (AGENTSUITE_MEMORY=ram).
+// memory tier (AGENTSUITE_MEMORY=ram, folded into the template name). Render refuses a binding that
+// serves a model other than the one the agent pins (ErrModelMismatch). The binding's approval edges
+// whose caller is this agent are set in the template's env (AGENTSUITE_APPROVAL); each must be one
+// of the agent's invokes edges.
 func Render(c *Composition, image string, b *Binding, o Options) (*Output, error) {
 	// Load checked the agent; check again for a Composition built by hand.
 	if err := supported(c.Agent); err != nil {
 		return nil, err
 	}
-	for _, t := range o.Approval {
+	if err := CheckModel(c, b); err != nil {
+		return nil, err
+	}
+	targets := b.ApprovalTargets(c.Agent.ID)
+	for _, t := range targets {
 		if !slices.ContainsFunc(c.Agent.Invokes, func(inv agentsuite.AgentInvoke) bool { return inv.Agent == t }) {
 			return nil, fmt.Errorf("approval for %q: agent %s has no invokes edge to it", t, c.Agent.ID)
 		}
@@ -356,15 +274,12 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 		// Add no capabilities: the harness needs none, and the template is the only place to say so.
 		SecurityContext: &atepb.SecurityContext{Capabilities: &atepb.Capabilities{}},
 	}
-	if o.Model != "" {
-		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.ModelEnv, Value: o.Model})
-	}
 	harness, resumability, tier := c.Agent.ID, v1.Resumability_RESUMABILITY_STATELESS_REPLAY, ""
 	if o.Memory {
 		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.MemoryEnv, Value: agent.MemoryRAM})
 		harness, resumability, tier = c.Agent.ID+"-memory", v1.Resumability_RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT, ",memory"
 	}
-	if targets := approvalTargets(o); len(targets) > 0 {
+	if len(targets) > 0 {
 		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.ApprovalEnv, Value: strings.Join(targets, ",")})
 	}
 	if o.ActorAtespace != "" {
@@ -406,6 +321,7 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 		Template:     tmpl,
 		Registration: reg,
 		DaemonFlag:   fmt.Sprintf("%s=%s/%s%s", harness, b.Atespace, name, tier),
+		ModelFlags:   b.DaemonModelFlags(),
 	}, nil
 }
 

@@ -106,8 +106,8 @@ func run(t *testing.T, fn controller.ToolFunc, session string, c api.ToolCall) a
 }
 
 // The vendored suite's coordinator declares writer and reviewer, each maxConcurrent 1 and maxDepth
-// 1; the workers declare none.
-func suitePolicy(t *testing.T, approve ...string) Policy {
+// 1; the workers declare none. gated names the coordinator's targets whose calls need approval.
+func suitePolicy(t *testing.T, gated ...string) Policy {
 	t.Helper()
 	report, err := agentsuite.ValidateDirectory("../suites/coordinator-workers")
 	if err != nil {
@@ -128,7 +128,11 @@ func suitePolicy(t *testing.T, approve ...string) Policy {
 		}
 		agents = append(agents, a)
 	}
-	p, err := FromAgents(agents, approve)
+	var gates []Gate
+	for _, g := range gated {
+		gates = append(gates, Gate{Caller: "coordinator", Agent: g})
+	}
+	p, err := FromAgents(agents, gates)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,8 +155,45 @@ func TestPolicyFromSuite(t *testing.T) {
 	if back.String() != p.String() {
 		t.Fatalf("round trip = %q, want %q", back.String(), p.String())
 	}
-	if _, err := FromAgents(nil, []string{"reviewer"}); err == nil || !strings.Contains(err.Error(), "no invokes edge targets it") {
-		t.Fatalf("approval for an untargeted agent: err = %v", err)
+	for _, g := range []Gate{{Caller: "coordinator", Agent: "publisher"}, {Caller: "writer", Agent: "reviewer"}, {Caller: "reviewer", Agent: "coordinator"}} {
+		if _, err := FromAgents(suiteAgents(t), []Gate{g}); err == nil || !strings.Contains(err.Error(), "the suite declares no such invokes edge") {
+			t.Fatalf("gate %+v on an undeclared edge: err = %v", g, err)
+		}
+	}
+}
+
+// suiteAgents returns the vendored suite's agent manifests.
+func suiteAgents(t *testing.T) []agentsuite.Agent {
+	t.Helper()
+	var agents []agentsuite.Agent
+	for _, id := range []string{"coordinator", "writer", "reviewer"} {
+		raw, err := os.ReadFile("../suites/coordinator-workers/agents/" + id + ".json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var a agentsuite.Agent
+		if err := agentsuite.Unmarshal(raw, &a); err != nil {
+			t.Fatal(err)
+		}
+		agents = append(agents, a)
+	}
+	return agents
+}
+
+// A gate names one edge, caller -> agent: when two agents invoke the same target, gating one
+// caller's edge leaves the other's ungated.
+func TestGateIsPerEdge(t *testing.T) {
+	agents := []agentsuite.Agent{
+		{ID: "a", Invokes: []agentsuite.AgentInvoke{{Agent: "c", MaxConcurrent: 1, MaxDepth: 1}}},
+		{ID: "b", Invokes: []agentsuite.AgentInvoke{{Agent: "c", MaxConcurrent: 2, MaxDepth: 1}}},
+		{ID: "c"},
+	}
+	p, err := FromAgents(agents, []Gate{{Caller: "a", Agent: "c"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := p.String(), "a=c:1:1:approval,b=c:2:1"; got != want {
+		t.Fatalf("policy = %q, want %q", got, want)
 	}
 }
 

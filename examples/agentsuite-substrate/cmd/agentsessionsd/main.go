@@ -4,7 +4,8 @@
 // call as a child session on the target agent's harness.
 //
 // The suite's edges come from AGENTSUITE_INVOKES, comma-separated
-// caller=target:maxConcurrent:maxDepth[:approval] values as emit render -approve prints them. The
+// caller=target:maxConcurrent:maxDepth[:approval] values as emit invokes prints them from the suite
+// and the binding's approval edges. The
 // harness names are the agent ids. A malformed value refuses the start.
 package main
 

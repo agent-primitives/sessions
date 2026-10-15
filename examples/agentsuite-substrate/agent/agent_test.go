@@ -58,25 +58,21 @@ func TestLoadPinsInstructions(t *testing.T) {
 	}
 }
 
-// The harness requests the override when one is set, and the manifest's model otherwise.
-func TestWithModel(t *testing.T) {
+// The harness requests the model its manifest pins; nothing in the harness overrides it.
+func TestRunRequestsThePinnedModel(t *testing.T) {
 	h, err := Load(stage(t, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := h.WithModel("").Model; got != "triage-model" {
-		t.Fatalf("no override: model = %q, want the manifest's triage-model", got)
-	}
-	o := h.WithModel("gpt-x")
-	if o.Model != "gpt-x" || h.Model != "triage-model" {
-		t.Fatalf("override: model = %q (original %q), want gpt-x and the original unchanged", o.Model, h.Model)
+	if h.Model != "triage-model" {
+		t.Fatalf("model = %q, want the manifest's triage-model", h.Model)
 	}
 	sink := &recordingSink{}
-	if err := o.Run(t.Context(), &api.Start{Inputs: []api.Message{*api.TextMessage("user", "hi")}}, sink); err != nil {
+	if err := h.Run(t.Context(), &api.Start{Inputs: []api.Message{*api.TextMessage("user", "hi")}}, sink); err != nil {
 		t.Fatal(err)
 	}
-	if len(sink.requests) != 1 || sink.requests[0].Model != "gpt-x" {
-		t.Fatalf("requests = %+v, want one for gpt-x", sink.requests)
+	if len(sink.requests) != 1 || sink.requests[0].Model != "triage-model" {
+		t.Fatalf("requests = %+v, want one for triage-model", sink.requests)
 	}
 }
 

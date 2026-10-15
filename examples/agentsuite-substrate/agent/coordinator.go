@@ -13,8 +13,9 @@ import (
 )
 
 // ApprovalEnv names the environment variable listing, comma-separated, the invoke targets whose
-// calls this harness sends as REQUIRES_APPROVAL. The ActorTemplate sets it from emit render
-// -approve; the host's executor refuses an ungated call to a gated target either way.
+// calls this harness sends as REQUIRES_APPROVAL. emit render sets it in the ActorTemplate from the
+// binding's approval edges whose caller is this agent; the host's executor refuses an ungated call
+// to a gated target either way.
 const ApprovalEnv = "AGENTSUITE_APPROVAL"
 
 // maxDelegations bounds one turn's delegations, so a model that keeps delegating ends the turn

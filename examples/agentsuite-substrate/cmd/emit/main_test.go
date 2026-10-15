@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"testing"
@@ -8,6 +12,8 @@ import (
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/aramase/agentsessions/examples/agentsuite-substrate/render"
 )
 
 // check-model refuses what agentsessionsd's model client refuses at startup (model/openai), which
@@ -165,13 +171,27 @@ func TestValidate(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
-	if len(lines) != 2 || lines[0] != "suite minimal valid: 1 agent; compositions: writer linux/amd64 profile default" ||
-		!strings.HasPrefix(lines[1], "validated by github.com/kaimahi-agents/kaimahi/agentsuite ") {
-		t.Errorf("validate printed %q, want the suite line and the validator line", out.String())
+	if len(lines) != 3 || lines[0] != "suite minimal valid: 1 agent; compositions: writer linux/amd64 profile default" ||
+		!strings.HasPrefix(lines[1], "digest sha256:") || len(lines[1]) != len("digest sha256:")+64 ||
+		!strings.HasPrefix(lines[2], "validated by github.com/kaimahi-agents/kaimahi/agentsuite ") {
+		t.Errorf("validate printed %q, want the suite line, its digest and the validator line", out.String())
 	}
-	if got, want := validLines("s", "v1", 2, []string{"a linux/amd64 profile p", "b linux/arm64 profile p"}),
-		"suite s valid: 2 agents; compositions: a linux/amd64 profile p; b linux/arm64 profile p\nvalidated by github.com/kaimahi-agents/kaimahi/agentsuite v1\n"; got != want {
+	if got, want := validLines("s", "sha256:d", "v1", 2, []string{"a linux/amd64 profile p", "b linux/arm64 profile p"}),
+		"suite s valid: 2 agents; compositions: a linux/amd64 profile p; b linux/arm64 profile p\ndigest sha256:d\nvalidated by github.com/kaimahi-agents/kaimahi/agentsuite v1\n"; got != want {
 		t.Errorf("validLines for two agents = %q, want %q", got, want)
+	}
+	// The suite version is the digest of agentsuite.json: the pinned suite has its own.
+	digests := map[string]bool{}
+	for _, dir := range []string{"../../suites/coordinator-workers", "../../suites/coordinator-workers-v2"} {
+		var o strings.Builder
+		if err := validate([]string{"-suite", dir}, &o); err != nil {
+			t.Fatal(err)
+		}
+		digests[strings.Split(o.String(), "\n")[1]] = true
+	}
+	if !digests["digest sha256:2d05b90f3ddef4b72eee99e6fad9f2c1e7ba9b2e160029b3767c9628bf008e70"] ||
+		!digests["digest sha256:306685d5375bb021ae1424f610012441b4381d0d49feab3b4c208ac2ced96c60"] {
+		t.Errorf("suite digests = %v, want 75f27d6's and the pinned version's (suites/coordinator-workers-v2/README.md)", digests)
 	}
 	dir := t.TempDir()
 	if err := validate([]string{"-suite", dir}, &out); err == nil {
@@ -251,5 +271,144 @@ func TestStableJSON(t *testing.T) {
 	}
 	if !proto.Equal(back, m) {
 		t.Errorf("stableJSON does not read back as the message: %v", back)
+	}
+}
+
+const (
+	pinnedSuite   = "../../suites/coordinator-workers-v2"
+	originalSuite = "../../suites/coordinator-workers"
+	coordBinding  = "../../binding-coordinator.json"
+	image         = "localhost:5001/agentsuite-harness@sha256:" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+)
+
+// bindingWith writes the coordinator binding with its approval edges replaced by gates
+// ("caller->agent"); none drops approval.
+func bindingWith(t *testing.T, gates ...string) string {
+	t.Helper()
+	raw, err := os.ReadFile(coordBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	delete(m, "approval")
+	var list []any
+	for _, g := range gates {
+		caller, agent, _ := strings.Cut(g, "->")
+		list = append(list, map[string]any{"caller": caller, "agent": agent})
+	}
+	if list != nil {
+		m["approval"] = map[string]any{"invokes": list}
+	}
+	out, _ := json.Marshal(m)
+	path := filepath.Join(t.TempDir(), "binding.json")
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// emit render and check-binding refuse a binding that serves another model than the suite pins, and
+// accept the suite version that pins it; the render writes the daemon's model flags from the binding.
+func TestRenderChecksTheModel(t *testing.T) {
+	var out strings.Builder
+	if err := checkBinding([]string{"-suite", pinnedSuite, "-binding", coordBinding}, &out); err != nil {
+		t.Fatalf("check-binding of the pinned suite: %v", err)
+	}
+	if !strings.Contains(out.String(), "serves gpt-5.4-mini for coordinator, writer, reviewer") {
+		t.Fatalf("check-binding printed %q", out.String())
+	}
+	if err := checkBinding([]string{"-suite", originalSuite, "-binding", coordBinding}, &out); !errors.Is(err, render.ErrModelMismatch) {
+		t.Fatalf("check-binding of 75f27d6's suite: err = %v, want the model mismatch", err)
+	}
+	if err := checkBinding([]string{"-suite", originalSuite, "-agent", "writer", "-binding", coordBinding}, &out); !errors.Is(err, render.ErrModelMismatch) {
+		t.Fatalf("check-binding -agent writer of 75f27d6's suite: err = %v, want the model mismatch", err)
+	}
+	dir := t.TempDir()
+	err := renderCmd([]string{"-suite", originalSuite, "-agent", "coordinator", "-binding", coordBinding, "-image", image, "-out", dir})
+	if !errors.Is(err, render.ErrModelMismatch) {
+		t.Fatalf("render of 75f27d6's suite: err = %v, want the model mismatch", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("a refused render wrote %d files", len(entries))
+	}
+	if err := renderCmd([]string{"-suite", pinnedSuite, "-agent", "coordinator", "-binding", coordBinding, "-image", image, "-out", dir}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "agentsessionsd.model-args"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "-model=gpt-5.4-mini\n-model-base-url=https://example.openai.azure.com\n-model-path=/openai/deployments/gpt-5.4-mini/chat/completions?api-version=2025-04-01-preview\n"; string(got) != want {
+		t.Fatalf("agentsessionsd.model-args = %q, want %q", got, want)
+	}
+	if err := renderCmd([]string{"-suite", pinnedSuite, "-agent", "coordinator", "-model", "gpt-x", "-binding", coordBinding, "-image", image, "-out", dir}); err == nil {
+		t.Fatal("render accepted -model: the model is the suite's, not a render-time choice")
+	}
+}
+
+// The binding chooses the gated edges: emit invokes marks them in AGENTSUITE_INVOKES, emit render
+// sets them in the caller's template, and both refuse a gate on an edge the suite does not declare.
+func TestBindingDrivesApproval(t *testing.T) {
+	for _, tc := range []struct {
+		gates []string
+		want  string
+	}{
+		{nil, "coordinator=reviewer:1:1,coordinator=writer:1:1"},
+		{[]string{"coordinator->reviewer"}, "coordinator=reviewer:1:1:approval,coordinator=writer:1:1"},
+		{[]string{"coordinator->writer", "coordinator->reviewer"}, "coordinator=reviewer:1:1:approval,coordinator=writer:1:1:approval"},
+	} {
+		var out strings.Builder
+		if err := invokesCmd([]string{"-suite", pinnedSuite, "-binding", bindingWith(t, tc.gates...)}, &out); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(out.String()); got != tc.want {
+			t.Errorf("gates %v: invokes = %q, want %q", tc.gates, got, tc.want)
+		}
+	}
+	var out strings.Builder
+	if err := invokesCmd([]string{"-suite", pinnedSuite, "-binding", coordBinding}, &out); err != nil || strings.TrimSpace(out.String()) != "coordinator=reviewer:1:1:approval,coordinator=writer:1:1" {
+		t.Fatalf("invokes with the demo's binding = %q (err %v)", out.String(), err)
+	}
+	if err := invokesCmd([]string{"-suite", pinnedSuite}, &out); err == nil {
+		t.Fatal("invokes ran without a binding")
+	}
+	for _, gate := range []string{"writer->reviewer", "coordinator->publisher"} {
+		b := bindingWith(t, gate)
+		if err := invokesCmd([]string{"-suite", pinnedSuite, "-binding", b}, &out); err == nil || !strings.Contains(err.Error(), "the suite declares no such invokes edge") {
+			t.Errorf("invokes with gate %s: err = %v", gate, err)
+		}
+		// A worker's render refuses it too, though the bad edge is not the worker's.
+		if err := renderCmd([]string{"-suite", pinnedSuite, "-agent", "reviewer", "-binding", b, "-image", image, "-out", t.TempDir()}); err == nil || !strings.Contains(err.Error(), "the suite declares no such invokes edge") {
+			t.Errorf("render of reviewer with gate %s: err = %v", gate, err)
+		}
+	}
+	approval := func(gates ...string) string {
+		dir := t.TempDir()
+		if err := renderCmd([]string{"-suite", pinnedSuite, "-agent", "coordinator", "-binding", bindingWith(t, gates...), "-image", image, "-out", dir}); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, "actortemplate.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpl := &atepb.ActorTemplate{}
+		if err := protojson.Unmarshal(raw, tmpl); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range tmpl.GetContainers()[0].GetEnv() {
+			if e.GetName() == "AGENTSUITE_APPROVAL" {
+				return e.GetValue()
+			}
+		}
+		return ""
+	}
+	if got := approval("coordinator->reviewer"); got != "reviewer" {
+		t.Errorf("AGENTSUITE_APPROVAL = %q, want reviewer", got)
+	}
+	if got := approval(); got != "" {
+		t.Errorf("AGENTSUITE_APPROVAL = %q with no approval edges", got)
 	}
 }

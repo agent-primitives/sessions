@@ -33,7 +33,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("harness: load agent: %v", err)
 	}
-	h = h.WithModel(os.Getenv(agent.ModelEnv))
+	// The model is the one the agent's manifest pins; nothing overrides it. A template rendered
+	// before the suite pinned its model may still set the old override: refuse it rather than
+	// request a model the binding was not checked against.
+	if v, ok := os.LookupEnv(agent.RetiredModelEnv); ok {
+		log.Fatalf("harness: %s=%q is set, but the model is pinned by the suite (%q); render the template again", agent.RetiredModelEnv, v, h.Model)
+	}
 	tier := "stateless replay"
 	switch m := os.Getenv(agent.MemoryEnv); m {
 	case "":

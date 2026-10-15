@@ -98,8 +98,6 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	# are the daemon's defaults.
 	MODEL_PATH="${AGENTSUITE_MODEL_PATH:-/chat/completions}"
 	MODEL_AUTH_HEADER="${AGENTSUITE_MODEL_AUTH_HEADER:-Authorization}"
-	# The harness requests the provider's model, not the fixture's.
-	HARNESS_MODEL="${MODEL_ID}"
 	# Each lands in a YAML plain scalar ("- -model=VALUE"): whitespace or a control character would
 	# change the YAML around it, a trailing ':' would turn the item into a map that kubectl refuses
 	# only after the Secret has changed, and a placeholder name would be replaced again further down.
@@ -147,7 +145,6 @@ else
 	MODEL_ID=triage-model
 	MODEL_PATH=/chat/completions
 	MODEL_AUTH_HEADER=Authorization
-	HARNESS_MODEL=""
 fi
 # Render the model settings into the agentsessionsd manifest now, so a value that cannot be
 # rendered stops the run here. The image, harness flag and Secret version are filled in later.
@@ -165,6 +162,19 @@ fi
 BINDING_ATESPACE="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("atespace", ""))' "${HERE}/${BINDING_FILE}")"
 if [[ "${BINDING_ATESPACE}" != "${ATESPACE}" ]]; then
 	refuse "${BINDING_FILE} names atespace '${BINDING_ATESPACE}', but the demo deploys into atespace ${ATESPACE}"
+fi
+
+# The binding says where the suite's pinned model is served. ${BINDING_FILE} serves the fake model;
+# with a real provider, this environment's binding is that file with its model set from the
+# provider settings (common.sh write_binding), and emit refuses it unless the agent pins exactly
+# that model: a different model is a new suite version, not a render-time override.
+BINDING="${HERE}/${BINDING_FILE}"
+if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
+	BINDING="${STATE}/binding.json"
+	write_binding "${HERE}/${BINDING_FILE}" "${BINDING}" || refuse "cannot write this environment's binding"
+	if ! reason="$("${WORK}/bin/emit" check-binding -suite "${HERE}/${SUITE_DIR}" -agent "${AGENT}" -platform "linux/${ARCH}" -binding "${BINDING}" 2>&1)"; then
+		refuse "the provider settings do not serve the suite's model: ${reason}"
+	fi
 fi
 
 # The micro-VM class needs /dev/kvm in the containers Docker runs (the kind node is one). Probe it the
@@ -310,7 +320,7 @@ for tier in stateless memory; do
 	if [[ "${tier}" == memory ]]; then out="${STATE}/render-memory"; fi
 	step "render the composition (${tier} tier): ActorTemplate + harness registration"
 	(cd "${HERE}" && go run ./cmd/emit render -suite "${SUITE_DIR}" -agent "${AGENT}" -platform "linux/${ARCH}" \
-		-binding "${BINDING_FILE}" -image "${HARNESS_IMAGE}" -model "${HARNESS_MODEL}" -tier "${tier}" -out "${out}")
+		-binding "${BINDING}" -image "${HARNESS_IMAGE}" -tier "${tier}" -out "${out}")
 	cat "${out}/harness-registration.json"
 done
 

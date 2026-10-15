@@ -7,5 +7,6 @@
   "sandbox": {"class": "gvisor", "configName": "gvisor-default"},
   "snapshot": {"fidelity": "MEMORY", "storageLocation": "gs://ate-snapshots/agentsuite-demo/"},
   "resources": {"cpu": "1", "memory": "512Mi"},
-  "workerSelector": {"matchLabels": {"workload": "agentsuite-demo-gvisor"}}
+  "workerSelector": {"matchLabels": {"workload": "agentsuite-demo-gvisor"}},
+  "model": {"name": "triage-model", "provider": "openai", "baseURL": "http://fakemodel.agentsuite-demo.svc:8080/v1", "secretRef": {"name": "agentsessionsd-model", "key": "api-key"}}
 }

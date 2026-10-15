@@ -2,6 +2,7 @@ package scripts_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -145,15 +146,15 @@ fi
 [ "$1 $2" != "run ./cmd/ate-setup" ] || exit "${STUB_INSTALL_RC:-0}"
 [ -n "${STUB_FULL:-}" ] || exit 97
 if [ "$1 $2 $3" = "run ./cmd/emit render" ]; then
-	prev= model=unset tier=
+	prev= binding= tier=
 	for a; do
 		[ "$prev" = -out ] && out=$a
-		[ "$prev" = -model ] && model=$a
+		[ "$prev" = -binding ] && binding=$a
 		[ "$prev" = -tier ] && tier=$a
 		prev=$a
 	done
-	# The -model up.sh forwards to the harness, kept verbatim (the call log's echo is not).
-	printf '%s' "$model" >"$STUB_DIR/render-model"
+	# The binding up.sh renders from, kept verbatim (the call log's echo is not).
+	printf '%s' "$binding" >"$STUB_DIR/render-binding"
 	mkdir -p "$out"
 	echo '{}' >"$out/harness-registration.json"
 	if [ "$tier" = memory ]; then
@@ -847,6 +848,12 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			wantOut: `would not start agentsessionsd: emit: modelconfig: the model base URL uses plain http to host "llm.example" while a model API key is set`,
 		},
 		{
+			// The suite pins triage-model; a provider serving another model is a new suite version.
+			name:    "a provider model the suite does not pin",
+			env:     func(*testing.T) []string { return provider },
+			wantOut: `the provider settings do not serve the suite's model: emit: suite support-desk agent triage pins model "triage-model" but the binding serves "m"; a different model needs a new suite version and a new evaluation; nothing was changed`,
+		},
+		{
 			name:    "a binding for another atespace",
 			env:     func(t *testing.T) []string { return []string{"STUB_BINDING=" + binding(t, "other")} },
 			wantOut: "binding-microvm.json names atespace 'other', but the demo deploys into atespace agentsuite-demo; nothing was changed",
@@ -904,13 +911,15 @@ func stdin(t *testing.T, s *stubs) string {
 	return string(b)
 }
 
-// The model base URL and model are copied into the Deployment as written: '&', '#' and '\' are not
-// special to the substitution. up.sh refuses a URL with a query or fragment (it could carry a
-// credential), so the URL's '&' is in its path.
+// The model base URL is copied into the Deployment as written: '&' is not special to the
+// substitution. up.sh refuses a URL with a query or fragment (it could carry a credential), so the
+// URL's '&' is in its path. With a real provider, up.sh renders from this environment's binding:
+// binding-microvm.json with the provider's model, base URL and path, which must be the model the
+// suite's triage agent pins (triage-model); the fake model renders from binding-microvm.json.
 func TestUpRendersTheDaemon(t *testing.T) {
 	const (
 		url   = "https://llm.example/v1&tenant=a/b"
-		model = `gpt&x#1\1`
+		model = "triage-model"
 	)
 	for _, tc := range []struct {
 		name        string
@@ -918,7 +927,9 @@ func TestUpRendersTheDaemon(t *testing.T) {
 		wantLines   []string
 		wantSecret  string // the Secret call that precedes the apply
 		wantVersion string
-		wantModel   string // the -model emit render gives the harness; "" keeps the fixture's
+		// wantModel is the binding's model up.sh renders from: name, baseURL, path ("" for none).
+		// Empty name: the committed binding-microvm.json.
+		wantModel [3]string
 	}{
 		{
 			name: "fake provider",
@@ -934,33 +945,33 @@ func TestUpRendersTheDaemon(t *testing.T) {
 				"- -model-path=/chat/completions", "- -model-auth-header=Authorization"},
 			wantSecret:  "apply --server-side",
 			wantVersion: "7",
-			wantModel:   model,
+			wantModel:   [3]string{model, url, ""},
 		},
 		{
 			// An in-cluster provider may take a key over plain http.
 			name: "in-cluster provider over http with a key",
-			env: []string{"AGENTSUITE_MODEL_BASE_URL=http://vllm.models.svc.cluster.local:8000/v1", "AGENTSUITE_MODEL=m",
+			env: []string{"AGENTSUITE_MODEL_BASE_URL=http://vllm.models.svc.cluster.local:8000/v1", "AGENTSUITE_MODEL=" + model,
 				"MODEL_API_KEY=k", "STUB_SECRET_VERSION=9"},
-			wantLines: []string{"- -model=m", "- -model-base-url=http://vllm.models.svc.cluster.local:8000/v1",
+			wantLines: []string{"- -model=" + model, "- -model-base-url=http://vllm.models.svc.cluster.local:8000/v1",
 				"- -model-path=/chat/completions", "- -model-auth-header=Authorization"},
 			wantSecret:  "apply --server-side",
 			wantVersion: "9",
-			wantModel:   "m",
+			wantModel:   [3]string{model, "http://vllm.models.svc.cluster.local:8000/v1", ""},
 		},
 		{
 			// An Azure OpenAI deployment: the api-version rides in the path, the key in the api-key
 			// header from the Secret.
 			name: "Azure OpenAI",
 			env: []string{
-				"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com", "AGENTSUITE_MODEL=dep", "MODEL_API_KEY=azure-key",
+				"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com", "AGENTSUITE_MODEL=" + model, "MODEL_API_KEY=azure-key",
 				"AGENTSUITE_MODEL_PATH=/openai/deployments/dep/chat/completions?api-version=2024-10-21",
 				"AGENTSUITE_MODEL_AUTH_HEADER=api-key", "STUB_SECRET_VERSION=8",
 			},
-			wantLines: []string{"- -model=dep", "- -model-base-url=https://res.openai.azure.com",
+			wantLines: []string{"- -model=" + model, "- -model-base-url=https://res.openai.azure.com",
 				"- -model-path=/openai/deployments/dep/chat/completions?api-version=2024-10-21", "- -model-auth-header=api-key"},
 			wantSecret:  "apply --server-side",
 			wantVersion: "8",
-			wantModel:   "dep",
+			wantModel:   [3]string{model, "https://res.openai.azure.com", "/openai/deployments/dep/chat/completions?api-version=2024-10-21"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -972,10 +983,31 @@ func TestUpRendersTheDaemon(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("up.sh exit %d, want 0\noutput:\n%s\ncalls:\n%s", code, out, calls)
 			}
-			// The harness requests the provider's model (an Azure deployment name), or the
-			// fixture's own with the fake model.
-			if got, err := os.ReadFile(filepath.Join(s.dir, "render-model")); err != nil || string(got) != tc.wantModel {
-				t.Errorf("emit render -model = %q (err %v), want %q", got, err, tc.wantModel)
+			// emit render reads the committed binding with the fake model, and this environment's
+			// binding (the provider's model, base URL and path) with a real one.
+			got, err := os.ReadFile(filepath.Join(s.dir, "render-binding"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantModel[0] == "" {
+				if !strings.HasSuffix(string(got), "/binding-microvm.json") {
+					t.Errorf("emit render -binding %s, want the committed binding-microvm.json", got)
+				}
+			} else {
+				var b struct {
+					Atespace string
+					Model    struct{ Name, Provider, BaseURL, Path string }
+				}
+				raw, err := os.ReadFile(string(got))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(raw, &b); err != nil {
+					t.Fatal(err)
+				}
+				if m := b.Model; [3]string{m.Name, m.BaseURL, m.Path} != tc.wantModel || m.Provider != "openai" || b.Atespace != "agentsuite-demo" {
+					t.Errorf("rendered binding %s = %+v, want model %v", got, b, tc.wantModel)
+				}
 			}
 			path := filepath.Join(s.work, "cluster-"+cluster, "agentsessionsd.yaml")
 			b, err := os.ReadFile(path)
@@ -1324,10 +1356,12 @@ func TestDemoTraceHop(t *testing.T) {
 	}
 }
 
-// coordinator.sh's model_secret (demo/model-token.sh) stores the managed-identity token in the
-// Secret's api-key without the newline a print() adds: agentsessionsd sends MODEL_API_KEY as given,
-// and Go's net/http refuses an Authorization header ending in "\n". The token is never printed, and
-// a metadata endpoint that fails or returns an empty token stops before kubectl runs.
+// coordinator.sh's model_secret (demo/model-token.sh) pipes the managed-identity token into the
+// Secret's api-key (kubectl --from-file=api-key=/dev/stdin), with no file on the host, and without
+// the newline a print() adds: agentsessionsd sends MODEL_API_KEY as given, and Go's net/http refuses
+// an Authorization header ending in "\n". The token is never printed or passed as an argument, a
+// metadata endpoint that fails or returns an empty token stops before kubectl runs, and a failed
+// kubectl create fails the call.
 func TestModelSecretStoresTheTokenWithoutANewline(t *testing.T) {
 	python3, err := exec.LookPath("python3")
 	if err != nil {
@@ -1336,39 +1370,59 @@ func TestModelSecretStoresTheTokenWithoutANewline(t *testing.T) {
 	const token = "stub-header.stub-payload.stub-signature"
 	for _, tc := range []struct {
 		name, curl string
+		createFail bool
 		wantErr    string
 	}{
 		{name: "token", curl: `printf '{"token_type": "Bearer", "access_token": "` + token + `"}\n'`},
 		{name: "metadata endpoint fails", curl: "exit 22", wantErr: "no token from the instance metadata endpoint"},
 		{name: "empty token", curl: `printf '{"access_token": ""}'`, wantErr: "returned an empty token"},
+		{name: "no token field", curl: `printf '{"error": "x"}'`, wantErr: "no token from the instance metadata endpoint"},
+		{name: "kubectl create fails", curl: `printf '{"access_token": "` + token + `"}'`, createFail: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir, bin := t.TempDir(), t.TempDir()
+			dir, bin, scratch := t.TempDir(), t.TempDir(), t.TempDir()
 			stub(t, bin, "curl", tc.curl+"\n")
 			// kubectl create copies the --from-file source as the Secret's api-key would hold it.
-			stub(t, bin, "kubectl", `case " $* " in
+			stub(t, bin, "kubectl", `echo "kubectl $*" >>"$STUB_DIR/calls"
+case " $* " in
 *" create secret "*)
-	for a in "$@"; do case "$a" in --from-file=api-key=*) cp "${a#--from-file=api-key=}" "$STUB_DIR/api-key" ;; esac; done
+	[ -z "${STUB_CREATE_FAIL:-}" ] || exit 1
+	for a in "$@"; do case "$a" in --from-file=api-key=*) cat "${a#--from-file=api-key=}" >"$STUB_DIR/api-key" ;; esac; done
 	echo "kind: Secret" ;;
 *" apply "*) cat >"$STUB_DIR/applied" ;;
 esac
-echo "kubectl $*" >>"$STUB_DIR/calls"
 `)
 			if err := os.Symlink(python3, filepath.Join(bin, "python3")); err != nil {
 				t.Fatal(err)
 			}
-			script := `set -euo pipefail; source demo/model-token.sh; model_secret agentsuite client-id "$STUB_DIR/token" kubectl --kubeconfig k`
+			script := `set -euo pipefail; source demo/model-token.sh; model_secret agentsuite client-id kubectl --kubeconfig k`
 			cmd := exec.Command("bash", "-c", script)
-			cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "STUB_DIR=" + dir, "HOME=" + dir}
+			cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "STUB_DIR=" + dir, "HOME=" + scratch, "TMPDIR=" + scratch}
+			if tc.createFail {
+				cmd.Env = append(cmd.Env, "STUB_CREATE_FAIL=1")
+			}
 			out, err := cmd.CombinedOutput()
 			if strings.Contains(string(out), token) {
 				t.Fatalf("output prints the token: %s", out)
+			}
+			calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
+			if strings.Contains(string(calls), token) {
+				t.Fatalf("a kubectl argument holds the token: %s", calls)
+			}
+			if entries, _ := os.ReadDir(scratch); len(entries) != 0 {
+				t.Fatalf("model_secret left %d files in TMPDIR and HOME", len(entries))
+			}
+			if tc.createFail {
+				if err == nil {
+					t.Fatalf("model_secret succeeded although kubectl create failed: %s", out)
+				}
+				return
 			}
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(string(out), tc.wantErr) {
 					t.Fatalf("err = %v, output %q; want %q", err, out, tc.wantErr)
 				}
-				if _, err := os.Stat(filepath.Join(dir, "calls")); !errors.Is(err, os.ErrNotExist) {
+				if len(calls) != 0 {
 					t.Fatal("kubectl ran after the token fetch failed")
 				}
 				return
@@ -1386,9 +1440,10 @@ echo "kubectl $*" >>"$STUB_DIR/calls"
 			if want := fmt.Sprintf("token: %d bytes", len(token)); !strings.Contains(string(out), want) {
 				t.Fatalf("output %q, want %q", out, want)
 			}
-			calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
-			if !strings.Contains(string(calls), "kubectl --kubeconfig k -n agentsuite apply --server-side") {
-				t.Fatalf("kubectl calls = %q, want the apply in namespace agentsuite", calls)
+			calls, _ = os.ReadFile(filepath.Join(dir, "calls"))
+			if !strings.Contains(string(calls), "create secret generic agentsessionsd-model --from-file=api-key=/dev/stdin") ||
+				!strings.Contains(string(calls), "kubectl --kubeconfig k -n agentsuite apply --server-side") {
+				t.Fatalf("kubectl calls = %q, want the create from stdin and the apply in namespace agentsuite", calls)
 			}
 		})
 	}

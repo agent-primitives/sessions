@@ -47,8 +47,9 @@ The recipe is for a disposable kind cluster you trust: nothing in it authenticat
 |---|---|
 | `suite/` | An AgentSuite (`support-desk`) with one tool-free agent, `triage`, and compositions for `linux/amd64` and `linux/arm64`. The default suite (`AGENTSUITE_DEMO_SUITE`, `AGENTSUITE_DEMO_AGENT`). |
 | `suites/kaimahi-minimal/` | kaimahi's `agentsuite/testdata/minimal` (agent `writer`, `linux/amd64` only), copied byte for byte from kaimahi `9c5c993`. `SOURCE` lists each file's git blob id at that commit and its sha256. |
-| `binding-microvm.json`, `binding.json` | Draft `AgentSessionsBinding`s (`kmx.kaimahi.dev/v1alpha1`) for kind: atespace, the micro-VM (`microvm`) or gVisor sandbox, MEMORY snapshots, worker selector. `up.sh` refuses an atespace other than `agentsuite-demo`, the one `deploy/` uses. |
-| `render/`, `cmd/emit` | `emit bundle` stages the agent layer (manifest and instructions) for the image. `emit render` writes the ActorTemplate, the harness registration and the daemon flag; `-tier memory` renders the memory tier. `emit validate` runs kaimahi's `agentsuite.ValidateDirectory` over a suite and prints the kaimahi module version it ran. `emit check-model` refuses model settings `agentsessionsd` would refuse at startup. |
+| `suites/coordinator-workers/`, `suites/coordinator-workers-v2/` | kaimahi's `agentsuite/testdata/coordinator-workers` at `75f27d6`, byte for byte, and a new version of it whose agents pin `gpt-5.4-mini`; `coordinator-workers-v2/README.md` lists every change and both suite digests. |
+| `binding-microvm.json`, `binding.json`, `binding-coordinator.json` | `AgentSessionsBinding`s (`kmx.kaimahi.dev/v1alpha1`), one per environment: atespace, the micro-VM (`microvm`) or gVisor sandbox, MEMORY snapshots, worker selector, and the model the environment serves. The first two serve `triage-model` from the fake model; `binding-coordinator.json` serves `gpt-5.4-mini` on Azure OpenAI and gates the coordinator's calls to reviewer. See [The binding and kmx](#the-binding-and-kmx). `up.sh` refuses an atespace other than `agentsuite-demo`, the one `deploy/` uses. |
+| `render/`, `cmd/emit` | `emit bundle` stages the agent layer (manifest and instructions) for the image. `emit render` writes the ActorTemplate, the harness registration, the daemon's harness flag and its model flags (`agentsessionsd.model-args`, from the binding), and refuses a binding whose served model is not exactly the one the agent pins; `-tier memory` renders the memory tier. `emit check-binding` runs the same binding checks before an image exists. `emit invokes` prints the daemon's invocation policy, with the binding's approval edges. `emit validate` runs kaimahi's `agentsuite.ValidateDirectory` over a suite and prints the suite's digest and the kaimahi module version it ran. `emit check-model` refuses model settings `agentsessionsd` would refuse at startup. |
 | `agent/`, `cmd/harness`, `Dockerfile.harness` | The harness image. It serves harnesswire on :80 and `/readyz` on :8081. The instructions are the system prompt, and the harness checks them against the digest in the agent manifest. Each model call is `sink.Model`. With `AGENTSUITE_MEMORY=ram` it keeps the conversation in RAM, ignores the history the host sends, and describes itself as `REQUIRES_MEMORY_SNAPSHOT`. |
 | `demo/` | The recorded demo: `driver.sh`, `smoke-microvm.sh`, `present.awk`, `demo.tape`, `record.sh`, `chapters.py`, the build and run diagrams (`build.mmd`, `run.mmd`, checked arrow by arrow in `diagrams.md`, spliced in by `splice.py`), the helpers its screens run (`split-view.py`, `trace-turn.sh`, `trace-hop.py`, `image-files.sh`, `wait-golden.sh`), `bat.conf` and the tools image (`Dockerfile.tools`). |
 | `fakemodel/`, `cmd/fakemodel` | A deterministic OpenAI-compatible endpoint. Its reply lists the user's issues so far, and `GET /stats` reports how many calls it has served. |
@@ -66,10 +67,10 @@ kaimahi's.
 
 | ActorTemplate field | Value |
 |---|---|
-| `metadata.name` | `<suite>-<agent>-<hash8>`, where `hash8` is the first 8 hex of `sha256(image digest + "\n" + binding digest)`, with `"\n" + model` appended when `emit render -model` overrides the agent's model and `"\nmemory"` for `-tier memory`. The binding digest is the SHA-256 of its JCS form. The name is a DNS label of at most 63 characters, and only suite and agent are truncated. |
+| `metadata.name` | `<suite>-<agent>-<hash8>`, where `hash8` is the first 8 hex of `sha256(image digest + "\n" + binding digest)` (kmx's formula), with `"\nmemory"` appended for `-tier memory`. The binding digest covers the served model and the approval edges. The name is a DNS label of at most 63 characters, and only suite and agent are truncated. |
 | `metadata.atespace` | `binding.atespace` |
 | `containers[0].image` | The harness image, which must be digest-pinned. |
-| `containers[0].env` | `HARNESS_ADDR=:80`, `HARNESS_READYZ=:8081`, `AGENT_DIR=/agent`, `AGENTSUITE_MODEL` when `-model` is given, and `AGENTSUITE_MEMORY=ram` for `-tier memory`. No model credentials: they stay with the host. |
+| `containers[0].env` | `HARNESS_ADDR=:80`, `HARNESS_READYZ=:8081`, `AGENT_DIR=/agent`, `AGENTSUITE_APPROVAL` (the binding's gated targets for this agent) and `AGENTSUITE_MEMORY=ram` for `-tier memory`. No model override: the harness requests the model its agent pins, and refuses to start if the retired `AGENTSUITE_MODEL` is set. No model credentials: they stay with the host. |
 | `containers[0].wakeupProbe` | `GET /readyz` on 8081 |
 | `containers[0].securityContext` | `capabilities: {}`, adding none |
 | `containers[0].resources` | `binding.resources` |
@@ -132,8 +133,11 @@ and two entries may not share one.
 
 ### Approval of a delegation
 
-- The deployment chooses which edges need approval (`emit render -approve reviewer`). The coordinator
-  harness then sends that call with mediation `REQUIRES_APPROVAL`; others are `CONTROLLER_MEDIATED`.
+- Each environment's binding chooses which edges need approval (`approval.invokes`, each a
+  `caller` and an `agent`). `emit render` sets the caller's gated targets in its template, so the
+  coordinator harness sends that call with mediation `REQUIRES_APPROVAL`; others are
+  `CONTROLLER_MEDIATED`. `emit invokes` marks the same edges in the daemon's policy. Both refuse a
+  gate on an edge the suite does not declare.
 - The host's executor refuses a call to an approval edge that arrives without `REQUIRES_APPROVAL`,
   so a harness cannot skip the gate by choosing its own mediation.
 - On the gated call the host (#131/#132) journals `TOOL_CALL` then `APPROVAL_REQUEST`, closes the
@@ -152,11 +156,11 @@ and two entries may not share one.
 
 | Path | What it is |
 |---|---|
-| `invoke/` | The host executor: `Policy` (edges from the suite, `-approve` choice), `Executor.For(agent)` as a `controller.ToolFunc`, the edge, mediation, `maxConcurrent` and `maxDepth` checks, and the child session. `suite_test.go` runs the vendored suite's three agents in process (local backends, the real controller and approval engine) through an approve and a deny. |
+| `invoke/` | The host executor: `Policy` (edges from the suite, gates from the binding), `Executor.For(agent)` as a `controller.ToolFunc`, the edge, mediation, `maxConcurrent` and `maxDepth` checks, and the child session. `suite_test.go` runs the pinned suite's three agents in process (local backends, the real controller and approval engine, gates from `binding-coordinator.json`) through an approve and a deny. |
 | `agent/coordinator.go` | The coordinator loop: the model asks for a delegation as one line of JSON; the harness makes the `agentsuite.invoke` call with id `<execution>-invoke-<n>`, stable across replay and resume. |
-| `cmd/agentsessionsd` | The substrate build of `agentsessionsd` plus the executor (`internal/agentsessionsd.WithToolExecutors`). The edges come from `AGENTSUITE_INVOKES`, which `emit invokes -approve reviewer` prints. |
-| `emit render -approve -actors` | Sets `AGENTSUITE_APPROVAL` in the coordinator's template (folded into its name) and `,actors=<atespace>` on each daemon flag. |
-| `demo/coordinator.sh` | `setup`: kind and substrate (`up.sh --substrate-only`), one image, binding atespace and ActorTemplate per agent, one daemon with three `-substrate-harness` flags. `probe`: one request approved and one denied through `agentctl`; ends with `PROBE OK`. `show`: the recorded demo's eight chapters (`demo/screen.sh` draws them as `driver.sh` does). `reset`: deletes the session actors and restarts the daemon (its journal is an `emptyDir`), so `show` can run again. |
+| `cmd/agentsessionsd` | The substrate build of `agentsessionsd` plus the executor (`internal/agentsessionsd.WithToolExecutors`). The edges come from `AGENTSUITE_INVOKES`, which `emit invokes -binding` prints. |
+| `emit render -actors` | Sets `AGENTSUITE_APPROVAL` in the coordinator's template from the binding and `,actors=<atespace>` on each daemon flag. |
+| `demo/coordinator.sh` | `setup`: this environment's binding (one copy per agent atespace) checked against the suite, kind and substrate (`up.sh --substrate-only`), one image and ActorTemplate per agent, one daemon with three `-substrate-harness` flags and the binding's model flags. `probe`: one request approved and one denied through `agentctl`; ends with `PROBE OK`. `show`: the recorded demo's eight chapters (`demo/screen.sh` draws them as `driver.sh` does). `reset`: deletes the session actors and restarts the daemon (its journal is an `emptyDir`), so `show` can run again. |
 | `demo/coordinator-record.sh`, `demo/coordinator.tape`, `demo/invoke.mmd` | The recording: `coordinator.sh show` on the host through `hq remote-test` under vhs, the invocation diagram spliced in, then `collect` writes the video's README, logs and checks. |
 
 ### Gaps in the invocation PoC
@@ -276,9 +280,15 @@ appears in argv or a file, and a failed apply leaves the stored key unchanged.
 `agentsessionsd` reads the key only when it starts, so `up.sh` stamps the Secret's version into the
 Deployment's pod template: a new or deleted key restarts the pod, which also drops its emptyDir
 journal, and an unchanged key leaves it running. It does not build or deploy the fake model. It
-points `agentsessionsd` at the endpoint, and the harness requests `AGENTSUITE_MODEL` instead of the
-fixture's `triage-model`: the ActorTemplate carries it as an env var, so each model gets its own
-template. `demo.sh` then skips the checks that depend on the fake's replies and counter, and does
+points `agentsessionsd` at the endpoint and renders from this environment's binding: the committed
+binding with its model set to `AGENTSUITE_MODEL`, `AGENTSUITE_MODEL_BASE_URL` and
+`AGENTSUITE_MODEL_PATH` (`common.sh` `write_binding`). The harness requests the model its agent
+pins, so `up.sh` refuses, before any cluster change, a provider model the agent does not pin
+(`emit check-binding`): the suite pins the model, and a different one is a new suite version and a
+new evaluation, not a render-time override. `driver.sh`, the v3 recording, ran
+`suites/kaimahi-minimal` (`example-model`) against Azure through the override this version removed,
+so its real-model run now stops there until that suite has a version pinning the served model.
+`demo.sh` then skips the checks that depend on the fake's replies and counter, and does
 not port-forward the fake. It still checks the journal in both modes: the inputs in order, one model
 call per turn, the suspend and resume records, the fork child's prefix, and that the replay
 re-executed every completed turn; in real-provider mode it claims only those, not what the replies
@@ -293,6 +303,32 @@ This path was run against the in-cluster fake standing in as the endpoint, with 
 the recorded demo against an Azure OpenAI deployment (`gpt-5.4-mini`, `api-version`
 `2025-04-01-preview`) with an Entra token in the default `Authorization` header. The `api-key`
 header has not been run against a live deployment.
+
+## The binding and kmx
+
+The binding is the per-environment half of a deployment, outside the suite: the suite pins the
+exact model, the binding says where it is served and where sessions are placed, and `emit render`
+refuses a binding whose `model.name` is not exactly the agent's pinned model (no case folding,
+prefix or version matching). A different model is a new suite version and a new evaluation
+(`suites/coordinator-workers-v2`). The shape follows kmx's `AgentSessionsBinding`
+(kaimahi `internal/kmx/runtime/agentsessions_binding.go` on branch `aramase/f/kmx_agentsessions_binding`,
+read at `6a895a6` plus that worktree's uncommitted changes on 2026-10-15): the same `apiVersion`,
+`kind` and fields, the same required `model` (`name`, `provider: openai`, optional `baseURL`,
+`secretRef`), the same template name formula, and the digest computed the same way (JCS of the
+binding's fields, with an empty `workerSelector` the same as an omitted one; not cross-checked by
+running kmx's code). Every difference that remains:
+
+| Difference | Why |
+|---|---|
+| `model.path` (PoC only) | An Azure OpenAI deployment's completions path carries its `api-version` query, and kmx's `model.baseURL` refuses a query. `TODO(spike): does Azure's v1 endpoint (<resource>/openai/v1, model in the body) work for this deployment with the managed-identity token, so kmx's shape needs no path?` |
+| `approval.invokes` (PoC only) | kmx has no approval field, and AgentSuite has none on an invokes edge. The PoC treats which delegation needs an operator as per-environment policy. kmx's strict parser refuses both PoC-only fields. |
+| `approval.invokes` is sorted before the digest | It is a set; kmx has no such field to order. |
+| JSON only | kmx reads YAML or JSON, refuses anchors, aliases and credential-shaped values, and checks Kubernetes quantities and label syntax; the PoC decodes strict JSON and checks names, URLs and the secret key shape, not quantities or labels. |
+| `snapshot.storageLocation` is checked for presence only | kmx also refuses credentials, queries and `.`/`..` segments in it. |
+| One binding per agent atespace | kmx lift renders one chat member into `binding.atespace`. The coordinator's three agents share one daemon, whose session actors are named by session uid, so `coordinator.sh setup` writes one copy of the binding per agent with `atespace` set to `agentsuite-<agent>` (three digests). |
+| The binding's endpoint is filled in at setup | `binding-coordinator.json` names `https://example.openai.azure.com`; `setup` writes this environment's copy with the operator's `AGENTSUITE_MODEL*` values, so no Azure resource name is committed. |
+| No eval evidence | kmx eval takes one chat member and records the binding digest in its evidence, and kmx lift requires that evidence. A suite with invokes edges has no kmx eval path yet, so this PoC renders without evidence. |
+| `model.secretRef` is checked, not rendered | `coordinator.sh` requires `agentsessionsd-model`/`api-key`, the Secret it writes; the Deployment's `secretKeyRef` is fixed. |
 
 ## Gaps this PoC works around
 
@@ -336,9 +372,8 @@ header has not been run against a live deployment.
   actor is refused (`FAILED_PRECONDITION`) rather than given a fresh actor. See
   [Substrate placement binding](../../docs/substrate-conformance.md#substrate-placement-binding).
 - **The journal lives in an emptyDir.** It lasts as long as the `agentsessionsd` pod.
-- **The AgentSessionsBinding is a draft.** kaimahi does not define the kind yet. `binding.json`
-  follows the draft field list, and `snapshot.fidelity` replaces the draft's `onCommit`, which
-  substrate no longer has.
+- **The AgentSessionsBinding follows kmx's, with two additions.** See
+  [The binding and kmx](#the-binding-and-kmx).
 - **There is no build profile.** The image is the harness binary plus the agent layer on `scratch`.
   It is not built from the suite's build profile (`runtimeBase` and `harness` are placeholder
   digests), and nothing records that it came from the composition.

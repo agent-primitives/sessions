@@ -27,7 +27,12 @@ import (
 	"github.com/aramase/agentsessions/sqlitelog"
 )
 
-const suiteDir = "../suites/coordinator-workers"
+// The demo's suite (the version that pins gpt-5.4-mini) and its binding, whose approval edge
+// coordinator -> reviewer gates the reviewer call.
+const (
+	suiteDir    = "../suites/coordinator-workers-v2"
+	bindingFile = "../binding-coordinator.json"
+)
 
 // loadAgent stages one agent of the vendored suite the way its image does (agent.json and
 // instructions.md) and loads it with the harness's own loader.
@@ -52,10 +57,12 @@ func loadAgent(t *testing.T, id string) agent.Harness {
 }
 
 // scriptedModel plays the three agents: the coordinator delegates to writer, then to reviewer,
-// then answers; writer drafts; reviewer approves. It counts live calls per agent.
+// then answers; writer drafts; reviewer approves. It counts live calls per agent and records the
+// model ids requested.
 type scriptedModel struct {
-	mu    sync.Mutex
-	calls map[string]int
+	mu     sync.Mutex
+	calls  map[string]int
+	models map[string]bool
 }
 
 func (m *scriptedModel) model(_ context.Context, req api.ModelRequest) (api.ModelResponse, error) {
@@ -92,6 +99,10 @@ func (m *scriptedModel) model(_ context.Context, req api.ModelRequest) (api.Mode
 	}
 	m.mu.Lock()
 	m.calls[who]++
+	if m.models == nil {
+		m.models = map[string]bool{}
+	}
+	m.models[req.Model] = true
 	m.mu.Unlock()
 	return api.ModelResponse{Message: *api.TextMessage("assistant", reply)}, nil
 }
@@ -129,7 +140,11 @@ func suiteServer(t *testing.T, model *scriptedModel) *client.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := invoke.FromAgents(agents, []string{"reviewer"})
+	binding, err := render.LoadBinding(bindingFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := invoke.FromAgents(agents, binding.Gates())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,8 +153,8 @@ func suiteServer(t *testing.T, model *scriptedModel) *client.Client {
 	placers := map[string]*placement.Placer{}
 	for _, id := range []string{"coordinator", "writer", "reviewer"} {
 		h := loadAgent(t, id)
-		if id == "coordinator" {
-			if h, err = h.WithApproval([]string{"reviewer"}); err != nil {
+		if targets := binding.ApprovalTargets(id); len(targets) > 0 {
+			if h, err = h.WithApproval(targets); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -311,6 +326,10 @@ func TestCoordinatorApproved(t *testing.T) {
 	}
 	if got := [3]int{model.count("coordinator"), model.count("writer"), model.count("reviewer")}; got != [3]int{3, 1, 1} {
 		t.Fatalf("live model calls (coordinator, writer, reviewer) = %v, want [3 1 1]", got)
+	}
+	// Every agent requests the model the suite pins, which the binding serves.
+	if len(model.models) != 1 || !model.models["gpt-5.4-mini"] {
+		t.Fatalf("models requested = %v, want only gpt-5.4-mini", model.models)
 	}
 }
 

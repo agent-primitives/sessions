@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# The coordinator suite (suites/coordinator-workers) on agent-substrate micro-VMs, with a real model.
+# The coordinator suite on agent-substrate micro-VMs, with a real model: the version of kaimahi's
+# coordinator-workers that pins gpt-5.4-mini (suites/coordinator-workers-v2) and this environment's
+# AgentSessionsBinding, which says where that model is served and which delegations need approval.
 #
 #   coordinator.sh setup      kind + substrate (up.sh --substrate-only), one harness image and one
 #                             ActorTemplate per agent (emit render), and one agentsessionsd serving all
@@ -9,14 +11,15 @@
 #   coordinator.sh teardown   down.sh
 #
 # Runs on a Linux host with KVM and Docker (kind, the cluster and the port-forward all there), as
-# driver.sh does. Settings: AGENTSUITE_MODEL_BASE_URL, AGENTSUITE_MODEL, AGENTSUITE_MODEL_PATH,
-# AGENTSUITE_MODEL_AUTH_HEADER (as for up.sh) and AZURE_MI_CLIENT_ID, the user-assigned managed
-# identity whose token is the model API key; it is fetched from the instance metadata endpoint,
-# stored only in the agentsessionsd-model Secret, and never printed. Logs go to COORD_LOGS
+# driver.sh does. Settings: AGENTSUITE_MODEL_BASE_URL, AGENTSUITE_MODEL, AGENTSUITE_MODEL_PATH (the
+# served model, written into this environment's binding: binding-coordinator.json with them, see
+# common.sh write_binding) and AZURE_MI_CLIENT_ID, the user-assigned managed identity whose token is
+# the model API key; it is fetched from the instance metadata endpoint, piped into the
+# agentsessionsd-model Secret with no file on the host, and never printed. Logs go to COORD_LOGS
 # (default ${WORK}/coordinator-logs), one file per step, through a filter that redacts tokens.
 set -euo pipefail
 DEMO="$(cd "$(dirname "$0")" && pwd)"
-export AGENTSUITE_DEMO_SUITE=suites/coordinator-workers AGENTSUITE_DEMO_AGENT=coordinator AGENTSUITE_DEMO_SANDBOX=microvm
+export AGENTSUITE_DEMO_SUITE=suites/coordinator-workers-v2 AGENTSUITE_DEMO_AGENT=coordinator AGENTSUITE_DEMO_SANDBOX=microvm
 source "${DEMO}/../common.sh"
 source "${DEMO}/model-token.sh"
 
@@ -29,11 +32,12 @@ setup | probe | show | reset | teardown) ;;
 	;;
 esac
 AGENTS=(coordinator writer reviewer)
-APPROVE=reviewer
+# The committed binding for this environment: the served model (its endpoint is filled in from the
+# settings above) and the approval edges.
+COORD_BINDING="${HERE}/binding-coordinator.json"
 SERVER=127.0.0.1:18090
 LOGS="${COORD_LOGS:-${WORK}/coordinator-logs}"
 mkdir -p "${LOGS}"
-TOKEN_FILE="${WORK}/model-token"
 JWT="ey""J"
 FIELD="access""_token"
 redact() {
@@ -60,7 +64,6 @@ cleanup() {
 		printf 'DEMO FAILED: exit %d, see %s\n' "${rc}" "${STEP_LOG##*/}"
 	fi
 	for p in "${PIDS[@]}"; do kill "${p}" 2>/dev/null || true; done
-	rm -f "${TOKEN_FILE}"
 	# Let the redacting filter flush the last lines, for at most 10 seconds.
 	exec 1>&- 2>&-
 	for _ in $(seq 100); do
@@ -101,7 +104,9 @@ unfilled() {
 	done
 	echo "${left}"
 }
-# render_manifest DAEMON_IMAGE SECRET_VERSION COORDINATOR_FLAG WRITER_FLAG REVIEWER_FLAG INVOKES
+# render_manifest DAEMON_IMAGE SECRET_VERSION COORDINATOR_FLAG WRITER_FLAG REVIEWER_FLAG INVOKES MODEL
+# BASE_URL PATH: the last three are the served model, from the binding (emit render's
+# agentsessionsd.model-args).
 render_manifest() {
 	local m
 	m="$(<"${HERE}/deploy/coordinator-agentsessionsd.yaml")"
@@ -111,38 +116,52 @@ render_manifest() {
 	m=${m//WRITER_FLAG/"$4"}
 	m=${m//REVIEWER_FLAG/"$5"}
 	m=${m//INVOKES_VALUE/"$6"}
-	m=${m//MODEL_BASE_URL/"${AGENTSUITE_MODEL_BASE_URL}"}
-	m=${m//MODEL_PATH/"${AGENTSUITE_MODEL_PATH}"}
-	m=${m//MODEL_AUTH_HEADER/"${AGENTSUITE_MODEL_AUTH_HEADER:-Authorization}"}
-	m=${m//MODEL_ID/"${AGENTSUITE_MODEL}"}
+	m=${m//MODEL_BASE_URL/"$8"}
+	m=${m//MODEL_PATH/"$9"}
+	m=${m//MODEL_AUTH_HEADER/Authorization}
+	m=${m//MODEL_ID/"$7"}
 	printf '%s\n' "${m}"
 }
+# model_arg NAME FILE: the value of -NAME= in an agentsessionsd.model-args FILE.
+model_arg() { sed -n "s/^-$1=//p" "$2"; }
 
 setup() {
 	local v
 	for v in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH AZURE_MI_CLIENT_ID; do
 		[[ -n "${!v:-}" ]] || fail "${v} is not set"
 	done
-	for v in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH AGENTSUITE_MODEL_AUTH_HEADER; do
+	for v in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH; do
 		[[ -z "$(unfilled "${!v:-}")" ]] || fail "${v} contains $(unfilled "${!v:-}"), a placeholder of deploy/coordinator-agentsessionsd.yaml"
 	done
 	# Before the first cluster change: the manifest renders with no placeholder left.
-	[[ -z "$(unfilled "$(render_manifest image 1 c w r i)")" ]] ||
-		fail "deploy/coordinator-agentsessionsd.yaml holds placeholders this script does not fill: $(unfilled "$(render_manifest image 1 c w r i)")"
+	[[ -z "$(unfilled "$(render_manifest image 1 c w r i m u p)")" ]] ||
+		fail "deploy/coordinator-agentsessionsd.yaml holds placeholders this script does not fill: $(unfilled "$(render_manifest image 1 c w r i m u p)")"
 	[[ "$(go env GOARCH)" == amd64 ]] || fail "the suite declares linux/amd64 compositions only; run on an amd64 host"
+	(cd "${HERE}" && go build -o "${WORK}/bin/emit" ./cmd/emit)
+	(cd "${ROOT}" && go build -o "${WORK}/bin/agentctl" ./cmd/agentctl)
+	# This environment's binding, one per agent: each agent's template and session actors live in its
+	# own atespace (actors are named by session UID, so harnesses on one daemon need separate actor
+	# atespaces, and a template's golden tag is scoped to its atespace). emit checks it against the
+	# suite before anything changes: the served model must be the one every agent pins.
+	local agent
+	for agent in "${AGENTS[@]}"; do
+		write_binding "${COORD_BINDING}" "${STATE}/binding-${agent}.json" "$(actors "${agent}")"
+	done
+	"${WORK}/bin/emit" check-binding -suite "${HERE}/${SUITE_DIR}" -binding "${STATE}/binding-coordinator.json" ||
+		fail "this environment's binding does not serve the suite's model"
+	[[ "$(python3 -c 'import json, sys; r = json.load(open(sys.argv[1]))["model"]["secretRef"]; print(r["name"], r["key"])' "${STATE}/binding-coordinator.json")" == "agentsessionsd-model api-key" ]] ||
+		fail "the binding's model.secretRef is not agentsessionsd-model/api-key, the Secret this script writes"
 	# up.sh validates the model settings before its first cluster change, then brings up kind,
 	# ate-system and the micro-VM WorkerPool.
 	step "up.sh --substrate-only"
 	"${DEMO}/../up.sh" --substrate-only
-	(cd "${HERE}" && go build -o "${WORK}/bin/emit" ./cmd/emit)
-	(cd "${ROOT}" && go build -o "${WORK}/bin/agentctl" ./cmd/agentctl)
 
 	step "the suite, validated by kaimahi's agentsuite package"
 	"${WORK}/bin/emit" validate -suite "${HERE}/${SUITE_DIR}"
-	INVOKES="$("${WORK}/bin/emit" invokes -suite "${HERE}/${SUITE_DIR}" -approve "${APPROVE}")"
+	INVOKES="$("${WORK}/bin/emit" invokes -suite "${HERE}/${SUITE_DIR}" -binding "${STATE}/binding-coordinator.json")"
 	echo "AGENTSUITE_INVOKES=${INVOKES}"
 
-	local ctx="${STATE}/coordinator-image" agent out binding flags=()
+	local ctx="${STATE}/coordinator-image" out binding flags=()
 	rm -rf "${ctx}" && mkdir -p "${ctx}"
 	(cd "${HERE}" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "${ctx}/harness" ./cmd/harness)
 	for agent in "${AGENTS[@]}"; do
@@ -153,17 +172,10 @@ setup() {
 		docker push -q "localhost:5001/agentsuite-harness:${agent}" >/dev/null
 		local image
 		image="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:5001/agentsuite-harness:${agent}")"
-		# Each agent's template and session actors live in its own atespace: actors are named by session
-		# UID, so harnesses on one daemon need separate actor atespaces, and a template's golden tag is
-		# scoped to its atespace.
 		binding="${STATE}/binding-${agent}.json"
-		python3 -c 'import json, sys; b = json.load(open(sys.argv[1])); b["atespace"] = sys.argv[2]; json.dump(b, open(sys.argv[3], "w"), indent=2)' \
-			"${HERE}/${BINDING_FILE}" "$(actors "${agent}")" "${binding}"
 		out="${STATE}/render-${agent}"
-		local approve=()
-		if [[ "${agent}" == coordinator ]]; then approve=(-approve "${APPROVE}"); fi
 		"${WORK}/bin/emit" render -suite "${HERE}/${SUITE_DIR}" -agent "${agent}" -platform linux/amd64 -binding "${binding}" \
-			-image "${image}" -model "${AGENTSUITE_MODEL}" -actors "$(actors "${agent}")" ${approve[@]+"${approve[@]}"} -out "${out}"
+			-image "${image}" -actors "$(actors "${agent}")" -out "${out}"
 		"${ATE[@]}" get atespace "$(actors "${agent}")" >/dev/null 2>&1 || "${ATE[@]}" create atespace "$(actors "${agent}")"
 		local template
 		template="$(cat "${out}/template-name")"
@@ -178,16 +190,24 @@ setup() {
 		flags+=("$(cat "${out}/agentsessionsd.args")")
 	done
 
-	step "a model token for the VM's managed identity (never printed)"
-	model_secret "${NS}" "${AZURE_MI_CLIENT_ID}" "${TOKEN_FILE}" "${K[@]}"
-	rm -f "${TOKEN_FILE}"
+	# One daemon serves the three agents, so it serves one model: the three renders must agree on it.
+	local margs="${STATE}/render-coordinator/agentsessionsd.model-args"
+	for agent in writer reviewer; do
+		cmp -s "${margs}" "${STATE}/render-${agent}/agentsessionsd.model-args" || fail "the ${agent} render serves another model than the coordinator's"
+	done
+	local model base path
+	model="$(model_arg model "${margs}")" base="$(model_arg model-base-url "${margs}")" path="$(model_arg model-path "${margs}")"
+	[[ -n "${model}" && -n "${base}" && -n "${path}" ]] || fail "the binding does not give the model, base URL and path the daemon needs"
+
+	step "a model token for the VM's managed identity (never printed, never in a file)"
+	model_secret "${NS}" "${AZURE_MI_CLIENT_ID}" "${K[@]}"
 	local version
 	version="$("${K[@]}" -n "${NS}" get secret agentsessionsd-model -o jsonpath='{.metadata.resourceVersion}')"
 
 	step "agentsessionsd with the invocation executor (examples/agentsuite-substrate/cmd/agentsessionsd)"
 	local daemon manifest
 	daemon="$(cd "${HERE}" && KO_DOCKER_REPO=localhost:5001 ko build --base-import-paths --platform=linux/amd64 ./cmd/agentsessionsd)"
-	manifest="$(render_manifest "${daemon}" "${version}" "${flags[0]}" "${flags[1]}" "${flags[2]}" "${INVOKES}")"
+	manifest="$(render_manifest "${daemon}" "${version}" "${flags[0]}" "${flags[1]}" "${flags[2]}" "${INVOKES}" "${model}" "${base}" "${path}")"
 	[[ -z "$(unfilled "${manifest}")" ]] || fail "deploy/coordinator-agentsessionsd.yaml still holds the placeholders '$(unfilled "${manifest}")' after rendering"
 	printf '%s\n' "${manifest}" >"${STATE}/coordinator-agentsessionsd.yaml"
 	"${K[@]}" apply -f "${STATE}/coordinator-agentsessionsd.yaml"
@@ -296,7 +316,7 @@ sessions() { "${WORK}/bin/agentctl" list --server "${SERVER}" | grep -c "harness
 show() {
 	[[ -x "${WORK}/bin/agentctl" && -x "${WORK}/bin/emit" ]] || fail "run coordinator.sh setup first"
 	rm -f "${LOGS}"/ch-*.log "${LOGS}/timeline.tsv"
-	rm -rf /tmp/render-coordinator /tmp/approve.txt /tmp/deny.txt
+	rm -rf /tmp/render-coordinator /tmp/render-refused /tmp/approve.txt /tmp/deny.txt
 	"${K[@]}" -n "${NS}" port-forward svc/agentsessionsd-coordinator "${SERVER##*:}:8080" >/dev/null 2>&1 &
 	PIDS+=($!)
 	local i
@@ -312,7 +332,9 @@ show() {
 	export API="${SERVER}" BINDING="${STATE}/binding-coordinator.json"
 	IMAGE="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["containers"][0]["image"])' "${STATE}/render-coordinator/actortemplate.json")"
 	[[ "${IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]] || fail "the coordinator's harness image is not digest-pinned: ${IMAGE}"
-	local template wtemplate rtemplate model="${AGENTSUITE_MODEL}" seq call res req out
+	local template wtemplate rtemplate model seq call res req out
+	model="$(model_arg model "${STATE}/render-coordinator/agentsessionsd.model-args")"
+	[[ -n "${model}" ]] || fail "setup's render names no model"
 	template="$(cat "${STATE}/render-coordinator/template-name")"
 	wtemplate="$(cat "${STATE}/render-writer/template-name")"
 	rtemplate="$(cat "${STATE}/render-reviewer/template-name")"
@@ -321,48 +343,74 @@ show() {
 
 	printf '\e[?25l\e[2J\e[3J\e[H\n'
 	printf '%s  An AgentSuite coordinator on AgentSessions and micro-VMs%s\n\n' "${C}" "${N}"
-	wrap "kaimahi's coordinator-workers suite: the coordinator delegates to writer and reviewer, each call a child session in its own micro-VM, with ${model} on Azure OpenAI. The call to reviewer waits for approval." "  " | sed "s/^/${W}/; s/\$/${N}/"
+	wrap "kaimahi's coordinator-workers suite, in a version that pins ${model}: the coordinator delegates to writer and reviewer, each call a child session in its own micro-VM, with the model served on Azure OpenAI as this environment's binding says. The call to reviewer waits for approval." "  " | sed "s/^/${W}/; s/\$/${N}/"
 	sleep "${TITLE_HOLD}"
 
 	# ---------------------------------------------------------------------------------------------
 	chapter 1 "The suite" "kaimahi's coordinator-workers test suite (agentsuite/testdata at 75f27d6): three agents"
-	run <<'EOF'
-ls -C suites/coordinator-workers/agents suites/coordinator-workers/instructions
-EOF
 	page "The coordinator may invoke writer and reviewer: one call at a time each, and no deeper chain"
 	ends_at suites/coordinator-workers/agents/coordinator.json 28
 	run -f <<'EOF'
 bat suites/coordinator-workers/agents/coordinator.json
 EOF
-	lines_hold suites/coordinator-workers/agents/coordinator.json 15:'"invokes"' 17:'"agent": "writer"' 18:'"maxConcurrent": 1' 19:'"maxDepth": 1' 22:'"agent": "reviewer"'
-	page "emit is the PoC's translator, built on kaimahi's agentsuite package; first, kaimahi's validator"
-	run <<'EOF'
-emit validate -suite suites/coordinator-workers
+	lines_hold suites/coordinator-workers/agents/coordinator.json 12:'"model": "example-model"' 15:'"invokes"' 17:'"agent": "writer"' 18:'"maxConcurrent": 1' 19:'"maxDepth": 1' 22:'"agent": "reviewer"'
+	page "Its agents name example-model. A new version of the suite pins the model they run with: four files change"
+	run -x <<'EOF'
+diff -rq -x SOURCE -x README.md suites/coordinator-workers suites/coordinator-workers-v2
 EOF
-	[[ "${SHOWN}" == "suite coordinator-workers valid: 3 agents"*"kaimahi/agentsuite v"*"-75f27d67f40b"* ]] || fail "emit validate did not report kaimahi 75f27d6's validator"
+	[[ "$(printf '%s\n' "${SHOWN}" | grep -c ' differ$')" == 4 ]] || fail "the new version does not differ in four files"
+	page "Each agent's model, and the digests of the agents in agentsuite.json"
+	run -x <<'EOF'
+diff suites/coordinator-workers/agents/coordinator.json suites/coordinator-workers-v2/agents/coordinator.json
+EOF
+	[[ "${SHOWN}" == *'"model": "example-model"'*'"model": "gpt-5.4-mini"'* ]] || fail "the new version does not pin gpt-5.4-mini"
+	page "kaimahi's validator accepts the new version; its digest, which covers every manifest, is the suite version"
+	run <<'EOF'
+emit validate -suite suites/coordinator-workers-v2
+EOF
+	[[ "${SHOWN}" == "suite coordinator-workers valid: 3 agents"*"digest sha256:306685d5375bb021ae1424f610012441b4381d0d49feab3b4c208ac2ced96c60"*"kaimahi/agentsuite v"*"-75f27d67f40b"* ]] ||
+		fail "emit validate did not report the new version's digest and kaimahi 75f27d6's validator"
 
 	# ---------------------------------------------------------------------------------------------
-	chapter 2 "The translation" "emit invokes: the suite's edges as the daemon's policy; which call needs approval is this deployment's choice"
+	chapter 2 "The translation" "This environment's AgentSessionsBinding, outside the suite: where the model is served, which calls need approval"
+	run -f <<'EOF'
+bat $BINDING
+EOF
+	python3 -c '
+import json, sys
+b = json.load(open(sys.argv[1]))
+ok = b["model"]["name"] == sys.argv[2] and b["approval"]["invokes"] == [{"caller": "coordinator", "agent": "reviewer"}] and "path" in b["model"]
+sys.exit(0 if ok else 1)' "${BINDING}" "${model}" || fail "the binding does not serve ${model} and gate coordinator -> reviewer"
+	page "kaimahi's original suite pins example-model, which this binding does not serve: emit render refuses it"
+	run -x <<'EOF'
+emit render -suite suites/coordinator-workers -agent coordinator -platform linux/amd64 -binding $BINDING -image $IMAGE -out /tmp/render-refused 2>&1
+EOF
+	[[ "${SHOWN}" == *'pins model "example-model" but the binding serves "'"${model}"'"; a different model needs a new suite version'* ]] ||
+		fail "emit render did not refuse the model mismatch"
+	[[ ! -e /tmp/render-refused ]] || fail "the refused render wrote files"
+	page "emit invokes: the suite's edges as the daemon's policy, gated by the binding's approval edge"
 	run <<'EOF'
-emit invokes -suite suites/coordinator-workers -approve reviewer
+emit invokes -suite suites/coordinator-workers-v2 -binding $BINDING
 EOF
 	[[ "${SHOWN}" == "coordinator=reviewer:1:1:approval,coordinator=writer:1:1" ]] || fail "emit invokes printed another policy"
-	page "emit render: one ActorTemplate per agent; the coordinator's carries the approval choice"
-	run <<EOF
-emit render -suite suites/coordinator-workers -agent coordinator -platform linux/amd64 -binding \$BINDING -image \$IMAGE -model ${model} -actors agentsuite-coordinator -approve reviewer -out /tmp/render-coordinator
+	page "emit render of the new version: one ActorTemplate per agent; the model is the suite's, with no override"
+	run <<'EOF'
+emit render -suite suites/coordinator-workers-v2 -agent coordinator -platform linux/amd64 -binding $BINDING -image $IMAGE -actors agentsuite-coordinator -out /tmp/render-coordinator
 EOF
+	[[ "${SHOWN}" == *"model ${model}, pinned by the suite and served by the binding"* ]] || fail "emit render did not name the pinned model"
 	offscreen "this render against the one setup created" diff -r /tmp/render-coordinator "${STATE}/render-coordinator" || fail "the render differs from setup's"
-	page "In the template: the harness reads the delegation targets that need approval from its env"
+	page "In the template: the delegation targets that need approval, from the binding"
 	seq="$(python3 -c 'import sys; print(next(i for i, l in enumerate(open(sys.argv[1]), 1) if "AGENTSUITE_APPROVAL" in l))' /tmp/render-coordinator/actortemplate.json)"
 	run -f <<EOF
 bat -r $((seq - 4)):$((seq + 1)) /tmp/render-coordinator/actortemplate.json
 EOF
 	lines_hold /tmp/render-coordinator/actortemplate.json "${seq}:AGENTSUITE_APPROVAL" "$((seq + 1)):\"value\": \"reviewer\""
-	page "And the flag that serves it from agentsessionsd, with its actors in the coordinator's own atespace"
+	page "And the flags that serve it from agentsessionsd: the harness, its actors' atespace, and the binding's model"
 	run <<'EOF'
-cat /tmp/render-coordinator/agentsessionsd.args
+cat /tmp/render-coordinator/agentsessionsd.args /tmp/render-coordinator/agentsessionsd.model-args
 EOF
-	[[ "${SHOWN}" == "-substrate-harness=coordinator=agentsuite-coordinator/${template},actors=agentsuite-coordinator" ]] || fail "the coordinator's flag is not ${template}"
+	[[ "${SHOWN}" == "-substrate-harness=coordinator=agentsuite-coordinator/${template},actors=agentsuite-coordinator"$'\n'"-model=${model}"$'\n'"-model-base-url="*$'\n'"-model-path="* ]] ||
+		fail "the coordinator's flags are not ${template} and the binding's model"
 
 	# ---------------------------------------------------------------------------------------------
 	chapter 3 "In the cluster" "Created before recording with kubectl ate create, from the three renders: one ActorTemplate per agent"
@@ -493,12 +541,14 @@ EOF
 
 	# ---------------------------------------------------------------------------------------------
 	chapter 8 "Open questions" "Open questions, each tagged with whose it is"
-	show_lines "AgentSuite: an invokes edge has no approval field (Tools have one); here the deployment chooses, through emit -approve.
+	show_lines "kmx: the binding has no approval field; this PoC adds approval.invokes per environment. Add it, or declare it in AgentSuite?
+kmx: the binding has no model.path, and model.baseURL refuses a query; Azure's deployment path carries api-version. Add path?
+kmx: eval and lift take one chat member; a suite with invokes edges has no eval yet, so this render has no eval evidence.
+kmx: a binding names one atespace; here each agent's actors need their own, so setup writes one binding per agent.
 AgentSuite: maxConcurrent bounds the declaring agent's calls; across runtime replicas too? This PoC counts per daemon.
 AgentSessions: agent-to-agent calls are a host tool call that creates a child session; should there be a first-class primitive?
 AgentSessions: CreateSession takes no idempotency key, so recovery after a crash mid-call could create a second child.
 AgentSessions: the HarnessRegistry does not take substrate placements yet, so the three harnesses are daemon flags.
-AgentSessions: a child session's micro-VM keeps running after its one turn; should the invoking host suspend it?
 substrate: is a template's golden snapshot usable from another atespace? Here each agent's template has its own." 16
 	sleep $((READ * 3))
 	log "DEMO COMPLETE in $((SECONDS - SHOW_START)) s"

@@ -1,0 +1,19 @@
+{
+  "apiVersion": "kmx.kaimahi.dev/v1alpha1",
+  "kind": "AgentSessionsBinding",
+  "target": {"platform": "kubernetes", "id": "agentsuite-demo"},
+  "placement": {"backend": "substrate"},
+  "atespace": "agentsuite-demo",
+  "sandbox": {"class": "microvm", "configName": "microvm"},
+  "snapshot": {"fidelity": "MEMORY", "storageLocation": "gs://ate-snapshots/agentsuite-demo/"},
+  "resources": {"cpu": "1", "memory": "512Mi"},
+  "workerSelector": {"matchLabels": {"workload": "agentsuite-demo-microvm"}},
+  "model": {
+    "name": "gpt-5.4-mini",
+    "provider": "openai",
+    "baseURL": "https://example.openai.azure.com",
+    "path": "/openai/deployments/gpt-5.4-mini/chat/completions?api-version=2025-04-01-preview",
+    "secretRef": {"name": "agentsessionsd-model", "key": "api-key"}
+  },
+  "approval": {"invokes": [{"caller": "coordinator", "agent": "reviewer"}]}
+}

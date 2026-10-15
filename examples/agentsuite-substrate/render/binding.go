@@ -1,0 +1,341 @@
+package render
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"regexp"
+	"slices"
+	"strings"
+
+	"github.com/kaimahi-agents/kaimahi/agentsuite"
+
+	"github.com/aramase/agentsessions/examples/agentsuite-substrate/invoke"
+)
+
+const (
+	// BindingAPIVersion and BindingKind identify an AgentSessionsBinding, as kaimahi's kmx does.
+	BindingAPIVersion = "kmx.kaimahi.dev/v1alpha1"
+	BindingKind       = "AgentSessionsBinding"
+	// ModelProvider is the only model provider a binding names: agentsessionsd serves an
+	// OpenAI-compatible endpoint.
+	ModelProvider = "openai"
+)
+
+// Binding is the per-environment half of a deployment: the AgentSessionsBinding. The suite pins
+// the exact model; the binding says where that model is served and where sessions are placed. It
+// lives outside the suite, one per environment.
+//
+// Its fields follow kmx's AgentSessionsBinding (kaimahi internal/kmx/runtime/agentsessions_binding.go
+// on branch aramase/f/kmx_agentsessions_binding), with two additions this PoC needs: model.path
+// (an Azure OpenAI deployment's completions path, which carries its api-version query) and
+// approval (the invokes edges this environment gates). README.md lists every difference.
+type Binding struct {
+	APIVersion     string                `json:"apiVersion"`
+	Kind           string                `json:"kind"`
+	Target         BindingTarget         `json:"target"`
+	Placement      BindingPlacement      `json:"placement"`
+	Atespace       string                `json:"atespace"`
+	Sandbox        BindingSandbox        `json:"sandbox"`
+	Snapshot       BindingSnapshot       `json:"snapshot"`
+	Resources      BindingResources      `json:"resources,omitzero"`
+	WorkerSelector BindingWorkerSelector `json:"workerSelector,omitzero"`
+	Model          BindingModel          `json:"model"`
+	Approval       BindingApproval       `json:"approval,omitzero"`
+
+	digest string
+}
+
+type BindingTarget struct {
+	Platform string `json:"platform"`
+	ID       string `json:"id"`
+}
+
+type BindingPlacement struct {
+	Backend string `json:"backend"`
+}
+
+type BindingSandbox struct {
+	Class      string `json:"class"`
+	ConfigName string `json:"configName"`
+}
+
+type BindingSnapshot struct {
+	Fidelity        string `json:"fidelity"`
+	StorageLocation string `json:"storageLocation"`
+}
+
+type BindingResources struct {
+	CPU    string `json:"cpu,omitempty"`
+	Memory string `json:"memory,omitempty"`
+}
+
+type BindingWorkerSelector struct {
+	MatchLabels map[string]string `json:"matchLabels,omitempty"`
+}
+
+// BindingModel says where the suite's pinned model is served: Name must equal the model every
+// rendered agent pins, BaseURL and Path are agentsessionsd's -model-base-url and -model-path, and
+// SecretRef names the Secret key that holds the credential. It cannot hold a credential value.
+type BindingModel struct {
+	Name     string `json:"name"`
+	Provider string `json:"provider"`
+	BaseURL  string `json:"baseURL,omitempty"`
+	// Path is PoC-only: kmx's binding has no path, and its baseURL refuses a query.
+	Path      string           `json:"path,omitempty"`
+	SecretRef BindingSecretRef `json:"secretRef"`
+}
+
+type BindingSecretRef struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
+}
+
+// BindingApproval is PoC-only: the invokes edges whose calls this environment sends to an operator
+// for approval. The suite declares the edges; AgentSuite has no approval field on an edge.
+type BindingApproval struct {
+	Invokes []invoke.Gate `json:"invokes,omitempty"`
+}
+
+var (
+	dnsSubdomain = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
+	secretKey    = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
+)
+
+// LoadBinding decodes a binding strictly (unknown fields are refused), validates it, and records
+// its digest (see Digest). Its errors never repeat model.baseURL or model.path.
+func LoadBinding(path string) (*Binding, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var b Binding
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&b); err != nil {
+		return nil, fmt.Errorf("binding %s: %w", path, err)
+	}
+	if dec.More() {
+		return nil, fmt.Errorf("binding %s: want one JSON document", path)
+	}
+	if err := b.validate(); err != nil {
+		return nil, fmt.Errorf("binding %s: %w", path, err)
+	}
+	b = b.normalized()
+	enc, err := json.Marshal(b)
+	if err != nil {
+		return nil, fmt.Errorf("binding %s: %w", path, err)
+	}
+	if b.digest, err = agentsuite.Digest(enc); err != nil {
+		return nil, fmt.Errorf("binding %s: %w", path, err)
+	}
+	return &b, nil
+}
+
+// Digest is "sha256:" plus the SHA-256 of the RFC 8785 (JCS) form of the binding's fields, as kmx
+// computes it: key order and whitespace do not change it, and an empty workerSelector or approval
+// is the same binding as an omitted one. The approval edges are sorted first, so their order does
+// not change it either (kmx has no approval field).
+func (b *Binding) Digest() string { return b.digest }
+
+// normalized gives equivalent spellings one form: the approval edges are a set, so they are sorted.
+func (b Binding) normalized() Binding {
+	if len(b.WorkerSelector.MatchLabels) == 0 {
+		b.WorkerSelector.MatchLabels = nil
+	}
+	if len(b.Approval.Invokes) == 0 {
+		b.Approval.Invokes = nil
+	}
+	b.Approval.Invokes = slices.Clone(b.Approval.Invokes)
+	slices.SortFunc(b.Approval.Invokes, func(x, y invoke.Gate) int {
+		return strings.Compare(x.Caller+"\x00"+x.Agent, y.Caller+"\x00"+y.Agent)
+	})
+	return b
+}
+
+func (b Binding) validate() error {
+	switch {
+	case b.APIVersion != BindingAPIVersion || b.Kind != BindingKind:
+		return fmt.Errorf("want %s %s, got %q %q", BindingAPIVersion, BindingKind, b.APIVersion, b.Kind)
+	case b.Target.Platform != "kubernetes":
+		return errors.New("target.platform must be kubernetes")
+	case !dnsSubdomain.MatchString(b.Target.ID):
+		return fmt.Errorf("target.id %q is not a Kubernetes object name", b.Target.ID)
+	case b.Placement.Backend != "substrate":
+		return fmt.Errorf("placement.backend %q: only substrate is rendered", b.Placement.Backend)
+	case !dnsLabel.MatchString(b.Atespace):
+		return fmt.Errorf("atespace %q is not a DNS label", b.Atespace)
+	case b.Sandbox.Class != "microvm" && b.Sandbox.Class != "gvisor":
+		return fmt.Errorf("sandbox.class %q: want microvm or gvisor", b.Sandbox.Class)
+	case !dnsSubdomain.MatchString(b.Sandbox.ConfigName):
+		return fmt.Errorf("sandbox.configName %q is not a Kubernetes object name", b.Sandbox.ConfigName)
+	case b.Snapshot.Fidelity != "MEMORY" && b.Snapshot.Fidelity != "ROOTFS" && b.Snapshot.Fidelity != "VOLUMES":
+		return errors.New("snapshot.fidelity: want MEMORY, ROOTFS or VOLUMES")
+	case b.Snapshot.StorageLocation == "":
+		return errors.New("snapshot.storageLocation is required")
+	}
+	if err := b.Model.validate(); err != nil {
+		return err
+	}
+	seen := map[invoke.Gate]bool{}
+	for _, g := range b.Approval.Invokes {
+		if !dnsLabel.MatchString(g.Caller) || !dnsLabel.MatchString(g.Agent) {
+			return fmt.Errorf("approval.invokes: %q -> %q: caller and agent must be agent ids", g.Caller, g.Agent)
+		}
+		if seen[g] {
+			return fmt.Errorf("approval.invokes: %s -> %s is given more than once", g.Caller, g.Agent)
+		}
+		seen[g] = true
+	}
+	return nil
+}
+
+func (m BindingModel) validate() error {
+	switch {
+	case m.Name == "" || strings.ContainsFunc(m.Name, func(r rune) bool { return r <= ' ' || r == 0x7f }):
+		return errors.New("model.name must be one exact model identifier without whitespace")
+	case m.Provider != ModelProvider:
+		return fmt.Errorf("model.provider %q: want %s (an OpenAI-compatible endpoint)", m.Provider, ModelProvider)
+	case !dnsSubdomain.MatchString(m.SecretRef.Name):
+		return fmt.Errorf("model.secretRef.name %q is not a Secret name", m.SecretRef.Name)
+	case !secretKey.MatchString(m.SecretRef.Key):
+		return fmt.Errorf("model.secretRef.key %q is not a Secret key", m.SecretRef.Key)
+	}
+	if m.BaseURL != "" {
+		if err := CheckModelBaseURL(m.BaseURL); err != nil {
+			return fmt.Errorf("model.baseURL: %w", err)
+		}
+	}
+	if m.Path != "" {
+		if err := CheckModelPath(m.Path); err != nil {
+			return fmt.Errorf("model.path: %w", err)
+		}
+	}
+	return nil
+}
+
+// ErrModelMismatch classifies a binding that serves a model other than the one an agent pins.
+var ErrModelMismatch = errors.New("the binding serves a model other than the suite's pinned model")
+
+// ModelMismatchError names both models. Model ids are identities, not credentials.
+type ModelMismatchError struct{ Suite, Agent, Pinned, Served string }
+
+func (e *ModelMismatchError) Error() string {
+	return fmt.Sprintf("suite %s agent %s pins model %q but the binding serves %q; a different model needs a new suite version and a new evaluation",
+		e.Suite, e.Agent, e.Pinned, e.Served)
+}
+
+func (e *ModelMismatchError) Is(target error) bool { return target == ErrModelMismatch }
+
+// CheckModel refuses a binding whose model.name is not exactly the model the composition's agent
+// pins: no case folding, prefix or version matching, as kmx's eval and lift check it.
+func CheckModel(c *Composition, b *Binding) error {
+	if b.Model.Name != c.Agent.Model.Model {
+		return &ModelMismatchError{Suite: c.Suite, Agent: c.Agent.ID, Pinned: c.Agent.Model.Model, Served: b.Model.Name}
+	}
+	return nil
+}
+
+// Gates returns the binding's approval edges.
+func (b *Binding) Gates() []invoke.Gate { return slices.Clone(b.Approval.Invokes) }
+
+// ApprovalTargets returns the agents whose calls by caller the binding gates, sorted.
+func (b *Binding) ApprovalTargets(caller string) []string {
+	var out []string
+	for _, g := range b.Approval.Invokes {
+		if g.Caller == caller {
+			out = append(out, g.Agent)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// DaemonModelFlags are the agentsessionsd flags that serve the binding's model: -model, and
+// -model-base-url and -model-path when the binding sets them (the daemon's defaults otherwise).
+func (b *Binding) DaemonModelFlags() []string {
+	flags := []string{"-model=" + b.Model.Name}
+	if b.Model.BaseURL != "" {
+		flags = append(flags, "-model-base-url="+b.Model.BaseURL)
+	}
+	if b.Model.Path != "" {
+		flags = append(flags, "-model-path="+b.Model.Path)
+	}
+	return flags
+}
+
+// hidden ends every refusal of a value that may hold a credential.
+const hidden = " (the value is not shown, since it may hold a credential)"
+
+// apiVersion is the api-version value a model path may carry: a date, optionally with Azure
+// OpenAI's -preview suffix. Its shape leaves no room for a key.
+var apiVersion = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}(-preview)?$`)
+
+// CheckModelBaseURL refuses a model base URL that is not http(s) with a host, or that carries
+// userinfo, a query or a fragment: it is printed, logged and rendered into the daemon's arguments,
+// so a credential in it would bypass the Secret. Its errors never contain the URL or any part of
+// it: a parse error can quote the userinfo of a URL that does not parse
+// ("https://user:secret/x@host" reads "secret" as the port).
+func CheckModelBaseURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return errors.New("the base URL is not a valid URL" + hidden)
+	}
+	switch {
+	case u.User != nil:
+		return errors.New("the base URL carries userinfo (user:password@); pass the provider's key in MODEL_API_KEY, which up.sh stores in a Secret" + hidden)
+	case u.RawQuery != "" || u.ForceQuery:
+		return errors.New("the base URL carries a query; a credential there would be printed and rendered into the Deployment, so pass the provider's key in MODEL_API_KEY and an api-version in AGENTSUITE_MODEL_PATH" + hidden)
+	case strings.Contains(raw, "#"):
+		return errors.New("the base URL carries a fragment, which the model client drops" + hidden)
+	case u.Scheme != "http" && u.Scheme != "https":
+		// url.Parse lowercases the scheme. A value like "user:secret@host" parses as scheme "user".
+		return errors.New("the base URL is not http or https" + hidden)
+	case u.Host == "":
+		return errors.New("the base URL has no host (want scheme://host[/path])" + hidden)
+	}
+	return nil
+}
+
+// CheckModelPath refuses a completions path the demo will not render or let the daemon log. The
+// path must be one absolute path ("//host" would read as an authority), with no '@' or fragment,
+// and its only query parameter may be a single api-version whose value is a date (2024-10-21,
+// 2025-04-01-preview): an Azure OpenAI deployment needs it there, and that shape cannot hold a key.
+// Any other parameter (Azure's own api-key, a signature) is refused. Like CheckModelBaseURL, its
+// errors never contain the path.
+func CheckModelPath(raw string) error {
+	switch {
+	case !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//"):
+		return errors.New("the model path does not start with a single '/' (want /path[?api-version=YYYY-MM-DD])" + hidden)
+	case strings.Contains(raw, "#"):
+		return errors.New("the model path carries a fragment, which the model client drops" + hidden)
+	case strings.Contains(raw, "@"):
+		return errors.New("the model path contains '@', which could be read as userinfo" + hidden)
+	case strings.HasSuffix(raw, ":"):
+		// up.sh renders the path into a YAML plain scalar, where a trailing ':' makes a map key.
+		return errors.New("the model path ends with ':'" + hidden)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return errors.New("the model path is not a valid URL path" + hidden)
+	}
+	if u.ForceQuery && u.RawQuery == "" {
+		return errors.New("the model path ends with an empty query" + hidden)
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return errors.New("the model path's query does not parse" + hidden)
+	}
+	for k, vs := range q {
+		if k != "api-version" {
+			return errors.New("the model path carries a query parameter other than api-version; pass the provider's key in MODEL_API_KEY" + hidden)
+		}
+		if len(vs) != 1 || !apiVersion.MatchString(vs[0]) {
+			return errors.New("the model path's api-version is not one date (YYYY-MM-DD, optionally -preview)" + hidden)
+		}
+	}
+	return nil
+}

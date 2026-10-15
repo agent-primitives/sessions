@@ -209,13 +209,18 @@ func (s *resumeSink) recordedNext(kind api.EventKind) (api.Event, bool) {
 }
 
 func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
-	s.live.guard.mu.Lock()
+	if err := s.live.guard.mu.Lock(ctx); err != nil {
+		return api.ModelResponse{}, err
+	}
 	defer s.live.guard.mu.Unlock()
 	if err := s.live.guard.err(); err != nil {
 		return api.ModelResponse{}, err
 	}
 	if s.failure != nil {
 		return api.ModelResponse{}, s.failure
+	}
+	if err := ctx.Err(); err != nil {
+		return api.ModelResponse{}, err
 	}
 	if s.i < len(s.stream) {
 		mc, ok := s.recordedNext(api.EventModelCall)
@@ -252,13 +257,18 @@ func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 }
 
 func (s *resumeSink) Output(ctx context.Context, delta string) error {
-	s.live.guard.mu.Lock()
+	if err := s.live.guard.mu.Lock(ctx); err != nil {
+		return err
+	}
 	defer s.live.guard.mu.Unlock()
 	if err := s.live.guard.err(); err != nil {
 		return err
 	}
 	if s.failure != nil {
 		return s.failure
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if s.i < len(s.stream) {
 		out, ok := s.recordedNext(api.EventOutput)
@@ -278,13 +288,18 @@ func (s *resumeSink) Output(ctx context.Context, delta string) error {
 }
 
 func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
-	s.live.guard.mu.Lock()
+	if err := s.live.guard.mu.Lock(ctx); err != nil {
+		return api.ToolResult{}, err
+	}
 	defer s.live.guard.mu.Unlock()
 	if err := s.live.guard.err(); err != nil {
 		return api.ToolResult{}, err
 	}
 	if s.failure != nil {
 		return api.ToolResult{}, s.failure
+	}
+	if err := ctx.Err(); err != nil {
+		return api.ToolResult{}, err
 	}
 	// Preserve historical keyless ordinary rejections without consuming fallback evidence.
 	// A same-ID gated intent must still validate identity before recovery can execute it.
@@ -355,13 +370,18 @@ func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolRes
 }
 
 func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {
-	s.live.guard.mu.Lock()
+	if err := s.live.guard.mu.Lock(ctx); err != nil {
+		return err
+	}
 	defer s.live.guard.mu.Unlock()
 	if err := s.live.guard.err(); err != nil {
 		return err
 	}
 	if s.failure != nil {
 		return s.failure
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if s.live.calls[tr.ID] {
 		if s.i < len(s.stream) {
@@ -387,13 +407,18 @@ func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {
 }
 
 func (s *resumeSink) Usage(ctx context.Context, u api.Usage) error {
-	s.live.guard.mu.Lock()
+	if err := s.live.guard.mu.Lock(ctx); err != nil {
+		return err
+	}
 	defer s.live.guard.mu.Unlock()
 	if err := s.live.guard.err(); err != nil {
 		return err
 	}
 	if s.failure != nil {
 		return s.failure
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if s.live.legacyRecovery {
 		if s.i < len(s.stream) {

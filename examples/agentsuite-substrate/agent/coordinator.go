@@ -30,7 +30,6 @@ func delegationPrompt(targets []string) string {
 
 You can delegate to these agents: %s.
 To delegate, reply with only one line of JSON and nothing else: {"invoke": "<agent>", "task": "<the complete task for that agent>"}
-Each delegation starts a new session of that agent, unless you add "session": "<session id>" with the id a reply from that agent gave you: then the task goes to that same session, which remembers its earlier tasks and replies. Use this for follow-ups such as revisions.
 The next message gives you that agent's reply, or says why the delegation did not run.
 If a delegation did not run, do not do that agent's task yourself: continue without it and say in your final answer which task was not done and why.
 Delegate one task at a time. When you have what you need, reply with the final answer as plain text, not JSON.`, strings.Join(targets, ", "))
@@ -91,6 +90,10 @@ func (h Harness) runCoordinator(ctx context.Context, start *api.Start, sink api.
 		}
 	}
 	messages = append(messages, start.Inputs...)
+	// The child sessions each agent's replies named in this turn. A follow-up may only name one of
+	// the same agent's; a model that attaches another agent's id gets a new session instead (the host
+	// would refuse the call). Derived from recorded results, so replay makes the same choice.
+	children := map[string][]string{}
 	for step := 1; ; step++ {
 		resp, err := sink.Model(ctx, api.ModelRequest{Model: h.Model, Messages: messages})
 		if err != nil {
@@ -113,6 +116,10 @@ func (h Harness) runCoordinator(ctx context.Context, start *api.Start, sink api.
 		if slices.Contains(h.Approval, d.Invoke) {
 			mediation = api.MediationRequiresApproval
 		}
+		if d.Session != "" && !slices.Contains(children[d.Invoke], d.Session) {
+			log.Printf("harness: dropping session %q from the delegation to %s: no reply from %s named it in this turn", d.Session, d.Invoke, d.Invoke)
+			d.Session = ""
+		}
 		log.Printf("harness: delegating to %s (%s), call %s, session %q", d.Invoke, mediation, id, d.Session)
 		args := map[string]any{"agent": d.Invoke, "task": d.Task}
 		if d.Session != "" {
@@ -128,12 +135,16 @@ func (h Harness) runCoordinator(ctx context.Context, start *api.Start, sink api.
 		if err != nil {
 			return err
 		}
+		if s, _ := res.Output["session"].(string); s != "" && !res.IsError {
+			children[d.Invoke] = append(children[d.Invoke], s)
+		}
 		messages = append(messages, resp.Message, *api.TextMessage("user", resultText(d.Invoke, res)))
 	}
 }
 
-// resultText is how a delegation's outcome reaches the model. A reply names the child session, so
-// the model can send it a follow-up.
+// resultText is how a delegation's outcome reaches the model. A reply says how to send that same
+// child a follow-up; the system prompt does not, since the extra instruction made gpt-5.4-mini
+// refuse to delegate at all in two of four probe runs.
 func resultText(agent string, res api.ToolResult) string {
 	if res.IsError {
 		return fmt.Sprintf("The delegation to %s did not run: %s", agent, res.Error)
@@ -141,7 +152,7 @@ func resultText(agent string, res api.ToolResult) string {
 	out, _ := res.Output["output"].(string)
 	text := fmt.Sprintf("Reply from %s:\n%s", agent, out)
 	if s, _ := res.Output["session"].(string); s != "" {
-		text += fmt.Sprintf("\n(%s session id: %s)", agent, s)
+		text += fmt.Sprintf("\n(To give %s a follow-up task in this same session, add \"session\": %q to that delegation's JSON. Do not add it for another agent.)", agent, s)
 	}
 	return text
 }

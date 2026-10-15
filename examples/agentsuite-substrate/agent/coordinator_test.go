@@ -187,6 +187,38 @@ func TestParseDelegation(t *testing.T) {
 	}
 }
 
+// A follow-up keeps a session one of the same agent's replies named in this turn; a session id the
+// model attaches to another agent's task is dropped, so that task gets a new child.
+func TestCoordinatorFollowUpSessions(t *testing.T) {
+	h, err := Load(stageCoordinator(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &scriptedSink{
+		replies: []string{
+			`{"invoke": "writer", "task": "draft"}`,
+			`{"invoke": "writer", "task": "revise", "session": "sess-w"}`,
+			`{"invoke": "reviewer", "task": "review", "session": "sess-w"}`,
+			"done",
+		},
+		tool: func(tc api.ToolCall) (api.ToolResult, error) {
+			agent := tc.Args["agent"].(string)
+			return api.ToolResult{ID: tc.ID, Output: map[string]any{"output": "ok", "session": map[string]string{"writer": "sess-w", "reviewer": "sess-r"}[agent]}}, nil
+		},
+	}
+	if err := h.Run(t.Context(), &api.Start{ExecutionID: "e"}, sink); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, c := range sink.calls {
+		s, _ := c.Args["session"].(string)
+		got = append(got, c.Args["agent"].(string)+":"+s)
+	}
+	if strings.Join(got, ",") != "writer:,writer:sess-w,reviewer:" {
+		t.Fatalf("calls = %v, want a new writer, a writer follow-up, and a new reviewer", got)
+	}
+}
+
 // A follow-up names the child session; a reply names the session it came from, so the model can.
 func TestFollowUpDelegation(t *testing.T) {
 	d, ok := parseDelegation(`{"invoke": "writer", "task": "make it rhyme", "session": "sess-1"}`)
@@ -194,7 +226,7 @@ func TestFollowUpDelegation(t *testing.T) {
 		t.Fatalf("parseDelegation = %+v, %v", d, ok)
 	}
 	got := resultText("writer", api.ToolResult{Output: map[string]any{"output": "a poem", "session": "sess-1"}})
-	if got != "Reply from writer:\na poem\n(writer session id: sess-1)" {
+	if got != "Reply from writer:\na poem\n(To give writer a follow-up task in this same session, add \"session\": \"sess-1\" to that delegation's JSON. Do not add it for another agent.)" {
 		t.Fatalf("resultText = %q", got)
 	}
 }

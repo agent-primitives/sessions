@@ -272,7 +272,7 @@ ctl() { "${WORK}/bin/agentctl" "$1" --server "${SERVER}" "${@:2}"; }
 run_case() {
 	local decision="$1" log="${LOGS}/probe-$1"
 	step "a coordinator request; the reviewer call needs approval (${decision})"
-	ctl exec --harness coordinator --input "Write a two-line poem about tides, then have it reviewed for clarity. Reply with the final poem and one line on the review." | tee "${log}-exec.txt"
+	ctl exec --harness coordinator --input "Have the writer write a two-line poem about tides, then have the reviewer give a one-sentence clarity review. Reply with the final poem and that sentence." | tee "${log}-exec.txt"
 	local uid
 	uid="$(sed -n 's/^session //p' "${log}-exec.txt" | head -1)"
 	[[ -n "${uid}" ]] || fail "no session uid in the exec output"
@@ -286,6 +286,10 @@ run_case() {
 	for kind in EVENT_TOOL_CALL EVENT_APPROVAL_REQUEST EVENT_APPROVAL_RESULT EVENT_TOOL_RESULT EVENT_END; do
 		grep -q "${kind}" "${log}-journal.txt" || fail "session ${uid}: no ${kind} in its journal"
 	done
+	# An approved reviewer call must have run a reviewer child: a result naming one, not a refusal.
+	if [[ "${decision}" == approve ]]; then
+		grep 'EVENT_TOOL_RESULT' "${log}-journal.txt" | grep -q '"agent":"reviewer"' || fail "session ${uid}: the approved reviewer call ran no reviewer child"
+	fi
 	echo "${uid}" >"${log}-uid"
 }
 
@@ -370,7 +374,7 @@ lifecycle() {
 	forward
 	step "session actors before"
 	actor_states | tee "${LOGS}/lifecycle-actors-before.txt"
-	local i uid runs="${LIFECYCLE_RUNS:-5}"
+	local i uid runs="${LIFECYCLE_RUNS:-8}"
 	for i in $(seq "${runs}"); do
 		step "run ${i}: a writer delegation, then a follow-up to the same writer session"
 		ctl exec --harness coordinator --input "Have the writer write a two-line poem about tides. Then delegate a follow-up to that same writer session (give its session id) asking it to make the two lines rhyme. Do not use the reviewer. Reply with the final poem." >"${LOGS}/lifecycle-${i}-exec.txt"
@@ -378,6 +382,8 @@ lifecycle() {
 		[[ -n "${uid}" ]] || fail "run ${i}: no session uid"
 		ctl replay --session "${uid}" -v >"${LOGS}/lifecycle-${i}-journal.txt"
 		actor_states
+		# The deployment's rate limit is low; space the runs out.
+		sleep "${LIFECYCLE_PAUSE:-30}"
 	done
 	step "session actors after"
 	actor_states | tee "${LOGS}/lifecycle-actors-after.txt"
@@ -385,10 +391,13 @@ lifecycle() {
 	step "every delegation's child lifecycle, from the coordinators' journals"
 	lifecycles "${LOGS}"/lifecycle-*-journal.txt | tee "${LOGS}/lifecycle-table.txt"
 	"${K[@]}" -n "${NS}" logs deploy/agentsessionsd-coordinator 2>&1 | grep 'agentsuite invocation' >"${LOGS}/lifecycle-daemon.txt" || true
-	grep -q "RUNNING" "${LOGS}/lifecycle-actors-after.txt" && fail "a session actor is still running after its turn"
-	local woke
+	# Root (coordinator) sessions keep their actors; every child's must be suspended.
+	grep -E '^agentsuite-(writer|reviewer):.*RUNNING' "${LOGS}/lifecycle-actors-after.txt" && fail "a child session's actor is still running after its turn"
+	local woke want="${LIFECYCLE_MIN_WAKES:-5}"
 	woke="$(grep -c 'origin=follow-up' "${LOGS}/lifecycle-table.txt" || true)"
-	((woke >= runs)) || fail "only ${woke} follow-ups woke a child; want ${runs}"
+	# The model chooses whether to follow up; a run where it starts a new writer session instead
+	# wakes nothing, so there are more runs than wakes wanted.
+	((woke >= want)) || fail "only ${woke} follow-ups woke a child; want ${want}"
 	echo "LIFECYCLE OK"
 }
 

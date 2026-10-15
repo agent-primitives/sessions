@@ -193,6 +193,18 @@ and two entries may not share one.
 - The tool result's `lifecycle` records what happened: `origin` (`new`, `follow-up`, `retry`),
   `turn` (`ran`, `recorded`, `re-driven`), and `wakeMs`, `turnMs`, `suspendMs`. The daemon logs the
   same line (`agentsuite invocation`).
+- Measured on micro-VMs (zephyr kind cluster, 2026-10-15, `coordinator.sh lifecycle`, 5 runs):
+  suspend n=8, 398-445 ms (median 421); wake (`Resume` of a suspended child) n=3, 431-443 ms
+  (median 434); child turn n=8, 808-1533 ms. Child actors after the runs: writer 7 and reviewer 1,
+  all `ACTOR_STATE_SUSPENDED`, none running (before this change every child stayed
+  `ACTOR_STATE_RUNNING`). Root coordinator sessions are not suspended. The model chose a follow-up
+  in 3 of 5 runs, so `lifecycle` now runs 8 and wants 5 wakes; that longer run, `crash` on
+  micro-VMs and the shared template on micro-VMs were not run (the host became unreachable).
+- `shared` mode (`COORD_TEMPLATE=shared coordinator.sh setup`): one image with no agent and one
+  ActorTemplate in atespace `agentsuite-members`; the daemon (`AGENTSUITE_MEMBERS_JSON`, from
+  `emit members`) adds each agent's member to every new turn's execution config, so it is journaled
+  in `EXECUTION_START`; the harness refuses a member or instructions the template's
+  `AGENTSUITE_MEMBERS` pins do not match. Unit-tested; not yet run on a cluster.
 
 ### Idempotent child creation (PoC)
 

@@ -16,6 +16,10 @@ provide.
 
 ### Fixed
 
+- `model/openai` joins the completions path to the base URL's path instead of appending it to the
+  string, so a base URL with a query (`-model-base-url 'https://h/v1?api-version=2'`) reaches
+  `/v1/chat/completions` with the query kept, ahead of any query `-model-path` carries. A fragment
+  is dropped. Before, the path landed inside the query or fragment and every turn went to `/v1`.
 - Session-level suspend no longer destroys the Substrate actor needed by resume. Both replay-based
   and memory-snapshot sessions retain their restore handle after `Placer.Suspend`; explicit `Stop`
   remains destructive teardown.
@@ -139,6 +143,8 @@ provide.
   until this host restarts or loads it through `RegisterHarness` with the identical compatible spec.
   For a RETIRED row, restart this host to serve its existing sessions without reactivating it:
   `RegisterHarness` reactivates the row for every host sharing the journal.
+- `openai.New` refuses a base URL that is not absolute (no scheme or host), so `agentsessionsd`
+  exits at startup with `-model-base-url` set to one. Such a URL used to fail every request.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

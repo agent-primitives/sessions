@@ -46,10 +46,10 @@ import (
 	"syscall"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/resolver"
 
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/client"
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/harness/chatagent"
 	"github.com/aramase/agentsessions/harness/echoagent"
@@ -81,7 +81,7 @@ type options struct {
 // ToolExecutorFunc returns the host tool executor for the named -harness or -substrate-harness, or
 // nil for none. sessions is a client of this daemon's own Sessions listener, for an executor that
 // drives other sessions (AgentSuite invocations create child sessions); it connects on first use.
-type ToolExecutorFunc func(harness string, sessions v1.SessionsClient) controller.ToolFunc
+type ToolExecutorFunc func(harness string, sessions *client.Client) controller.ToolFunc
 
 // WithToolExecutors installs host tool executors for CONTROLLER_MEDIATED and approved
 // REQUIRES_APPROVAL tool calls. Without it no harness has one, and such a call fails the turn.
@@ -180,8 +180,7 @@ func Run(args []string, opts ...Option) error {
 	var selfAddr atomic.Pointer[string]
 	var executors func(name string) controller.ToolFunc
 	if o.executors != nil {
-		selfConn, err := grpc.NewClient("passthrough:///agentsessionsd",
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		self, err := client.Dial("passthrough:///agentsessionsd", client.WithDialOptions(
 			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 				addr := selfAddr.Load()
 				if addr == nil {
@@ -189,13 +188,12 @@ func Run(args []string, opts ...Option) error {
 				}
 				var d net.Dialer
 				return d.DialContext(ctx, "tcp", *addr)
-			}))
+			})))
 		if err != nil {
 			return fmt.Errorf("sessions client for tool executors: %w", err)
 		}
-		defer func() { _ = selfConn.Close() }()
-		sessions := v1.NewSessionsClient(selfConn)
-		executors = func(name string) controller.ToolFunc { return o.executors(name, sessions) }
+		defer func() { _ = self.Close() }()
+		executors = func(name string) controller.ToolFunc { return o.executors(name, self) }
 	}
 
 	registry, closeBackends, err := harnessRegistry(*model, remotes, modelFn, streamFn, logger, substrateBackends, executors)

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,6 +74,94 @@ func TestHarnessRegistryInstallsExecutorsByName(t *testing.T) {
 		t.Fatalf("exec without an executor hung: %v", err)
 	}
 }
+
+// replyHarness outputs "reply:" plus its first input's text, without a model call.
+type replyHarness struct{}
+
+func (replyHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "reply", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, nil
+}
+
+func (replyHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	var text string
+	if len(start.Inputs) > 0 {
+		text = start.Inputs[0].Text()
+	}
+	return sink.Output(ctx, "reply:"+text)
+}
+
+// Through Run, an executor's sessions client reaches the daemon's own Sessions listener: the
+// tooler harness's host-mediated call runs a turn in a child session on the reply harness over that
+// loopback client, and the child's output comes back as the tool result. The wildcard bind checks
+// the dial address is the loopback form, not the bind address.
+func TestRunToolExecutorsReachTheDaemonOverLoopback(t *testing.T) {
+	tooler := serveHarness(t, toolHarness{})
+	reply := serveHarness(t, replyHarness{})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	addrs := make(chan string, 1)
+	var asked []string
+	executors := func(name string, sessions *client.Client) controller.ToolFunc {
+		asked = append(asked, name)
+		if name != "tooler" {
+			return nil
+		}
+		return func(ctx context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+			child, err := sessions.Exec(ctx, client.ExecOptions{Harness: "reply", Inputs: []string{"from " + scope.SessionUID[:4]}})
+			if err != nil {
+				return api.ToolResult{}, err
+			}
+			return api.ToolResult{ID: call.ID, Output: map[string]any{"text": child.Output + "@" + child.Session.GetMetadata().GetUid()}}, nil
+		}
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- Run([]string{"-journal", t.TempDir() + "/journal.db", "-addr", "0.0.0.0:0", "-model", "m", "-harness", "tooler=" + tooler, "-harness", "reply=" + reply},
+			WithToolExecutors(executors), withContext(ctx), withListening(func(addr string) { addrs <- addr }))
+	}()
+	var addr string
+	select {
+	case addr = <-addrs:
+	case err := <-done:
+		t.Fatalf("Run returned before serving: %v", err)
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := client.Dial("127.0.0.1:" + port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
+	defer tcancel()
+	turn, err := c.Exec(tctx, client.ExecOptions{Harness: "tooler", Inputs: []string{"hi"}})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	parent := turn.Session.GetMetadata().GetUid()
+	got, ok := strings.CutPrefix(turn.Output, "tool:reply:from "+parent[:4]+"@")
+	if !ok || got == "" || got == parent {
+		t.Fatalf("output = %q, want the reply child's output and its own session uid", turn.Output)
+	}
+	if _, err := c.GetSession(tctx, got); err != nil {
+		t.Fatalf("the child session %s is not in the daemon's journal: %v", got, err)
+	}
+	if !slices.Contains(asked, "tooler") {
+		t.Fatalf("executors asked for %v, want tooler", asked)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+// withContext makes ctx the parent of Run's signal context.
+func withContext(ctx context.Context) Option { return func(o *options) { o.ctx = ctx } }
+
+// withListening reports the Sessions listener's address once Run serves.
+func withListening(f func(addr string)) Option { return func(o *options) { o.listening = f } }
 
 func TestLoopbackDialAddr(t *testing.T) {
 	for _, tc := range []struct {

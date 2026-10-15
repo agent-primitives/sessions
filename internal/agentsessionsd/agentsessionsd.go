@@ -76,6 +76,10 @@ type options struct {
 	executors ToolExecutorFunc
 	// output receives command-line errors and the usage; nil is os.Stderr. Tests set it.
 	output io.Writer
+	// ctx, when set, is the parent of Run's signal context, so a test can stop Run; listening is
+	// called with the Sessions listener's address once it serves. Tests set them.
+	ctx       context.Context
+	listening func(addr string)
 }
 
 // ToolExecutorFunc returns the host tool executor for the named -harness or -substrate-harness, or
@@ -90,10 +94,10 @@ func WithToolExecutors(f ToolExecutorFunc) Option {
 }
 
 // Run parses args (without the program name) and serves until SIGINT or SIGTERM. -h returns
-// flag.ErrHelp. A flag that does not parse (a second -substrate-harness included) and positional
-// arguments wrap ErrUsage. A configuration check after parsing (a -substrate-harness with no
-// -model, a substrate flag without -substrate-harness, and the like) returns a plain error, which
-// Main prints and reports with status 1.
+// flag.ErrHelp. A flag that does not parse (a -substrate-harness that repeats a name included) and
+// positional arguments wrap ErrUsage. A configuration check after parsing (a -substrate-harness with
+// no -model, a substrate flag without -substrate-harness, two -substrate-harness entries sharing an
+// actor atespace, and the like) returns a plain error, which Main prints and reports with status 1.
 func Run(args []string, opts ...Option) error {
 	var o options
 	for _, opt := range opts {
@@ -248,11 +252,18 @@ func Run(args []string, opts ...Option) error {
 		}
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	parent := context.Background()
+	if o.ctx != nil {
+		parent = o.ctx
+	}
+	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	serveErr := make(chan error, 2)
 	go func() { serveErr <- srv.Serve(lis) }()
+	if o.listening != nil {
+		o.listening(lis.Addr().String())
+	}
 	servers := 1
 	if operatorServer != nil {
 		servers++
@@ -310,8 +321,8 @@ func loopbackDialAddr(a *net.TCPAddr) string {
 
 // Main runs the server with os.Args and exits with the conventional status: 0 on success or -h, 2
 // when the arguments cannot be parsed (an unknown or malformed flag, a positional argument, a
-// repeated -substrate-harness; see Run's ErrUsage), and 1 otherwise, including a configuration
-// error in flags that parsed.
+// -substrate-harness that repeats a name; see Run's ErrUsage), and 1 otherwise, including a
+// configuration error in flags that parsed (two -substrate-harness entries sharing an actor atespace).
 func Main(opts ...Option) {
 	err := Run(os.Args[1:], opts...)
 	switch {

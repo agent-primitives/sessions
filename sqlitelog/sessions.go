@@ -171,14 +171,17 @@ func (s *Store) putSession(db execer, m SessionMeta) error {
 }
 
 // sessionSelect is shared by SessionInfo and ListSessions so a single row shape backs both. The
-// LEFT JOIN keeps sessions without executions. No rendering query reads event blobs.
+// LEFT JOIN keeps sessions without executions. The indexed event head remains current even
+// when an older writer skips the projection; a lagging projection cannot report an approval.
+// No rendering query reads event blobs.
 const sessionSelect = `
 SELECT s.session, s.project, s.name, s.harness, s.model, s.parent_uid, s.fork_seq,
        s.compute_state, s.created_at, s.updated_at,
        s.labels, s.annotations, s.origin, s.identity,
-       s.last_seq,
-       CASE WHEN s.approval_corrupt = 0 AND s.invalid_approval_executions = 0 AND a.execution_id != ''
-                 AND a.first_seq > s.reporting_fork_seq AND a.invalid = 0
+       (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session = s.session),
+       CASE WHEN s.last_seq = (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session = s.session)
+                 AND s.approval_corrupt = 0 AND s.invalid_approval_executions = 0 AND a.execution_id != ''
+                 AND a.call_seq > s.reporting_fork_seq AND a.invalid = 0
                  AND a.completed = 0 AND a.receipt = 0 AND a.request_seq > 0 AND a.decision_seq = 0
                  AND (a.has_start = 0 OR (a.expected_inputs >= 0
                       AND a.input_records = a.input_messages AND a.input_records = a.expected_inputs))

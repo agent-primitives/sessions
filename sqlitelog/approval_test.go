@@ -56,7 +56,8 @@ func TestApprovalPrefixes(t *testing.T) {
 		{"nongated malformed compatible then gated suppresses", []api.Event{{ExecutionID: "old", Kind: api.EventExecutionStart}, s, c, r, {ExecutionID: "old", Kind: api.EventApprovalRequest}}, []api.ApprovalRef{none, none, none, {ExecutionID: "e", ToolCallID: "call", RequestSeq: 4}, none}},
 		{"latest is first seen not last touched", []api.Event{s, c, r, other[0], other[1], other[2], {ExecutionID: "e", Kind: api.EventError, Err: &api.Error{Description: "audit"}}}, []api.ApprovalRef{none, none, pending, none, none, latest, latest}},
 		{"fork excludes inherited even if touched", []api.Event{s, c, r, fork, {ExecutionID: "e", Kind: api.EventError}, other[0], other[1], other[2]}, []api.ApprovalRef{none, none, pending, none, none, none, none, {ExecutionID: "latest", ToolCallID: "call", RequestSeq: 8}}},
-		{"first seen before fork with late call", []api.Event{s, fork, c, r}, []api.ApprovalRef{none, none, none, none}},
+		{"first seen before fork with late call", []api.Event{s, fork, c, r}, []api.ApprovalRef{none, none, none, {ExecutionID: "e", ToolCallID: "call", RequestSeq: 4}}},
+		{"new gate after nested fork", []api.Event{s, c, r, d, receipt, fork, fork, second, secondRequest}, []api.ApprovalRef{none, none, pending, none, none, none, none, none, {ExecutionID: "e", ToolCallID: "second", RequestSeq: 9}}},
 		{"latest nested fork excludes earlier turn", []api.Event{fork, s, c, r, fork, second, secondRequest}, []api.ApprovalRef{none, none, none, {ExecutionID: "e", ToolCallID: "call", RequestSeq: 4}, none, none, none}},
 		{"error and suspend preserve pending", []api.Event{s, c, r, {ExecutionID: "e", Kind: api.EventError, Err: &api.Error{Description: "audit"}}, {Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleSuspend}}}, []api.ApprovalRef{none, none, pending, pending, pending}},
 		{"end suppresses pending", []api.Event{s, c, r, {ExecutionID: "e", Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}}}, []api.ApprovalRef{none, none, pending, none}},
@@ -74,6 +75,61 @@ func TestApprovalPrefixes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A v2 writer already open at migration still uses the old event/metadata SQL, without
+// updating the projection. Both old-created sessions and later new-writer appends must stay safe.
+func TestApprovalMixedWriter(t *testing.T) {
+	path, old := approvalFixture(t, false)
+	store := approvalOpen(t, path)
+	for _, uid := range []string{"healthy", "new"} {
+		var head int64
+		var prev string
+		if err := old.QueryRow(`SELECT COALESCE(MAX(seq),0), COALESCE((SELECT hash FROM events WHERE session=? ORDER BY seq DESC LIMIT 1),'') FROM events WHERE session=?`, uid, uid).Scan(&head, &prev); err != nil {
+			t.Fatal(err)
+		}
+		ev := api.Event{ExecutionID: "e", Kind: api.EventError, Err: &api.Error{Description: "old writer"}}
+		hash, err := canon.HashRecord(prev, head+1, ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		blob, err := proto.Marshal(wire.EventToProto(ev))
+		if err != nil {
+			t.Fatal(err)
+		}
+		approvalExec(t, old, `INSERT INTO sessions(session,project) VALUES(?,'default') ON CONFLICT(session) DO NOTHING`, uid)
+		approvalExec(t, old, `INSERT INTO events(session,seq,prev_hash,hash,fence,event) VALUES(?,?,?,?,0,?)`, uid, head+1, prev, hash, blob)
+		for phase := 0; phase < 3; phase++ {
+			info := approvalInfo(t, store, uid)
+			if info.LastSeq != head+1 || info.PendingApproval != (api.ApprovalRef{}) {
+				t.Fatalf("%s phase %d: %+v", uid, phase, info)
+			}
+			page, err := store.ListSessions(ListOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var listed SessionInfo
+			for _, row := range page.Sessions {
+				if row.UID == uid {
+					listed = row
+				}
+			}
+			if !reflect.DeepEqual(listed, info) {
+				t.Fatalf("list=%+v get=%+v", listed, info)
+			}
+			switch phase {
+			case 0:
+				approvalAppend(t, store.Session(uid), head+1, 0, ev)
+				head++
+			case 1:
+				store.Close()
+				store = approvalOpen(t, path)
+			}
+		}
+		if err := store.Session(uid).Verify(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -158,6 +214,12 @@ func TestApprovalComputeAndAtomicity(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := approvalInfo(t, store, "s")
+	if _, err := log.Append(3, fence, api.Event{Kind: api.EventParked, Parked: &api.ApprovalRef{ExecutionID: "e", ToolCallID: "call", RequestSeq: 3}}); err == nil || !strings.Contains(err.Error(), "transport-only") {
+		t.Fatalf("PARKED refusal: %v", err)
+	}
+	if after := approvalInfo(t, store, "s"); !reflect.DeepEqual(after, before) {
+		t.Fatalf("PARKED changed metadata or cursor: %+v", after)
+	}
 	if before.LastSeq != 3 || before.PendingApproval != (api.ApprovalRef{ExecutionID: "e", ToolCallID: "call", RequestSeq: 3}) || before.Project != "custom" || before.Name != "renamed" {
 		t.Fatalf("metadata clobbered projection: %+v", before)
 	}

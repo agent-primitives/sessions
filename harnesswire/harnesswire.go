@@ -321,6 +321,9 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 			}
 		case v1.EventKind_EVENT_TOOL_RESULT:
 			if tr := wire.ToolResultFromProto(ev.GetResult()); tr != nil {
+				// Reports are harness-owned, not host receipts. Preserve the old host's
+				// normalization until approval-aware Report validation is available.
+				tr.Code, tr.ApprovalRequestSeq, tr.ApprovalDecisionSeq = 0, 0, 0
 				if err := sink.Report(ctx, *tr); err != nil {
 					return err
 				}

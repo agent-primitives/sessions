@@ -73,13 +73,11 @@ message Session {
   reserved 4; // retired: a flattened lifecycle phase, replaced by the two axes below
   ExecState exec_state = 13;       // execution/turn axis
   ComputeState compute_state = 14; // incarnation axis
-  // Output-only unresolved host-owned APPROVAL_REQUEST for hosts supporting approval reporting;
-  // the reference Sessions service leaves this field unset. It is not caller-writable metadata.
-  // Requests/decisions match execution_id, tool_call_id and request_seq. Supporting hosts exclude
-  // executions first seen before the child's latest FORK, including later calls in those turns,
-  // and suppress the reference for invalid approval-bearing evidence in the captured history.
-  // Metadata, correlation and cursor describe one captured prefix, not current runtime state.
-  // Clearing a reference after a decision does not prove a receipt or execution completion.
+  // Set by hosts supporting approval reporting for a valid unanswered host-owned APPROVAL_REQUEST
+  // in the latest first-seen execution at last_seq. Requests/decisions match execution_id,
+  // tool_call_id and request_seq. Calls whose TOOL_CALL precedes the child's latest FORK are excluded.
+  // Unset when no request is reportable, approval-bearing evidence is invalid, the projection lags
+  // last_seq, or the host does not support reporting. The reference Sessions service leaves it unset.
   ApprovalRef pending_approval = 15;
   int64 last_seq = 5;              // event-log cursor
 

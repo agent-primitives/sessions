@@ -39,8 +39,9 @@ func dial(t *testing.T, srv v1.HarnessServer) *harnesswire.ClientHarness {
 
 // hostSink is the host side of the stream: it records each model request and answers with resp.
 type hostSink struct {
-	resp api.ModelResponse
-	reqs []api.ModelRequest
+	resp    api.ModelResponse
+	reqs    []api.ModelRequest
+	reports []api.ToolResult
 }
 
 func (s *hostSink) Model(_ context.Context, req api.ModelRequest) (api.ModelResponse, error) {
@@ -51,8 +52,29 @@ func (*hostSink) Output(context.Context, string) error { return nil }
 func (*hostSink) ToolCall(context.Context, api.ToolCall) (api.ToolResult, error) {
 	return api.ToolResult{}, errors.New("unexpected tool call")
 }
-func (*hostSink) Report(context.Context, api.ToolResult) error { return nil }
-func (*hostSink) Usage(context.Context, api.Usage) error       { return nil }
+func (s *hostSink) Report(_ context.Context, tr api.ToolResult) error {
+	s.reports = append(s.reports, tr)
+	return nil
+}
+func (*hostSink) Usage(context.Context, api.Usage) error { return nil }
+
+type reportHarness struct{ modelHarness }
+
+func (reportHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	return sink.Report(ctx, api.ToolResult{ID: "reported", IsError: true, Content: []api.Part{{Text: &api.TextPart{Text: "failed"}}}, Code: api.ToolResultCodeExecutorError, ApprovalRequestSeq: 2, ApprovalDecisionSeq: 3})
+}
+
+func TestRemoteReportDropsHostReceiptFields(t *testing.T) {
+	host := &hostSink{}
+	h := dial(t, harnesswire.NewServer(reportHarness{}))
+	if err := h.Run(t.Context(), &api.Start{ExecutionID: "e"}, host); err != nil {
+		t.Fatal(err)
+	}
+	want := []api.ToolResult{{ID: "reported", IsError: true, Content: []api.Part{{Text: &api.TextPart{Text: "failed"}}}}}
+	if !reflect.DeepEqual(host.reports, want) {
+		t.Fatalf("Report=%+v want=%+v", host.reports, want)
+	}
+}
 
 // modelHarness makes one model call with req and keeps the response it was served.
 type modelHarness struct {

@@ -749,7 +749,7 @@ func (s *sessionSet) markCheckpoint(sessionUID string) error {
 // The caller holds sessionSet.mu.
 func (s *sessionSet) setCheckpointLocked(sessionUID string) error {
 	if _, ok := s.checkpoints[sessionUID]; ok {
-		return fmt.Errorf("%w: session %q is already being checkpointed by a fork or Suspend", ErrCheckpointing, sessionUID)
+		return fmt.Errorf("%w: session %q checkpoint mark is held by another operation", ErrCheckpointing, sessionUID)
 	}
 	if s.checkpoints == nil {
 		s.checkpoints = map[string]struct{}{}

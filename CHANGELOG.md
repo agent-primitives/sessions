@@ -99,7 +99,6 @@ provide.
   decision; retry after the fork finishes. This coordination covers one Registry/host only.
 - Ordinary `Resume` and `Suspend` now return `ABORTED`, rather than `INTERNAL`, for journal CAS
   conflicts (`eventlog.ErrConflict`) and superseded fences (`eventlog.ErrFenced`).
-
 - Owned unreceipted approval calls block new input, including after a decision. No-input Exec
   recovers the existing current approval invocation with its recorded config, inputs, route and
   cursor, checking CAS/deadline under the guard before runtime IO or request repair. Unrelated

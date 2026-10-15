@@ -79,7 +79,7 @@ func (s *Server) Connect(stream v1.Harness_ConnectServer) error {
 	defer sink.mu.Unlock()
 	sink.closed = true
 	if sink.parked != nil {
-		if runErr != nil && !isParkUnwind(runErr, sink.parked.Ref) {
+		if runErr != nil && !api.IsParkUnwind(runErr, sink.parked.Ref) {
 			return runErr
 		}
 		return stream.Send(&v1.Event{
@@ -539,27 +539,6 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 			return endError(ev.GetEnd())
 		}
 	}
-}
-
-// A wrapped park is a normal unwind, but a joined independent Run failure must
-// not be hidden by finding the park somewhere in its error tree.
-func isParkUnwind(err error, ref api.ApprovalRef) bool {
-	var parked *api.ApprovalParkedError
-	if !errors.As(err, &parked) || parked == nil || parked.Ref != ref {
-		return false
-	}
-	for err != nil {
-		if joined, ok := err.(interface{ Unwrap() []error }); ok {
-			for _, cause := range joined.Unwrap() {
-				if !isParkUnwind(cause, ref) {
-					return false
-				}
-			}
-			return true
-		}
-		err = errors.Unwrap(err)
-	}
-	return true
 }
 
 // exchangePark accepts only the transport acknowledgement followed by actual

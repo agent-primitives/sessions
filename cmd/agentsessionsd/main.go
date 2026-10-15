@@ -517,7 +517,18 @@ func modelFunc(model, baseURL, path, authHeader string) (controller.ModelFunc, c
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("configure model: %w", err)
 	}
-	return client.Model, client.StreamModel, model + " @ " + baseURL + path, nil
+	return client.Model, client.StreamModel, model + " @ " + loggedEndpoint(client.Endpoint()), nil
+}
+
+// loggedEndpoint is the endpoint as the startup log shows it: the joined URL requests go to, with
+// the query after the path, so a base URL with a query does not log a URL nothing is sent to. A
+// userinfo password is masked; the query is logged as given, so it must not carry a secret.
+func loggedEndpoint(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil { // openai.New built it with url.URL.String, so it parses
+		return "(endpoint not shown)"
+	}
+	return u.Redacted()
 }
 
 // modelAPIKey reads the credential, preferring the endpoint-neutral name. OPENAI_API_KEY is

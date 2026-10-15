@@ -38,6 +38,8 @@ provide.
   string, so a base URL with a query (`-model-base-url 'https://h/v1?api-version=2'`) reaches
   `/v1/chat/completions` with the query kept, ahead of any query `-model-path` carries. A fragment
   is dropped. Before, the path landed inside the query or fragment and every turn went to `/v1`.
+  `agentsessionsd`'s startup log names that joined endpoint (`openai.Client.Endpoint`), with a
+  userinfo password masked, instead of the base URL and path concatenated.
 - Session-level suspend no longer destroys the Substrate actor needed by resume. Both replay-based
   and memory-snapshot sessions retain their restore handle after `Placer.Suspend`; explicit `Stop`
   remains destructive teardown.

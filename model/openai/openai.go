@@ -168,6 +168,11 @@ func New(opts ...Option) (*Client, error) {
 	return c, nil
 }
 
+// Endpoint returns the URL every completions request is sent to: the base URL's path joined with
+// the path, the base URL's query ahead of the path's, and no fragment. It carries whatever userinfo
+// and query the base URL has, so redact it (url.URL.Redacted) before logging.
+func (c *Client) Endpoint() string { return c.endpoint }
+
 // joinEndpoint appends path to base's path and keeps both query strings, base's first. Joining the
 // strings instead would put the path after a query or fragment in base, sending
 // https://h/v1?api-version=2#x/chat/completions to /v1 with the path lost in the fragment.

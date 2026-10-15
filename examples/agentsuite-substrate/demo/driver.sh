@@ -323,7 +323,7 @@ print(" ".join(a["metadata"]["name"] for a in items if a["metadata"]["name"].sta
 C=$'\e[1;36m' Y=$'\e[1;33m' G=$'\e[32m' W=$'\e[1;37m' D=$'\e[2m' N=$'\e[0m'
 CHAPTERS=11
 MAX_LINES=5
-CAPTION_HOLD=4 TITLE_HOLD=5 DIAGRAM_HOLD=10 FILE_HOLD=7
+CAPTION_HOLD=2.5 TITLE_HOLD=5 DIAGRAM_HOLD=9 FILE_HOLD=5.5
 HEADER_ROWS=4
 # wrap TEXT [PREFIX [INDENT]]: TEXT folded to the screen at word boundaries, each line after the
 # first indented by INDENT spaces (default the width of PREFIX).
@@ -417,10 +417,12 @@ run() {
 	printf '%s\n' "${shown}"
 	SCREEN_ROWS=$((SCREEN_ROWS + rows))
 	log "\$ ${cmdline}"
-	sleep "1.$((rows > 1 ? 9 : 2))"
+	sleep "$((rows > 1 ? 1 : 0)).$((rows > 1 ? 4 : 8))"
 	if [[ -n "${what}" ]]; then
 		printf '  %s⠿ %s …%s\n' "${D}" "${what}" "${N}"
-		SCREEN_ROWS=$((SCREEN_ROWS + 1)) SCREEN_LINES=$((SCREEN_LINES + 1))
+		# The wait's status line takes a row, but it is the driver's, not the command's output, so it
+		# does not count toward the screen's output rows.
+		SCREEN_ROWS=$((SCREEN_ROWS + 1))
 		sleep 1
 	fi
 	t0=${SECONDS}

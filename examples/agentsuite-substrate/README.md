@@ -359,5 +359,5 @@ it; `record.sh setup|show|reset|record|collect|teardown` runs one part, `show` b
 top row, k/11 full for chapter k, and `chapters.py` finds the first frame of each. By default it runs the driver on the
 machine vhs runs on (`DEMO_REMOTE=local`); `DEMO_REMOTE=hq DEMO_HOST=<host>` drives a remote host
 through `hq remote-test`, a private tool, in the image `Dockerfile.tools` builds there. `DEMO_READ`
-(default 4) is how many seconds a result stays on screen; a caption stays 4 s before its first
-command, a file 7 s, the title card 5 s and each diagram 10 s.
+(default 3) is how many seconds a result stays on screen; a caption stays 2.5 s before its first
+command (and on screen through the rest), a file 5.5 s, the title card 5 s and each diagram 9 s.

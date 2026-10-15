@@ -35,7 +35,7 @@ ENV_FILE="${AZURE_OPENAI_ENV:-${HOME}/.config/hq/azure-openai.env}"
 REMOTE="${DEMO_REMOTE:-local}"
 # demo.tape's terminal is 130 columns by 39 rows; the driver draws one column fewer, so a full row
 # never wraps.
-export DEMO_COLS=129 DEMO_ROWS=39 DEMO_READ="${DEMO_READ:-4}"
+export DEMO_COLS=129 DEMO_ROWS=39 DEMO_READ="${DEMO_READ:-3}"
 CHAPTERS=11
 IMAGE=agentsuite-demo-tools:3
 MERMAID_CLI="@mermaid-js/mermaid-cli@11.17.0"

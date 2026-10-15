@@ -34,6 +34,16 @@ provide.
 
 ### Added
 
+- Approval wire types: correlated request references, decision-only `Approve` messages, explicit
+  receipt statuses/sequences and transport-only park acknowledgements. `Approve` remains
+  `UNIMPLEMENTED`; the reference controller/bridge still reject `REQUIRES_APPROVAL`, and Session
+  replies leave `pending_approval` unset. Go types/converters carry the contract without enabling
+  a public approval workflow.
+- SQLite `SessionInfo` captures the journal-derived `last_seq` and a reporting-only
+  `PendingApproval` with metadata, using an incremental approval projection in the append
+  transaction. Calls whose `TOOL_CALL` precedes the child's latest `FORK` are excluded, as are
+  invalid approval-bearing histories and projections lagging the journal head; the reference
+  is not command authority or a runtime/integrity probe.
 - Go SDK callers can pass opaque per-execution config through `client.ExecOptions.Config`.
   Omitting it keeps the existing empty-config behavior. Config is durable journal content exposed
   by Replay; do not include credentials. No wire or journal schema change.
@@ -69,6 +79,20 @@ provide.
 
 ### Compatibility
 
+- SQLite schema version 3 adds the approval projection and captured cursor. Opening a version 2
+  database backfills them atomically without changing event bytes or hashes. An undecodable v2
+  session is isolated with no actionable reference; healthy sessions remain readable. SQL faults
+  roll back the migration, and the older version 1 namespace migration still fails closed.
+  Builds supporting at most version 2 refuse the upgraded database; back it up before upgrading
+  if rollback may be needed. An already-open older writer can still append without updating
+  the projection: `last_seq` stays current, but references remain suppressed for that session
+  rather than skipping missing evidence. Direct out-of-band edits do not refresh the projection.
+- Approval additions preserve old field numbers, default receipt/decision bytes and model-input
+  hashes. New durable receipt status/correlation fields are hash-bound; transient Go approval
+  carriers are excluded from wire receipts and model-input hashing. Low-level Append refuses
+  transport-only `PARKED` events but otherwise remains permissive; projection suppression does
+  not replace validation at command boundaries. Remote harness reports discard host receipt
+  status/correlation fields until approval-aware Report validation is available.
 - `agentsessionsd -registry-addr` is off by default. Enabling it creates a plaintext,
   unauthenticated **local admin surface** on a separate literal-loopback listener; Sessions still
   refuses registry RPCs, and neither listener gains TLS or authentication. Any local or same-pod

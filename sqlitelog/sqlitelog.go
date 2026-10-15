@@ -79,13 +79,14 @@ CREATE INDEX IF NOT EXISTS sessions_project_created
 
 // SchemaVersion is the schema shape this build writes, stamped into PRAGMA user_version so a
 // build can identify a database without inspecting its columns. Version 1 is what v0.1.0 through
-// v0.1.2 shipped. Version 2 adds the harness registry.
-const SchemaVersion = 2
+// v0.1.2 shipped. Version 2 adds the harness registry; version 3 adds approval reporting.
+const SchemaVersion = 3
 
 // migrations[i] moves a database from version i+1 to i+2, inside the migration transaction. The
 // array length is tied to SchemaVersion, so bumping one without the other does not compile.
 var migrations = [SchemaVersion - 1]func(*sql.Tx) error{
 	migrateV1ToV2,
+	migrateV2ToV3,
 }
 
 // v1ToV2 is the SQL half of the 1 -> 2 rung: harnesses registered through the HarnessRegistry API.
@@ -405,6 +406,9 @@ func (l *Log) NewFence() (int64, error) {
 // is current, inside one transaction. It assigns seq, computes content_hash once via canon, and
 // stores it alongside the wire-encoded event.
 func (l *Log) Append(expectedLastSeq, fence int64, ev api.Event) (eventlog.Record, error) {
+	if ev.Kind == api.EventParked {
+		return eventlog.Record{}, errors.New("sqlitelog: PARKED is transport-only")
+	}
 	tx, err := l.store.db.Begin()
 	if err != nil {
 		return eventlog.Record{}, err
@@ -444,7 +448,8 @@ func (l *Log) Append(expectedLastSeq, fence int64, ev api.Event) (eventlog.Recor
 	if err != nil {
 		return eventlog.Record{}, fmt.Errorf("sqlitelog: canonicalize seq %d: %w", seq, err)
 	}
-	blob, err := proto.Marshal(wire.EventToProto(ev))
+	pb := wire.EventToProto(ev)
+	blob, err := proto.Marshal(pb)
 	if err != nil {
 		return eventlog.Record{}, fmt.Errorf("sqlitelog: marshal seq %d: %w", seq, err)
 	}
@@ -463,6 +468,10 @@ func (l *Log) Append(expectedLastSeq, fence int64, ev api.Event) (eventlog.Recor
 	}
 	if err := touchSession(tx, l.session, l.store.defaultProject, ev); err != nil {
 		return eventlog.Record{}, err
+	}
+	// Report only the selected wire body and normalized enums that strict journal reads see.
+	if err := projectApproval(tx, l.session, seq, wire.EventFromProto(pb)); err != nil {
+		return eventlog.Record{}, fmt.Errorf("sqlitelog: project approval seq %d: %w", seq, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return eventlog.Record{}, err

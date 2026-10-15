@@ -30,6 +30,7 @@ const (
 	Sessions_DeleteSession_FullMethodName = "/agentsessions.v1.Sessions/DeleteSession"
 	Sessions_Exec_FullMethodName          = "/agentsessions.v1.Sessions/Exec"
 	Sessions_Replay_FullMethodName        = "/agentsessions.v1.Sessions/Replay"
+	Sessions_Approve_FullMethodName       = "/agentsessions.v1.Sessions/Approve"
 	Sessions_Cancel_FullMethodName        = "/agentsessions.v1.Sessions/Cancel"
 	Sessions_Suspend_FullMethodName       = "/agentsessions.v1.Sessions/Suspend"
 	Sessions_Resume_FullMethodName        = "/agentsessions.v1.Sessions/Resume"
@@ -50,6 +51,10 @@ type SessionsClient interface {
 	// ephemeral Deltas; Replay re-delivers committed records only (read-only).
 	Exec(ctx context.Context, in *ExecRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExecUpdate], error)
 	Replay(ctx context.Context, in *ReplayRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogRecord], error)
+	// Not implemented: the reference server returns UNIMPLEMENTED.
+	// Supporting hosts commit durable decisions only, never implicitly Resume or execute a tool;
+	// exact retries return the existing decision. Identity is provenance, not authorization.
+	Approve(ctx context.Context, in *ApproveRequest, opts ...grpc.CallOption) (*ApproveResponse, error)
 	// In-flight control: cancel the running execution. Not implemented: the server returns
 	// UNIMPLEMENTED.
 	Cancel(ctx context.Context, in *CancelRequest, opts ...grpc.CallOption) (*Session, error)
@@ -149,6 +154,16 @@ func (c *sessionsClient) Replay(ctx context.Context, in *ReplayRequest, opts ...
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Sessions_ReplayClient = grpc.ServerStreamingClient[LogRecord]
 
+func (c *sessionsClient) Approve(ctx context.Context, in *ApproveRequest, opts ...grpc.CallOption) (*ApproveResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApproveResponse)
+	err := c.cc.Invoke(ctx, Sessions_Approve_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sessionsClient) Cancel(ctx context.Context, in *CancelRequest, opts ...grpc.CallOption) (*Session, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Session)
@@ -203,6 +218,10 @@ type SessionsServer interface {
 	// ephemeral Deltas; Replay re-delivers committed records only (read-only).
 	Exec(*ExecRequest, grpc.ServerStreamingServer[ExecUpdate]) error
 	Replay(*ReplayRequest, grpc.ServerStreamingServer[LogRecord]) error
+	// Not implemented: the reference server returns UNIMPLEMENTED.
+	// Supporting hosts commit durable decisions only, never implicitly Resume or execute a tool;
+	// exact retries return the existing decision. Identity is provenance, not authorization.
+	Approve(context.Context, *ApproveRequest) (*ApproveResponse, error)
 	// In-flight control: cancel the running execution. Not implemented: the server returns
 	// UNIMPLEMENTED.
 	Cancel(context.Context, *CancelRequest) (*Session, error)
@@ -241,6 +260,9 @@ func (UnimplementedSessionsServer) Exec(*ExecRequest, grpc.ServerStreamingServer
 }
 func (UnimplementedSessionsServer) Replay(*ReplayRequest, grpc.ServerStreamingServer[LogRecord]) error {
 	return status.Errorf(codes.Unimplemented, "method Replay not implemented")
+}
+func (UnimplementedSessionsServer) Approve(context.Context, *ApproveRequest) (*ApproveResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Approve not implemented")
 }
 func (UnimplementedSessionsServer) Cancel(context.Context, *CancelRequest) (*Session, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Cancel not implemented")
@@ -369,6 +391,24 @@ func _Sessions_Replay_Handler(srv interface{}, stream grpc.ServerStream) error {
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Sessions_ReplayServer = grpc.ServerStreamingServer[LogRecord]
 
+func _Sessions_Approve_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ApproveRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionsServer).Approve(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Sessions_Approve_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionsServer).Approve(ctx, req.(*ApproveRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Sessions_Cancel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CancelRequest)
 	if err := dec(in); err != nil {
@@ -463,6 +503,10 @@ var Sessions_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteSession",
 			Handler:    _Sessions_DeleteSession_Handler,
+		},
+		{
+			MethodName: "Approve",
+			Handler:    _Sessions_Approve_Handler,
 		},
 		{
 			MethodName: "Cancel",

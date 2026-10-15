@@ -75,6 +75,9 @@ provide.
   transaction. Calls whose `TOOL_CALL` precedes the child's latest `FORK` are excluded, as are
   invalid approval-bearing histories and projections lagging the journal head; the reference
   is not command authority or a runtime/integrity probe.
+- `agentctl replay -v` also prints each record's content hash and previous hash (16 hex), the
+  execution id, a model call's model and input hash, and a usage record's token counts. Without
+  `-v` the output is unchanged.
 - Go SDK callers can pass opaque per-execution config through `client.ExecOptions.Config`.
   Omitting it keeps the existing empty-config behavior. Config is durable journal content exposed
   by Replay; do not include credentials. No wire or journal schema change.

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1210,28 +1211,37 @@ func TestDemoRealProviderJournalChecks(t *testing.T) {
 
 // demo.tape hides the recording around each wait driver.sh show runs out of frame, so it must list
 // one hidden pair (the "⠿" start and the "✓" end) per `run -w` call: a call the tape does not know
-// shifts every later cut onto the wrong wait. driver.sh keeps `run -w` out of loops, so the count of
-// calls is the count of waits.
+// shifts every later cut onto the wrong wait. The drivers keep `run -w` out of loops, so the count of
+// calls is the count of waits. coordinator.tape and coordinator.sh show follow the same rule.
 func TestDemoTapeMatchesDriverWaits(t *testing.T) {
-	driver, err := os.ReadFile("demo/driver.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tape, err := os.ReadFile("demo/demo.tape")
-	if err != nil {
-		t.Fatal(err)
-	}
-	calls := 0
-	for _, line := range strings.Split(string(driver), "\n") {
-		f := strings.Fields(line)
-		if len(f) > 1 && f[0] == "run" && (f[1] == "-w" || (f[1] == "-x" && len(f) > 2 && f[2] == "-w")) {
-			calls++
+	wait := regexp.MustCompile(`\nWait\+Line@\d+m /(⠿|✓)`)
+	for driverFile, tapeFile := range map[string]string{"demo/driver.sh": "demo/demo.tape", "demo/coordinator.sh": "demo/coordinator.tape"} {
+		driver, err := os.ReadFile(driverFile)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	starts := strings.Count(string(tape), "\nWait+Line@5m /⠿")
-	ends := strings.Count(string(tape), "\nWait+Line@5m /✓")
-	if calls == 0 || starts != calls || ends != calls {
-		t.Fatalf("driver.sh makes %d `run -w` calls; demo.tape waits for %d starts and %d ends", calls, starts, ends)
+		tape, err := os.ReadFile(tapeFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		for _, line := range strings.Split(string(driver), "\n") {
+			f := strings.Fields(line)
+			if len(f) > 1 && f[0] == "run" && (f[1] == "-w" || (f[1] == "-x" && len(f) > 2 && f[2] == "-w")) {
+				calls++
+			}
+		}
+		starts, ends := 0, 0
+		for _, m := range wait.FindAllStringSubmatch(string(tape), -1) {
+			if m[1] == "⠿" {
+				starts++
+			} else {
+				ends++
+			}
+		}
+		if calls == 0 || starts != calls || ends != calls {
+			t.Errorf("%s makes %d `run -w` calls; %s waits for %d starts and %d ends", driverFile, calls, tapeFile, starts, ends)
+		}
 	}
 }
 

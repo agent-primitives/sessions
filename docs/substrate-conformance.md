@@ -52,8 +52,8 @@ The substrate build of `agentsessionsd` adds these flags:
 
 | Flag | Meaning |
 |---|---|
-| `-substrate-harness name=atespace/template[,memory]` | Serve harness `name` from that ActorTemplate, one actor per session. `,memory` declares `REQUIRES_MEMORY_SNAPSHOT`; the default is `STATELESS_REPLAY`. At most one: a second is refused at startup (see [Substrate placement binding](#substrate-placement-binding)). Requires `-model`, like `-harness`. |
-| `-substrate-atespace` | Atespace the session actors are created in (required). It must already exist, and must not change while sessions exist: see [Substrate placement binding](#substrate-placement-binding). |
+| `-substrate-harness name=atespace/template[,memory][,actors=<atespace>]` | Serve harness `name` from that ActorTemplate, one actor per session. `,memory` declares `REQUIRES_MEMORY_SNAPSHOT`; the default is `STATELESS_REPLAY`. `,actors=` creates this harness's actors in its own atespace instead of `-substrate-atespace`. Repeatable; two harnesses may not share an actor atespace (see [Substrate placement binding](#substrate-placement-binding)). Requires `-model`, like `-harness`. |
+| `-substrate-atespace` | Atespace the session actors are created in; required unless every `-substrate-harness` gives `,actors=`. It, and each `,actors=` atespace, must already exist, and must not change while sessions exist: see [Substrate placement binding](#substrate-placement-binding). |
 | `-ateapi-addr` | ate-api Control address, TLS (default `api.ate-system.svc:443`). |
 | `-ateapi-token-file` | Bearer token file, re-read on every call, so a projected ServiceAccount token rotates. |
 | `-ateapi-ca-file`, `-ateapi-server-name` | Verify the ate-api certificate against this CA and name; the default is the system roots and the host of `-ateapi-addr`. |
@@ -73,7 +73,7 @@ the harness's own `Describe` reports.
 A session's journal records its harness name, not where that harness's actors live. The atespace,
 the ActorTemplate and the declared tier come from the daemon's flags at each start, and the session
 store keeps none of them. Three ways that goes wrong for a `REQUIRES_MEMORY_SNAPSHOT` session, the
-second of which the daemon prevents by refusing a second `-substrate-harness`:
+second of which the daemon prevents by refusing two substrate harnesses with one actor atespace:
 
 - **The binding changes under existing sessions.** Restarting with another `-substrate-atespace`
   makes the next `Exec` look for the session's actor where it never was. Without the check below,
@@ -82,17 +82,18 @@ second of which the daemon prevents by refusing a second `-substrate-harness`:
   by session UID in the atespace: an existing session's actor is found and attached, still running
   the old template, and only new sessions and stateless fork children get the new one. Nothing
   reports the difference.
-- **Harnesses would share one actor per session.** A substrate backend creates its actors in the
-  one `-substrate-atespace`, under the session UID. With two substrate harnesses, a turn an
+- **Harnesses would share one actor per session.** A substrate backend creates its actors in one
+  atespace, under the session UID. With two substrate harnesses in the same atespace, a turn an
   `ExecRequest.harness` override sent to the second would find the first harness's actor running and
   attach to it, so it would run on the first harness's template while its `EXECUTION_START` records
   the second. The cold-create guard below counts turns per harness, so after that shared actor is
   lost, a harness that never ran a turn for the session would cold-create over state the other
-  harness built. `agentsessionsd` therefore accepts `-substrate-harness` at most once and exits
-  with status 2 on a second; per-harness actor names are the open question below. The rule is per
-  daemon: two `agentsessionsd` hosts that share a journal and an atespace but serve different
+  harness built. `agentsessionsd` therefore refuses to start when two `-substrate-harness` entries
+  resolve to the same actor atespace; give each its own with `,actors=<atespace>`. The rule is per
+  daemon: two `agentsessionsd` hosts that share a journal and an actor atespace but serve different
   `-substrate-harness` names still share each session's actor, and so does a program that builds
-  its own `placement.Registry` with two substrate backends on one atespace.
+  its own `placement.Registry` with two substrate backends on one atespace. Changing a harness's
+  `,actors=` under existing sessions is the first case above.
 - **The tier is mis-declared.** A stateful image declared without `,memory` is treated as
   `STATELESS_REPLAY`: a fork cold-creates the child and replays the journal into it, and a lost actor
   is recreated, both without the parent's RAM.
@@ -181,7 +182,7 @@ TODO(spike): should the session store persist each session's substrate binding (
 
 TODO(spike): should `runtime/substrate` verify the live harness's `Describe` resumability against the configured tier, given that `Placer.recheck` runs only for a `LiveDescriber` backend and does not compare tiers?
 
-TODO(spike): should a substrate actor name carry the harness as well as the session, or `Create` refuse to attach to an actor created from another template, so `agentsessionsd` can accept more than one `-substrate-harness` without them sharing a session's actor (and without the per-harness cold-create guard undercounting the turns that ran on it)? Existing actors are named by session UID only, so this needs a migration story.
+TODO(spike): should a substrate actor name carry the harness as well as the session, or `Create` refuse to attach to an actor created from another template, so two substrate harnesses need not each be given their own actor atespace (`,actors=`)? Existing actors are named by session UID only, so this needs a migration story.
 
 `examples/agentsuite-substrate` runs this end to end on kind: an AgentSuite agent rendered into an
 ActorTemplate and served with `-substrate-harness`, then suspended, resumed, replayed and forked.

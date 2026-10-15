@@ -36,17 +36,21 @@ func WithSubstrate(newControl SubstrateControlFunc) Option {
 }
 
 // substrateHarness is one -substrate-harness entry: the ActorTemplate whose image is the harness,
-// and the resumability tier the operator declares for it. The tier must be known before any actor
-// exists (placement gates on it before Create), so it is configuration, as it is for the
-// conformance suite, rather than asked of a live harness.
+// the resumability tier the operator declares for it, and the atespace its session actors are
+// created in. The tier must be known before any actor exists (placement gates on it before Create),
+// so it is configuration, as it is for the conformance suite, rather than asked of a live harness.
 type substrateHarness struct {
 	template substrate.ObjectRef
 	memory   bool
+	// actors is the atespace this harness's session actors are created in (,actors=<atespace>);
+	// empty means -substrate-atespace.
+	actors string
 }
 
-// substrateHarnesses holds the -substrate-harness name=atespace/template[,memory] flag. It takes one
-// entry: runtime/substrate names a session's actor by session UID in the one -substrate-atespace, so
-// a second substrate harness would attach to the first one's actor (see Set).
+// substrateHarnesses holds the repeatable -substrate-harness
+// name=atespace/template[,memory][,actors=<atespace>] flag. runtime/substrate names a session's actor
+// by session UID, so two harnesses sharing an actor atespace would attach a session's turns on one to
+// the other's actor; check refuses that.
 type substrateHarnesses map[string]substrateHarness
 
 func (s substrateHarnesses) String() string {
@@ -57,22 +61,27 @@ func (s substrateHarnesses) Set(value string) error {
 	name, ref, ok := strings.Cut(value, "=")
 	name, ref = strings.TrimSpace(name), strings.TrimSpace(ref)
 	if !ok || name == "" || ref == "" {
-		return fmt.Errorf("want name=atespace/template or name=atespace/template,memory, got %q", value)
+		return fmt.Errorf("want name=atespace/template[,memory][,actors=<atespace>], got %q", value)
 	}
-	if len(s) > 0 {
-		// A turn an ExecRequest.harness override sent to the second harness would run on the first
-		// one's actor and template, and the cold-create guard would count it on the wrong harness.
-		// Refused until actors are named per harness (docs/substrate-conformance.md, "Substrate
-		// placement binding").
-		return fmt.Errorf("given more than once (already %q): only one substrate harness is supported, because substrate harnesses would share one actor per session", s.String())
+	if _, dup := s[name]; dup {
+		return fmt.Errorf("harness %q is given more than once", name)
 	}
-	ref, tier, hasTier := strings.Cut(ref, ",")
+	ref, opts, _ := strings.Cut(ref, ",")
 	h := substrateHarness{}
-	if hasTier {
-		if tier != "memory" {
-			return fmt.Errorf("harness %q: unknown option %q; the only option is memory (REQUIRES_MEMORY_SNAPSHOT)", name, tier)
+	if opts != "" {
+		for _, opt := range strings.Split(opts, ",") {
+			switch key, val, _ := strings.Cut(opt, "="); {
+			case opt == "memory" && !h.memory:
+				h.memory = true
+			case key == "actors" && h.actors == "":
+				if !isShortName(val) {
+					return fmt.Errorf("harness %q: actors=%q is not a lowercase DNS label", name, val)
+				}
+				h.actors = val
+			default:
+				return fmt.Errorf("harness %q: unknown or repeated option %q; the options are memory (REQUIRES_MEMORY_SNAPSHOT) and actors=<atespace>", name, opt)
+			}
 		}
-		h.memory = true
 	}
 	atespace, template, ok := strings.Cut(ref, "/")
 	if !ok || !isShortName(atespace) || !isShortName(template) {
@@ -123,8 +132,8 @@ func registerSubstrateFlags(fs *flag.FlagSet) *substrateFlags {
 			f.only = append(f.only, fl.Name)
 		}
 	})
-	fs.Var(f.harnesses, "substrate-harness", "run a harness as an agent-substrate actor per session, as name=atespace/template; append ,memory for a REQUIRES_MEMORY_SNAPSHOT harness. The tier is not checked against the image's Describe: a stateful image declared without ,memory loses its RAM state on fork. Give it at most once")
-	f.atespace = fs.String("substrate-atespace", "", "atespace the session actors are created in; required with -substrate-harness. Must not change while sessions exist: their actors stay in the old atespace, and a REQUIRES_MEMORY_SNAPSHOT session with a started turn is then refused")
+	fs.Var(f.harnesses, "substrate-harness", "run a harness as an agent-substrate actor per session, as name=atespace/template; append ,memory for a REQUIRES_MEMORY_SNAPSHOT harness and ,actors=<atespace> to create its actors somewhere other than -substrate-atespace. The tier is not checked against the image's Describe: a stateful image declared without ,memory loses its RAM state on fork. Repeatable; no two harnesses may share an actor atespace")
+	f.atespace = fs.String("substrate-atespace", "", "atespace session actors are created in; required unless every -substrate-harness gives ,actors=. Must not change while sessions exist: their actors stay in the old atespace, and a REQUIRES_MEMORY_SNAPSHOT session with a started turn is then refused")
 	f.ateapi = fs.String("ateapi-addr", "api.ate-system.svc:443", "address of the substrate ate-api Control service (TLS)")
 	f.serverName = fs.String("ateapi-server-name", "", "TLS server name for the ate-api; empty uses the host of -ateapi-addr")
 	f.caFile = fs.String("ateapi-ca-file", "", "PEM CA bundle that signs the ate-api serving certificate; empty uses the system roots")
@@ -166,10 +175,17 @@ func (f *substrateFlags) check(fs *flag.FlagSet, model string, remotes remoteHar
 	if err := substrateNeedsModel(model); err != nil {
 		return err
 	}
-	if !isShortName(*f.atespace) {
-		return fmt.Errorf("-substrate-atespace %q: want the atespace session actors are created in, a lowercase DNS label", *f.atespace)
+	needDefault := false
+	for _, h := range f.harnesses {
+		needDefault = needDefault || h.actors == ""
+	}
+	if needDefault || *f.atespace != "" {
+		if !isShortName(*f.atespace) {
+			return fmt.Errorf("-substrate-atespace %q: want the atespace session actors are created in, a lowercase DNS label", *f.atespace)
+		}
 	}
 	builtin := builtinHarnesses(model)
+	actorSpaces := map[string]string{}
 	for _, name := range slices.Sorted(maps.Keys(f.harnesses)) {
 		if slices.Contains(builtin, name) {
 			return errNameTaken(name)
@@ -177,6 +193,14 @@ func (f *substrateFlags) check(fs *flag.FlagSet, model string, remotes remoteHar
 		if _, ok := remotes[name]; ok {
 			return fmt.Errorf("harness %q is given with both -harness and -substrate-harness", name)
 		}
+		// Actors are named by session UID, so a turn of one session on a second harness in the same
+		// atespace would attach to the first harness's actor and template, and the cold-create guard
+		// would count it on the wrong harness.
+		space := f.actorAtespace(name)
+		if other, taken := actorSpaces[space]; taken {
+			return fmt.Errorf("substrate harnesses %q and %q both create session actors in atespace %q; give each its own with ,actors=<atespace>", other, name, space)
+		}
+		actorSpaces[space] = name
 	}
 	if err := checkHarnessAddress(*f.ateapi); err != nil {
 		return fmt.Errorf("-ateapi-addr: %w", err)
@@ -258,10 +282,18 @@ func (f *substrateFlags) backends(newControl SubstrateControlFunc, logger *slog.
 			resumability = api.ResumabilityRequiresMemorySnapshot
 		}
 		desc := api.Descriptor{ID: name, Capabilities: api.Capabilities{Resumability: resumability}}
-		backends[name] = substrate.New(ctl, *f.atespace, h.template, desc,
+		backends[name] = substrate.New(ctl, f.actorAtespace(name), h.template, desc,
 			substrate.WithLogger(logger), substrate.WithRouter(*f.router))
 	}
 	return backends, func() { _ = conn.Close() }, nil
+}
+
+// actorAtespace is where the named harness's session actors are created.
+func (f *substrateFlags) actorAtespace(name string) string {
+	if a := f.harnesses[name].actors; a != "" {
+		return a
+	}
+	return *f.atespace
 }
 
 // logConfig records where substrate sessions go, without the token.
@@ -275,7 +307,7 @@ func (f *substrateFlags) logConfig(logger *slog.Logger) {
 			"harness", name,
 			"template", h.template.Atespace+"/"+h.template.Name,
 			"memory_snapshot", h.memory,
-			"actor_atespace", *f.atespace,
+			"actor_atespace", f.actorAtespace(name),
 			"ateapi", *f.ateapi,
 			"atenet_router", *f.router,
 			"ateapi_token_file", *f.tokenFile,

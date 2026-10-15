@@ -117,9 +117,10 @@ provide.
   in `-substrate-atespace`, controlled over the ate-api (`-ateapi-addr`, TLS, with
   `-ateapi-token-file` re-read on every call, `-ateapi-ca-file` or `-ateapi-insecure-skip-verify`)
   and reached through `-atenet-router`. It requires `-model`, and refuses the other substrate flags
-  without a `-substrate-harness`. It takes one `-substrate-harness` and exits with status 2 on a
-  second: actors are named by session UID in the one atespace, so two substrate harnesses would
-  share a session's actor. The rule is per daemon: two hosts sharing a journal and an atespace with
+  without a `-substrate-harness`. `-substrate-harness` is repeatable when each entry creates its
+  actors in its own atespace (`,actors=<atespace>`); two entries that resolve to one actor atespace
+  are refused at startup, since actors are named by session UID and the two harnesses would share
+  a session's actor. The rule is per daemon: two hosts sharing a journal and an actor atespace with
   different `-substrate-harness` names share it too (see `docs/substrate-conformance.md`). The
   neutral `cmd/agentsessionsd` does not offer these flags; both binaries are now built from
   `internal/agentsessionsd`.

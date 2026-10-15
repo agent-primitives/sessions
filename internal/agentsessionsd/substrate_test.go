@@ -59,9 +59,18 @@ func TestSubstrateHarnessFlagParsing(t *testing.T) {
 		{name: "empty template", values: []string{"a=t/"}, wantErr: "is not atespace/template"},
 		{name: "nested path", values: []string{"a=t/b/c"}, wantErr: "is not atespace/template"},
 		{name: "uppercase", values: []string{"a=T/b"}, wantErr: "is not atespace/template"},
-		{name: "unknown option", values: []string{"a=t/b,snapshot"}, wantErr: `unknown option "snapshot"`},
-		{name: "a second harness", values: []string{"a=t/a", "b=t/b,memory"}, wantErr: `given more than once (already "a"): only one substrate harness is supported`},
-		{name: "the same harness twice", values: []string{"a=t/b", "a=t/b"}, wantErr: `given more than once (already "a")`},
+		{name: "unknown option", values: []string{"a=t/b,snapshot"}, wantErr: `unknown or repeated option "snapshot"`},
+		{name: "repeated option", values: []string{"a=t/b,memory,memory"}, wantErr: `unknown or repeated option "memory"`},
+		{name: "bad actors", values: []string{"a=t/b,actors=Bad"}, wantErr: `actors="Bad" is not a lowercase DNS label`},
+		{
+			name:   "two harnesses with actor atespaces",
+			values: []string{"a=t/a,actors=space-a", "b=t/b,memory,actors=space-b"},
+			want: substrateHarnesses{
+				"a": {template: substrate.ObjectRef{Atespace: "t", Name: "a"}, actors: "space-a"},
+				"b": {template: substrate.ObjectRef{Atespace: "t", Name: "b"}, memory: true, actors: "space-b"},
+			},
+		},
+		{name: "the same harness twice", values: []string{"a=t/b", "a=t/b"}, wantErr: `harness "a" is given more than once`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got := substrateHarnesses{}
@@ -131,6 +140,10 @@ func TestSubstrateStartupChecks(t *testing.T) {
 		{name: "empty token", args: append(slices.Clone(base), "-ateapi-token-file", empty), want: "is empty"},
 		{name: "substrate flags without a harness", args: []string{"-model", "m", "-substrate-atespace", "s", "-atenet-router", "router:80"}, want: "-atenet-router, -substrate-atespace given without -substrate-harness: these flags only configure substrate harnesses"},
 		{name: "a boolean substrate flag without a harness", args: []string{"-ateapi-insecure-skip-verify"}, want: "-ateapi-insecure-skip-verify given without -substrate-harness: these flags only configure substrate harnesses"},
+		{name: "two harnesses in the default actor atespace", args: append(slices.Clone(base), "-substrate-harness", "x=t/x"), want: `substrate harnesses "w" and "x" both create session actors in atespace "sessions"`},
+		{name: "actors equal to the default atespace", args: append(slices.Clone(base), "-substrate-harness", "x=t/x,actors=sessions"), want: `both create session actors in atespace "sessions"`},
+		{name: "two harnesses with the same actors", args: []string{"-model", "m", "-substrate-harness", "w=t/w,actors=a", "-substrate-harness", "x=t/x,actors=a"}, want: `substrate harnesses "w" and "x" both create session actors in atespace "a"`},
+		{name: "a harness without actors and no default", args: []string{"-model", "m", "-substrate-harness", "w=t/w,actors=a", "-substrate-harness", "x=t/x"}, want: "-substrate-atespace"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			journal := filepath.Join(t.TempDir(), "journal.db")
@@ -148,20 +161,19 @@ func TestSubstrateStartupChecks(t *testing.T) {
 	}
 }
 
-// Substrate harnesses would share one actor per session, so the daemon refuses a second
-// -substrate-harness as a command-line error: it prints the reason and the usage and exits 2, before
-// it opens the journal or dials the ate-api.
-func TestSecondSubstrateHarnessIsRefused(t *testing.T) {
+// A repeated -substrate-harness name is a command-line error: the daemon prints the reason and the
+// usage and exits 2, before it opens the journal or dials the ate-api.
+func TestRepeatedSubstrateHarnessIsRefused(t *testing.T) {
 	journal := filepath.Join(t.TempDir(), "journal.db")
 	dialed := false
 	newControl := func(grpc.ClientConnInterface) substrate.ControlClient { dialed = true; return nil }
 	var out strings.Builder
 	err := Run([]string{"-journal", journal, "-addr", "127.0.0.1:0", "-model", "m", "-substrate-atespace", "s",
-		"-substrate-harness", "a=t/a", "-substrate-harness", "b=t/b,memory"}, WithSubstrate(newControl), withOutput(&out))
+		"-substrate-harness", "a=t/a,actors=x", "-substrate-harness", "a=t/b,actors=y"}, WithSubstrate(newControl), withOutput(&out))
 	if !errors.Is(err, ErrUsage) {
 		t.Fatalf("Run error = %v, want ErrUsage (exit status 2)", err)
 	}
-	const want = `invalid value "b=t/b,memory" for flag -substrate-harness: given more than once (already "a"): only one substrate harness is supported, because substrate harnesses would share one actor per session`
+	const want = `invalid value "a=t/b,actors=y" for flag -substrate-harness: harness "a" is given more than once`
 	if !strings.Contains(out.String(), want) || !strings.Contains(out.String(), "Usage of agentsessionsd") {
 		t.Fatalf("output = %q, want %q, then the usage", out.String(), want)
 	}
@@ -170,6 +182,52 @@ func TestSecondSubstrateHarnessIsRefused(t *testing.T) {
 	}
 	if dialed {
 		t.Fatal("a refused start built a control client")
+	}
+}
+
+// Two substrate harnesses on one daemon create a session's actor in their own actor atespaces, so
+// the same session uid on each names two different actors.
+func TestSubstrateHarnessesUseTheirOwnActorAtespace(t *testing.T) {
+	routed := make(chan string, 16)
+	router := serveRouter(t, echoagent.Harness{}, routed)
+	ctl := &fakeControl{actors: map[string]substrate.ActorStatus{}}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	f := registerSubstrateFlags(fs)
+	if err := fs.Parse([]string{"-substrate-harness", "writer=tmpl/writer-1,actors=writers",
+		"-substrate-harness", "reviewer=tmpl/reviewer-1,actors=reviewers", "-atenet-router", router, "-ateapi-insecure-skip-verify"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.check(fs, "test-model", nil); err != nil {
+		t.Fatal(err)
+	}
+	backends, closeConn, err := f.backends(func(grpc.ClientConnInterface) substrate.ControlClient { return ctl }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(closeConn)
+	registry, closeBackends, err := harnessRegistry("test-model", nil, echoagent.Model, nil, nil, backends, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(closeBackends)
+	c := newTestClient(t, registry)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	for _, h := range []struct{ harness, space, template string }{
+		{"writer", "writers", "tmpl/writer-1"},
+		{"reviewer", "reviewers", "tmpl/reviewer-1"},
+	} {
+		turn, err := c.Exec(ctx, client.ExecOptions{Harness: h.harness, Inputs: []string{"hi"}})
+		if err != nil {
+			t.Fatalf("exec on %s: %v", h.harness, err)
+		}
+		uid := turn.Session.GetMetadata().GetUid()
+		if want := "create:" + h.space + "/" + uid + ":tmpl=" + h.template; !slices.Contains(ctl.log(), want) {
+			t.Fatalf("control calls = %v, want %q", ctl.log(), want)
+		}
+		if target := <-routed; target != h.space+"/"+uid {
+			t.Fatalf("router saw ate-target-actor %q, want %s/%s", target, h.space, uid)
+		}
 	}
 }
 
@@ -304,7 +362,7 @@ func TestSubstrateHarnessRunsThroughTheRouter(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(closeConn)
-	registry, closeBackends, err := harnessRegistry("test-model", nil, echoagent.Model, nil, nil, backends)
+	registry, closeBackends, err := harnessRegistry("test-model", nil, echoagent.Model, nil, nil, backends, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

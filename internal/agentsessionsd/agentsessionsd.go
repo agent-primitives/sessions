@@ -42,9 +42,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/resolver"
 
 	v1 "github.com/aramase/agentsessions/api/genpb"
@@ -71,8 +73,20 @@ type Option func(*options)
 
 type options struct {
 	substrate SubstrateControlFunc
+	executors ToolExecutorFunc
 	// output receives command-line errors and the usage; nil is os.Stderr. Tests set it.
 	output io.Writer
+}
+
+// ToolExecutorFunc returns the host tool executor for the named -harness or -substrate-harness, or
+// nil for none. sessions is a client of this daemon's own Sessions listener, for an executor that
+// drives other sessions (AgentSuite invocations create child sessions); it connects on first use.
+type ToolExecutorFunc func(harness string, sessions v1.SessionsClient) controller.ToolFunc
+
+// WithToolExecutors installs host tool executors for CONTROLLER_MEDIATED and approved
+// REQUIRES_APPROVAL tool calls. Without it no harness has one, and such a call fails the turn.
+func WithToolExecutors(f ToolExecutorFunc) Option {
+	return func(o *options) { o.executors = f }
 }
 
 // Run parses args (without the program name) and serves until SIGINT or SIGTERM. -h returns
@@ -161,7 +175,30 @@ func Run(args []string, opts ...Option) error {
 	}
 	defer func() { _ = store.Close() }()
 
-	registry, closeBackends, err := harnessRegistry(*model, remotes, modelFn, streamFn, logger, substrateBackends)
+	// The executors' client of this daemon's own Sessions API. grpc.NewClient does not connect, and
+	// the dialer reads the listener's address, bound below before the server accepts a request.
+	var selfAddr atomic.Pointer[string]
+	var executors func(name string) controller.ToolFunc
+	if o.executors != nil {
+		selfConn, err := grpc.NewClient("passthrough:///agentsessionsd",
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+				addr := selfAddr.Load()
+				if addr == nil {
+					return nil, errors.New("the Sessions listener is not bound yet")
+				}
+				var d net.Dialer
+				return d.DialContext(ctx, "tcp", *addr)
+			}))
+		if err != nil {
+			return fmt.Errorf("sessions client for tool executors: %w", err)
+		}
+		defer func() { _ = selfConn.Close() }()
+		sessions := v1.NewSessionsClient(selfConn)
+		executors = func(name string) controller.ToolFunc { return o.executors(name, sessions) }
+	}
+
+	registry, closeBackends, err := harnessRegistry(*model, remotes, modelFn, streamFn, logger, substrateBackends, executors)
 	if err != nil {
 		return err
 	}
@@ -199,6 +236,8 @@ func Run(args []string, opts ...Option) error {
 		return fmt.Errorf("listen on %s: %w", *addr, err)
 	}
 	defer lis.Close()
+	self := loopbackDialAddr(lis.Addr().(*net.TCPAddr))
+	selfAddr.Store(&self)
 	var operatorLis net.Listener
 	if operatorServer != nil {
 		operatorLis, err = net.Listen("tcp", *registryAddr)
@@ -256,6 +295,19 @@ func Run(args []string, opts ...Option) error {
 		}
 	}
 	return result
+}
+
+// loopbackDialAddr is where a process reaches its own listener: a wildcard bind (":8080",
+// "0.0.0.0:8080", "[::]:8080") is dialed on loopback of the same family.
+func loopbackDialAddr(a *net.TCPAddr) string {
+	ip := a.IP
+	switch {
+	case ip == nil || ip.Equal(net.IPv4zero):
+		ip = net.IPv4(127, 0, 0, 1)
+	case ip.Equal(net.IPv6unspecified):
+		ip = net.IPv6loopback
+	}
+	return net.JoinHostPort(ip.String(), strconv.Itoa(a.Port))
 }
 
 // Main runs the server with os.Args and exits with the conventional status: 0 on success or -h, 2
@@ -500,8 +552,10 @@ func errNameTaken(name string) error {
 // all of them. Echo remains the default; chat requires an explicitly configured model.
 //
 // substrateBackends are the -substrate-harness backends by name, already built; their names were
-// checked against the built-in and -harness names by substrateFlags.check.
-func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.ModelFunc, streamFn controller.StreamFunc, logger *slog.Logger, substrateBackends map[string]placement.Backend) (*placement.Registry, func(), error) {
+// checked against the built-in and -harness names by substrateFlags.check. executors, when not nil,
+// returns the host tool executor for a -harness or -substrate-harness name (nil for none); the
+// built-in harnesses call no host-mediated tools and get none.
+func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.ModelFunc, streamFn controller.StreamFunc, logger *slog.Logger, substrateBackends map[string]placement.Backend, executors func(name string) controller.ToolFunc) (*placement.Registry, func(), error) {
 	echo := local.New(echoagent.Harness{}, local.WithLogger(logger))
 	backends := []*local.Backend{echo}
 	var remoteBackends []*remote.Backend
@@ -519,6 +573,16 @@ func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.M
 	}
 	placers := map[string]*placement.Placer{
 		"echo": placement.New(echo, modelFn, opts...),
+	}
+	// optsFor adds the named harness's host tool executor, if the caller configured one.
+	optsFor := func(name string) []placement.Option {
+		if executors == nil {
+			return opts
+		}
+		if tool := executors(name); tool != nil {
+			return append(slices.Clone(opts), placement.WithToolExecutor(tool))
+		}
+		return opts
 	}
 	if model != "" {
 		chat := local.New(chatagent.Harness{Model: model}, local.WithLogger(logger))
@@ -538,7 +602,7 @@ func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.M
 		}
 		backend := remote.New(addr, remote.WithLogger(logger))
 		remoteBackends = append(remoteBackends, backend)
-		placers[name] = placement.New(backend, modelFn, opts...)
+		placers[name] = placement.New(backend, modelFn, optsFor(name)...)
 	}
 	if len(substrateBackends) > 0 {
 		if err := substrateNeedsModel(model); err != nil {
@@ -551,7 +615,7 @@ func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.M
 			closeBackends()
 			return nil, nil, errNameTaken(name)
 		}
-		placers[name] = placement.New(substrateBackends[name], modelFn, opts...)
+		placers[name] = placement.New(substrateBackends[name], modelFn, optsFor(name)...)
 	}
 	// The -harness and -substrate-harness names are static entries, so ReserveStaticHarnessNames
 	// reserves them along with the built-in ones.

@@ -3,6 +3,7 @@ package invoke_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -132,9 +133,43 @@ func (l *lateSessions) Replay(ctx context.Context, uid string, from, to int64) (
 	return l.c.Replay(ctx, uid, from, to)
 }
 
+func (l *lateSessions) ListSessions(ctx context.Context, project string) ([]*v1.Session, error) {
+	return l.c.ListSessions(ctx, project)
+}
+
+func (l *lateSessions) Suspend(ctx context.Context, uid string) (*v1.Session, error) {
+	return l.c.Suspend(ctx, uid)
+}
+
+func (l *lateSessions) Resume(ctx context.Context, uid string, boot bool) (*v1.Session, error) {
+	return l.c.Resume(ctx, uid, boot)
+}
+
+// crashOnce wraps the coordinator's executor: the first call runs (the child session and its turn
+// happen) and then fails as a host that died before journaling the result would, so the caller's
+// journal holds the TOOL_CALL and no TOOL_RESULT.
+type crashOnce struct {
+	mu      sync.Mutex
+	crashed bool
+}
+
+func (c *crashOnce) wrap(tool controller.ToolFunc) controller.ToolFunc {
+	return func(ctx context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+		res, err := tool(ctx, scope, call)
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if err == nil && !c.crashed {
+			c.crashed = true
+			return api.ToolResult{}, errors.New("host crashed before the tool result was journaled")
+		}
+		return res, err
+	}
+}
+
 // suiteServer serves the three agents as stateless harnesses on local backends, the coordinator
 // with the invoke executor over the server's own Sessions API, as agentsessionsd does on substrate.
-func suiteServer(t *testing.T, model *scriptedModel) *client.Client {
+// crash, when set, wraps the coordinator's executor.
+func suiteServer(t *testing.T, model *scriptedModel, crash ...*crashOnce) *client.Client {
 	t.Helper()
 	agents, err := render.Agents(suiteDir)
 	if err != nil {
@@ -162,6 +197,9 @@ func suiteServer(t *testing.T, model *scriptedModel) *client.Client {
 		t.Cleanup(func() { _ = b.Close() })
 		var opts []placement.Option
 		if tool := x.For(id); tool != nil {
+			for _, c := range crash {
+				tool = c.wrap(tool)
+			}
 			opts = append(opts, placement.WithToolExecutor(tool))
 		}
 		placers[id] = placement.New(b, controller.ModelFunc(model.model), opts...)
@@ -327,6 +365,16 @@ func TestCoordinatorApproved(t *testing.T) {
 	if got := [3]int{model.count("coordinator"), model.count("writer"), model.count("reviewer")}; got != [3]int{3, 1, 1} {
 		t.Fatalf("live model calls (coordinator, writer, reviewer) = %v, want [3 1 1]", got)
 	}
+	// Each child was suspended after its turn: none holds compute once it has answered.
+	for target, sessions := range kids {
+		s, err := c.GetSession(ctx, sessions[0].GetMetadata().GetUid())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.GetComputeState() != v1.ComputeState_COMPUTE_COLD {
+			t.Fatalf("%s child compute = %v, want COLD", target, s.GetComputeState())
+		}
+	}
 	// Every agent requests the model the suite pins, which the binding serves.
 	if len(model.models) != 1 || !model.models["gpt-5.4-mini"] {
 		t.Fatalf("models requested = %v, want only gpt-5.4-mini", model.models)
@@ -367,5 +415,44 @@ func TestCoordinatorDenied(t *testing.T) {
 	}
 	if model.count("reviewer") != 0 {
 		t.Fatal("the reviewer's model was called after a denial")
+	}
+}
+
+// The host "crashes" after the writer child's turn and before the coordinator's TOOL_RESULT is
+// journaled. Resume re-drives the coordinator's turn under the recorded call: the executor finds the
+// writer child by the call's key, serves its recorded turn, and the turn goes on to the gated
+// reviewer call. One writer session, one writer model call.
+func TestCoordinatorCrashMidDelegation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	model := &scriptedModel{calls: map[string]int{}}
+	c := suiteServer(t, model, &crashOnce{})
+	turn, err := c.Exec(ctx, client.ExecOptions{Harness: "coordinator", Inputs: []string{"Two lines on tides, reviewed."}})
+	if err == nil {
+		t.Fatal("the crashed turn succeeded")
+	}
+	uid := turn.Session.GetMetadata().GetUid()
+	j := journal(t, ctx, c, uid)
+	if !contains(j.kinds, "TOOL_CALL") || len(j.results) != 0 {
+		t.Fatalf("after the crash the journal = %v, want the writer call without a result", j.kinds)
+	}
+	if kids := children(t, ctx, c, uid); len(kids["writer"]) != 1 {
+		t.Fatalf("children after the crash = %v", kids)
+	}
+	if _, err := c.Resume(ctx, uid, false); err != nil {
+		t.Fatal(err)
+	}
+	j = journal(t, ctx, c, uid)
+	if !contains(j.kinds, "TOOL_CALL", "TOOL_RESULT", "TOOL_CALL", "APPROVAL_REQUEST") || len(j.results) != 1 {
+		t.Fatalf("after the resume the journal = %v, want the writer result, then the gated reviewer call", j.kinds)
+	}
+	kids := children(t, ctx, c, uid)
+	if len(kids["writer"]) != 1 || model.count("writer") != 1 {
+		t.Fatalf("children = %v and %d writer model calls, want one writer child that ran once", kids, model.count("writer"))
+	}
+	lc := j.results[0].GetOutput().GetFields()["lifecycle"].GetStructValue().GetFields()
+	if j.results[0].GetOutput().GetFields()["session"].GetStringValue() != kids["writer"][0].GetMetadata().GetUid() ||
+		lc["origin"].GetStringValue() != "retry" || lc["turn"].GetStringValue() != "recorded" {
+		t.Fatalf("writer result = %v, want the first child's recorded turn", j.results[0])
 	}
 }

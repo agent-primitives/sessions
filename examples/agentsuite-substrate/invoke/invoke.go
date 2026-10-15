@@ -6,6 +6,16 @@
 // in the caller's journal; the child's first EXECUTION_START config records the caller (see
 // Provenance), so each journal names the other.
 //
+// A child's actor is suspended after each of its turns, so a delegation does not hold a worker once
+// it has answered. A call that names a child (Args.Session) is a follow-up: the executor wakes that
+// child with Resume, runs the task there and suspends it again.
+//
+// Child creation is idempotent per call: the child carries Key(calling session, tool call id) as a
+// label, and the executor looks for it before it creates one. A call re-driven after a host crash
+// (the caller's TOOL_CALL is journaled, its TOOL_RESULT is not) therefore reaches the same child,
+// and the child's journal says whether that call's turn there finished (served from the journal),
+// was interrupted (re-driven with Resume) or never started (run now).
+//
 // The suite's bounds are enforced before any child session exists: an undeclared edge, a call that
 // would exceed the edge's maxConcurrent (in-flight invocations of the target by the declaring agent,
 // across all of its sessions on this daemon), and a chain deeper than the edge's maxDepth (kaimahi
@@ -16,9 +26,12 @@ package invoke
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"slices"
 	"strconv"
@@ -27,11 +40,14 @@ import (
 	"time"
 
 	"github.com/kaimahi-agents/kaimahi/agentsuite"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/client"
 	"github.com/aramase/agentsessions/controller"
+	"github.com/aramase/agentsessions/wire"
 )
 
 // Tool is the tool name of an invocation call.
@@ -148,6 +164,32 @@ func (p Policy) Set(value string) error {
 type Args struct {
 	Agent string `json:"agent"`
 	Task  string `json:"task"`
+	// Session, when set, sends the task to a child session an earlier call of the same calling
+	// session created on Agent (a follow-up), instead of creating a new one. The executor wakes the
+	// child, runs the turn there and suspends it again.
+	Session string `json:"session,omitempty"`
+}
+
+// Labels the executor sets on a child session. They are client-set metadata, not provenance: the
+// tamper-evident link is the child's EXECUTION_START config and the caller's TOOL_RESULT.
+const (
+	// LabelInvokedBy is the calling session's uid.
+	LabelInvokedBy = "agentsuite.invoked-by"
+	// LabelEdge is <caller>-to-<target>.
+	LabelEdge = "agentsuite.edge"
+	// LabelKey is the child's idempotency key (Key): the executor finds an existing child by it
+	// before it creates one.
+	LabelKey = "agentsuite.invocation-key"
+)
+
+// Key is the idempotency key of the child session an invocation creates: a digest of the calling
+// session's uid and the tool call's id. The call id is stable across replay and resume (the harness
+// derives it from the execution id), so a re-driven call after a host crash computes the same key.
+// The digest keeps the label short; the inputs are separated by a NUL so that no two (session, call)
+// pairs share an encoding.
+func Key(parent, callID string) string {
+	sum := sha256.Sum256([]byte(parent + "\x00" + callID))
+	return hex.EncodeToString(sum[:16])
 }
 
 // Provenance is what a child session's first execution config records under ConfigKey.
@@ -165,9 +207,12 @@ type Provenance struct {
 // Sessions is the part of the Sessions client the executor uses.
 type Sessions interface {
 	GetSession(ctx context.Context, uid string) (*v1.Session, error)
+	ListSessions(ctx context.Context, project string) ([]*v1.Session, error)
 	CreateSession(ctx context.Context, s *v1.Session) (*v1.Session, error)
 	Exec(ctx context.Context, opts client.ExecOptions) (*client.TurnResult, error)
 	Replay(ctx context.Context, uid string, fromSeq, toSeq int64) ([]*v1.LogRecord, error)
+	Suspend(ctx context.Context, uid string) (*v1.Session, error)
+	Resume(ctx context.Context, uid string, boot bool) (*v1.Session, error)
 }
 
 // DefaultTimeout bounds one invocation's child turn when New is given no WithTimeout.
@@ -181,6 +226,11 @@ type Executor struct {
 
 	mu       sync.Mutex
 	inflight map[inflightKey]int
+	// createMu serializes the find-or-create of a child by its key on this daemon, so two
+	// re-drives of one call here cannot both miss the lookup and create two children. Another
+	// daemon on the same journal is not covered: that needs a key the Sessions API enforces.
+	createMu sync.Mutex
+	logger   *slog.Logger
 }
 
 // inflightKey is what maxConcurrent counts: the declaring (calling) agent's invocations of target,
@@ -196,6 +246,12 @@ func WithTimeout(d time.Duration) Option {
 	return func(x *Executor) { x.timeout = d }
 }
 
+// WithLogger logs each invocation's child lifecycle (created or reused, wake, turn and suspend
+// times). Without it nothing is logged.
+func WithLogger(l *slog.Logger) Option {
+	return func(x *Executor) { x.logger = l }
+}
+
 // New returns an executor for policy that drives child sessions through sessions.
 func New(policy Policy, sessions Sessions, opts ...Option) *Executor {
 	x := &Executor{policy: policy, sessions: sessions, timeout: DefaultTimeout, inflight: map[inflightKey]int{}}
@@ -204,6 +260,9 @@ func New(policy Policy, sessions Sessions, opts ...Option) *Executor {
 	}
 	if x.timeout <= 0 {
 		x.timeout = DefaultTimeout
+	}
+	if x.logger == nil {
+		x.logger = slog.New(slog.DiscardHandler)
 	}
 	return x
 }
@@ -258,14 +317,6 @@ func (x *Executor) invoke(ctx context.Context, caller, session string, call api.
 	}
 	defer release()
 
-	prov := Provenance{
-		ParentSession: session, Caller: caller, ToolCallID: call.ID, Target: args.Agent,
-		Depth: depth + 1, Remaining: min(remaining, edge.MaxDepth) - 1,
-	}
-	config, err := json.Marshal(map[string]Provenance{ConfigKey: prov})
-	if err != nil {
-		return api.ToolResult{}, err
-	}
 	// The child lives in the caller's project, and its creation and turn are bounded by the
 	// executor's timeout (and by the caller's own deadline, when ctx carries an earlier one).
 	ctx, cancel := context.WithTimeout(ctx, x.timeout)
@@ -274,27 +325,251 @@ func (x *Executor) invoke(ctx context.Context, caller, session string, call api.
 	if err != nil {
 		return api.ToolResult{}, fmt.Errorf("invoke %s: read the calling session: %w", args.Agent, err)
 	}
-	child, err := x.sessions.CreateSession(ctx, &v1.Session{
-		Metadata: &v1.ResourceMetadata{Project: parent.GetMetadata().GetProject(), Name: caller + "-" + args.Agent},
-		Harness:  args.Agent,
-		Labels:   map[string]string{"agentsuite.invoked-by": session, "agentsuite.edge": caller + "-to-" + args.Agent},
-	})
-	if err != nil {
-		return api.ToolResult{}, fmt.Errorf("invoke %s: create child session: %w", args.Agent, err)
+	project := parent.GetMetadata().GetProject()
+	var child *v1.Session
+	origin := "new"
+	if args.Session != "" {
+		var why string
+		if child, why, err = x.followUp(ctx, session, project, args); err != nil {
+			return api.ToolResult{}, err
+		}
+		if why != "" {
+			return refuse(call, "%s", why)
+		}
+		origin = "follow-up"
+	} else {
+		var created bool
+		if child, created, err = x.child(ctx, caller, session, project, args.Agent, call.ID); err != nil {
+			return api.ToolResult{}, err
+		}
+		if !created {
+			origin = "retry"
+		}
 	}
 	uid := child.GetMetadata().GetUid()
-	turn, err := x.sessions.Exec(ctx, client.ExecOptions{Session: uid, Inputs: []string{args.Task}, Config: config})
-	if err != nil {
-		// The child exists and its journal holds what happened; the caller's model gets the failure.
-		msg := fmt.Sprintf("invocation of %s failed in child session %s: %v", args.Agent, uid, err)
-		return api.ToolResult{ID: call.ID, IsError: true, Error: msg, Output: map[string]any{"session": uid, "agent": args.Agent},
-			Content: api.TextMessage("tool", msg).Parts}, nil
+
+	prov := Provenance{
+		ParentSession: session, Caller: caller, ToolCallID: call.ID, Target: args.Agent,
+		Depth: depth + 1, Remaining: min(remaining, edge.MaxDepth) - 1,
 	}
-	return api.ToolResult{
-		ID:      call.ID,
-		Output:  map[string]any{"session": uid, "agent": args.Agent, "output": turn.Output},
-		Content: api.TextMessage("tool", turn.Output).Parts,
-	}, nil
+	config, err := json.Marshal(map[string]Provenance{ConfigKey: prov})
+	if err != nil {
+		return api.ToolResult{}, err
+	}
+	out, lc, turnErr := x.turn(ctx, child, call.ID, args.Task, config)
+	lc["origin"] = origin
+	// The child's turn is over, done or failed: suspend its actor so it does not hold a worker
+	// until someone deletes it. A follow-up call wakes it again. A failed suspend does not undo
+	// the turn; the result says the child is still running.
+	x.suspend(ctx, uid, lc)
+	x.logger.Info("agentsuite invocation", "caller", caller, "session", session, "tool_call", call.ID, "target", args.Agent, "child", uid, "lifecycle", lc)
+	output := map[string]any{"session": uid, "agent": args.Agent, "lifecycle": lc}
+	if turnErr != nil {
+		// The child exists and its journal holds what happened; the caller's model gets the failure.
+		msg := fmt.Sprintf("invocation of %s failed in child session %s: %v", args.Agent, uid, turnErr)
+		return api.ToolResult{ID: call.ID, IsError: true, Error: msg, Output: output, Content: api.TextMessage("tool", msg).Parts}, nil
+	}
+	output["output"] = out
+	return api.ToolResult{ID: call.ID, Output: output, Content: api.TextMessage("tool", out).Parts}, nil
+}
+
+// child finds the child session an earlier attempt of this call created (by its LabelKey), or
+// creates it. A host that crashed after CreateSession and before the caller's TOOL_RESULT re-drives
+// the same call on recovery; the lookup makes that retry reach the same child instead of a second
+// one. created reports whether this call created it.
+func (x *Executor) child(ctx context.Context, caller, parent, project, target, callID string) (_ *v1.Session, created bool, _ error) {
+	key := Key(parent, callID)
+	x.createMu.Lock()
+	defer x.createMu.Unlock()
+	all, err := x.sessions.ListSessions(ctx, project)
+	if err != nil {
+		return nil, false, fmt.Errorf("invoke %s: look up the child of call %s: %w", target, callID, err)
+	}
+	for _, s := range all {
+		if s.GetLabels()[LabelKey] != key {
+			continue
+		}
+		if s.GetLabels()[LabelInvokedBy] != parent || s.GetHarness() != target {
+			return nil, false, fmt.Errorf("invoke %s: session %s carries call %s's key but another caller or harness", target, s.GetMetadata().GetUid(), callID)
+		}
+		return s, false, nil
+	}
+	s, err := x.sessions.CreateSession(ctx, &v1.Session{
+		Metadata: &v1.ResourceMetadata{Project: project, Name: caller + "-" + target + "-" + key[:12]},
+		Harness:  target,
+		Labels:   map[string]string{LabelInvokedBy: parent, LabelEdge: caller + "-to-" + target, LabelKey: key},
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("invoke %s: create child session: %w", target, err)
+	}
+	return s, true, nil
+}
+
+// followUp checks that args.Session is a child the calling session created on args.Agent: its
+// labels and its first execution's provenance name the caller and the target, and it is in the
+// caller's project. why is the refusal the caller's model sees; err is a failure to check.
+func (x *Executor) followUp(ctx context.Context, parent, project string, args Args) (_ *v1.Session, why string, _ error) {
+	notMine := fmt.Sprintf("session %q is not a %s session this session invoked", args.Session, args.Agent)
+	s, err := x.sessions.GetSession(ctx, args.Session)
+	if status.Code(err) == codes.NotFound {
+		return nil, notMine, nil
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("invoke %s: read session %s: %w", args.Agent, args.Session, err)
+	}
+	if s.GetHarness() != args.Agent || s.GetLabels()[LabelInvokedBy] != parent || s.GetMetadata().GetProject() != project {
+		return nil, notMine, nil
+	}
+	prov, ok, err := x.provenance(ctx, args.Session)
+	if err != nil {
+		return nil, "", err
+	}
+	if !ok || prov.ParentSession != parent || prov.Target != args.Agent {
+		return nil, notMine, nil
+	}
+	return s, "", nil
+}
+
+// turn runs the call's task in child, unless the child's journal shows an earlier attempt of the
+// same call (its EXECUTION_START names this tool call id): a completed one is served from the
+// child's journal, an interrupted one is re-driven with Resume. lc records what happened and how
+// long each step took, in milliseconds.
+func (x *Executor) turn(ctx context.Context, child *v1.Session, callID, task string, config []byte) (string, map[string]any, error) {
+	uid := child.GetMetadata().GetUid()
+	lc := map[string]any{}
+	rec, err := x.recorded(ctx, uid, callID)
+	if err != nil {
+		return "", lc, err
+	}
+	switch {
+	case rec.ended:
+		lc["turn"] = "recorded"
+	case rec.started:
+		start := time.Now()
+		if _, err := x.sessions.Resume(ctx, uid, false); err != nil {
+			return "", lc, fmt.Errorf("re-drive the interrupted turn: %w", err)
+		}
+		lc["turn"], lc["resumeMs"] = "re-driven", ms(start)
+		if rec, err = x.recorded(ctx, uid, callID); err != nil {
+			return "", lc, err
+		}
+		if !rec.ended {
+			return "", lc, errors.New("the re-driven turn did not end")
+		}
+	default:
+		if child.GetComputeState() == v1.ComputeState_COMPUTE_COLD {
+			start := time.Now()
+			if _, err := x.sessions.Resume(ctx, uid, false); err != nil {
+				return "", lc, fmt.Errorf("wake the child: %w", err)
+			}
+			lc["wakeMs"] = ms(start)
+		}
+		start := time.Now()
+		turn, err := x.sessions.Exec(ctx, client.ExecOptions{Session: uid, Inputs: []string{task}, Config: config})
+		lc["turn"], lc["turnMs"] = "ran", ms(start)
+		if err != nil {
+			return "", lc, err
+		}
+		return turn.Output, lc, nil
+	}
+	if rec.failed != "" && rec.output == "" {
+		return "", lc, errors.New(rec.failed)
+	}
+	return rec.output, lc, nil
+}
+
+// suspend frees the child's worker unless it is already suspended, and records the outcome in lc.
+// It runs even after the caller's deadline, with its own short bound, so a timed-out invocation
+// does not leave its micro-VM running.
+func (x *Executor) suspend(ctx context.Context, uid string, lc map[string]any) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), suspendTimeout)
+	defer cancel()
+	if s, err := x.sessions.GetSession(ctx, uid); err == nil && s.GetComputeState() == v1.ComputeState_COMPUTE_COLD {
+		lc["suspended"] = true
+		return
+	}
+	start := time.Now()
+	if _, err := x.sessions.Suspend(ctx, uid); err != nil {
+		lc["suspended"], lc["suspendError"] = false, err.Error()
+		return
+	}
+	lc["suspended"], lc["suspendMs"] = true, ms(start)
+}
+
+// suspendTimeout bounds the suspend after a child's turn.
+const suspendTimeout = time.Minute
+
+func ms(start time.Time) int64 { return time.Since(start).Milliseconds() }
+
+// attempt is what a child's journal holds of one call's turn there.
+type attempt struct {
+	started, ended bool
+	output         string
+	failed         string
+}
+
+// recorded reads the child's journal for the execution whose EXECUTION_START config names callID.
+func (x *Executor) recorded(ctx context.Context, uid, callID string) (attempt, error) {
+	recs, err := x.sessions.Replay(ctx, uid, 1, 0)
+	if err != nil {
+		return attempt{}, fmt.Errorf("read child session %s's journal: %w", uid, err)
+	}
+	var a attempt
+	var exec string
+	for _, r := range recs {
+		ev := r.GetEvent()
+		if start := ev.GetExecutionStart(); start != nil && exec == "" {
+			if p, ok := parseProvenance(start.GetConfig()); ok && p.ToolCallID == callID {
+				exec, a.started = ev.GetExecutionId(), true
+			}
+			continue
+		}
+		if exec == "" || ev.GetExecutionId() != exec {
+			continue
+		}
+		switch ev.GetKind() {
+		case v1.EventKind_EVENT_OUTPUT:
+			if m := wire.MessageFromProto(ev.GetMessage()); m != nil {
+				a.output += m.Text()
+			}
+		case v1.EventKind_EVENT_END:
+			a.ended = true
+			if st := ev.GetEnd().GetState(); st != "" && st != "COMPLETED" && a.failed == "" {
+				a.failed = "the child's turn ended " + st
+			}
+		case v1.EventKind_EVENT_ERROR:
+			a.failed = ev.GetError().GetDescription()
+		}
+	}
+	return a, nil
+}
+
+// parseProvenance reads the invocation provenance from an execution config, if it has one.
+func parseProvenance(config []byte) (Provenance, bool) {
+	var cfg map[string]json.RawMessage
+	if len(config) == 0 || json.Unmarshal(config, &cfg) != nil || cfg[ConfigKey] == nil {
+		return Provenance{}, false
+	}
+	var p Provenance
+	if json.Unmarshal(cfg[ConfigKey], &p) != nil {
+		return Provenance{}, false
+	}
+	return p, true
+}
+
+// provenance reads the provenance in a session's first EXECUTION_START.
+func (x *Executor) provenance(ctx context.Context, uid string) (Provenance, bool, error) {
+	recs, err := x.sessions.Replay(ctx, uid, 1, 0)
+	if err != nil {
+		return Provenance{}, false, fmt.Errorf("invoke: read session %s's journal: %w", uid, err)
+	}
+	for _, r := range recs {
+		if start := r.GetEvent().GetExecutionStart(); start != nil {
+			p, ok := parseProvenance(start.GetConfig())
+			return p, ok, nil
+		}
+	}
+	return Provenance{}, false, nil
 }
 
 // acquire takes one of edge.MaxConcurrent slots for the declaring agent's invocations of the

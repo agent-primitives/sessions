@@ -168,21 +168,71 @@ and two entries may not share one.
 
 ### Gaps in the invocation PoC
 
-- A child session keeps its actor running after its one turn: nothing suspends it, so each
-  delegation holds a micro-VM until the session is suspended or its actor deleted
-  (`coordinator.sh reset` deletes them). Observed in the probe: every child actor was still
-  `ACTOR_STATE_RUNNING` after its turn.
-- Child creation is not idempotent: if the host crashes after the child turn but before the
-  `TOOL_RESULT` commits, recovery runs the executor again and creates a second child.
-  `CreateSession` has no client-chosen id or idempotency key to deduplicate on.
 - `maxConcurrent` is counted in memory per declaring agent and per daemon. Two daemons sharing a
   journal each allow `maxConcurrent`, and a call in flight is forgotten when its daemon exits.
+- Child lookup by idempotency key is list-then-create: it lists the caller's project (O(sessions))
+  and serializes creates within one daemon only. Two daemons on one journal can both miss the lookup
+  and create two children. See [CreateSession idempotency key](#design-note-a-createsession-idempotency-key).
 - The executor reaches the daemon's own Sessions API over plaintext loopback without
   authentication, like every other caller of this PoC's daemon. The child session's labels
   (`agentsuite.invoked-by`) are client-set metadata; the tamper-evident link is the child's first
   `EXECUTION_START` config and the parent's `TOOL_RESULT`.
 - Tool definitions are not offered to the model (`model/openai` refuses them), so a delegation is a
   JSON reply the harness parses. A reply that is not exactly one JSON object is the final answer.
+
+### Child lifecycle: suspend after each turn, wake on a follow-up
+
+- After a child's turn (done or failed) the executor calls `Suspend` on the child session, so its
+  actor is snapshotted and its worker freed before the caller's `TOOL_RESULT` commits. A failed
+  suspend does not fail the delegation; the result records `suspended: false` and the error.
+- A delegation may name an earlier child: `{"invoke": "writer", "task": "...", "session": "<id>"}`
+  (tool argument `session`). The executor checks that the session is a child of the calling session
+  on that agent (labels, project, and the provenance in its first `EXECUTION_START`), wakes it with
+  `Resume`, runs the task there (the child keeps its own history) and suspends it again. Each reply
+  the coordinator's model sees names the child's session id.
+- The tool result's `lifecycle` records what happened: `origin` (`new`, `follow-up`, `retry`),
+  `turn` (`ran`, `recorded`, `re-driven`), and `wakeMs`, `turnMs`, `suspendMs`. The daemon logs the
+  same line (`agentsuite invocation`).
+
+### Idempotent child creation (PoC)
+
+- The child's idempotency key is `Key(parent session uid, tool call id)`, a 32-hex sha256 prefix,
+  set as label `agentsuite.invocation-key` (the name is `<caller>-<target>-<key[:12]>`). The tool
+  call id is `<execution id>-invoke-<n>`, stable across replay and resume.
+- Before creating a child the executor lists the caller's project for the key. On a hit it reuses
+  that child and reads the child's journal for an execution whose `EXECUTION_START` names this tool
+  call id: ended means serve its output (no second turn), started means `Resume` the child (the
+  host's crash recovery re-drives the interrupted turn, at most once per model call), absent means
+  run the turn now.
+- So a host that dies anywhere between `CreateSession` and the caller's `TOOL_RESULT` reaches the
+  same child when the caller's turn is re-driven (`Resume` of the caller). Tested in process
+  (`invoke` `TestInvokeRetryAfterCrashReachesTheSameChild`, three crash points;
+  `TestCoordinatorCrashMidDelegation` through the real controller) and on micro-VMs (see the probe).
+
+#### Design note: a CreateSession idempotency key
+
+For a later AgentSessions issue; not implemented here.
+
+- Problem: `CreateSession` assigns a fresh uid every time. A host tool executor that creates a
+  session as a side effect (agent-to-agent invocation, fan-out) has no atomic way to make the
+  create idempotent across a crash; the PoC's list-by-label lookup is O(sessions), racy across
+  daemons, and depends on labels any client can set.
+- Proposal: `CreateSessionRequest.idempotency_key` (string, at most 128 bytes, scoped to the
+  project). The service stores `(project, key) -> uid` in the same transaction as the metadata row.
+  A repeat with the same key and an equivalent spec returns the existing session (`OK`, not
+  `ALREADY_EXISTS`); a repeat with a different spec (harness, labels, identity) is
+  `FAILED_PRECONDITION`, so a key cannot silently alias two different children.
+- Key choice is the caller's: the invoke executor would send `Key(parent uid, tool call id)`,
+  which `ToolFunc`'s contract already names as the dedup scope (`scope.SessionUID` plus the call's
+  `IdempotencyKey`).
+- Retention: keys live as long as the session; deleting the session frees the key.
+- Not covered by the key: whether the child's turn ran. That stays in the child's journal (the
+  `EXECUTION_START` config names the call), as the PoC does; an `Exec` idempotency key would be a
+  separate change.
+- Alternative considered: client-chosen session uid. Simpler to store, but it lets callers pick
+  uids across tenants and couples uid format to callers; a scoped key does not.
+- Compatibility: additive proto field; old servers ignore it, so a client must check the server
+  supports it (a capability bit) before relying on it.
 
 ## Requirements
 
@@ -231,27 +281,29 @@ AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 AGENTSUITE_MODEL=<model> MOD
 AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 ./demo.sh
 ```
 
-Azure OpenAI serves a deployment at `/openai/deployments/<deployment>/chat/completions` and pins
-its API version in an `api-version` query parameter, with the key in an `api-key` header. Put the
-path and the query in `AGENTSUITE_MODEL_PATH` and the header name in `AGENTSUITE_MODEL_AUTH_HEADER`;
-`up.sh` passes them to `agentsessionsd` as `-model-path` and `-model-auth-header`, and the base URL
-stays free of a query:
+Azure OpenAI's v1 API serves every deployment at `https://<resource>.openai.azure.com/openai/v1`,
+takes the deployment name as the request's `model`, and needs no `api-version`
+([API version lifecycle](https://learn.microsoft.com/azure/ai-foundry/openai/api-version-lifecycle)).
+Put that URL in `AGENTSUITE_MODEL_BASE_URL` and the deployment name in `AGENTSUITE_MODEL`.
+`agentsessionsd` keeps its default `-model-path`, `/chat/completions`, which its model client
+appends to the base URL's path (`model/openai` `joinEndpoint`), so requests go to
+`<resource>/openai/v1/chat/completions`:
 
 ```bash
-export AGENTSUITE_MODEL_BASE_URL=https://<resource>.openai.azure.com
+export AGENTSUITE_MODEL_BASE_URL=https://<resource>.openai.azure.com/openai/v1
 AGENTSUITE_MODEL=<deployment> \
-  AGENTSUITE_MODEL_PATH='/openai/deployments/<deployment>/chat/completions?api-version=2024-10-21' \
   AGENTSUITE_MODEL_AUTH_HEADER=api-key \
   MODEL_API_KEY=<key> ./up.sh
 ./demo.sh
 ```
 
-Quote the path, since `?` is a shell glob character. `AGENTSUITE_MODEL` is the deployment name;
-the harness sends it as the request's `model`, and Azure routes by the deployment in the path. The
-path's only query parameter may be one date-shaped `api-version` (`2024-10-21`,
-`2025-04-01-preview`), and it may not contain `@` or a fragment, start with `//` or end with `:`.
-Unset, the path is `/chat/completions` and the header is `Authorization` (a bearer token), the
-daemon's defaults.
+With a key, Azure takes it in an `api-key` header, which `AGENTSUITE_MODEL_AUTH_HEADER=api-key`
+selects (`up.sh` passes it as `-model-auth-header`). Unset, the header is `Authorization` (a bearer
+token), the daemon's default. Do not add an `api-version`: `up.sh` refuses any query on the base
+URL, and Azure answers one on the v1 endpoint with HTTP 400 (`API version not supported`).
+`AGENTSUITE_MODEL_PATH` is retired: `up.sh`, `coordinator.sh setup`, `driver.sh setup` and the two
+record scripts refuse it when set, before any cluster change, and say to put the v1 endpoint in
+`AGENTSUITE_MODEL_BASE_URL` instead.
 
 A resource with key authentication disabled takes a Microsoft Entra token for the
 `https://cognitiveservices.azure.com` resource as a bearer token: leave
@@ -260,32 +312,30 @@ at start and does not refresh it, so turns fail once the token expires (about 24
 managed-identity token); rerun `up.sh` with a fresh one, which restarts the daemons and drops their
 journals. The [recorded demo](#the-recorded-demo) runs this way, with a managed identity's token.
 
-`up.sh` refuses `AGENTSUITE_MODEL_BASE_URL` without `AGENTSUITE_MODEL`; `AGENTSUITE_MODEL`,
-`AGENTSUITE_MODEL_PATH`, `AGENTSUITE_MODEL_AUTH_HEADER` or `MODEL_API_KEY` without
+`up.sh` refuses `AGENTSUITE_MODEL_PATH` (retired, above); `AGENTSUITE_MODEL_BASE_URL` without
+`AGENTSUITE_MODEL`; `AGENTSUITE_MODEL`, `AGENTSUITE_MODEL_AUTH_HEADER` or `MODEL_API_KEY` without
 `AGENTSUITE_MODEL_BASE_URL` (only the URL selects a real provider, so the run would otherwise switch
-to the fake model); any of the four settings with whitespace or a control character in it, or ending
-with `:` (the manifest would read it as a YAML map key); a URL that is not `http` or `https` or that
-carries userinfo, a query or a fragment; with `MODEL_API_KEY` set, a plain `http` URL whose host is
-not a loopback address, `localhost`, or an in-cluster service ending in `.svc` or
-`.svc.cluster.local`, as `agentsessionsd` does; a path that carries a query other than one
-date-shaped `api-version`; a header that is not a header name; and any combination `agentsessionsd`
-would refuse at startup. It does so before it changes the cluster, so a misconfigured rerun leaves
-the running daemon, its journal and an existing key in place. `emit check-model` makes the last
-checks: it builds the model client with the daemon's own constructor (`internal/modelconfig`), so it
-refuses the same URLs and paths (no scheme or host, a bad port or `%` escape). The values are copied
-into the Deployment as written. The URL is also printed, the daemon logs the URL and the path, and
-both are written to `${STATE}/agentsessionsd.yaml`, so a credential in either would sit outside the
-Secret. `check-model` refuses these forms, which can carry one: userinfo, a query or a fragment in
-the URL; a query other than `api-version`, `@` or a fragment in the path. Its refusals do not repeat
-the URL or the path. It cannot tell a credential placed in a path segment, which is copied like any
-other. `up.sh` applies the key to the `agentsessionsd-model` Secret through stdin, so it never
-appears in argv or a file, and a failed apply leaves the stored key unchanged.
+to the fake model); any of the three settings with whitespace or a control character in it, or
+ending with `:` (the manifest would read it as a YAML map key); a URL that is not `http` or `https`
+or that carries userinfo, a query or a fragment; with `MODEL_API_KEY` set, a plain `http` URL whose
+host is not a loopback address, `localhost`, or an in-cluster service ending in `.svc` or
+`.svc.cluster.local`, as `agentsessionsd` does; a header that is not a header name; and any
+combination `agentsessionsd` would refuse at startup. It does so before it changes the cluster, so a
+misconfigured rerun leaves the running daemon, its journal and an existing key in place. `emit
+check-model` makes the last checks: it builds the model client with the daemon's own constructor
+(`internal/modelconfig`) and default path, so it refuses the same URLs (no scheme or host, a bad port
+or `%` escape). The values are copied into the Deployment as written. The URL is also printed, the
+daemon logs it, and it is written to `${STATE}/agentsessionsd.yaml`, so a credential in it would sit
+outside the Secret. `check-model` refuses the forms that can carry one: userinfo, a query or a
+fragment. Its refusals do not repeat the URL. It cannot tell a credential placed in a path segment,
+which is copied like any other. `up.sh` applies the key to the `agentsessionsd-model` Secret through
+stdin, so it never appears in argv or a file, and a failed apply leaves the stored key unchanged.
 `agentsessionsd` reads the key only when it starts, so `up.sh` stamps the Secret's version into the
 Deployment's pod template: a new or deleted key restarts the pod, which also drops its emptyDir
 journal, and an unchanged key leaves it running. It does not build or deploy the fake model. It
 points `agentsessionsd` at the endpoint and renders from this environment's binding: the committed
-binding with its model set to `AGENTSUITE_MODEL`, `AGENTSUITE_MODEL_BASE_URL` and
-`AGENTSUITE_MODEL_PATH` (`common.sh` `write_binding`). The harness requests the model its agent
+binding with its model set to `AGENTSUITE_MODEL` and `AGENTSUITE_MODEL_BASE_URL` (`common.sh`
+`write_binding`). The harness requests the model its agent
 pins, so `up.sh` refuses, before any cluster change, a provider model the agent does not pin
 (`emit check-binding`): the suite pins the model, and a different one is a new suite version and a
 new evaluation, not a render-time override. `driver.sh`, the v3 recording, ran
@@ -303,9 +353,15 @@ again on every real-provider run. A fake-provider `up.sh` deletes it too, so the
 a key.
 
 This path was run against the in-cluster fake standing in as the endpoint, with a dummy key, and by
-the recorded demo against an Azure OpenAI deployment (`gpt-5.4-mini`, `api-version`
-`2025-04-01-preview`) with an Entra token in the default `Authorization` header. The `api-key`
-header has not been run against a live deployment.
+the recorded demo against an Azure OpenAI deployment (`gpt-5.4-mini`) with an Entra token in the
+default `Authorization` header. That recording used the retired deployment path with `api-version`
+`2025-04-01-preview`. The v1 endpoint was verified on 2026-10-15 from the demo host with a
+managed-identity token (audience `https://cognitiveservices.azure.com` or `https://ai.azure.com`):
+`POST <resource>/openai/v1/chat/completions` with `model` `gpt-5.4-mini` returned HTTP 200 (response
+model `gpt-5.4-mini-2026-03-17`); the same URL with `?api-version=2025-04-01-preview` returned HTTP
+400 (`API version not supported`); `model` `no-such-deployment` returned HTTP 404
+(`DeploymentNotFound`). Those were direct requests, not a demo run through `agentsessionsd`. The
+`api-key` header has not been run against a live deployment.
 
 ## The binding and kmx
 
@@ -317,8 +373,11 @@ and a new evaluation (not run for v2; see the last row of the table). The shape 
 `AgentSessionsBinding` (kaimahi `internal/kmx/runtime/agentsessions_binding.go` and
 `internal/kmx/agentsessions/render.go` on branch `aramase/f/kmx_agentsessions_binding`, compared at
 `e005eb7`, `render.KmxCommit`): the same
-`apiVersion`, `kind` and fields, the same required `model` (`name`, `provider: openai`, optional
-`baseURL`, `secretRef`) and required `resources` (`cpu` and `memory`, each a positive quantity of at
+`apiVersion`, `kind` and fields, the same required `model`, now kmx's exactly (`name`,
+`provider: openai`, optional `baseURL`, `secretRef`, and nothing else: Azure OpenAI's v1 endpoint,
+`<resource>/openai/v1`, takes the deployment as the request's `model` and no `api-version`, so the
+binding needs no path, and a `model.path` is refused as an unknown member, as kmx refuses it), and
+required `resources` (`cpu` and `memory`, each a positive quantity of at
 most 32 bytes within substrate's 999.999 cores and 2^63-1 bytes, parsed by apimachinery's
 `resource.ParseQuantity`, as kmx and substrate parse them), rendered as the ActorTemplate's
 `resources` as kmx renders them, the same `workerSelector` rule (at most ten labels, qualified names,
@@ -333,7 +392,9 @@ formula (fed this renderer's own version, so the names differ; see the table), a
 results were checked by running kmx's code on the same inputs. At `e005eb7`:
 `AgentSessionsBindingDigest` on `binding-microvm.json` and `binding.json`, `TemplateName` on a
 pinned image and its mirror, and `ParseAgentSessionsBinding` on the decoder edits `render_test.go`
-makes (a repeated `kind` and label, `Kind` and `model.Name`, invalid UTF-8). At `fc03a7c`, the
+makes (a repeated `kind` and label, `Kind` and `model.Name`, invalid UTF-8), and on
+`binding-coordinator.json` without its `approval` (accepted with the `/openai/v1` base URL; with a
+`model.path` added, refused: `field path not found`). At `fc03a7c`, the
 branch's head before its rebase onto kaimahi main, whose binding and render files, `go.mod` and
 `go.sum` are byte-identical to `e005eb7`'s: `ValidateAgentSessionsBinding` on the boundary values
 `render_test.go` uses (959 and 960 storage bytes, quantity and label limits). `render_test.go` pins
@@ -341,16 +402,15 @@ the digests and names. Every difference that remains:
 
 | Difference | Why |
 |---|---|
-| `model.path` (PoC only) | An Azure OpenAI deployment's completions path carries its `api-version` query, and kmx's `model.baseURL` refuses a query. `TODO(spike): does Azure's v1 endpoint (<resource>/openai/v1, model in the body) work for this deployment with the managed-identity token, so kmx's shape needs no path?` |
-| `approval.invokes` (PoC only) | kmx has no approval field, and AgentSuite has none on an invokes edge. The PoC treats which delegation needs an operator as per-environment policy. kmx's strict parser refuses both PoC-only fields. |
+| `approval.invokes` (PoC only) | kmx has no approval field, and AgentSuite has none on an invokes edge. The PoC treats which delegation needs an operator as per-environment policy. kmx's strict parser refuses this PoC-only field. |
 | `approval.invokes` is sorted before the digest | It is a set; kmx has no such field to order. |
 | Template names differ from kmx's for the same image and binding | The formula is kmx's, `sha256(rendererVersion + "\n" + image + "\n" + bindingDigest)` over the full image reference, but the renderer version is the PoC's own (`agentsessions-poc.actortemplate/v2`, kmx's is `kmx.agentsessions-actortemplate/v2`): this renderer's ActorTemplate is not kmx's (its container env sets `AGENT_DIR` and `AGENTSUITE_APPROVAL`; kmx's sets `HARNESS_KIND` and `HARNESS_MODEL`), and kmx folds the version in so that two mappings never share a name. The memory tier also appends `"\nmemory"`; kmx has no memory tier. |
 | The memory tier refuses a `ROOTFS` or `VOLUMES` binding | kmx renders one stateless chat member, for which any fidelity is valid. The PoC's `-tier memory` keeps the conversation only in RAM, which substrate's `ROOTFS` and `VOLUMES` snapshots do not carry, so it requires `MEMORY`. |
 | The registration names the agent, not `chat` | kmx registers its member with `descriptor_id: chat` (the built-in chat harness in harnessnode); the PoC's harness serves the suite's agent, so `descriptor_id` is the agent id. |
 | Render output, and the substrate revision it targets | kmx lift is plan-only: it prints one JSON document (the ActorTemplate in proto field names, its `templateDigest`, the canonical registration and its `registrationSpecDigest`, and the host model references) checked against substrate `f4f7b806` (`SubstrateAPICommit`). The PoC writes `actortemplate.json` (protojson of the pinned substrate `96dffb2`'s `ateapipb.ActorTemplate`), the registration, the daemon flag and the model flags, and `up.sh`/`coordinator.sh` apply them. Both templates set the same fields; their values differ only in the name and the container env, as above. |
-| JSON only, no credential-shape scan | kmx reads YAML or JSON, refuses anchors, aliases and merge keys, and scans the binding's text and every value, and its harness image reference (`HarnessImageDigest`), for credential shapes (kaimahi `internal/kmx/secretshapes`, an internal package the PoC cannot import). The PoC decodes JSON only, with `encoding/json/v2`, which refuses what kmx's decoder refuses in a JSON document (unknown members, a member name in another case, a member given twice, invalid UTF-8, a second document), and keeps credentials out by field shape: names, URLs, the model path, the storage location and the Secret key are checked, and the harness image must parse as a digest-pinned reference. A credential-shaped string that still fits a field's shape (a token as a repository path segment of the image) is accepted, which kmx would refuse. Errors never repeat a URL, location or image. |
+| JSON only, no credential-shape scan | kmx reads YAML or JSON, refuses anchors, aliases and merge keys, and scans the binding's text and every value, and its harness image reference (`HarnessImageDigest`), for credential shapes (kaimahi `internal/kmx/secretshapes`, an internal package the PoC cannot import). The PoC decodes JSON only, with `encoding/json/v2`, which refuses what kmx's decoder refuses in a JSON document (unknown members, a member name in another case, a member given twice, invalid UTF-8, a second document), and keeps credentials out by field shape: names, URLs, the storage location and the Secret key are checked, and the harness image must parse as a digest-pinned reference. A credential-shaped string that still fits a field's shape (a token as a repository path segment of the image) is accepted, which kmx would refuse. Errors never repeat a URL, location or image. |
 | One binding per agent atespace | kmx lift renders one chat member into `binding.atespace`. The coordinator's three agents share one daemon, whose session actors are named by session uid, so `coordinator.sh setup` writes one copy of the binding per agent with `atespace` set to `agentsuite-<agent>` (three digests). |
-| The binding's endpoint is filled in at setup | `binding-coordinator.json` names `https://example.openai.azure.com`; `setup` writes this environment's copy with the operator's `AGENTSUITE_MODEL*` values, so no Azure resource name is committed. |
+| The binding's endpoint is filled in at setup | `binding-coordinator.json` names `https://example.openai.azure.com/openai/v1`; `setup` writes this environment's copy with the operator's `AGENTSUITE_MODEL*` values, so no Azure resource name is committed. |
 | No eval evidence | kmx eval takes one chat member and records the binding digest in its evidence, and kmx lift requires that evidence. A suite with invokes edges has no kmx eval path yet, so this PoC renders without evidence. |
 | `model.secretRef` is checked, not rendered | `coordinator.sh` requires `agentsessionsd-model`/`api-key`, the Secret it writes; the Deployment's `secretKeyRef` is fixed. |
 
@@ -503,8 +563,7 @@ harness's token line, and the journal's `EVENT_MODEL_CALL` record for the model 
 
 ```bash
 # On the KVM host, in a checkout, with the tools Dockerfile.tools installs:
-export AGENTSUITE_MODEL_BASE_URL=https://<resource>.openai.azure.com AGENTSUITE_MODEL=<deployment> \
-  AGENTSUITE_MODEL_PATH='/openai/deployments/<deployment>/chat/completions?api-version=2025-04-01-preview' \
+export AGENTSUITE_MODEL_BASE_URL=https://<resource>.openai.azure.com/openai/v1 AGENTSUITE_MODEL=<deployment> \
   AZURE_MI_CLIENT_ID=<client id of a managed identity on the host with access to the resource>
 examples/agentsuite-substrate/demo/driver.sh setup
 examples/agentsuite-substrate/demo/driver.sh show       # on a terminal it renders through present.awk

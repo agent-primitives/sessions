@@ -30,15 +30,18 @@ func delegationPrompt(targets []string) string {
 
 You can delegate to these agents: %s.
 To delegate, reply with only one line of JSON and nothing else: {"invoke": "<agent>", "task": "<the complete task for that agent>"}
+Each delegation starts a new session of that agent, unless you add "session": "<session id>" with the id a reply from that agent gave you: then the task goes to that same session, which remembers its earlier tasks and replies. Use this for follow-ups such as revisions.
 The next message gives you that agent's reply, or says why the delegation did not run.
 If a delegation did not run, do not do that agent's task yourself: continue without it and say in your final answer which task was not done and why.
 Delegate one task at a time. When you have what you need, reply with the final answer as plain text, not JSON.`, strings.Join(targets, ", "))
 }
 
-// delegation is a model reply asking for an invocation.
+// delegation is a model reply asking for an invocation. Session, when set, sends the task to a
+// session an earlier delegation of this coordinator session created (a follow-up).
 type delegation struct {
-	Invoke string `json:"invoke"`
-	Task   string `json:"task"`
+	Invoke  string `json:"invoke"`
+	Task    string `json:"task"`
+	Session string `json:"session,omitempty"`
 }
 
 // parseDelegation reads a reply that is one JSON object with a non-empty "invoke", optionally in a
@@ -110,11 +113,15 @@ func (h Harness) runCoordinator(ctx context.Context, start *api.Start, sink api.
 		if slices.Contains(h.Approval, d.Invoke) {
 			mediation = api.MediationRequiresApproval
 		}
-		log.Printf("harness: delegating to %s (%s), call %s", d.Invoke, mediation, id)
+		log.Printf("harness: delegating to %s (%s), call %s, session %q", d.Invoke, mediation, id, d.Session)
+		args := map[string]any{"agent": d.Invoke, "task": d.Task}
+		if d.Session != "" {
+			args["session"] = d.Session
+		}
 		res, err := sink.ToolCall(ctx, api.ToolCall{
 			ID:             id,
 			Tool:           invoke.Tool,
-			Args:           map[string]any{"agent": d.Invoke, "task": d.Task},
+			Args:           args,
 			Mediation:      mediation,
 			IdempotencyKey: id,
 		})
@@ -125,11 +132,16 @@ func (h Harness) runCoordinator(ctx context.Context, start *api.Start, sink api.
 	}
 }
 
-// resultText is how a delegation's outcome reaches the model.
+// resultText is how a delegation's outcome reaches the model. A reply names the child session, so
+// the model can send it a follow-up.
 func resultText(agent string, res api.ToolResult) string {
 	if res.IsError {
 		return fmt.Sprintf("The delegation to %s did not run: %s", agent, res.Error)
 	}
 	out, _ := res.Output["output"].(string)
-	return fmt.Sprintf("Reply from %s:\n%s", agent, out)
+	text := fmt.Sprintf("Reply from %s:\n%s", agent, out)
+	if s, _ := res.Output["session"].(string); s != "" {
+		text += fmt.Sprintf("\n(%s session id: %s)", agent, s)
+	}
+	return text
 }

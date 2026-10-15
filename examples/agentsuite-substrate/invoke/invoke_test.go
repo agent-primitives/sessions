@@ -6,39 +6,89 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kaimahi-agents/kaimahi/agentsuite"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/client"
 	"github.com/aramase/agentsessions/controller"
+	"github.com/aramase/agentsessions/wire"
 )
 
-// fakeSessions records child sessions and their first exec config, and serves each session's
-// journal as one EXECUTION_START carrying that config. Every calling session is in project
-// "proj-<uid>".
+// fakeSessions records child sessions and their first exec config, and keeps a journal per session:
+// each Exec appends an EXECUTION_START with its config and, once the turn finishes, its OUTPUT and
+// END; Resume finishes an interrupted turn the way the host's re-drive would. A session without a
+// journal serves one EXECUTION_START carrying its configs entry (the calling sessions of the tests).
+// Every calling session is in project "proj-<uid>".
 type fakeSessions struct {
-	mu      sync.Mutex
-	created []*v1.Session
-	configs map[string][]byte
+	mu       sync.Mutex
+	created  []*v1.Session
+	configs  map[string][]byte
+	journals map[string][]*v1.LogRecord
+	cold     map[string]bool
+	execs    int
+	// suspended and resumed list the Suspend and Resume calls, in order.
+	suspended, resumed []string
 	// block, when set, holds every Exec until it is closed or the Exec's ctx ends; started reports
 	// each Exec.
 	block   chan struct{}
 	started chan string
 	execErr error
+	// execErrBefore fails the next Exec before it journals anything.
+	execErrBefore error
+	suspendErr    error
 	// execCtxErr records the ctx error each blocked Exec ended with.
 	execCtxErr []error
 }
 
-func newFake() *fakeSessions { return &fakeSessions{configs: map[string][]byte{}} }
+func newFake() *fakeSessions {
+	return &fakeSessions{configs: map[string][]byte{}, journals: map[string][]*v1.LogRecord{}, cold: map[string]bool{}}
+}
 
 func (f *fakeSessions) GetSession(_ context.Context, uid string) (*v1.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, s := range f.created {
+		if s.GetMetadata().GetUid() == uid {
+			return f.view(s), nil
+		}
+	}
+	if strings.HasPrefix(uid, "sess-child-") {
+		return nil, status.Errorf(codes.NotFound, "session %q not found", uid)
+	}
 	return &v1.Session{Metadata: &v1.ResourceMetadata{Project: "proj-" + uid, Uid: uid}}, nil
+}
+
+func (f *fakeSessions) ListSessions(_ context.Context, project string) ([]*v1.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*v1.Session
+	for _, s := range f.created {
+		if s.GetMetadata().GetProject() == project {
+			out = append(out, f.view(s))
+		}
+	}
+	return out, nil
+}
+
+// view is a copy of s with its compute state, as the Sessions API reports it.
+func (f *fakeSessions) view(s *v1.Session) *v1.Session {
+	out := proto.Clone(s).(*v1.Session)
+	out.ComputeState = v1.ComputeState_COMPUTE_LIVE
+	if f.cold[s.GetMetadata().GetUid()] {
+		out.ComputeState = v1.ComputeState_COMPUTE_COLD
+	}
+	return out
 }
 
 func (f *fakeSessions) CreateSession(_ context.Context, s *v1.Session) (*v1.Session, error) {
@@ -49,9 +99,33 @@ func (f *fakeSessions) CreateSession(_ context.Context, s *v1.Session) (*v1.Sess
 	return out, nil
 }
 
+func (f *fakeSessions) record(uid, exec string, ev *v1.Event) {
+	ev.ExecutionId = exec
+	f.journals[uid] = append(f.journals[uid], &v1.LogRecord{Seq: int64(len(f.journals[uid]) + 1), Event: ev})
+}
+
+func (f *fakeSessions) finish(uid, exec, output string) {
+	f.record(uid, exec, &v1.Event{Kind: v1.EventKind_EVENT_OUTPUT, Body: &v1.Event_Message{Message: wire.MessageToProto(api.TextMessage("assistant", output))}})
+	f.record(uid, exec, &v1.Event{Kind: v1.EventKind_EVENT_END, Body: &v1.Event_End{End: &v1.HarnessEnd{State: "COMPLETED"}}})
+}
+
 func (f *fakeSessions) Exec(ctx context.Context, o client.ExecOptions) (*client.TurnResult, error) {
 	f.mu.Lock()
-	f.configs[o.Session] = o.Config
+	if err := f.execErrBefore; err != nil {
+		f.execErrBefore = nil
+		f.mu.Unlock()
+		return nil, err
+	}
+	if f.cold[o.Session] {
+		f.mu.Unlock()
+		return nil, fmt.Errorf("session %s is suspended", o.Session)
+	}
+	f.execs++
+	exec := fmt.Sprintf("exec-%d", f.execs)
+	if _, ok := f.configs[o.Session]; !ok {
+		f.configs[o.Session] = o.Config
+	}
+	f.record(o.Session, exec, &v1.Event{Kind: v1.EventKind_EVENT_EXECUTION_START, Body: &v1.Event_ExecutionStart{ExecutionStart: &v1.ExecutionStart{Config: o.Config}}})
 	block, started := f.block, f.started
 	f.mu.Unlock()
 	if started != nil {
@@ -70,7 +144,11 @@ func (f *fakeSessions) Exec(ctx context.Context, o client.ExecOptions) (*client.
 	if f.execErr != nil {
 		return nil, f.execErr
 	}
-	return &client.TurnResult{Output: "done: " + strings.Join(o.Inputs, " ")}, nil
+	out := "done: " + strings.Join(o.Inputs, " ")
+	f.mu.Lock()
+	f.finish(o.Session, exec, out)
+	f.mu.Unlock()
+	return &client.TurnResult{Output: out}, nil
 }
 
 func (f *fakeSessions) Replay(_ context.Context, uid string, _, _ int64) ([]*v1.LogRecord, error) {
@@ -79,10 +157,47 @@ func (f *fakeSessions) Replay(_ context.Context, uid string, _, _ int64) ([]*v1.
 	if uid == "missing" {
 		return nil, errors.New("not found")
 	}
+	if j := f.journals[uid]; len(j) > 0 {
+		return slices.Clone(j), nil
+	}
 	cfg := f.configs[uid]
 	return []*v1.LogRecord{
 		{Seq: 1, Event: &v1.Event{Body: &v1.Event_ExecutionStart{ExecutionStart: &v1.ExecutionStart{Config: cfg}}}},
 	}, nil
+}
+
+func (f *fakeSessions) Suspend(_ context.Context, uid string) (*v1.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.suspended = append(f.suspended, uid)
+	if f.suspendErr != nil {
+		return nil, f.suspendErr
+	}
+	f.cold[uid] = true
+	return &v1.Session{}, nil
+}
+
+// Resume wakes the session and, as the host's crash recovery does, finishes its last turn when it
+// has an EXECUTION_START and no END.
+func (f *fakeSessions) Resume(_ context.Context, uid string, _ bool) (*v1.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resumed = append(f.resumed, uid)
+	delete(f.cold, uid)
+	j := f.journals[uid]
+	var exec string
+	for _, r := range j {
+		switch r.GetEvent().GetKind() {
+		case v1.EventKind_EVENT_EXECUTION_START:
+			exec = r.GetEvent().GetExecutionId()
+		case v1.EventKind_EVENT_END:
+			exec = ""
+		}
+	}
+	if exec != "" {
+		f.finish(uid, exec, "re-driven")
+	}
+	return &v1.Session{}, nil
 }
 
 func (f *fakeSessions) setConfig(uid string, p Provenance) {
@@ -92,8 +207,19 @@ func (f *fakeSessions) setConfig(uid string, p Provenance) {
 	f.mu.Unlock()
 }
 
+// calls numbers the calls call makes, so two calls are two invocations unless a test reuses one.
+var calls atomic.Int64
+
 func call(agent, task string, mediation api.Mediation) api.ToolCall {
-	return api.ToolCall{ID: "call-1", Tool: Tool, Args: map[string]any{"agent": agent, "task": task}, Mediation: mediation, IdempotencyKey: "call-1"}
+	id := fmt.Sprintf("call-%d", calls.Add(1))
+	return api.ToolCall{ID: id, Tool: Tool, Args: map[string]any{"agent": agent, "task": task}, Mediation: mediation, IdempotencyKey: id}
+}
+
+// followUp is a call that sends task to the existing child session.
+func followUp(agent, session, task string) api.ToolCall {
+	c := call(agent, task, api.MediationControllerMediated)
+	c.Args["session"] = session
+	return c
 }
 
 func run(t *testing.T, fn controller.ToolFunc, session string, c api.ToolCall) api.ToolResult {
@@ -218,22 +344,25 @@ func TestPolicySetRefusesMalformedEdges(t *testing.T) {
 func TestInvokeCreatesChildSession(t *testing.T) {
 	f := newFake()
 	fn := New(suitePolicy(t), f).For("coordinator")
-	res := run(t, fn, "sess-root", call("writer", "write a haiku", api.MediationControllerMediated))
-	if res.IsError || res.ID != "call-1" {
+	c := call("writer", "write a haiku", api.MediationControllerMediated)
+	res := run(t, fn, "sess-root", c)
+	if res.IsError || res.ID != c.ID {
 		t.Fatalf("result = %+v", res)
 	}
 	if res.Output["session"] != "sess-child-1" || res.Output["agent"] != "writer" || res.Output["output"] != "done: write a haiku" {
 		t.Fatalf("output = %v", res.Output)
 	}
 	child := f.created[0]
-	if child.GetHarness() != "writer" || child.GetLabels()["agentsuite.invoked-by"] != "sess-root" || child.GetMetadata().GetName() != "coordinator-writer" {
+	key := Key("sess-root", c.ID)
+	if child.GetHarness() != "writer" || child.GetLabels()[LabelInvokedBy] != "sess-root" || child.GetLabels()[LabelKey] != key ||
+		child.GetMetadata().GetName() != "coordinator-writer-"+key[:12] {
 		t.Fatalf("child = %+v", child)
 	}
 	var cfg map[string]Provenance
 	if err := json.Unmarshal(f.configs["sess-child-1"], &cfg); err != nil {
 		t.Fatal(err)
 	}
-	want := Provenance{ParentSession: "sess-root", Caller: "coordinator", ToolCallID: "call-1", Target: "writer", Depth: 1, Remaining: 0}
+	want := Provenance{ParentSession: "sess-root", Caller: "coordinator", ToolCallID: c.ID, Target: "writer", Depth: 1, Remaining: 0}
 	if cfg[ConfigKey] != want {
 		t.Fatalf("provenance = %+v, want %+v", cfg[ConfigKey], want)
 	}
@@ -427,5 +556,174 @@ func TestInvokeErrors(t *testing.T) {
 	f.mu.Unlock()
 	if _, err := fn(t.Context(), controller.ToolCallContext{SessionUID: "sess-bad"}, call("writer", "w", api.MediationControllerMediated)); err == nil {
 		t.Fatal("malformed provenance must fail the call")
+	}
+}
+
+func lifecycle(t *testing.T, res api.ToolResult) map[string]any {
+	t.Helper()
+	lc, ok := res.Output["lifecycle"].(map[string]any)
+	if !ok {
+		t.Fatalf("no lifecycle in %v", res.Output)
+	}
+	return lc
+}
+
+// After its turn, a child is suspended, also when the turn failed; a failed suspend is reported in
+// the result and does not turn a done delegation into an error.
+func TestInvokeSuspendsChildAfterItsTurn(t *testing.T) {
+	f := newFake()
+	fn := New(suitePolicy(t), f).For("coordinator")
+	res := run(t, fn, "sess-root", call("writer", "w", api.MediationControllerMediated))
+	if lc := lifecycle(t, res); res.IsError || lc["origin"] != "new" || lc["turn"] != "ran" || lc["suspended"] != true || lc["suspendMs"] == nil || lc["wakeMs"] != nil {
+		t.Fatalf("result = %+v", res)
+	}
+	if !slices.Equal(f.suspended, []string{"sess-child-1"}) || len(f.resumed) != 0 {
+		t.Fatalf("suspended %v, resumed %v; want the child suspended once and nothing resumed", f.suspended, f.resumed)
+	}
+
+	f.execErr = errors.New("harness unavailable")
+	if res := run(t, fn, "sess-root", call("writer", "w", api.MediationControllerMediated)); !res.IsError || lifecycle(t, res)["suspended"] != true {
+		t.Fatalf("failed turn: %+v, want an error result with the child suspended", res)
+	}
+	f.execErr, f.suspendErr = nil, errors.New("ate-api unavailable")
+	res = run(t, fn, "sess-root", call("writer", "w", api.MediationControllerMediated))
+	if lc := lifecycle(t, res); res.IsError || lc["suspended"] != false || lc["suspendError"] != "ate-api unavailable" {
+		t.Fatalf("failed suspend: %+v, want the output with suspended false", res)
+	}
+}
+
+// A follow-up names an earlier child: the executor wakes it, runs the task there and suspends it
+// again, without creating a session. The turn's execution config names the follow-up's call.
+func TestInvokeFollowUpWakesTheSameChild(t *testing.T) {
+	f := newFake()
+	fn := New(suitePolicy(t), f).For("coordinator")
+	first := run(t, fn, "sess-root", call("writer", "draft", api.MediationControllerMediated))
+	child := first.Output["session"].(string)
+	c := followUp("writer", child, "revise")
+	res := run(t, fn, "sess-root", c)
+	lc := lifecycle(t, res)
+	if res.IsError || res.Output["session"] != child || res.Output["output"] != "done: revise" || lc["origin"] != "follow-up" || lc["wakeMs"] == nil || lc["suspended"] != true {
+		t.Fatalf("follow-up = %+v", res)
+	}
+	if len(f.created) != 1 || !slices.Equal(f.resumed, []string{child}) || !slices.Equal(f.suspended, []string{child, child}) {
+		t.Fatalf("created %d, resumed %v, suspended %v; want one child woken once and suspended after each turn", len(f.created), f.resumed, f.suspended)
+	}
+	recs, _ := f.Replay(t.Context(), child, 1, 0)
+	var ids []string
+	for _, r := range recs {
+		if p, ok := parseProvenance(r.GetEvent().GetExecutionStart().GetConfig()); ok {
+			ids = append(ids, p.ToolCallID)
+		}
+	}
+	if len(ids) != 2 || ids[1] != c.ID {
+		t.Fatalf("the child's executions name calls %v, want the first call then %s", ids, c.ID)
+	}
+}
+
+// A follow-up may only name a child of the calling session on the named agent; anything else is
+// refused before a turn runs.
+func TestInvokeFollowUpRefusesOtherSessions(t *testing.T) {
+	f := newFake()
+	x := New(suitePolicy(t), f)
+	writer := run(t, x.For("coordinator"), "sess-root", call("writer", "draft", api.MediationControllerMediated)).Output["session"].(string)
+	reviewer := run(t, x.For("coordinator"), "sess-other", call("reviewer", "review", api.MediationControllerMediated)).Output["session"].(string)
+	execs := f.execs
+	for name, c := range map[string]struct {
+		caller string
+		call   api.ToolCall
+	}{
+		"another agent's child":       {"sess-root", followUp("reviewer", writer, "x")},
+		"another caller's child":      {"sess-root", followUp("reviewer", reviewer, "x")},
+		"no such session":             {"sess-root", followUp("writer", "sess-child-99", "x")},
+		"a session it did not invoke": {"sess-root", followUp("writer", "sess-root", "x")},
+	} {
+		res := run(t, x.For("coordinator"), c.caller, c.call)
+		if !res.IsError || !strings.Contains(res.Error, "is not a") {
+			t.Errorf("%s: %+v, want a refusal", name, res)
+		}
+	}
+	if f.execs != execs || len(f.resumed) != 0 {
+		t.Fatalf("refused follow-ups ran %d turns and woke %v", f.execs-execs, f.resumed)
+	}
+}
+
+// A call re-driven after a host crash reaches the child the first attempt created, whatever the
+// crash interrupted: the child creation (no turn yet: run it now), the child's turn (re-driven with
+// Resume), or the result (the child's turn is served from its journal). Each retry runs on a new
+// executor, as a restarted host would, and no case creates a second child or runs the task twice.
+func TestInvokeRetryAfterCrashReachesTheSameChild(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		crash func(t *testing.T, f *fakeSessions, fn controller.ToolFunc, c api.ToolCall)
+		turn  string
+		execs int
+		out   string
+	}{
+		{
+			name: "after create, before the turn",
+			crash: func(t *testing.T, f *fakeSessions, fn controller.ToolFunc, c api.ToolCall) {
+				f.execErrBefore = errors.New("host lost")
+				run(t, fn, "sess-root", c)
+			},
+			turn: "ran", execs: 1, out: "done: w",
+		},
+		{
+			name: "during the child's turn",
+			crash: func(t *testing.T, f *fakeSessions, fn controller.ToolFunc, c api.ToolCall) {
+				f.block, f.started = make(chan struct{}), make(chan string, 1)
+				ctx, cancel := context.WithCancel(t.Context())
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					_, _ = fn(ctx, controller.ToolCallContext{SessionUID: "sess-root"}, c)
+				}()
+				<-f.started
+				cancel() // the host dies mid-turn; its result is never journaled
+				<-done
+				f.block, f.started = nil, nil
+			},
+			turn: "re-driven", execs: 1, out: "re-driven",
+		},
+		{
+			name: "after the child's turn, before the caller's result",
+			crash: func(t *testing.T, f *fakeSessions, fn controller.ToolFunc, c api.ToolCall) {
+				run(t, fn, "sess-root", c) // the result is dropped as a crash would drop it
+			},
+			turn: "recorded", execs: 1, out: "done: w",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFake()
+			c := call("writer", "w", api.MediationControllerMediated)
+			tc.crash(t, f, New(suitePolicy(t), f).For("coordinator"), c)
+			if len(f.created) != 1 {
+				t.Fatalf("the first attempt created %d children", len(f.created))
+			}
+			res := run(t, New(suitePolicy(t), f).For("coordinator"), "sess-root", c)
+			lc := lifecycle(t, res)
+			if res.IsError || res.Output["session"] != "sess-child-1" || res.Output["output"] != tc.out || lc["origin"] != "retry" || lc["turn"] != tc.turn || lc["suspended"] != true {
+				t.Fatalf("retry = %+v", res)
+			}
+			if len(f.created) != 1 || f.execs != tc.execs {
+				t.Fatalf("after the retry: %d children and %d turns, want 1 child and %d turns", len(f.created), f.execs, tc.execs)
+			}
+		})
+	}
+}
+
+// The key separates its inputs, and a child carrying a call's key for another caller or harness
+// fails the call rather than being reused.
+func TestKeyAndForeignKeyHolder(t *testing.T) {
+	if Key("a", "bc") == Key("ab", "c") || Key("s", "c") != Key("s", "c") || len(Key("s", "c")) != 32 {
+		t.Fatal("Key must be a stable 32-hex digest that separates session and call id")
+	}
+	f := newFake()
+	c := call("writer", "w", api.MediationControllerMediated)
+	_, _ = f.CreateSession(t.Context(), &v1.Session{
+		Metadata: &v1.ResourceMetadata{Project: "proj-sess-root"}, Harness: "reviewer",
+		Labels: map[string]string{LabelKey: Key("sess-root", c.ID), LabelInvokedBy: "sess-root"},
+	})
+	if _, err := New(suitePolicy(t), f).For("coordinator")(t.Context(), controller.ToolCallContext{SessionUID: "sess-root"}, c); err == nil {
+		t.Fatal("a session holding the key on another harness must fail the call")
 	}
 }

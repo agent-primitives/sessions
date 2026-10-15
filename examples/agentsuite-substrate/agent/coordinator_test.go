@@ -186,3 +186,15 @@ func TestParseDelegation(t *testing.T) {
 		}
 	}
 }
+
+// A follow-up names the child session; a reply names the session it came from, so the model can.
+func TestFollowUpDelegation(t *testing.T) {
+	d, ok := parseDelegation(`{"invoke": "writer", "task": "make it rhyme", "session": "sess-1"}`)
+	if !ok || d != (delegation{Invoke: "writer", Task: "make it rhyme", Session: "sess-1"}) {
+		t.Fatalf("parseDelegation = %+v, %v", d, ok)
+	}
+	got := resultText("writer", api.ToolResult{Output: map[string]any{"output": "a poem", "session": "sess-1"}})
+	if got != "Reply from writer:\na poem\n(writer session id: sess-1)" {
+		t.Fatalf("resultText = %q", got)
+	}
+}

@@ -9,11 +9,21 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/sqlitelog"
 	"github.com/aramase/agentsessions/wire"
 )
+
+func mustStruct(t *testing.T, m map[string]any) *structpb.Struct {
+	t.Helper()
+	s, err := structpb.NewStruct(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
 
 func TestExecHarnessFlag(t *testing.T) {
 	for _, tt := range []struct {
@@ -139,6 +149,32 @@ func TestFormatRecordVerbose(t *testing.T) {
 			Kind: v1.EventKind_EVENT_USAGE, Body: &v1.Event_Usage{Usage: &v1.Usage{Model: "gpt", InputTokens: 12, OutputTokens: 5, ReasoningTokens: 1}},
 		}},
 		want: "seq=3   EVENT_USAGE          hash=def prev=abc  model=gpt input_tokens=12 output_tokens=5 reasoning_tokens=1",
+	}, {
+		r: &v1.LogRecord{Seq: 4, ContentHash: "c4", PrevHash: "def", Event: &v1.Event{
+			Kind: v1.EventKind_EVENT_TOOL_CALL, Body: &v1.Event_Tool{Tool: &v1.ToolCall{Id: "call-1", Tool: "agentsuite.invoke", Mediation: v1.Mediation_MEDIATION_REQUIRES_APPROVAL,
+				Args: mustStruct(t, map[string]any{"task": "review it", "agent": "reviewer"})}},
+		}},
+		want: `seq=4   EVENT_TOOL_CALL      hash=c4 prev=def  id=call-1 tool=agentsuite.invoke mediation=REQUIRES_APPROVAL args={"agent":"reviewer","task":"review it"}`,
+	}, {
+		r: &v1.LogRecord{Seq: 5, ContentHash: "c5", PrevHash: "c4", Event: &v1.Event{
+			Kind: v1.EventKind_EVENT_APPROVAL_REQUEST, Body: &v1.Event_Approval{Approval: &v1.ApprovalRequest{ToolCallId: "call-1", Reason: "delegation"}},
+		}},
+		want: `seq=5   EVENT_APPROVAL_REQUEST hash=c5 prev=c4  tool_call=call-1 reason="delegation"`,
+	}, {
+		r: &v1.LogRecord{Seq: 6, ContentHash: "c6", PrevHash: "c5", Event: &v1.Event{
+			Kind: v1.EventKind_EVENT_APPROVAL_RESULT, Body: &v1.Event_ApprovalResult{ApprovalResult: &v1.ApprovalResult{ToolCallId: "call-1", Reason: "no", RequestSeq: 5}},
+		}},
+		want: `seq=6   EVENT_APPROVAL_RESULT hash=c6 prev=c5  tool_call=call-1 approved=false reason="no" request_seq=5`,
+	}, {
+		r: &v1.LogRecord{Seq: 7, ContentHash: "c7", PrevHash: "c6", Event: &v1.Event{
+			Kind: v1.EventKind_EVENT_TOOL_RESULT, Body: &v1.Event_Result{Result: &v1.ToolResult{Id: "call-1", Code: v1.ToolResult_APPROVAL_DENIED, IsError: true, Error: "denied"}},
+		}},
+		want: `seq=7   EVENT_TOOL_RESULT    hash=c7 prev=c6  id=call-1 code=APPROVAL_DENIED error="denied"`,
+	}, {
+		r: &v1.LogRecord{Seq: 8, ContentHash: "c8", PrevHash: "c7", Event: &v1.Event{
+			Kind: v1.EventKind_EVENT_TOOL_RESULT, Body: &v1.Event_Result{Result: &v1.ToolResult{Id: "call-2", Output: mustStruct(t, map[string]any{"session": "sess-1", "agent": "writer"})}},
+		}},
+		want: `seq=8   EVENT_TOOL_RESULT    hash=c8 prev=c7  id=call-2 output={"agent":"writer","session":"sess-1"}`,
 	}} {
 		if got := formatRecordVerbose(tt.r); got != tt.want {
 			t.Errorf("got  %q\nwant %q", got, tt.want)

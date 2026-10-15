@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"strings"
 
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/client"
@@ -392,7 +394,8 @@ func printRecord(r *v1.LogRecord) {
 
 // formatRecordVerbose is printRecord's line plus the record's chain links (content_hash and
 // prev_hash, shortened to 16 hex) and the body fields replay checks: a model call's model and input
-// hash, and a usage record's tokens.
+// hash, a usage record's tokens, a tool call's tool, mediation and arguments, a tool result's code,
+// error and output, and an approval request's or decision's fields.
 func formatRecordVerbose(r *v1.LogRecord) string {
 	ev := r.GetEvent()
 	line := fmt.Sprintf("seq=%-3d %-20s hash=%s prev=%s", r.GetSeq(), ev.GetKind(), short(r.GetContentHash()), short(r.GetPrevHash()))
@@ -406,10 +409,45 @@ func formatRecordVerbose(r *v1.LogRecord) string {
 		line += fmt.Sprintf("  model=%s input_tokens=%d output_tokens=%d reasoning_tokens=%d",
 			u.GetModel(), u.GetInputTokens(), u.GetOutputTokens(), u.GetReasoningTokens())
 	}
+	if c := ev.GetTool(); c != nil {
+		line += fmt.Sprintf("  id=%s tool=%s mediation=%s args=%s", c.GetId(), c.GetTool(),
+			strings.TrimPrefix(c.GetMediation().String(), "MEDIATION_"), compactJSON(c.GetArgs()))
+	}
+	if r := ev.GetResult(); r != nil {
+		line += "  id=" + r.GetId()
+		if r.GetCode() != v1.ToolResult_CODE_UNSPECIFIED {
+			line += " code=" + r.GetCode().String()
+		}
+		if r.GetIsError() {
+			line += fmt.Sprintf(" error=%q", r.GetError())
+		}
+		if r.GetOutput() != nil {
+			line += " output=" + compactJSON(r.GetOutput())
+		}
+	}
+	if a := ev.GetApproval(); a != nil {
+		line += fmt.Sprintf("  tool_call=%s reason=%q", a.GetToolCallId(), a.GetReason())
+	}
+	if a := ev.GetApprovalResult(); a != nil {
+		line += fmt.Sprintf("  tool_call=%s approved=%t reason=%q request_seq=%d", a.GetToolCallId(), a.GetApproved(), a.GetReason(), a.GetRequestSeq())
+	}
 	if msg := ev.GetMessage(); msg != nil {
 		line += "  " + partsText(msg)
 	}
 	return line
+}
+
+// compactJSON renders a Struct as one line of JSON with sorted keys (encoding/json, not protojson,
+// whose whitespace is not stable), or "-" when it is nil or does not encode.
+func compactJSON(s *structpb.Struct) string {
+	if s == nil {
+		return "-"
+	}
+	b, err := json.Marshal(s.AsMap())
+	if err != nil {
+		return "-"
+	}
+	return string(b)
 }
 
 // short keeps a hash readable in a line: its first 16 characters after any "sha256:" prefix, or "-"

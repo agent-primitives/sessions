@@ -212,9 +212,12 @@ collect() {
 	local video source
 	video="$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width,height,r_frame_rate -of csv=p=0 "${mp4}")"
 	source="$(cat "${OUT}/source.txt" 2>/dev/null || echo "an unrecorded source (no source.txt)")"
-	local scan mp4_hits
+	local scan mp4_hits mp4_prefix
 	scan="$(token_scan "${OUT}/logs" "${OUT}/scripts" "${OUT}/source.txt")"
-	mp4_hits="$(LC_ALL=C grep -c "ey""J" "${mp4}" || true)"
+	# A JWT in the MP4's bytes is its prefix and at least 8 more base64url characters; the bare 3-byte
+	# prefix also turns up by chance in compressed video, so it is counted but is not a finding.
+	mp4_hits="$(LC_ALL=C grep -a -o -E "ey""J[A-Za-z0-9_-]{8,}" "${mp4}" | wc -l | tr -d ' ')"
+	mp4_prefix="$(LC_ALL=C grep -a -o "ey""J" "${mp4}" | wc -l | tr -d ' ')"
 	local max_rows max_trace max_caption
 	# Each screen's row count is logged with its limit: 5, or 7 on the trace screen (run -n 7).
 	max_rows="$(sed -n 's/^(on screen: [0-9]* rows, \([0-9]*\) on this screen, limit 5)$/\1/p' "${OUT}"/logs/ch-*.log | sort -n | tail -1)"
@@ -258,7 +261,7 @@ collect() {
 			scripts_note="the demo files at ${head_short}, the same bytes the recording ran"
 		else
 			echo "  At ${head_short}, ${#changed[@]} of the demo files differ from the recording's: ${changed[*]}."
-			scripts_note="the demo files at ${head_short}; ${changed[*]} differ from the recording's (source.sha256 has the recording's hashes)"
+			scripts_note="the demo files at ${head_short}, which differ from the recording's only in ${changed[*]} (source.sha256 has the recording's hashes)"
 		fi
 		echo "- logs/: setup.log (off camera), show.log, one ch-N.log per chapter with the full output of every"
 		echo "  command (ch-4.log holds every component's full log for the traced turn), timeline.tsv; frames/: a"
@@ -292,12 +295,11 @@ collect() {
 		echo "  split screens are scripts/split-view.py. \$IMAGE, \$TEMPLATE, \$MEMTEMPLATE, \$API, \$API_MEM and"
 		echo "  \$ROUTER are set from setup's state before the title card (show.log has their values); \$CHILD is"
 		echo "  read from the line \`agentctl fork\` prints on screen (ch-9.log has it); the other variables are"
-		echo "  set by a command on screen. Waits longer than a moment are hidden between a \`⠿\`"
-		echo "  line and its \`✓ ... in N s\` line."
+		echo "  set by a command on screen."
 		echo "- The diagrams (build.mmd, run.mmd) are rendered with ${MERMAID_CLI} and spliced over the blocks"
 		echo "  chapters 2 and 4 draw for them (splice.py): $(awk -F'\t' '{ printf "%sthe %s diagram %s-%s s", (NR > 1 ? ", " : ""), ($1 == "magenta" ? "build" : $1 == "green" ? "run" : $1), $2, $3 }' "${OUT}/splice.tsv")."
-		echo "- Waits longer than a moment show one status line, \`⠿ <what> …\` and then \`✓ <what> in N s\`; it"
-		echo "  is the driver's, not a command's output, so it does not count toward a screen's output rows."
+		echo "- Waits longer than a moment are hidden between a status line \`⠿ <what> …\` and its \`✓ <what> in N s\`;"
+		echo "  that line is the driver's, not a command's output, so it does not count toward a screen's output rows."
 		echo "- After recording (\`record.sh teardown\`, logs/teardown.log): the cluster is deleted."
 		echo
 		cat "${DEMO}/diagrams.md"
@@ -310,7 +312,8 @@ collect() {
 		echo "  ${max_trace} on chapter 4's trace screen (limit 7); file screens show their file whole. The longest"
 		echo "  caption is ${max_caption} of $((DEMO_COLS - 2)) columns."
 		echo "- Token scan (a JWT prefix, the metadata token field, a bearer header) over logs/, scripts/ and"
-		echo "  source.txt: ${scan:-no matches}. The 3-byte JWT prefix in demo.mp4: ${mp4_hits} matches."
+		echo "  source.txt: ${scan:-no matches}. demo.mp4: ${mp4_hits} JWT-shaped strings (the prefix and 8 or more"
+		echo "  base64url characters); the bare 3-byte prefix occurs ${mp4_prefix} times, by chance in the video data."
 		echo "- Smoke pre-check: \`$(grep -m1 '^SMOKE OK' "${LOGS}/setup.log")\`"
 	} >"${OUT}/README.md"
 	echo "wrote ${OUT}/README.md"

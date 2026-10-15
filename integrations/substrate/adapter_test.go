@@ -25,7 +25,6 @@ type fakeControl struct {
 	lastCreate *atepb.Actor
 	lastTag    *atepb.Tag
 	actor      *atepb.Actor
-	resumed    *atepb.Actor // returned by ResumeActor when set; actor otherwise
 	getErr     error
 	tagErr     error
 }
@@ -39,9 +38,6 @@ func (f *fakeControl) CreateActor(_ context.Context, in *atepb.CreateActorReques
 }
 func (f *fakeControl) ResumeActor(_ context.Context, in *atepb.ResumeActorRequest, _ ...grpc.CallOption) (*atepb.ResumeActorResponse, error) {
 	f.calls = append(f.calls, "resume:"+in.GetActor().GetAtespace()+"/"+in.GetActor().GetName())
-	if f.resumed != nil {
-		return &atepb.ResumeActorResponse{Actor: f.resumed, Resumed: true}, nil
-	}
 	return &atepb.ResumeActorResponse{Actor: f.actor, Resumed: true}, nil
 }
 func (f *fakeControl) SuspendActor(_ context.Context, in *atepb.SuspendActorRequest, _ ...grpc.CallOption) (*atepb.SuspendActorResponse, error) {

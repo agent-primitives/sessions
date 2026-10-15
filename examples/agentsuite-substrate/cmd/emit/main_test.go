@@ -4,6 +4,10 @@ import (
 	"runtime/debug"
 	"strings"
 	"testing"
+
+	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 // check-model refuses what agentsessionsd's model client refuses at startup (model/openai), which
@@ -195,5 +199,57 @@ func TestDepVersion(t *testing.T) {
 				t.Errorf("depVersion = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// render writes each file in one fixed form (two-space indent, protojson's field order, a trailing
+// newline) that reads back as the same message, so two renders of the same inputs are the same
+// bytes and a file can be cited by line.
+func TestStableJSON(t *testing.T) {
+	m := &atepb.ActorTemplate{
+		Metadata: &atepb.ResourceMetadata{Atespace: "a", Name: "n"},
+		Containers: []*atepb.Container{{
+			Name:  "harness",
+			Image: "img@sha256:00",
+			Env:   []*atepb.EnvVar{{Name: "K", Value: "v"}},
+		}},
+		SandboxConfig: &atepb.SandboxConfig{SandboxClass: atepb.SandboxClass_SANDBOX_CLASS_MICROVM, ConfigName: "microvm"},
+	}
+	got, err := stableJSON(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{
+  "metadata": {
+    "atespace": "a",
+    "name": "n"
+  },
+  "containers": [
+    {
+      "name": "harness",
+      "image": "img@sha256:00",
+      "env": [
+        {
+          "name": "K",
+          "value": "v"
+        }
+      ]
+    }
+  ],
+  "sandboxConfig": {
+    "sandboxClass": "SANDBOX_CLASS_MICROVM",
+    "configName": "microvm"
+  }
+}
+`
+	if string(got) != want {
+		t.Errorf("stableJSON =\n%s\nwant\n%s", got, want)
+	}
+	back := &atepb.ActorTemplate{}
+	if err := protojson.Unmarshal(got, back); err != nil {
+		t.Fatal(err)
+	}
+	if !proto.Equal(back, m) {
+		t.Errorf("stableJSON does not read back as the message: %v", back)
 	}
 }

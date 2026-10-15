@@ -25,6 +25,19 @@ case "${1:-}" in
 	;;
 esac
 
+# AGENTSUITE_DEMO_SKIP_TEMPLATE names a tier (stateless or memory) whose ActorTemplate is rendered
+# but not created, for a caller that creates it itself (the recorded demo creates the stateless one
+# on camera). agentsessionsd is still deployed with that tier's -substrate-harness flag: it reads the
+# template only when it creates a session's actor, not at startup.
+SKIP_TEMPLATE="${AGENTSUITE_DEMO_SKIP_TEMPLATE:-}"
+case "${SKIP_TEMPLATE}" in
+"" | stateless | memory) ;;
+*)
+	echo "AGENTSUITE_DEMO_SKIP_TEMPLATE=${SKIP_TEMPLATE}: want stateless or memory; nothing was changed" >&2
+	exit 1
+	;;
+esac
+
 step() { printf '\n==> %s\n' "$*"; }
 
 for tool in docker kind ko go git python3 kubectl curl; do
@@ -304,6 +317,12 @@ done
 "${ATE[@]}" get atespace "${ATESPACE}" >/dev/null 2>&1 || "${ATE[@]}" create atespace "${ATESPACE}"
 for out in "${STATE}/render" "${STATE}/render-memory"; do
 	TEMPLATE="$(cat "${out}/template-name")"
+	tier=stateless
+	if [[ "${out}" == "${STATE}/render-memory" ]]; then tier=memory; fi
+	if [[ "${SKIP_TEMPLATE}" == "${tier}" ]]; then
+		step "ActorTemplate ${ATESPACE}/${TEMPLATE} (${tier} tier) rendered, not created: AGENTSUITE_DEMO_SKIP_TEMPLATE=${tier}"
+		continue
+	fi
 	step "ActorTemplate ${ATESPACE}/${TEMPLATE}; wait for its golden snapshot"
 	if ! "${ATE[@]}" get actor-template "${TEMPLATE}" -a "${ATESPACE}" >/dev/null 2>&1; then
 		"${ATE[@]}" create actor-template -f "${out}/actortemplate.json"

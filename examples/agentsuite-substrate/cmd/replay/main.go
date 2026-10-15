@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"time"
@@ -34,14 +35,15 @@ func main() {
 	atespace := flag.String("atespace", "agentsuite-demo", "atespace of the session actors")
 	modelURL := flag.String("model-base-url", "http://127.0.0.1:8082/v1", "model endpoint the replay would call if it called one")
 	statsURL := flag.String("stats-url", "http://127.0.0.1:8082/stats", "fake model call counter; empty relies on the controller's own count")
+	outputsFile := flag.String("outputs", "", "write each replayed turn's output to this file instead of printing it")
 	flag.Parse()
-	if err := run(*server, *session, *router, *atespace, *modelURL, *statsURL); err != nil {
+	if err := run(*server, *session, *router, *atespace, *modelURL, *statsURL, *outputsFile); err != nil {
 		fmt.Fprintln(os.Stderr, "replay:", err)
 		os.Exit(1)
 	}
 }
 
-func run(server, uid, router, atespace, modelURL, statsURL string) error {
+func run(server, uid, router, atespace, modelURL, statsURL, outputsFile string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	c, err := client.Dial(server)
@@ -93,8 +95,20 @@ func run(server, uid, router, atespace, modelURL, statsURL string) error {
 	if err != nil {
 		return err
 	}
+	var w io.Writer = os.Stdout
+	if outputsFile != "" {
+		f, err := os.Create(outputsFile)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		w = f
+		fmt.Printf("replayed outputs: %d, written to %s\n", len(outputs), outputsFile)
+	}
 	for i, o := range outputs {
-		fmt.Printf("replayed output %d: %s\n", i+1, o)
+		if _, err := fmt.Fprintf(w, "replayed output %d: %s\n", i+1, o); err != nil {
+			return err
+		}
 	}
 	fmt.Printf("re-executed %d completed turns\n", completedTurns(recs))
 	if statsURL != "" {

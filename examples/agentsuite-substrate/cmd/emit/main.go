@@ -12,6 +12,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -180,11 +182,11 @@ func renderCmd(args []string) error {
 		return err
 	}
 	write := func(name string, m proto.Message) error {
-		data, err := protojson.MarshalOptions{Multiline: true, Indent: "  "}.Marshal(m)
+		data, err := stableJSON(m)
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(filepath.Join(c.out, name), append(data, '\n'), 0o644)
+		return os.WriteFile(filepath.Join(c.out, name), data, 0o644)
 	}
 	if err := write("actortemplate.json", out.Template); err != nil {
 		return err
@@ -202,6 +204,23 @@ func renderCmd(args []string) error {
 	fmt.Printf("ActorTemplate %s/%s (image %s, binding %s)\nharness %s -> -substrate-harness=%s\n",
 		out.Template.GetMetadata().GetAtespace(), name, *image, b.Digest(), out.Registration.GetMetadata().GetName(), out.DaemonFlag)
 	return nil
+}
+
+// stableJSON is m as protojson writes it (field order, names and values), re-indented by
+// encoding/json with two spaces and a trailing newline. protojson deliberately varies its whitespace
+// between builds, so its own Multiline output differs from run to run; this form is the same bytes
+// for the same message, which lets a rendered file be diffed, compared and cited by line.
+func stableJSON(m proto.Message) ([]byte, error) {
+	data, err := protojson.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	if err := json.Indent(&out, data, "", "  "); err != nil {
+		return nil, err
+	}
+	out.WriteByte('\n')
+	return out.Bytes(), nil
 }
 
 // checkModel refuses model settings agentsessionsd would refuse at startup, so up.sh can stop before

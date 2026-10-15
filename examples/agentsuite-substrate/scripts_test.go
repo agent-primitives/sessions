@@ -499,6 +499,33 @@ func TestUpClusterPhase(t *testing.T) {
 	}
 }
 
+// AGENTSUITE_DEMO_SKIP_TEMPLATE=stateless renders the stateless tier's template but neither looks it
+// up nor creates it, creates the memory tier's, and still deploys agentsessionsd with the stateless
+// tier's -substrate-harness flag (the recorded demo creates that template on camera).
+func TestUpSkipsATemplate(t *testing.T) {
+	s := newStubs(t)
+	s.node(t, "node-1")
+	s.record(t, "created-cluster", "node-1")
+	s.record(t, "setup-cluster", "node-1 installed")
+	code, out, calls := s.run(t, "up.sh", "STUB_CLUSTERS="+cluster, "STUB_FULL=1", "AGENTSUITE_DEMO_SKIP_TEMPLATE=stateless")
+	if code != 0 {
+		t.Fatalf("up.sh exit %d, want 0\noutput:\n%s\ncalls:\n%s", code, out, calls)
+	}
+	if strings.Contains(calls, "actor-template tmpl-1") || !strings.Contains(calls, "get actor-template tmpl-2") {
+		t.Errorf("want template tmpl-2 looked up and tmpl-1 left alone; calls:\n%s", calls)
+	}
+	if !strings.Contains(out, "agentsuite-demo/tmpl-1 (stateless tier) rendered, not created: AGENTSUITE_DEMO_SKIP_TEMPLATE=stateless") {
+		t.Errorf("output does not say tmpl-1 was skipped:\n%s", out)
+	}
+	b, err := os.ReadFile(filepath.Join(s.work, "cluster-"+cluster, "agentsessionsd.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "- -substrate-harness=triage=agentsuite-demo/tmpl-1\n") {
+		t.Errorf("agentsessionsd.yaml lacks the stateless tier's flag:\n%s", b)
+	}
+}
+
 func TestDown(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -835,6 +862,11 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			name:    "micro-VM on a Docker host without KVM",
 			env:     func(*testing.T) []string { return []string{"STUB_NO_KVM=1"} },
 			wantOut: "AGENTSUITE_DEMO_SANDBOX=microvm needs /dev/kvm in the Docker host, and 'docker run --device /dev/kvm' failed; set AGENTSUITE_DEMO_SANDBOX=gvisor on a host without KVM (an arm64 Mac); nothing was changed",
+		},
+		{
+			name:    "a template tier to skip that is not a tier",
+			env:     func(*testing.T) []string { return []string{"AGENTSUITE_DEMO_SKIP_TEMPLATE=both"} },
+			wantOut: "AGENTSUITE_DEMO_SKIP_TEMPLATE=both: want stateless or memory; nothing was changed",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

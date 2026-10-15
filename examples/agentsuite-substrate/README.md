@@ -241,9 +241,8 @@ header has not been run against a live deployment.
   `Describe`, so a stateful image declared without it loses its RAM state on fork. This demo
   declares each deployment with its template's tier: `agentsessionsd` serves `<agent>` without
   `,memory` (`STATELESS_REPLAY`), and `agentsessionsd-memory` serves `<agent>-memory` with it
-  (`REQUIRES_MEMORY_SNAPSHOT`); neither declaration is checked against its image. A memory-tier
-  session that has started a turn and lost its actor is refused (`FAILED_PRECONDITION`) rather than
-  given a fresh actor. See
+  (`REQUIRES_MEMORY_SNAPSHOT`). A memory-tier session that has started a turn and lost its actor is
+  refused (`FAILED_PRECONDITION`) rather than given a fresh actor. See
   [Substrate placement binding](../../docs/substrate-conformance.md#substrate-placement-binding).
 - **The journal lives in an emptyDir.** It lasts as long as the `agentsessionsd` pod.
 - **The AgentSessionsBinding is a draft.** kaimahi does not define the kind yet. `binding.json`

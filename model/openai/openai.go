@@ -109,7 +109,8 @@ func WithHeader(name, value string) Option {
 }
 
 // WithPath overrides the path appended to the base URL. It may carry a query string, which is what
-// an endpoint that pins an API version needs.
+// an endpoint that pins an API version needs; New refuses a query parameter that the base URL's
+// query also sets.
 func WithPath(p string) Option {
 	return func(c *Client) {
 		if p != "" {
@@ -143,8 +144,8 @@ func WithHTTPClient(h *http.Client) Option {
 
 // New builds a Client. A default model is required: the model id ends up on every recorded
 // MODEL_CALL event, so a client that cannot name one would write a journal that does not say what
-// produced the completion. A base URL that is not absolute, or a path that does not parse, is an
-// error.
+// produced the completion. A base URL that is not absolute, a path that does not parse, or a query
+// parameter set in both the base URL and the path is an error.
 func New(opts ...Option) (*Client, error) {
 	c := &Client{
 		baseURL: DefaultBaseURL,
@@ -170,6 +171,10 @@ func New(opts ...Option) (*Client, error) {
 // joinEndpoint appends path to base's path and keeps both query strings, base's first. Joining the
 // strings instead would put the path after a query or fragment in base, sending
 // https://h/v1?api-version=2#x/chat/completions to /v1 with the path lost in the fragment.
+//
+// A parameter both queries set is refused rather than sent twice: which copy an endpoint reads
+// differs between servers, so an api-version in both could select a version neither one names.
+// Only names are compared, and the error quotes the name alone, since a value may be a secret.
 func joinEndpoint(base, path string) (string, error) {
 	u, err := url.Parse(base)
 	if err != nil {
@@ -181,6 +186,9 @@ func joinEndpoint(base, path string) (string, error) {
 	p, err := url.Parse(path)
 	if err != nil {
 		return "", fmt.Errorf("openai: path: %w", err)
+	}
+	if key := sharedQueryKey(u.RawQuery, p.RawQuery); key != "" {
+		return "", fmt.Errorf("openai: query parameter %q is set in both the base URL and the path; set it in one of them", key)
 	}
 	joined := *u
 	joined.Path = strings.TrimSuffix(u.Path, "/") + p.Path
@@ -194,6 +202,25 @@ func joinEndpoint(base, path string) (string, error) {
 	joined.ForceQuery = false
 	joined.Fragment, joined.RawFragment = "", ""
 	return joined.String(), nil
+}
+
+// sharedQueryKey returns the first parameter name, in a's order, that both raw queries set, or "".
+// Names are compared after decoding, so api-version and api%2Dversion are the same parameter. A
+// pair that does not decode is compared as far as it parses; the query is still sent as given.
+func sharedQueryKey(a, b string) string {
+	if a == "" || b == "" {
+		return ""
+	}
+	bq, _ := url.ParseQuery(b)
+	for _, pair := range strings.Split(a, "&") {
+		name, _, _ := strings.Cut(pair, "=")
+		if name, err := url.QueryUnescape(name); err == nil && name != "" {
+			if _, ok := bq[name]; ok {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 // maxRedirects is net/http's default redirect limit, which setting CheckRedirect replaces.

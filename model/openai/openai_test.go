@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -658,6 +659,39 @@ func TestBaseURLWithAQueryOrFragmentKeepsTheCompletionsPath(t *testing.T) {
 				t.Fatalf("raw path = %q, want the base URL's escaping kept", gotRawPath)
 			}
 		})
+	}
+}
+
+// A parameter set in both the base URL's query and the path's query would be sent twice, and
+// servers differ in which copy they read, so New refuses it. The error names the parameter and
+// never a value, which may be a secret. Different parameters in the two queries are still joined.
+func TestNewRefusesAQueryParameterInBothBaseURLAndPath(t *testing.T) {
+	for _, tc := range []struct {
+		name, base, path, wantKey string
+	}{
+		{name: "same key", base: "https://h/openai?api-version=2", path: "/chat/completions?api-version=3", wantKey: "api-version"},
+		{name: "same key and value", base: "https://h/openai?api-version=2", path: "/chat/completions?api-version=2", wantKey: "api-version"},
+		{name: "second key of several", base: "https://h/openai?tenant=a&sig=s3cr3t", path: "/chat/completions?x=1&sig=other", wantKey: "sig"},
+		{name: "escaped name", base: "https://h/openai?api%2Dversion=2", path: "/chat/completions?api-version=3", wantKey: "api-version"},
+		{name: "key without a value", base: "https://h/openai?flag", path: "/chat/completions?flag=1", wantKey: "flag"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := openai.New(openai.WithBaseURL(tc.base), openai.WithPath(tc.path), openai.WithModel("m"))
+			if err == nil {
+				t.Fatalf("New(base %q, path %q) succeeded, want a duplicate-parameter error", tc.base, tc.path)
+			}
+			if !strings.Contains(err.Error(), strconv.Quote(tc.wantKey)) {
+				t.Fatalf("err = %v, want it to name %q", err, tc.wantKey)
+			}
+			for _, secret := range []string{"s3cr3t", "other", "=2", "=3"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("err = %v, must not quote a query value", err)
+				}
+			}
+		})
+	}
+	if _, err := openai.New(openai.WithBaseURL("https://h/openai?tenant=a"), openai.WithPath("/chat/completions?api-version=2"), openai.WithModel("m")); err != nil {
+		t.Fatalf("distinct parameters in the two queries: %v", err)
 	}
 }
 

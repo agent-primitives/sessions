@@ -166,6 +166,9 @@ provide.
   `RegisterHarness` reactivates the row for every host sharing the journal.
 - `openai.New` refuses a base URL that is not absolute (no scheme or host), so `agentsessionsd`
   exits at startup with `-model-base-url` set to one. Such a URL used to fail every request.
+  It also refuses a query parameter that both the base URL and the path (`WithPath`,
+  `-model-path`) set, such as an `api-version` in each, which was sent twice; set it in one of
+  them. The error names the parameter, never its value.
 - `agentsessionsd` exits at startup with a model API key and a plain-`http` `-model-base-url` to a
   host that is not loopback, `localhost` or a `.svc` name (see Security). Switch such an
   endpoint to `https`, or unset the key, before upgrading.

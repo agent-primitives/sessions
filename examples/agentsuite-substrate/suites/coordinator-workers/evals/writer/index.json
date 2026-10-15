@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "1.0.0-draft",
+  "mediaType": "application/vnd.agentsuite.eval.index.v1+json",
+  "agent": "writer",
+  "cases": [
+    {"path": "evals/writer/cases/capital.json", "digest": "sha256:b8dc8bb6bc77fa7c09e2f7968e1d7f08216e97d461489d201fff930c2c905f1b"},
+    {"path": "evals/writer/cases/arithmetic.json", "digest": "sha256:a37f60068526aa1a5c83674574273aefa49528c6f16afeb0f4586722cbf804af"}
+  ],
+  "limits": {"maxCases": 128, "maxCaseBytes": 4194304}
+}

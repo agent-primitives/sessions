@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0-draft",
+  "mediaType": "application/vnd.agentsuite.agent.v1+json",
+  "id": "coordinator",
+  "description": "Delegates writing tasks to the writer and reviews to the reviewer.",
+  "instructions": {
+    "path": "instructions/coordinator.md",
+    "digest": "sha256:ac9a925737cfa43cf4c5f50251f393770eae4b451dd52de50166e5c3b289f1f4"
+  },
+  "model": {
+    "protocol": "openai-compatible",
+    "model": "example-model"
+  },
+  "toolProviders": [],
+  "invokes": [
+    {
+      "agent": "writer",
+      "maxConcurrent": 1,
+      "maxDepth": 1
+    },
+    {
+      "agent": "reviewer",
+      "maxConcurrent": 1,
+      "maxDepth": 1
+    }
+  ],
+  "extensions": []
+}

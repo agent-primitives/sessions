@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/agent-substrate/substrate v0.4.1-0.20261013053953-96dffb287919
 	github.com/aramase/agentsessions v0.1.3-0.20261013201528-ca85f47a2ec1
-	github.com/kaimahi-agents/kaimahi v0.5.2-0.20261014180858-9c5c993e35ba
+	github.com/kaimahi-agents/kaimahi v0.6.1-0.20261015030249-75f27d67f40b
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 )

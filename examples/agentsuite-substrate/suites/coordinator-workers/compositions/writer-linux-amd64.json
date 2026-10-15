@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0.0-draft",
+  "mediaType": "application/vnd.agentsuite.composition.v1+json",
+  "agent": "writer",
+  "platform": {
+    "os": "linux",
+    "architecture": "amd64"
+  },
+  "buildProfile": "default",
+  "toolProviders": []
+}

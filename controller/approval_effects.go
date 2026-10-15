@@ -18,7 +18,8 @@ var ErrApprovalUnavailable = errors.New("controller: approval execution is unava
 // ErrInvalidApprovalCall rejects missing or reused gated call identities before intent is written.
 var ErrInvalidApprovalCall = errors.New("controller: invalid approval call identity")
 
-// ErrApprovalReceiptReport rejects in-harness reports carrying host-owned approval receipt fields.
+// ErrApprovalReceiptReport rejects harness reports and ordinary executor replies carrying
+// host-owned approval receipt fields or unsupported result codes.
 var ErrApprovalReceiptReport = errors.New("controller: approval receipts are host owned")
 
 // ErrMissingToolExecutor is a recoverable host precondition, not an executor-failure receipt.

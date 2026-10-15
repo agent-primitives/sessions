@@ -667,7 +667,7 @@ EOF
 agentctl replay --server $API --session $CHILD --to 1
 EOF
 	[[ "${SHOWN}" == *"\"parentSession\":\"${S}\""* && "${SHOWN}" == *'"caller":"coordinator"'* && "${SHOWN}" == *'"depth":1'* ]] || fail "the writer session does not record its parent"
-	page "Each child session ran as an actor from its agent's template on the micro-VM worker pool; after its turn the host suspended it, so it holds no worker"
+	page "Each child ran as an actor from its agent's template on micro-VMs; after its turn the host suspended it"
 	run -n 12 <<'EOF'
 kubectl ate get actors -a agentsuite-writer && kubectl ate get actors -a agentsuite-reviewer
 EOF
@@ -708,7 +708,9 @@ EOF
 agentctl replay --server \$API --session \$DENIED --from ${out} --to ${out}
 EOF
 	page "A second writer session, and no second reviewer session"
-	run <<'EOF'
+	# Five sessions; a child's name carries its key (<caller>-<target>-<key[:12]>), so the reviewer's
+	# row is one column too wide and wraps.
+	run -n 6 <<'EOF'
 agentctl list --server $API
 EOF
 	[[ "$(sessions writer)" == 2 && "$(sessions reviewer)" == 1 && "$(sessions coordinator)" == 2 ]] || fail "want two coordinator, two writer and one reviewer session"

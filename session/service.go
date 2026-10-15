@@ -605,7 +605,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		return sendErr
 	}
 	var park *api.ApprovalParkedError
-	parked := errors.As(operationErr, &park) && isParkUnwind(operationErr, park.Ref)
+	parked := errors.As(operationErr, &park) && api.IsParkUnwind(operationErr, park.Ref)
 	if operationErr != nil && !parked {
 		if refused != nil && operationErr == refused {
 			return refused
@@ -883,7 +883,7 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	}
 	err = s.registry.Resume(ctx, log, uid, info.Harness, placement.WithResolvedHarnessCheck(check))
 	var park *api.ApprovalParkedError
-	if err != nil && (!errors.As(err, &park) || !isParkUnwind(err, park.Ref)) {
+	if err != nil && (!errors.As(err, &park) || !api.IsParkUnwind(err, park.Ref)) {
 		if refused != nil && err == refused {
 			return nil, refused
 		}
@@ -894,27 +894,6 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 		return nil, sessionStoreError(err, uid)
 	}
 	return sessionProto(info)
-}
-
-// A park is a successful public pause only when every joined cause unwinds the same request.
-// Independent Run failures retain the existing Exec/Resume error mapping, even beside a park.
-func isParkUnwind(err error, ref api.ApprovalRef) bool {
-	var parked *api.ApprovalParkedError
-	if !errors.As(err, &parked) || parked == nil || parked.Ref != ref {
-		return false
-	}
-	for err != nil {
-		if joined, ok := err.(interface{ Unwrap() []error }); ok {
-			for _, cause := range joined.Unwrap() {
-				if !isParkUnwind(cause, ref) {
-					return false
-				}
-			}
-			return true
-		}
-		err = errors.Unwrap(err)
-	}
-	return true
 }
 
 func suspendError(err error) error {

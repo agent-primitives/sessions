@@ -52,7 +52,7 @@ func approvalError(err error) error {
 	switch {
 	case errors.Is(err, controller.ErrInvalidApprovalDecision), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, controller.ErrReplayDiverged), errors.Is(err, controller.ErrApprovalUnavailable):
 		return status.Error(codes.FailedPrecondition, err.Error())
-	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
+	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, placement.ErrCheckpointing), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
 		return status.Error(codes.Aborted, err.Error())
 	default:
 		return status.Errorf(codes.Internal, "approve: %v", err)

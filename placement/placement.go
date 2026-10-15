@@ -120,9 +120,9 @@ type Placer struct {
 type sessionSet struct {
 	mu   sync.Mutex
 	live map[string]map[*liveHarness]struct{} // session UID -> open harness connections
-	// checkpoints holds the session UIDs a stateful fork or a Suspend is checkpointing. While a
-	// session is in it, no harness connection can be opened for the session and no other fork or
-	// Suspend can checkpoint it.
+	// checkpoints holds session UIDs fenced by a stateful Fork, Suspend or approval decision.
+	// While a session is in it, no harness connection can be opened for the session and no
+	// other operation can acquire its checkpoint mark.
 	checkpoints map[string]struct{}
 	// shared is set when a Registry owns the set, so a Placer cannot join two registries' sets.
 	shared bool
@@ -386,7 +386,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}
 	if err := c.Exec(ctx, har, inputs, expectedLastSeq); err != nil {
 		var park *api.ApprovalParkedError
-		if errors.As(err, &park) && isParkUnwind(err, park.Ref) {
+		if errors.As(err, &park) && api.IsParkUnwind(err, park.Ref) {
 			return inc, p.handoffPark(operationCtx, log, sessionUID, fence, park, closeInvocation, cfg.observer)
 		}
 		return inc, turnError(ctx, err)
@@ -577,9 +577,9 @@ func tcpDial(address string, opts []grpc.DialOption) (api.Harness, func() error,
 // ErrCheckpointing is returned when a turn cannot proceed because its session is being
 // checkpointed as the parent of a stateful Fork, which lasts until every child is cloned from the
 // checkpoint: either the turn tried to open a harness connection meanwhile, or the checkpoint ended
-// the connection the turn was using. A stateful Fork or a Suspend that finds the session already
-// being checkpointed by another one returns it too. It is retryable once the checkpoint returns;
-// session.Service maps it to codes.Aborted.
+// the connection the turn was using. A stateful Fork, Suspend or Registry.Approve also returns it
+// when another operation holds the shared checkpoint mark. It is retryable once that operation
+// returns; session.Service maps it to codes.Aborted.
 var ErrCheckpointing = errors.New("placement: session is being checkpointed")
 
 // errSuperseded is the cancellation cause of a turn whose harness connection a checkpoint ended. The
@@ -725,7 +725,7 @@ func (p *Placer) refuseDuringCheckpoint(sessionUID string) error {
 func (p *Placer) beginCheckpoint(sessionUID string) ([]*liveHarness, error) {
 	p.sessions.mu.Lock()
 	defer p.sessions.mu.Unlock()
-	if err := p.setCheckpointLocked(sessionUID); err != nil {
+	if err := p.sessions.setCheckpointLocked(sessionUID); err != nil {
 		return nil, err
 	}
 	open := make([]*liveHarness, 0, len(p.sessions.live[sessionUID]))
@@ -736,34 +736,33 @@ func (p *Placer) beginCheckpoint(sessionUID string) ([]*liveHarness, error) {
 	return open, nil
 }
 
-// markCheckpoint sets the session's checkpoint mark for a Suspend. Unlike beginCheckpoint it ends
-// no harness connection: Suspend holds the session guard, and every connection is opened by an Exec
-// or Resume under that guard, so none is open. It fails with ErrCheckpointing, changing nothing,
-// while a fork holds the mark. Every successful call must be paired with endCheckpoint.
-func (p *Placer) markCheckpoint(sessionUID string) error {
-	p.sessions.mu.Lock()
-	defer p.sessions.mu.Unlock()
-	return p.setCheckpointLocked(sessionUID)
+// markCheckpoint excludes a stateful Fork while a guarded Suspend or approval decision runs.
+// The caller holds the session guard; marking does not close harness connections. It fails with
+// ErrCheckpointing, changing nothing, while a fork holds the mark. Pair success with endCheckpoint.
+func (s *sessionSet) markCheckpoint(sessionUID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.setCheckpointLocked(sessionUID)
 }
 
-// setCheckpointLocked sets the session's checkpoint mark, or fails with ErrCheckpointing if a fork
-// or Suspend already holds it. The caller holds sessionSet.mu.
-func (p *Placer) setCheckpointLocked(sessionUID string) error {
-	if _, ok := p.sessions.checkpoints[sessionUID]; ok {
+// setCheckpointLocked sets the shared mark, or fails if another operation holds it.
+// The caller holds sessionSet.mu.
+func (s *sessionSet) setCheckpointLocked(sessionUID string) error {
+	if _, ok := s.checkpoints[sessionUID]; ok {
 		return fmt.Errorf("%w: session %q is already being checkpointed by a fork or Suspend", ErrCheckpointing, sessionUID)
 	}
-	if p.sessions.checkpoints == nil {
-		p.sessions.checkpoints = map[string]struct{}{}
+	if s.checkpoints == nil {
+		s.checkpoints = map[string]struct{}{}
 	}
-	p.sessions.checkpoints[sessionUID] = struct{}{}
+	s.checkpoints[sessionUID] = struct{}{}
 	return nil
 }
 
 // endCheckpoint lifts the mark beginCheckpoint or markCheckpoint set.
-func (p *Placer) endCheckpoint(sessionUID string) {
-	p.sessions.mu.Lock()
-	defer p.sessions.mu.Unlock()
-	delete(p.sessions.checkpoints, sessionUID)
+func (s *sessionSet) endCheckpoint(sessionUID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.checkpoints, sessionUID)
 }
 
 // endHarnesses ends the harness connections beginCheckpoint returned, and must run before a stateful
@@ -848,10 +847,10 @@ func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	defer release()
 	// The guard is taken first and never waited on (tryLock), and the mark is set under
 	// sessionSet.mu, which is never held while taking the guard, so the two cannot deadlock.
-	if err := p.markCheckpoint(sessionUID); err != nil {
+	if err := p.sessions.markCheckpoint(sessionUID); err != nil {
 		return api.SnapshotRef{}, err
 	}
-	defer p.endCheckpoint(sessionUID)
+	defer p.sessions.endCheckpoint(sessionUID)
 
 	return p.suspend(ctx, log, sessionUID, nil)
 }
@@ -887,34 +886,13 @@ func (p *Placer) suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	return ref, nil
 }
 
-// isParkUnwind accepts wrapped and joined matching parks, but not an independent Run failure
-// hidden elsewhere in the error tree. Keep this check local to placement's two handoff callers.
-func isParkUnwind(err error, ref api.ApprovalRef) bool {
-	var parked *api.ApprovalParkedError
-	if !errors.As(err, &parked) || parked == nil || parked.Ref != ref {
-		return false
-	}
-	for err != nil {
-		if joined, ok := err.(interface{ Unwrap() []error }); ok {
-			for _, cause := range joined.Unwrap() {
-				if !isParkUnwind(cause, ref) {
-					return false
-				}
-			}
-			return true
-		}
-		err = errors.Unwrap(err)
-	}
-	return true
-}
-
 // handoffPark releases the invocation connection before compute, keeping the same guard and
 // fence through the captured-head SUSPEND append. Only a fully committed handoff returns park.
 func (p *Placer) handoffPark(ctx context.Context, log eventlog.Store, sessionUID string, fence int64, park *api.ApprovalParkedError, closeInvocation func() error, observer controller.Observer) error {
-	if err := p.markCheckpoint(sessionUID); err != nil {
+	if err := p.sessions.markCheckpoint(sessionUID); err != nil {
 		return err
 	}
-	defer p.endCheckpoint(sessionUID)
+	defer p.sessions.endCheckpoint(sessionUID)
 	state, err := controller.InspectApproval(log, 0)
 	if err != nil {
 		return err
@@ -1062,7 +1040,7 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	}
 	if _, err := c.Resume(ctx, har); err != nil {
 		var park *api.ApprovalParkedError
-		if errors.As(err, &park) && isParkUnwind(err, park.Ref) {
+		if errors.As(err, &park) && api.IsParkUnwind(err, park.Ref) {
 			return p.handoffPark(operationCtx, log, sessionUID, fence, park, closeInvocation, cfg.observer)
 		}
 		return turnError(ctx, err)
@@ -1261,7 +1239,7 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if err != nil {
 		return api.SnapshotRef{}, nil, err
 	}
-	release := sync.OnceFunc(func() { p.endCheckpoint(parentUID) })
+	release := sync.OnceFunc(func() { p.sessions.endCheckpoint(parentUID) })
 	// Lift the mark on every path but the one that hands release to the caller, a panic included:
 	// a recovered panic in the runtime's Snapshot must not leave the parent refused for good.
 	handedOff := false

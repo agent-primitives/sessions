@@ -339,12 +339,17 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 
 // Approve journals only a decision under the shared session guard. The decision does not need
 // a served/available harness or any compute, so routing and host recovery checks do not apply.
+// Approve returns ErrCheckpointing while a stateful Fork holds the session's checkpoint mark.
 func (r *Registry) Approve(ctx context.Context, log eventlog.Store, sessionUID string, decision api.ApprovalDecision) (eventlog.Record, error) {
 	release, err := r.guard.tryLock(sessionUID)
 	if err != nil {
 		return eventlog.Record{}, err
 	}
 	defer release()
+	if err := r.sessions.markCheckpoint(sessionUID); err != nil {
+		return eventlog.Record{}, err
+	}
+	defer r.sessions.endCheckpoint(sessionUID)
 	return controller.Approve(log, decision)
 }
 
@@ -385,10 +390,10 @@ func (r *Registry) Suspend(ctx context.Context, log eventlog.Store, sessionUID, 
 			return api.SnapshotRef{}, err
 		}
 	}
-	if err := p.markCheckpoint(sessionUID); err != nil {
+	if err := r.sessions.markCheckpoint(sessionUID); err != nil {
 		return api.SnapshotRef{}, err
 	}
-	defer p.endCheckpoint(sessionUID)
+	defer r.sessions.endCheckpoint(sessionUID)
 	return p.suspend(ctx, log, sessionUID, nil)
 }
 

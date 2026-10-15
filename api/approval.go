@@ -40,3 +40,25 @@ func (e *ApprovalParkedError) Error() string {
 }
 
 func (e *ApprovalParkedError) Unwrap() error { return ErrApprovalParked }
+
+// IsParkUnwind reports whether err contains only wrapped or joined parks for ref, with no
+// independent failure elsewhere in the error tree. A matching park alone does not prove
+// that the host has checkpointed compute or durably recorded a successful pause.
+func IsParkUnwind(err error, ref ApprovalRef) bool {
+	var parked *ApprovalParkedError
+	if !errors.As(err, &parked) || parked == nil || parked.Ref != ref {
+		return false
+	}
+	for err != nil {
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			for _, cause := range joined.Unwrap() {
+				if !IsParkUnwind(cause, ref) {
+					return false
+				}
+			}
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return true
+}

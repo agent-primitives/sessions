@@ -103,8 +103,13 @@ declares `invokes` edges to `writer` and `reviewer`, each `maxConcurrent: 1`, `m
   final output. The child's `EXECUTION_START` config records the parent session, the tool call id, the
   edge and the remaining depth, so each journal names the other.
 - The executor enforces the suite: an undeclared edge, a call that would exceed the edge's
-  `maxConcurrent` (counted per calling session), and a chain deeper than `maxDepth` are refused with
+  `maxConcurrent` (in-flight invocations of the target by the declaring agent, across all of its
+  sessions: kaimahi `agentsuite/spec.md` 8.1 bounds "concurrent invocations of this target by the
+  declaring agent"), and a chain deeper than `maxDepth` are refused with
   an error result before any child session exists.
+- The child session is created in the calling session's project. Its creation and turn are bounded
+  by the executor's timeout (`invoke.DefaultTimeout`, 5 minutes), so a hung worker cannot hold the
+  caller's turn and its `maxConcurrent` slot indefinitely; the caller's model gets an error result.
 - Replay and resume never re-run a child: the recorded `TOOL_RESULT` is served from the journal, as
   for any host-mediated tool.
 
@@ -158,8 +163,8 @@ and two entries may not share one.
 - Child creation is not idempotent: if the host crashes after the child turn but before the
   `TOOL_RESULT` commits, recovery runs the executor again and creates a second child.
   `CreateSession` has no client-chosen id or idempotency key to deduplicate on.
-- `maxConcurrent` is counted in memory per calling session and per daemon. Two daemons sharing a
-  journal each allow `maxConcurrent`.
+- `maxConcurrent` is counted in memory per declaring agent and per daemon. Two daemons sharing a
+  journal each allow `maxConcurrent`, and a call in flight is forgotten when its daemon exits.
 - The executor reaches the daemon's own Sessions API over plaintext loopback without
   authentication, like every other caller of this PoC's daemon. The child session's labels
   (`agentsuite.invoked-by`) are client-set metadata; the tamper-evident link is the child's first

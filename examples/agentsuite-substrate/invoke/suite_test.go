@@ -105,6 +105,10 @@ func (m *scriptedModel) count(who string) int {
 // lateSessions lets the executor be built before the client of the server it lives in.
 type lateSessions struct{ c *client.Client }
 
+func (l *lateSessions) GetSession(ctx context.Context, uid string) (*v1.Session, error) {
+	return l.c.GetSession(ctx, uid)
+}
+
 func (l *lateSessions) CreateSession(ctx context.Context, s *v1.Session) (*v1.Session, error) {
 	return l.c.CreateSession(ctx, s)
 }

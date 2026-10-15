@@ -7,8 +7,9 @@
 // Provenance), so each journal names the other.
 //
 // The suite's bounds are enforced before any child session exists: an undeclared edge, a call that
-// would exceed the edge's maxConcurrent for the calling session, and a chain deeper than the edge's
-// maxDepth (kaimahi agentsuite/spec.md section 8.1) are refused with an error result. An edge the
+// would exceed the edge's maxConcurrent (in-flight invocations of the target by the declaring agent,
+// across all of its sessions on this daemon), and a chain deeper than the edge's maxDepth (kaimahi
+// agentsuite/spec.md section 8.1) are refused with an error result. An edge the
 // deployment marks for approval is refused unless the call arrives as REQUIRES_APPROVAL, so the
 // harness cannot skip the host's approval gate by choosing its own mediation.
 package invoke
@@ -23,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kaimahi-agents/kaimahi/agentsuite"
 
@@ -157,25 +159,48 @@ type Provenance struct {
 
 // Sessions is the part of the Sessions client the executor uses.
 type Sessions interface {
+	GetSession(ctx context.Context, uid string) (*v1.Session, error)
 	CreateSession(ctx context.Context, s *v1.Session) (*v1.Session, error)
 	Exec(ctx context.Context, opts client.ExecOptions) (*client.TurnResult, error)
 	Replay(ctx context.Context, uid string, fromSeq, toSeq int64) ([]*v1.LogRecord, error)
 }
 
+// DefaultTimeout bounds one invocation's child turn when New is given no WithTimeout.
+const DefaultTimeout = 5 * time.Minute
+
 // Executor runs invocations for the harnesses of one daemon.
 type Executor struct {
 	policy   Policy
 	sessions Sessions
+	timeout  time.Duration
 
 	mu       sync.Mutex
 	inflight map[inflightKey]int
 }
 
-type inflightKey struct{ session, target string }
+// inflightKey is what maxConcurrent counts: the declaring (calling) agent's invocations of target,
+// whichever of its sessions makes them.
+type inflightKey struct{ caller, target string }
+
+// Option configures an Executor.
+type Option func(*Executor)
+
+// WithTimeout bounds each invocation's child session creation and turn, so a hung worker cannot
+// hold the caller's turn and its maxConcurrent slot past d. d must be positive.
+func WithTimeout(d time.Duration) Option {
+	return func(x *Executor) { x.timeout = d }
+}
 
 // New returns an executor for policy that drives child sessions through sessions.
-func New(policy Policy, sessions Sessions) *Executor {
-	return &Executor{policy: policy, sessions: sessions, inflight: map[inflightKey]int{}}
+func New(policy Policy, sessions Sessions, opts ...Option) *Executor {
+	x := &Executor{policy: policy, sessions: sessions, timeout: DefaultTimeout, inflight: map[inflightKey]int{}}
+	for _, o := range opts {
+		o(x)
+	}
+	if x.timeout <= 0 {
+		x.timeout = DefaultTimeout
+	}
+	return x
 }
 
 // For returns the tool executor for the harness serving agent caller, or nil when the agent
@@ -222,9 +247,9 @@ func (x *Executor) invoke(ctx context.Context, caller, session string, call api.
 	if remaining < 1 {
 		return refuse(call, "%s -> %s exceeds maxDepth: session %s is at depth %d and its chain allows no deeper invocation", caller, args.Agent, session, depth)
 	}
-	release, ok := x.acquire(session, edge)
+	release, ok := x.acquire(caller, edge)
 	if !ok {
-		return refuse(call, "%s -> %s exceeds maxConcurrent %d for session %s", caller, args.Agent, edge.MaxConcurrent, session)
+		return refuse(call, "%s -> %s exceeds maxConcurrent %d: agent %s already has %d invocation(s) of %s in flight", caller, args.Agent, edge.MaxConcurrent, caller, edge.MaxConcurrent, args.Agent)
 	}
 	defer release()
 
@@ -236,8 +261,16 @@ func (x *Executor) invoke(ctx context.Context, caller, session string, call api.
 	if err != nil {
 		return api.ToolResult{}, err
 	}
+	// The child lives in the caller's project, and its creation and turn are bounded by the
+	// executor's timeout (and by the caller's own deadline, when ctx carries an earlier one).
+	ctx, cancel := context.WithTimeout(ctx, x.timeout)
+	defer cancel()
+	parent, err := x.sessions.GetSession(ctx, session)
+	if err != nil {
+		return api.ToolResult{}, fmt.Errorf("invoke %s: read the calling session: %w", args.Agent, err)
+	}
 	child, err := x.sessions.CreateSession(ctx, &v1.Session{
-		Metadata: &v1.ResourceMetadata{Name: caller + "-" + args.Agent},
+		Metadata: &v1.ResourceMetadata{Project: parent.GetMetadata().GetProject(), Name: caller + "-" + args.Agent},
 		Harness:  args.Agent,
 		Labels:   map[string]string{"agentsuite.invoked-by": session, "agentsuite.edge": caller + "-to-" + args.Agent},
 	})
@@ -259,10 +292,11 @@ func (x *Executor) invoke(ctx context.Context, caller, session string, call api.
 	}, nil
 }
 
-// acquire takes one of edge.MaxConcurrent slots for the calling session's invocations of the
-// target. The count is in memory: a call in flight dies with the daemon.
-func (x *Executor) acquire(session string, edge Edge) (func(), bool) {
-	k := inflightKey{session, edge.Target}
+// acquire takes one of edge.MaxConcurrent slots for the declaring agent's invocations of the
+// target, across all of its sessions. The count is in memory and per daemon: a call in flight dies
+// with the daemon, and two daemons sharing a journal each allow MaxConcurrent.
+func (x *Executor) acquire(caller string, edge Edge) (func(), bool) {
+	k := inflightKey{caller, edge.Target}
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	if x.inflight[k] >= edge.MaxConcurrent {

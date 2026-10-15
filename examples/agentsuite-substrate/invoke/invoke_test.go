@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kaimahi-agents/kaimahi/agentsuite"
 
@@ -19,28 +20,36 @@ import (
 )
 
 // fakeSessions records child sessions and their first exec config, and serves each session's
-// journal as one EXECUTION_START carrying that config.
+// journal as one EXECUTION_START carrying that config. Every calling session is in project
+// "proj-<uid>".
 type fakeSessions struct {
 	mu      sync.Mutex
 	created []*v1.Session
 	configs map[string][]byte
-	// block, when set, holds every Exec until it is closed; started reports each Exec.
+	// block, when set, holds every Exec until it is closed or the Exec's ctx ends; started reports
+	// each Exec.
 	block   chan struct{}
 	started chan string
 	execErr error
+	// execCtxErr records the ctx error each blocked Exec ended with.
+	execCtxErr []error
 }
 
 func newFake() *fakeSessions { return &fakeSessions{configs: map[string][]byte{}} }
 
+func (f *fakeSessions) GetSession(_ context.Context, uid string) (*v1.Session, error) {
+	return &v1.Session{Metadata: &v1.ResourceMetadata{Project: "proj-" + uid, Uid: uid}}, nil
+}
+
 func (f *fakeSessions) CreateSession(_ context.Context, s *v1.Session) (*v1.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := &v1.Session{Metadata: &v1.ResourceMetadata{Name: s.GetMetadata().GetName(), Uid: fmt.Sprintf("sess-child-%d", len(f.created)+1)}, Harness: s.GetHarness(), Labels: s.GetLabels()}
+	out := &v1.Session{Metadata: &v1.ResourceMetadata{Project: s.GetMetadata().GetProject(), Name: s.GetMetadata().GetName(), Uid: fmt.Sprintf("sess-child-%d", len(f.created)+1)}, Harness: s.GetHarness(), Labels: s.GetLabels()}
 	f.created = append(f.created, out)
 	return out, nil
 }
 
-func (f *fakeSessions) Exec(_ context.Context, o client.ExecOptions) (*client.TurnResult, error) {
+func (f *fakeSessions) Exec(ctx context.Context, o client.ExecOptions) (*client.TurnResult, error) {
 	f.mu.Lock()
 	f.configs[o.Session] = o.Config
 	block, started := f.block, f.started
@@ -49,7 +58,14 @@ func (f *fakeSessions) Exec(_ context.Context, o client.ExecOptions) (*client.Tu
 		started <- o.Session
 	}
 	if block != nil {
-		<-block
+		select {
+		case <-block:
+		case <-ctx.Done():
+			f.mu.Lock()
+			f.execCtxErr = append(f.execCtxErr, ctx.Err())
+			f.mu.Unlock()
+			return nil, ctx.Err()
+		}
 	}
 	if f.execErr != nil {
 		return nil, f.execErr
@@ -232,32 +248,41 @@ func TestInvokeRequiresApprovalMediationOnGatedEdge(t *testing.T) {
 	}
 }
 
-// maxConcurrent counts the calling session's in-flight invocations of the target: a second call
-// while the first runs is refused, a call from another session or to another target is not, and the
-// slot frees when the first returns.
+// maxConcurrent counts the declaring agent's in-flight invocations of the target across all of its
+// sessions (kaimahi agentsuite/spec.md 8.1: "concurrent invocations of this target by the declaring
+// agent"): while one coordinator session's writer call runs, another coordinator session's writer
+// call is refused, a call to another target or by another agent is not, and the slot frees when the
+// first returns.
 func TestInvokeEnforcesMaxConcurrent(t *testing.T) {
+	p := suitePolicy(t)
+	if err := p.Set("planner=writer:1:1"); err != nil {
+		t.Fatal(err)
+	}
 	f := newFake()
 	block := make(chan struct{})
 	f.block, f.started = block, make(chan string, 4)
-	fn := New(suitePolicy(t), f).For("coordinator")
+	x := New(p, f)
+	fn := x.For("coordinator")
 	first := make(chan api.ToolResult, 1)
 	go func() {
-		res, _ := fn(context.Background(), controller.ToolCallContext{SessionUID: "sess-root"}, call("writer", "one", api.MediationControllerMediated))
+		res, _ := fn(context.Background(), controller.ToolCallContext{SessionUID: "sess-root-a"}, call("writer", "one", api.MediationControllerMediated))
 		first <- res
 	}()
 	<-f.started
 	f.mu.Lock()
 	f.block = nil // later calls do not wait
 	f.mu.Unlock()
-	res := run(t, fn, "sess-root", call("writer", "two", api.MediationControllerMediated))
-	if !res.IsError || !strings.Contains(res.Error, "exceeds maxConcurrent 1 for session sess-root") {
-		t.Fatalf("second concurrent call: %+v, want the maxConcurrent refusal", res)
+	for _, session := range []string{"sess-root-b", "sess-root-a"} {
+		res := run(t, fn, session, call("writer", "two", api.MediationControllerMediated))
+		if !res.IsError || !strings.Contains(res.Error, "coordinator -> writer exceeds maxConcurrent 1: agent coordinator already has 1 invocation(s) of writer in flight") {
+			t.Fatalf("%s: concurrent call: %+v, want the maxConcurrent refusal", session, res)
+		}
 	}
-	if res := run(t, fn, "sess-other", call("writer", "other session", api.MediationControllerMediated)); res.IsError {
-		t.Fatalf("another session's call: %+v", res)
-	}
-	if res := run(t, fn, "sess-root", call("reviewer", "other target", api.MediationControllerMediated)); res.IsError {
+	if res := run(t, fn, "sess-root-b", call("reviewer", "other target", api.MediationControllerMediated)); res.IsError {
 		t.Fatalf("another target: %+v", res)
+	}
+	if res := run(t, x.For("planner"), "sess-planner", call("writer", "other agent", api.MediationControllerMediated)); res.IsError {
+		t.Fatalf("another declaring agent: %+v", res)
 	}
 	close(f.started)
 	f.mu.Lock()
@@ -267,8 +292,33 @@ func TestInvokeEnforcesMaxConcurrent(t *testing.T) {
 	if res := <-first; res.IsError {
 		t.Fatalf("first call: %+v", res)
 	}
-	if res := run(t, fn, "sess-root", call("writer", "three", api.MediationControllerMediated)); res.IsError {
+	if res := run(t, fn, "sess-root-b", call("writer", "three", api.MediationControllerMediated)); res.IsError {
 		t.Fatalf("after the first returned: %+v", res)
+	}
+}
+
+// The child session lands in the calling session's project, and a child turn that outlives the
+// executor's timeout ends with a handled error result and frees the maxConcurrent slot.
+func TestInvokeChildProjectAndTimeout(t *testing.T) {
+	f := newFake()
+	fn := New(suitePolicy(t), f, WithTimeout(50*time.Millisecond)).For("coordinator")
+	if res := run(t, fn, "sess-root", call("writer", "w", api.MediationControllerMediated)); res.IsError {
+		t.Fatal(res.Error)
+	}
+	if got := f.created[0].GetMetadata().GetProject(); got != "proj-sess-root" {
+		t.Fatalf("child project = %q, want the caller's proj-sess-root", got)
+	}
+	f.block = make(chan struct{}) // never closed: the child turn hangs
+	res := run(t, fn, "sess-root", call("writer", "hang", api.MediationControllerMediated))
+	if !res.IsError || !strings.Contains(res.Error, "failed in child session sess-child-2") || !strings.Contains(res.Error, context.DeadlineExceeded.Error()) {
+		t.Fatalf("hung child: %+v, want a deadline error result", res)
+	}
+	if len(f.execCtxErr) != 1 || !errors.Is(f.execCtxErr[0], context.DeadlineExceeded) {
+		t.Fatalf("child Exec ctx errors = %v, want one deadline", f.execCtxErr)
+	}
+	f.block = nil
+	if res := run(t, fn, "sess-root", call("writer", "after", api.MediationControllerMediated)); res.IsError {
+		t.Fatalf("after the timeout the slot is free: %+v", res)
 	}
 }
 

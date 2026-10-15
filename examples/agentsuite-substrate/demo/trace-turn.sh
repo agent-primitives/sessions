@@ -26,6 +26,10 @@ here="$(cd "$(dirname "$0")" && pwd)"
 atespace=agentsuite-demo
 mkdir -p "${dir}"
 
+# What the fetching tools print on stderr goes to DIR/fetch.stderr, kept with the logs, so it is not
+# lost: the kubectl-ate plugin reaches the cluster through a port-forward whose teardown can log a
+# harmless "Error copying from remote stream" line. A fetch that fails still stops the script (set -e).
+exec 3>&2 2>>"${dir}/fetch.stderr"
 kubectl ate get actor "${session}" -a "${atespace}" -o json >"${dir}/actor.json"
 kubectl -n agentsuite-demo logs deploy/agentsessionsd >"${dir}/agentsessionsd.log"
 # Every pod of substrate's control plane and of the demo's namespace but agentsessionsd: the ate-api
@@ -40,6 +44,7 @@ done
 kubectl ate logs actor "${session}" -a "${atespace}" --source lifecycle >"${dir}/actor-lifecycle.log"
 kubectl ate logs actor "${session}" -a "${atespace}" --source containers >"${dir}/harness.log"
 agentctl replay -v --server "${API:?}" --session "${session}" >"${dir}/journal.log"
+exec 2>&3 3>&-
 
 hop() { python3 "${here}/trace-hop.py" "$@"; }
 shopt -s nullglob

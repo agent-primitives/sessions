@@ -179,6 +179,12 @@ type Options struct {
 	// ActorAtespace, when set, is where agentsessionsd creates this harness's session actors: the
 	// daemon flag gets ,actors=<atespace>, so several agents can share one daemon.
 	ActorAtespace string
+	// Members, when set, renders the suite's shared template instead of the agent's own: one image
+	// with no agent baked in, run by every member, whose env pins each member's instructions digest
+	// (agent.MembersEnv). The member and its instructions arrive at session start. Every agent's
+	// render with the same image, binding and Members gives the same template; only the
+	// registration and the daemon flag differ.
+	Members map[string]string
 }
 
 // RendererVersion identifies this PoC's binding-to-ActorTemplate mapping and is part of hash8, as
@@ -202,17 +208,22 @@ func TemplateName(suite, agent, image, bindingDigest string, o Options) string {
 	return templateName(RendererVersion, suite, agent, image, bindingDigest, o)
 }
 
-func templateName(renderer, suite, agent, image, bindingDigest string, o Options) string {
+func templateName(renderer, suite, agentID, image, bindingDigest string, o Options) string {
 	content := renderer + "\n" + image + "\n" + bindingDigest
 	if o.Memory {
 		content += "\nmemory"
+	}
+	if o.Members != nil {
+		// The shared template is the suite's, not one agent's, and its env pins the members.
+		content += "\nmembers\n" + agent.FormatPins(o.Members)
+		agentID = "members"
 	}
 	sum := sha256.Sum256([]byte(content))
 	hash8 := hex.EncodeToString(sum[:])[:8]
 	clean := func(s string) string {
 		return strings.Trim(notLabel.ReplaceAllString(strings.ToLower(s), "-"), "-")
 	}
-	s, a := clean(suite), clean(agent)
+	s, a := clean(suite), clean(agentID)
 	// 63 = len(s) + 1 + len(a) + 1 + 8. Split the 53 characters between suite and agent, giving
 	// either one the other's unused share.
 	const budget = 63 - 2 - 8
@@ -283,6 +294,14 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 	if len(c.Agent.Invokes) > 0 && o.Memory {
 		return nil, fmt.Errorf("agent %s has invokes edges: delegations need the approval-capable stateless tier", c.Agent.ID)
 	}
+	if o.Members != nil {
+		if o.Memory {
+			return nil, errors.New("a shared template runs the stateless tier only")
+		}
+		if pinned := o.Members[c.Agent.ID]; pinned != c.Agent.Instructions.Digest {
+			return nil, fmt.Errorf("the shared template's members do not pin agent %s's instructions %s", c.Agent.ID, c.Agent.Instructions.Digest)
+		}
+	}
 	// The memory tier keeps the conversation only in RAM and is registered as
 	// REQUIRES_MEMORY_SNAPSHOT; substrate cold-boots a ROOTFS or VOLUMES snapshot on resume, without
 	// process memory, so a resumed or forked session would come back empty with nothing to say so.
@@ -327,6 +346,13 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 	if len(targets) > 0 {
 		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.ApprovalEnv, Value: strings.Join(targets, ",")})
 	}
+	descriptor := c.Agent.ID
+	if o.Members != nil {
+		// No agent in the image: the member, its instructions and approval targets come at session
+		// start, checked against these pins.
+		container.Env = []*atepb.EnvVar{container.Env[0], container.Env[1], {Name: agent.MembersEnv, Value: agent.FormatPins(o.Members)}}
+		descriptor = agent.SharedID
+	}
 	if o.ActorAtespace != "" {
 		tier += ",actors=" + o.ActorAtespace
 	}
@@ -356,7 +382,7 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 			Capabilities: &v1.Capabilities{
 				Resumability: resumability,
 			},
-			DescriptorId: c.Agent.ID,
+			DescriptorId: descriptor,
 		},
 	}
 	return &Output{

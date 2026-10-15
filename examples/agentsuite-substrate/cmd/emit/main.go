@@ -22,6 +22,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -39,6 +40,7 @@ import (
 
 	"github.com/kaimahi-agents/kaimahi/agentsuite"
 
+	"github.com/aramase/agentsessions/examples/agentsuite-substrate/agent"
 	"github.com/aramase/agentsessions/examples/agentsuite-substrate/invoke"
 	"github.com/aramase/agentsessions/examples/agentsuite-substrate/render"
 	"github.com/aramase/agentsessions/internal/modelconfig"
@@ -46,7 +48,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render|check-binding|invokes|validate|check-model> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render|check-binding|invokes|members|validate|check-model> [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -57,6 +59,8 @@ func main() {
 		err = renderCmd(os.Args[2:])
 	case "invokes":
 		err = invokesCmd(os.Args[2:], os.Stdout)
+	case "members":
+		err = membersCmd(os.Args[2:], os.Stdout)
 	case "check-binding":
 		err = checkBinding(os.Args[2:], os.Stdout)
 	case "validate":
@@ -64,7 +68,7 @@ func main() {
 	case "check-model":
 		err = checkModel(os.Args[2:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render|check-binding|invokes|validate|check-model> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: emit <bundle|render|check-binding|invokes|members|validate|check-model> [flags]")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -225,6 +229,67 @@ func invokesCmd(args []string, w io.Writer) error {
 	return err
 }
 
+// membersCmd prints the daemon's AGENTSUITE_MEMBERS_JSON for a shared template: base64 of each
+// agent's member (id, pinned model, invokes targets, the binding's approval targets, instructions
+// and their digest), which the daemon adds to each turn's execution config on that agent's harness.
+func membersCmd(args []string, w io.Writer) error {
+	fs := flag.NewFlagSet("members", flag.ContinueOnError)
+	suite := fs.String("suite", "suite", "AgentSuite content directory")
+	binding := fs.String("binding", "", "AgentSessionsBinding file (model and approval edges)")
+	platform := fs.String("platform", "linux/amd64", "composition platform, os/arch")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 || *binding == "" {
+		return errors.New("members: want -suite DIR -binding FILE")
+	}
+	b, err := render.LoadBinding(*binding)
+	if err != nil {
+		return err
+	}
+	if _, err := suitePolicy(*suite, b); err != nil {
+		return err
+	}
+	members, err := suiteMembers(*suite, *platform, b)
+	if err != nil {
+		return err
+	}
+	raw, err := json.Marshal(members)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(w, base64.StdEncoding.EncodeToString(raw))
+	return err
+}
+
+// suiteMembers loads every agent of the suite as a shared-harness member, each checked against the
+// binding's model as its own render would be.
+func suiteMembers(suite, platform string, b *render.Binding) (map[string]agent.Member, error) {
+	agents, err := render.Agents(suite)
+	if err != nil {
+		return nil, err
+	}
+	members := map[string]agent.Member{}
+	for _, a := range agents {
+		comp, err := render.Load(suite, a.ID, platform)
+		if err != nil {
+			return nil, err
+		}
+		if err := render.CheckModel(comp, b); err != nil {
+			return nil, err
+		}
+		m := agent.Member{ID: a.ID, Model: a.Model.Model, Approval: b.ApprovalTargets(a.ID), Instructions: string(comp.Instructions), InstructionsDigest: a.Instructions.Digest}
+		for _, inv := range a.Invokes {
+			m.Invokes = append(m.Invokes, inv.Agent)
+		}
+		if agent.Digest(m.Instructions) != m.InstructionsDigest {
+			return nil, fmt.Errorf("agent %s: instructions do not match the manifest's digest", a.ID)
+		}
+		members[a.ID] = m
+	}
+	return members, nil
+}
+
 // suitePolicy is the suite's invocation policy with the binding's approval edges, which must all be
 // edges the suite declares.
 func suitePolicy(suite string, b *render.Binding) (invoke.Policy, error) {
@@ -296,6 +361,7 @@ func renderCmd(args []string) error {
 	image := fs.String("image", "", "digest-pinned harness image, name@sha256:...")
 	tier := fs.String("tier", "stateless", "stateless (STATELESS_REPLAY, harness <agent>) or memory (REQUIRES_MEMORY_SNAPSHOT, conversation in RAM, harness <agent>-memory)")
 	actors := fs.String("actors", "", "atespace agentsessionsd creates this harness's session actors in (,actors= on the daemon flag); empty uses the daemon's -substrate-atespace")
+	shared := fs.Bool("shared", false, "render the suite's shared template (one image without an agent, every member's instructions digest pinned in its env) instead of the agent's own; the member comes at session start (emit members)")
 	if err := parse(fs, args); err != nil {
 		return err
 	}
@@ -315,7 +381,18 @@ func renderCmd(args []string) error {
 	if *tier != "stateless" && *tier != "memory" {
 		return fmt.Errorf("-tier %q: want stateless or memory", *tier)
 	}
-	out, err := render.Render(comp, *image, b, render.Options{Memory: *tier == "memory", ActorAtespace: *actors})
+	opts := render.Options{Memory: *tier == "memory", ActorAtespace: *actors}
+	if *shared {
+		members, err := suiteMembers(c.suite, c.platform, b)
+		if err != nil {
+			return err
+		}
+		opts.Members = map[string]string{}
+		for id, m := range members {
+			opts.Members[id] = m.InstructionsDigest
+		}
+	}
+	out, err := render.Render(comp, *image, b, opts)
 	if err != nil {
 		return err
 	}

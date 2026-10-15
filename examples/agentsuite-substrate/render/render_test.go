@@ -889,3 +889,59 @@ func TestVendoredKaimahiMinimal(t *testing.T) {
 		t.Fatalf("SOURCE lists %d files, want 6", files)
 	}
 }
+
+// A shared render gives every agent the same template: no agent dir or approval env, the members'
+// instruction digests pinned, the shared descriptor. Only the registration name and the daemon flag
+// differ. Pins that do not cover an agent's instructions are refused, and so is the memory tier.
+func TestRenderShared(t *testing.T) {
+	const suite = "../suites/coordinator-workers-v2"
+	b, err := LoadBinding("../binding-coordinator.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := "localhost:5001/h@sha256:" + strings.Repeat("a", 64)
+	agents, err := Agents(suite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pins := map[string]string{}
+	for _, a := range agents {
+		pins[a.ID] = a.Instructions.Digest
+	}
+	var first []byte
+	for _, a := range agents {
+		comp, err := Load(suite, a.ID, "linux/amd64")
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := Render(comp, image, b, Options{Members: pins, ActorAtespace: "agentsuite-" + a.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpl, _ := json.Marshal(out.Template)
+		if first == nil {
+			first = tmpl
+		} else if !bytes.Equal(tmpl, first) {
+			t.Fatalf("agent %s got another template", a.ID)
+		}
+		env := out.Template.GetContainers()[0].GetEnv()
+		if len(env) != 3 || env[2].GetName() != agent.MembersEnv || env[2].GetValue() != agent.FormatPins(pins) {
+			t.Fatalf("env = %v", env)
+		}
+		name := out.Template.GetMetadata().GetName()
+		if !strings.HasPrefix(name, "coordinator-workers-members-") || out.DaemonFlag != a.ID+"="+b.Atespace+"/"+name+",actors=agentsuite-"+a.ID ||
+			out.Registration.GetSpec().GetDescriptorId() != agent.SharedID {
+			t.Fatalf("name %s, flag %s, registration %v", name, out.DaemonFlag, out.Registration)
+		}
+	}
+	comp, err := Load(suite, "writer", "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Render(comp, image, b, Options{Members: map[string]string{"writer": agent.Digest("other")}}); err == nil {
+		t.Fatal("pins that do not cover the agent's instructions were accepted")
+	}
+	if _, err := Render(comp, image, b, Options{Members: pins, Memory: true}); err == nil {
+		t.Fatal("a shared memory-tier template was accepted")
+	}
+}

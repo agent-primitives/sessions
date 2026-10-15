@@ -39,6 +39,9 @@ spec:
           env:
             - name: AGENTSUITE_INVOKES
               value: "INVOKES_VALUE"
+            # Set only with COORD_TEMPLATE=shared: the members the daemon hands the shared harness.
+            - name: AGENTSUITE_MEMBERS_JSON
+              value: "MEMBERS_VALUE"
             - name: MODEL_API_KEY
               valueFrom:
                 secretKeyRef: {name: agentsessionsd-model, key: api-key, optional: true}

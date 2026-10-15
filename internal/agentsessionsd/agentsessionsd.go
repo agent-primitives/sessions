@@ -46,7 +46,9 @@ import (
 	"syscall"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/resolver"
+	"google.golang.org/grpc/status"
 
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/client"
@@ -74,6 +76,8 @@ type Option func(*options)
 type options struct {
 	substrate SubstrateControlFunc
 	executors ToolExecutorFunc
+	// execConfig, when set, rewrites each new turn's execution config (WithExecConfig).
+	execConfig ExecConfigFunc
 	// output receives command-line errors and the usage; nil is os.Stderr. Tests set it.
 	output io.Writer
 	// ctx, when set, is the parent of Run's signal context, so a test can stop Run; listening is
@@ -91,6 +95,61 @@ type ToolExecutorFunc func(harness string, sessions *client.Client) controller.T
 // REQUIRES_APPROVAL tool calls. Without it no harness has one, and such a call fails the turn.
 func WithToolExecutors(f ToolExecutorFunc) Option {
 	return func(o *options) { o.executors = f }
+}
+
+// ExecConfigFunc rewrites the execution config of a turn that starts on the named harness: the
+// daemon calls it for every Sessions Exec that carries inputs, before the turn runs, so what it
+// returns is journaled in the turn's EXECUTION_START and reaches the harness in Start. An error
+// refuses the Exec with INVALID_ARGUMENT. Input-less recovery Execs, which run a recorded turn with
+// its recorded config, are not passed to it.
+type ExecConfigFunc func(harness string, config []byte) ([]byte, error)
+
+// WithExecConfig installs f. It lets a host hand a harness per-harness settings at session start
+// (the AgentSuite PoC's shared harness takes its member this way) without a client sending them.
+func WithExecConfig(f ExecConfigFunc) Option {
+	return func(o *options) { o.execConfig = f }
+}
+
+// execConfigInterceptor applies f to the first ExecRequest of each Exec stream. harnessOf names the
+// harness the turn runs on: the request's override, else the session's harness, else the default.
+func execConfigInterceptor(f ExecConfigFunc, harnessOf func(*v1.ExecRequest) (string, error)) grpc.StreamServerInterceptor {
+	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		if info.FullMethod != v1.Sessions_Exec_FullMethodName {
+			return handler(srv, ss)
+		}
+		return handler(srv, &execConfigStream{ServerStream: ss, f: f, harnessOf: harnessOf})
+	}
+}
+
+type execConfigStream struct {
+	grpc.ServerStream
+	f         ExecConfigFunc
+	harnessOf func(*v1.ExecRequest) (string, error)
+	seen      bool
+}
+
+func (s *execConfigStream) RecvMsg(m any) error {
+	if err := s.ServerStream.RecvMsg(m); err != nil {
+		return err
+	}
+	req, ok := m.(*v1.ExecRequest)
+	if !ok || s.seen {
+		return nil
+	}
+	s.seen = true
+	if len(req.GetInputs()) == 0 {
+		return nil
+	}
+	name, err := s.harnessOf(req)
+	if err != nil {
+		return err
+	}
+	cfg, err := s.f(name, req.GetConfig())
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	req.Config = cfg
+	return nil
 }
 
 // Run parses args (without the program name) and serves until SIGINT or SIGTERM. -h returns
@@ -221,6 +280,27 @@ func Run(args []string, opts ...Option) error {
 	serverOptions := []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(logger)),
 		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(logger)),
+	}
+	if o.execConfig != nil {
+		serverOptions = append(serverOptions, grpc.ChainStreamInterceptor(execConfigInterceptor(o.execConfig, func(req *v1.ExecRequest) (string, error) {
+			if req.GetHarness() != "" {
+				return req.GetHarness(), nil
+			}
+			if req.GetSession() == "" {
+				return registry.Default(), nil
+			}
+			info, err := store.SessionInfo(req.GetSession())
+			if errors.Is(err, sqlitelog.ErrSessionNotFound) {
+				return "", status.Errorf(codes.NotFound, "session %q not found", req.GetSession())
+			}
+			if err != nil {
+				return "", status.Errorf(codes.Internal, "session %q: %v", req.GetSession(), err)
+			}
+			if info.Harness == "" {
+				return registry.Default(), nil
+			}
+			return info.Harness, nil
+		})))
 	}
 	srv := grpc.NewServer(serverOptions...)
 	v1.RegisterSessionsServer(srv, svc)

@@ -16,6 +16,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/examples/agentsuite-substrate/agent"
 	"github.com/aramase/agentsessions/harnesswire"
@@ -29,6 +30,21 @@ func env(key, def string) string {
 }
 
 func main() {
+	// A shared template's harness has no agent baked in: the member comes with each execution.
+	if v, ok := os.LookupEnv(agent.MembersEnv); ok {
+		pins, err := agent.ParsePins(v)
+		if err != nil {
+			log.Fatalf("harness: %v", err)
+		}
+		for _, k := range []string{agent.RetiredModelEnv, agent.MemoryEnv, agent.ApprovalEnv} {
+			if _, set := os.LookupEnv(k); set {
+				log.Fatalf("harness: %s is set with %s: a shared harness takes the member's model and approval targets at session start, and runs in the stateless tier only", k, agent.MembersEnv)
+			}
+		}
+		log.Printf("harness: shared harness for members %s", agent.FormatPins(pins))
+		serve(agent.Shared{Pins: pins})
+		return
+	}
 	h, err := agent.Load(env("AGENT_DIR", "/agent"))
 	if err != nil {
 		log.Fatalf("harness: load agent: %v", err)
@@ -56,6 +72,12 @@ func main() {
 			log.Fatalf("harness: %s: %v", agent.ApprovalEnv, err)
 		}
 	}
+	log.Printf("harness: agent %q (model %q, tier %s, invokes %v, approval %v)", h.ID, h.Model, tier, h.Invokes, h.Approval)
+	serve(h)
+}
+
+// serve serves h over harnesswire and /readyz until SIGINT or SIGTERM.
+func serve(h api.Harness) {
 	addr, readyzAddr := env("HARNESS_ADDR", ":80"), env("HARNESS_READYZ", ":8081")
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -79,7 +101,7 @@ func main() {
 		srv.GracefulStop()
 		_ = readyz.Close()
 	}()
-	log.Printf("harness: agent %q (model %q, tier %s, invokes %v, approval %v) serving harnesswire on %s, readyz on %s", h.ID, h.Model, tier, h.Invokes, h.Approval, addr, readyzAddr)
+	log.Printf("harness: serving harnesswire on %s, readyz on %s", addr, readyzAddr)
 	if err := srv.Serve(lis); err != nil {
 		log.Fatalf("harness: serve: %v", err)
 	}

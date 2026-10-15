@@ -1,9 +1,38 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/aramase/agentsessions/examples/agentsuite-substrate/agent"
 )
+
+// AGENTSUITE_MEMBERS_JSON must be base64 JSON whose members carry their own id, a model and
+// instructions matching their digest.
+func TestParseMembers(t *testing.T) {
+	enc := func(m map[string]agent.Member) string {
+		b, _ := json.Marshal(m)
+		return base64.StdEncoding.EncodeToString(b)
+	}
+	ok := agent.Member{ID: "writer", Model: "m", Instructions: "Write.", InstructionsDigest: agent.Digest("Write.")}
+	if got, err := parseMembers(enc(map[string]agent.Member{"writer": ok})); err != nil || got["writer"].Instructions != "Write." {
+		t.Fatalf("parseMembers = %v, %v", got, err)
+	}
+	tampered := ok
+	tampered.Instructions = "Other."
+	for name, v := range map[string]string{
+		"not base64":   "%%%",
+		"empty":        enc(map[string]agent.Member{}),
+		"wrong id":     enc(map[string]agent.Member{"reviewer": ok}),
+		"wrong digest": enc(map[string]agent.Member{"writer": tampered}),
+	} {
+		if _, err := parseMembers(v); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
 
 // AGENTSUITE_INVOKES is parsed with the same Policy.Set the emit output round-trips through; a
 // malformed edge refuses the start.

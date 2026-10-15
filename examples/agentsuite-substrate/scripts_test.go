@@ -104,7 +104,8 @@ func newStubs(t *testing.T) *stubs {
 	}
 	log := `echo "$(basename "$0") $*" >>"$STUB_DIR/calls"` + "\n"
 	// kind lists STUB_CLUSTERS, or fails when STUB_KIND_LIST_FAIL is set, as a broken kind binary
-	// or an unreachable Docker daemon does.
+	// or an unreachable Docker daemon does. With STUB_CLUSTERS_FROM_NODE set it lists the demo's
+	// cluster while the control-plane container exists, so a run can create it.
 	stub(t, bin, "kind", log+`
 if [ "$1 $2" = "get clusters" ]; then
 	if [ -n "${STUB_KIND_LIST_FAIL:-}" ]; then
@@ -112,6 +113,7 @@ if [ "$1 $2" = "get clusters" ]; then
 		exit 1
 	fi
 	[ -z "${STUB_CLUSTERS:-}" ] || echo "$STUB_CLUSTERS"
+	[ -z "${STUB_CLUSTERS_FROM_NODE:-}" ] || [ ! -f "$STUB_DIR/node-id" ] || echo "$AGENTSUITE_DEMO_CLUSTER"
 fi
 `)
 	// docker inspect reports the control-plane container ID kept in $STUB_DIR/node-id, or the
@@ -123,7 +125,14 @@ run) [ -z "${STUB_NO_KVM:-}" ] || exit 125 ;;
 inspect)
 	case "$3" in
 	*RepoDigests*) echo "localhost:5001/agentsuite-harness@`+digest+`" ;;
-	*) [ -f "$STUB_DIR/node-id" ] && cat "$STUB_DIR/node-id" || exit 1 ;;
+	*)
+		# STUB_NODE_HIDDEN_ONCE: the first lookup fails, as one during a Docker hiccup would.
+		if [ -n "${STUB_NODE_HIDDEN_ONCE:-}" ] && [ ! -f "$STUB_DIR/node-hidden" ]; then
+			: >"$STUB_DIR/node-hidden"
+			exit 1
+		fi
+		[ -f "$STUB_DIR/node-id" ] && cat "$STUB_DIR/node-id" || exit 1
+		;;
 	esac
 	;;
 esac
@@ -271,12 +280,18 @@ func (s *stubs) read(t *testing.T, name string) string {
 // calls the stubs logged. The script's PID is in $STUB_DIR/script-pid while it runs.
 func (s *stubs) run(t *testing.T, script string, env ...string) (int, string, string) {
 	t.Helper()
+	return s.runArgs(t, script, nil, env...)
+}
+
+// runArgs is run with arguments for the script.
+func (s *stubs) runArgs(t *testing.T, script string, args []string, env ...string) (int, string, string) {
+	t.Helper()
 	for _, name := range []string{"calls", "kubectl-stdin", "script-pid"} {
 		if err := os.Remove(filepath.Join(s.dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			t.Fatal(err)
 		}
 	}
-	cmd := exec.Command("./" + script)
+	cmd := exec.Command("./"+script, args...)
 	cmd.Env = append(append([]string{}, s.env...), env...)
 	var buf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &buf, &buf
@@ -590,6 +605,95 @@ func TestClusterNameIsMatchedLiterally(t *testing.T) {
 	code, out, _ = s.run(t, "down.sh", "AGENTSUITE_DEMO_CLUSTER=../x")
 	if code != 1 || !strings.Contains(out, "AGENTSUITE_DEMO_CLUSTER=../x: want lowercase letters") {
 		t.Fatalf("down.sh exit %d, want 1 and the name refused\noutput:\n%s", code, out)
+	}
+}
+
+// A failed driver.sh setup runs down.sh only when it created the cluster itself. A rerun of setup
+// on an installed cluster (driver.sh asks for one when the model token is near expiry) that fails,
+// before up.sh or after it reused the cluster, keeps the cluster and agentsessionsd's session
+// journals in it, as up.sh does.
+func TestDriverSetupDeletesOnlyTheClusterItCreated(t *testing.T) {
+	model := []string{"AGENTSUITE_MODEL_BASE_URL=https://example.openai.azure.com/openai/v1", "AGENTSUITE_MODEL=m",
+		"AGENTSUITE_MODEL_PATH=/chat/completions", "AZURE_MI_CLIENT_ID=00000000-0000-0000-0000-000000000000"}
+	installed := func(s *stubs, t *testing.T) {
+		s.node(t, "node-1")
+		s.record(t, "created-cluster", "node-1")
+		s.record(t, "setup-cluster", "node-1 installed")
+	}
+	for _, tc := range []struct {
+		name       string
+		before     func(*stubs, *testing.T)
+		env        []string
+		wantOut    string
+		wantCreate bool
+		wantDelete bool
+	}{
+		{
+			name: "a rerun on an installed cluster missing a model variable keeps it", before: installed,
+			env:     append([]string{"STUB_CLUSTERS=" + cluster}, model[:3]...),
+			wantOut: "AZURE_MI_CLIENT_ID is not set",
+		},
+		{
+			// up.sh reuses the cluster, then stops at the go stub (building kubectl-ate).
+			name: "a rerun on an installed cluster that fails in up.sh keeps it", before: installed,
+			env:     append([]string{"STUB_CLUSTERS=" + cluster}, model...),
+			wantOut: "DEMO FAILED: up.sh --substrate-only",
+		},
+		{
+			// kind lists the cluster, but setup's container lookup fails and up.sh's then finds it:
+			// setup cannot tell that container from one it created, so it keeps the cluster.
+			name: "a listed cluster whose container setup could not see is kept", before: installed,
+			env:     append([]string{"STUB_CLUSTERS=" + cluster, "STUB_NODE_HIDDEN_ONCE=1"}, model...),
+			wantOut: "DEMO FAILED: up.sh --substrate-only",
+		},
+		{
+			name: "a setup that created the cluster deletes it", before: func(*stubs, *testing.T) {},
+			env:     append([]string{"STUB_CLUSTERS_FROM_NODE=1"}, model...),
+			wantOut: "DEMO FAILED: up.sh --substrate-only", wantCreate: true, wantDelete: true,
+		},
+		{
+			// up.sh recreates an owned cluster whose first setup did not finish: a new container.
+			name: "a setup that recreated an unfinished cluster deletes it",
+			before: func(s *stubs, t *testing.T) {
+				s.node(t, "node-0")
+				s.record(t, "created-cluster", "node-0")
+				s.record(t, "setup-cluster", "node-0 creating")
+			},
+			env:     append([]string{"STUB_CLUSTERS_FROM_NODE=1"}, model...),
+			wantOut: "DEMO FAILED: up.sh --substrate-only", wantCreate: true, wantDelete: true,
+		},
+		{
+			name: "DEMO_KEEP_ON_FAILURE keeps a cluster setup created", before: func(*stubs, *testing.T) {},
+			env:     append([]string{"STUB_CLUSTERS_FROM_NODE=1", "DEMO_KEEP_ON_FAILURE=1"}, model...),
+			wantOut: "DEMO FAILED: up.sh --substrate-only", wantCreate: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStubs(t)
+			tc.before(s, t)
+			owned, setup := s.read(t, "created-cluster"), s.read(t, "setup-cluster")
+			code, out, calls := s.runArgs(t, "demo/driver.sh", []string{"setup"}, append([]string{"STUB_NEW_NODE_ID=node-1"}, tc.env...)...)
+			if code == 0 {
+				t.Fatalf("driver.sh setup exit 0, want a failure\noutput:\n%s\ncalls:\n%s", out, calls)
+			}
+			if !strings.Contains(out, tc.wantOut) {
+				t.Errorf("output does not contain %q:\n%s", tc.wantOut, out)
+			}
+			if created := strings.Contains(calls, "create-kind-cluster.sh"); created != tc.wantCreate {
+				t.Errorf("create-kind-cluster.sh called = %v, want %v:\n%s", created, tc.wantCreate, calls)
+			}
+			if deleted := strings.Contains(calls, "kind delete cluster --name demo"); deleted != tc.wantDelete {
+				t.Fatalf("kind delete called = %v, want %v\noutput:\n%s\ncalls:\n%s", deleted, tc.wantDelete, out, calls)
+			}
+			if !tc.wantCreate {
+				if o, st := s.read(t, "created-cluster"), s.read(t, "setup-cluster"); o != owned || st != setup {
+					t.Errorf("records = %q, %q, want %q, %q kept", o, st, owned, setup)
+				}
+				if !strings.Contains(out, "this setup created no kind cluster, so down.sh is not run") {
+					t.Errorf("output does not say down.sh is not run:\n%s", out)
+				}
+			}
+		})
 	}
 }
 

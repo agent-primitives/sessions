@@ -50,8 +50,10 @@ The recorded executing name is the host's resolved registry name, not necessaril
 A per-turn override is resumed through that same registry entry (backend/model/executor); removing
 it or serving a different known version yields `FAILED_PRECONDITION`. Missing legacy names fall
 back to session metadata. Completed Resume and ordinary lifecycle routing are unchanged; Suspend
-of an unreceipted approval uses its recorded route too. Raw
-`Sessions.Replay` remains readable even when the recorded implementation is not served.
+of an owned unreceipted approval uses its recorded route too. An inherited approval instead
+suspends through the child's stored-default harness; unresolved inherited tool intents still
+cannot be resumed. Raw `Sessions.Replay` remains readable even when the recorded implementation
+is not served.
 
 `Capabilities` is the important part, because the host uses it to place your harness on a compatible
 runtime (see [Capability matching](#capability-matching)):

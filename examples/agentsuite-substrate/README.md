@@ -163,7 +163,7 @@ and two entries may not share one.
 | `agent/coordinator.go` | The coordinator loop: the model asks for a delegation as one line of JSON; the harness makes the `agentsuite.invoke` call with id `<execution>-invoke-<n>`, stable across replay and resume. |
 | `cmd/agentsessionsd` | The substrate build of `agentsessionsd` plus the executor (`internal/agentsessionsd.WithToolExecutors`). The edges come from `AGENTSUITE_INVOKES`, which `emit invokes -binding` prints. |
 | `emit render -actors` | Sets `AGENTSUITE_APPROVAL` in the coordinator's template from the binding and `,actors=<atespace>` on each daemon flag. |
-| `demo/coordinator.sh` | `setup`: this environment's binding (one copy per agent atespace) checked against the suite, kind and substrate (`up.sh --substrate-only`), one image and ActorTemplate per agent, one daemon with three `-substrate-harness` flags and the binding's model flags. `probe`: one request approved and one denied through `agentctl`; ends with `PROBE OK`. `show`: the recorded demo's eight chapters (`demo/screen.sh` draws them as `driver.sh` does). `reset`: deletes the session actors and restarts the daemon (its journal is an `emptyDir`), so `show` can run again. |
+| `demo/coordinator.sh` | `setup`: this environment's binding (one copy per agent atespace) checked against the suite, kind and substrate (`up.sh --substrate-only`), one image and ActorTemplate per agent, one daemon with three `-substrate-harness` flags and the binding's model flags. `probe`: one request approved and one denied through `agentctl`; ends with `PROBE OK`. `show`: the recorded demo's eight chapters (`demo/screen.sh` draws them as `driver.sh` does). `reset`: deletes the session actors and restarts the daemon (its journal is an `emptyDir`), so `show` can run again. `lifecycle`: suspend and wake times over follow-ups; ends with `LIFECYCLE OK`. `crash`: kills the daemon mid-delegation (`CRASH_AT=create` or `turn`) and resumes; ends with `CRASH OK`. |
 | `demo/coordinator-record.sh`, `demo/coordinator.tape`, `demo/invoke.mmd` | The recording: `coordinator.sh show` on the host through `hq remote-test` under vhs, the invocation diagram spliced in, then `collect` writes the video's README, logs and checks. |
 
 ### Gaps in the invocation PoC
@@ -173,6 +173,13 @@ and two entries may not share one.
 - Child lookup by idempotency key is list-then-create: it lists the caller's project (O(sessions))
   and serializes creates within one daemon only. Two daemons on one journal can both miss the lookup
   and create two children. See [CreateSession idempotency key](#design-note-a-createsession-idempotency-key).
+- A host that dies while a child's actor is being created leaves the actor `ACTOR_STATE_RESUMING`
+  on micro-VMs, and no later call finishes it: `runtime/substrate` `attach` answers every
+  transitioning actor with a retryable busy error and never drives one, which is right while
+  another live host owns the transition and wrong once that host is gone. A fix would call
+  `ResumeActor` for an actor found `RESUMING` (substrate serializes it under the actor's lease and
+  answers `ABORTED` while another operation holds it); that is a core runtime change, not made
+  here.
 - The executor reaches the daemon's own Sessions API over plaintext loopback without
   authentication, like every other caller of this PoC's daemon. The child session's labels
   (`agentsuite.invoked-by`) are client-set metadata; the tamper-evident link is the child's first
@@ -191,15 +198,19 @@ and two entries may not share one.
   `Resume`, runs the task there (the child keeps its own history) and suspends it again. Each reply
   the coordinator's model sees names the child's session id.
 - The tool result's `lifecycle` records what happened: `origin` (`new`, `follow-up`, `retry`),
-  `turn` (`ran`, `recorded`, `re-driven`), and `wakeMs`, `turnMs`, `suspendMs`. The daemon logs the
-  same line (`agentsuite invocation`).
-- Measured on micro-VMs (zephyr kind cluster, 2026-10-15, `coordinator.sh lifecycle`, 5 runs):
-  suspend n=8, 398-445 ms (median 421); wake (`Resume` of a suspended child) n=3, 431-443 ms
-  (median 434); child turn n=8, 808-1533 ms. Child actors after the runs: writer 7 and reviewer 1,
-  all `ACTOR_STATE_SUSPENDED`, none running (before this change every child stayed
-  `ACTOR_STATE_RUNNING`). Root coordinator sessions are not suspended. The model chose a follow-up
-  in 3 of 5 runs, so `lifecycle` now runs 8 and wants 5 wakes; that longer run, `crash` on
-  micro-VMs and the shared template on micro-VMs were not run (the host became unreachable).
+  `turn` (`ran`, `recorded`, `re-driven`), `aborted` (child steps refused as `ABORTED` and tried
+  again), and `wakeMs`, `turnMs`, `suspendMs`, `resumeMs`. The daemon logs the same line
+  (`agentsuite invocation`).
+- Measured on micro-VMs (zephyr kind cluster, 2026-10-15, `coordinator.sh lifecycle`, 8 runs, each
+  a writer delegation then a follow-up to the same writer session; `LIFECYCLE OK`): suspend n=16,
+  406-573 ms (median 420); wake (`Resume` of a suspended child) n=8, 429-460 ms (median 454);
+  child turn n=16, 753-1503 ms. Session actors before: coordinator 10 running, writer 6 and
+  reviewer 1 suspended; after: coordinator 18 running, writer 14 and reviewer 1 suspended, no child
+  running and none holding a worker (before this change every child stayed
+  `ACTOR_STATE_RUNNING`). Root coordinator sessions are not suspended. An earlier wording of the
+  task, which asked the model to "give its session id", made gpt-5.4-mini refuse in 4 of 8 runs.
+- `show` asserts it: chapter 5 fails unless the writer child is `ACTOR_STATE_SUSPENDED` with no
+  worker after its turn, and chapter 8 prints that run's `suspendMs`.
 - `shared` mode (`COORD_TEMPLATE=shared coordinator.sh setup`): one image with no agent and one
   ActorTemplate in atespace `agentsuite-members`; the daemon (`AGENTSUITE_MEMBERS_JSON`, from
   `emit members`) adds each agent's member to the execution config of every Sessions `Exec` on that
@@ -215,6 +226,20 @@ and two entries may not share one.
   gates are still enforced by the host's invocation executor (`invoke.Policy`, keyed by harness
   name); the model is not: a wrong daemon config makes the harness request another model with the
   daemon's credential.
+- Run end to end on micro-VMs (2026-10-15, `COORD_TEMPLATE=shared coordinator.sh setup`, then
+  `probe`: `PROBE OK`, approve and deny). Render: the three renders give one byte-identical
+  ActorTemplate (`agentsuite-members/coordinator-workers-members-567ab9f0`), created once, with one
+  golden snapshot; registration still takes one `-substrate-harness` flag per agent, each naming
+  that template and its own actor atespace. Session actors in `agentsuite-coordinator`,
+  `agentsuite-writer` and `agentsuite-reviewer` were created from the template in
+  `agentsuite-members` (their `actorTemplate`), and their snapshots are stored under that template's
+  prefix (`.../coordinator-workers-members-567ab9f0/atespaces/<actor atespace>/actors/...`). A
+  writer child's first `EXECUTION_START` holds `agentsuite.member` (`id` writer, `model`, the
+  instructions and their digest) next to its invocation provenance. So: one template and one golden
+  snapshot, but still three actor atespaces, since the daemon refuses two harnesses sharing one.
+  TODO(spike): a new actor's status keeps only its latest snapshot, so that the first resume
+  restored the shared golden tag was not observed directly (a per-agent actor seen mid-creation
+  listed its template's `ate-golden` tag as its snapshot).
 
 ### Idempotent child creation (PoC)
 
@@ -231,7 +256,24 @@ and two entries may not share one.
   (`invoke` `TestInvokeRetryAfterCrashReachesTheSameChild`, four crash points against a fake
   Sessions API, a fresh executor each time; `TestCoordinatorCrashMidDelegation` through the real
   controller, where the crash is an error from the first executor, not a process exit).
-  A real host restart on micro-VMs (`coordinator.sh crash`) has not run yet.
+  A child step refused with `ABORTED` (its actor mid-transition) is tried again until the call's
+  deadline (`TestInvokeRetriesAnAbortedChildStep`).
+- On micro-VMs (2026-10-15, `coordinator.sh crash`: SIGKILL of `agentsessionsd` on its kind node,
+  the container restarts with the same `emptyDir` journal, then `agentctl resume` of the
+  coordinator):
+  - `CRASH_AT=turn` (the writer child's journal at `last_seq=3`, its turn running): one writer
+    child, the retry re-drove its turn (`origin=retry turn=re-driven resumeMs=1028`), the child
+    was suspended, and the coordinator's turn ended with the poem. `CRASH OK`.
+  - `CRASH_AT=create` (the child session created, `last_seq=0`, its actor still being created): the
+    retry reaches the same child (still one writer session), but the delegation does not finish.
+    The daemon died while it was creating and resuming the child's actor, and the actor stayed
+    `ACTOR_STATE_RESUMING` (which step was cut was not traced). The `runtime/substrate` backend's
+    `attach` refuses any transitioning actor as busy (`actor ... is mid-transition`, `ABORTED`)
+    without driving it, so every retry is refused (`aborted=62` over the 5-minute call deadline)
+    and the writer result is an error; the actor stays `RESUMING` with a worker assigned. By its
+    code, substrate's `ResumeActor` reuses a `RESUMING` actor's assignment and continues (substrate
+    `96dffb28` `cmd/ateapi/internal/controlapi/workflow_resume.go` `ensureWorkerAssigned`; read, not
+    run), so the fix belongs in `attach`, not in this executor; see the gaps below.
 
 #### Design note: a CreateSession idempotency key
 
@@ -393,7 +435,11 @@ managed-identity token (audience `https://cognitiveservices.azure.com` or `https
 `POST <resource>/openai/v1/chat/completions` with `model` `gpt-5.4-mini` returned HTTP 200 (response
 model `gpt-5.4-mini-2026-03-17`); the same URL with `?api-version=2025-04-01-preview` returned HTTP
 400 (`API version not supported`); `model` `no-such-deployment` returned HTTP 404
-(`DeploymentNotFound`). Those were direct requests, not a demo run through `agentsessionsd`. The
+(`DeploymentNotFound`). The coordinator demo then ran through `agentsessionsd` with base URL
+`<resource>/openai/v1` and model `gpt-5.4-mini`: its `setup` logs the daemon's model as
+`gpt-5.4-mini @ <resource>/openai/v1/chat/completions`, and `probe` (approve and deny), `show`,
+`lifecycle` and `crash` served every coordinator, writer and reviewer turn from it on 2026-10-15
+(`PROBE OK`, `DEMO COMPLETE`, `LIFECYCLE OK`, each turn's `EVENT_USAGE` names `gpt-5.4-mini`). The
 `api-key` header has not been run against a live deployment.
 
 ## The binding and kmx

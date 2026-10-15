@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "1.0.0-draft",
+  "mediaType": "application/vnd.agentsuite.agent.v1+json",
+  "id": "writer",
+  "description": "Writes content requested by the coordinator.",
+  "instructions": {
+    "path": "instructions/writer.md",
+    "digest": "sha256:516ff360a8ebb5e36e87f0d401a3cc7436ad2ad1059aae64670aff1078171df8"
+  },
+  "model": {
+    "protocol": "openai-compatible",
+    "model": "gpt-5.4-mini"
+  },
+  "toolProviders": [],
+  "invokes": [],
+  "evals": [
+    {"path": "evals/writer/index.json", "digest": "sha256:58cdec908ecd57c3f098d90a8b933546ee5a7ac6bd454135e28f64be8c2d996b"}
+  ],
+  "extensions": []
+}

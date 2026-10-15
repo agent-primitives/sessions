@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "1.0.0-draft",
+  "mediaType": "application/vnd.agentsuite.eval.case.v1+json",
+  "id": "arithmetic",
+  "input": "What is two plus two?",
+  "assertions": [
+    {"id": "four", "type": "regex", "pattern": "\\b4\\b"}
+  ]
+}

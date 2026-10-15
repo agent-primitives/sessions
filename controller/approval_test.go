@@ -600,7 +600,12 @@ func TestApprovalInheritedReceiptAndReportAuthority(t *testing.T) {
 	if result, err := serveApproval(state, state.Receipt.Event.Result); err != nil || result.ID != "c" {
 		t.Fatalf("inherited receipt=%+v %v", result, err)
 	}
-	for _, r := range []api.ToolResult{{Approval: &api.ApprovalResult{}}, {ApprovalRequestSeq: 3}, {ApprovalDecisionSeq: 4}, {Code: api.ToolResultCodeApprovalDenied}} {
+	for _, code := range []api.ToolResultCode{api.ToolResultCodeUnspecified, api.ToolResultCodeExecutorError} {
+		if err := approvalReportError(api.ToolResult{Code: code}); err != nil {
+			t.Fatalf("ordinary code %v rejected: %v", code, err)
+		}
+	}
+	for _, r := range []api.ToolResult{{Approval: &api.ApprovalResult{}}, {ApprovalRequestSeq: 3}, {ApprovalDecisionSeq: 4}, {Code: api.ToolResultCodeApprovalDenied}, {Code: api.ToolResultCode(7)}} {
 		if err := approvalReportError(r); !errors.Is(err, ErrApprovalReceiptReport) {
 			t.Fatal(err)
 		}

@@ -611,7 +611,7 @@ func validateApprovalReceipt(callID string, decision *api.ApprovalResult, receip
 }
 
 func rejectApprovalReport(receipt api.ToolResult) error {
-	if receipt.Approval != nil || receipt.ApprovalRequestSeq != 0 || receipt.ApprovalDecisionSeq != 0 || receipt.Code == api.ToolResultCodeApprovalDenied {
+	if receipt.Approval != nil || receipt.ApprovalRequestSeq != 0 || receipt.ApprovalDecisionSeq != 0 || (receipt.Code != api.ToolResultCodeUnspecified && receipt.Code != api.ToolResultCodeExecutorError) {
 		return errors.New("harnesswire: harness report or ordinary reply contains host-owned approval receipt")
 	}
 	return nil

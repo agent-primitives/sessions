@@ -256,6 +256,19 @@ func TestApprovalServerRejectsMalformedFrames(t *testing.T) {
 	}
 }
 
+func TestApprovalReportAcceptsExecutorError(t *testing.T) {
+	server := NewServer(gateHarness{run: func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+		return sink.Report(ctx, api.ToolResult{ID: "ordinary", Code: api.ToolResultCodeExecutorError, IsError: true})
+	}})
+	host := &gateHost{}
+	if err := NewClientHarness(approvalClient(t, server)).Run(approvalContext(t), &api.Start{SessionUID: "session", ExecutionID: "exec"}, host); err != nil {
+		t.Fatal(err)
+	}
+	if host.reports != 1 {
+		t.Fatalf("reports = %d, want 1", host.reports)
+	}
+}
+
 func TestApprovalClientRejectsHostAuthorityForgery(t *testing.T) {
 	tests := map[string]*v1.Event{
 		"request":          {Kind: v1.EventKind_EVENT_APPROVAL_REQUEST, Body: &v1.Event_Approval{Approval: &v1.ApprovalRequest{ToolCallId: "call"}}},
@@ -265,6 +278,7 @@ func TestApprovalClientRejectsHostAuthorityForgery(t *testing.T) {
 		"request receipt":  {Kind: v1.EventKind_EVENT_TOOL_RESULT, Body: &v1.Event_Result{Result: &v1.ToolResult{Id: "call", ApprovalRequestSeq: 17}}},
 		"decision receipt": {Kind: v1.EventKind_EVENT_TOOL_RESULT, Body: &v1.Event_Result{Result: &v1.ToolResult{Id: "call", ApprovalDecisionSeq: 19}}},
 		"denial receipt":   {Kind: v1.EventKind_EVENT_TOOL_RESULT, Body: &v1.Event_Result{Result: &v1.ToolResult{Id: "call", Code: v1.ToolResult_APPROVAL_DENIED, IsError: true}}},
+		"unknown code":     {Kind: v1.EventKind_EVENT_TOOL_RESULT, Body: &v1.Event_Result{Result: &v1.ToolResult{Id: "call", Code: v1.ToolResult_Code(7)}}},
 	}
 	for name, event := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -633,6 +647,7 @@ func TestApprovalServerReportForgeryIsSticky(t *testing.T) {
 		{"request", api.ToolResult{ApprovalRequestSeq: 17}},
 		{"decision", api.ToolResult{ApprovalDecisionSeq: 19}},
 		{"denial", api.ToolResult{Code: api.ToolResultCodeApprovalDenied, IsError: true}},
+		{"unknown code", api.ToolResult{Code: api.ToolResultCode(7)}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			observed := make(chan []error, 1)

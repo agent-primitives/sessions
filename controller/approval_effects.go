@@ -30,7 +30,7 @@ func approvalPark(state *ApprovalState) error {
 }
 
 func approvalReportError(result api.ToolResult) error {
-	if result.Approval != nil || result.ApprovalRequestSeq != 0 || result.ApprovalDecisionSeq != 0 || result.Code == api.ToolResultCodeApprovalDenied {
+	if result.Approval != nil || result.ApprovalRequestSeq != 0 || result.ApprovalDecisionSeq != 0 || (result.Code != api.ToolResultCodeUnspecified && result.Code != api.ToolResultCodeExecutorError) {
 		return ErrApprovalReceiptReport
 	}
 	return nil

@@ -124,8 +124,9 @@ provide.
   hashes. New durable receipt status/correlation fields are hash-bound; transient Go approval
   carriers are excluded from wire receipts and model-input hashing. Low-level Append refuses
   transport-only `PARKED` events but otherwise remains permissive; projection suppression does
-  not replace validation at command boundaries. Remote harness reports with host receipt
-  status/correlation fields are rejected by approval-aware Report validation.
+  not replace validation at command boundaries. Remote harness reports with host-owned approval
+  receipt fields or codes other than `CODE_UNSPECIFIED`/`EXECUTOR_ERROR` are rejected by
+  approval-aware Report validation; `EXECUTOR_ERROR` remains accepted on harness reports.
 - `agentsessionsd -registry-addr` is off by default. Enabling it creates a plaintext,
   unauthenticated **local admin surface** on a separate literal-loopback listener; Sessions still
   refuses registry RPCs, and neither listener gains TLS or authentication. Any local or same-pod

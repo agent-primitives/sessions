@@ -659,24 +659,26 @@ EOF
 	[[ "$(sessions writer)" == 1 && "$(sessions reviewer)" == 1 && "$(sessions coordinator)" == 1 ]] || fail "want one coordinator, one writer and one reviewer session"
 	journal "${SERVER}" "${S}"
 	CHILD="$(line_of "$(nth EVENT_TOOL_RESULT 1)" | python3 -c 'import re, sys; print(re.search(r"\"session\":\"(sess-[0-9a-f]+)\"", sys.stdin.read()).group(1))')"
-	log "(CHILD=${CHILD}, read from the writer result on chapter 4's screen)"
+	SUSPEND_MS="$(line_of "$(nth EVENT_TOOL_RESULT 1)" | python3 -c 'import re, sys; m = re.search(r"\"suspendMs\":\s*([0-9]+)", sys.stdin.read()); print(m.group(1) if m else "")')"
+	[[ -n "${SUSPEND_MS}" ]] || fail "the writer result records no suspend of its child"
+	log "(CHILD=${CHILD}, read from the writer result on chapter 4's screen; its suspendMs=${SUSPEND_MS})"
 	page "The writer session's first record names its parent session, the tool call and its place in the chain"
 	run -n 6 <<'EOF'
 agentctl replay --server $API --session $CHILD --to 1
 EOF
 	[[ "${SHOWN}" == *"\"parentSession\":\"${S}\""* && "${SHOWN}" == *'"caller":"coordinator"'* && "${SHOWN}" == *'"depth":1'* ]] || fail "the writer session does not record its parent"
-	page "Each child session ran as an actor from its agent's template on the micro-VM worker pool"
+	page "Each child session ran as an actor from its agent's template on the micro-VM worker pool; after its turn the host suspended it, so it holds no worker"
 	run -n 12 <<'EOF'
 kubectl ate get actors -a agentsuite-writer && kubectl ate get actors -a agentsuite-reviewer
 EOF
 	[[ "${SHOWN}" == *"${CHILD}"*"${wtemplate}"* && "${SHOWN}" == *"${rtemplate}"* ]] || fail "the child sessions' actors are not from the workers' templates"
-	# Chapter 8 asks whether the invoking host should suspend a child after its one turn: check that
-	# nothing does on this run, so the question still stands when it is recorded.
-	local row running=""
+	# The invocation executor suspends every child before it records the child's result (chapter 8):
+	# the writer child's actor is suspended and has no worker pod.
+	local row suspended=""
 	while IFS= read -r row; do
-		if [[ "${row}" == *"${CHILD}"*"${wtemplate}"*ACTOR_STATE_RUNNING* ]]; then running=1; fi
+		if [[ "${row}" == *"${CHILD}"*"${wtemplate}"*ACTOR_STATE_SUSPENDED*"<none>"* ]]; then suspended=1; fi
 	done <<<"${SHOWN}"
-	[[ -n "${running}" ]] || fail "the writer child's actor is not running after its turn; revisit chapter 8's suspend question"
+	[[ -n "${suspended}" ]] || fail "the writer child's actor is not suspended without a worker after its turn"
 
 	# ---------------------------------------------------------------------------------------------
 	chapter 6 "Delegation, denied" "The same request in a new session; this time the operator denies the reviewer call"
@@ -719,16 +721,16 @@ EOF
 	[[ "${SHOWN}" == *"--- PASS: TestInvokeEnforcesMaxConcurrent"* && "${SHOWN}" == *"--- PASS: TestInvokeEnforcesMaxDepth"* ]] || fail "the bounds tests did not pass"
 
 	# ---------------------------------------------------------------------------------------------
-	chapter 8 "Open questions" "Open questions, each tagged with whose it is"
+	chapter 8 "Open questions" "Open questions, each tagged with whose it is, and one this PoC answered"
 	show_lines "kmx: the binding has no approval field; this PoC adds approval.invokes per environment. Add it, or declare it in AgentSuite?
 kmx: no model.path needed: Azure's v1 endpoint (<resource>/openai/v1) takes the deployment as model and no api-version.
 kmx: eval and lift take one chat member; a suite with invokes edges has no eval yet, so this render has no eval evidence.
 kmx: a binding names one atespace; here each agent's actors need their own, so setup writes one binding per agent.
 AgentSuite: maxConcurrent bounds the declaring agent's calls; across runtime replicas too? This PoC counts per daemon.
 AgentSessions: agent-to-agent calls are a host tool call that creates a child session; should there be a first-class primitive?
-AgentSessions: CreateSession takes no idempotency key, so recovery after a crash mid-call could create a second child.
+AgentSessions: CreateSession takes no idempotency key; this PoC keys each child by parent + tool call in a label (README).
 AgentSessions: the HarnessRegistry does not take substrate placements yet, so the three harnesses are daemon flags.
-AgentSessions: a child session's micro-VM keeps running after its one turn; should the invoking host suspend it?
+Answered: the host suspends each child after its turn (writer: ${SUSPEND_MS} ms here) and wakes it for a follow-up (README).
 substrate: is a template's golden snapshot usable from another atespace? Here each agent's template has its own." 16
 	sleep $((READ * 3))
 	log "DEMO COMPLETE in $((SECONDS - SHOW_START)) s"

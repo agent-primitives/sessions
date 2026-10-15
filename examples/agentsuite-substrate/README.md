@@ -202,9 +202,19 @@ and two entries may not share one.
   micro-VMs and the shared template on micro-VMs were not run (the host became unreachable).
 - `shared` mode (`COORD_TEMPLATE=shared coordinator.sh setup`): one image with no agent and one
   ActorTemplate in atespace `agentsuite-members`; the daemon (`AGENTSUITE_MEMBERS_JSON`, from
-  `emit members`) adds each agent's member to every new turn's execution config, so it is journaled
-  in `EXECUTION_START`; the harness refuses a member or instructions the template's
-  `AGENTSUITE_MEMBERS` pins do not match. Unit-tested; not yet run on a cluster.
+  `emit members`) adds each agent's member to the execution config of every Sessions `Exec` on that
+  agent's harness (with or without inputs), so it is journaled in `EXECUTION_START`; an `Exec` whose
+  config already names a member is refused with `INVALID_ARGUMENT`. The harness refuses a member
+  whose id the template's `AGENTSUITE_MEMBERS` does not pin, or whose instructions do not hash to
+  the pinned digest.
+- What the template pins, and what it does not: only each member's instructions digest. The model,
+  `invokes` edges and approval targets in the member come from the daemon's configuration and are
+  not pinned by the template, and the harness cannot check that the member it is handed is the one
+  its harness name stands for (one image serves all three). Since only the daemon sets the member,
+  that trust moves from the image digest to the daemon's configuration. The edges and approval
+  gates are still enforced by the host's invocation executor (`invoke.Policy`, keyed by harness
+  name); the model is not: a wrong daemon config makes the harness request another model with the
+  daemon's credential.
 
 ### Idempotent child creation (PoC)
 
@@ -213,13 +223,15 @@ and two entries may not share one.
   call id is `<execution id>-invoke-<n>`, stable across replay and resume.
 - Before creating a child the executor lists the caller's project for the key. On a hit it reuses
   that child and reads the child's journal for an execution whose `EXECUTION_START` names this tool
-  call id: ended means serve its output (no second turn), started means `Resume` the child (the
-  host's crash recovery re-drives the interrupted turn, at most once per model call), absent means
-  run the turn now.
+  call id: finished (`END`, or `ERROR` for a failed turn) means serve its output or its failure (no
+  second turn), started with neither means `Resume` the child (the host's crash recovery re-drives
+  the interrupted turn, at most once per model call), absent means run the turn now.
 - So a host that dies anywhere between `CreateSession` and the caller's `TOOL_RESULT` reaches the
   same child when the caller's turn is re-driven (`Resume` of the caller). Tested in process
-  (`invoke` `TestInvokeRetryAfterCrashReachesTheSameChild`, three crash points;
-  `TestCoordinatorCrashMidDelegation` through the real controller) and on micro-VMs (see the probe).
+  (`invoke` `TestInvokeRetryAfterCrashReachesTheSameChild`, four crash points against a fake
+  Sessions API, a fresh executor each time; `TestCoordinatorCrashMidDelegation` through the real
+  controller, where the crash is an error from the first executor, not a process exit).
+  A real host restart on micro-VMs (`coordinator.sh crash`) has not run yet.
 
 #### Design note: a CreateSession idempotency key
 
@@ -295,7 +307,16 @@ AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 ./demo.sh
 
 Azure OpenAI's v1 API serves every deployment at `https://<resource>.openai.azure.com/openai/v1`,
 takes the deployment name as the request's `model`, and needs no `api-version`
-([API version lifecycle](https://learn.microsoft.com/azure/ai-foundry/openai/api-version-lifecycle)).
+([API version lifecycle](https://learn.microsoft.com/azure/ai-foundry/openai/api-version-lifecycle),
+updated 2026-06-05). That page names no model or deployment type that the v1 path excludes: its
+"Model support" section recommends the Responses API for Azure OpenAI models and says the v1 API
+"also allows you to make chat completions calls with models from other providers like DeepSeek and
+Grok which support the OpenAI v1 chat completions syntax"; its only limit is by capability, "only a
+subset of the inference and authoring API capabilities are supported" at the v1 GA launch. Chat
+completions, which `model/openai` uses, is in that subset (the request below returned 200).
+TODO(spike): do all deployment types (Standard, Global, Data Zone, provisioned) behave the same on
+`/openai/v1`? The page does not list deployment types, and only this PoC's one deployment was tried
+(its type was not recorded).
 Put that URL in `AGENTSUITE_MODEL_BASE_URL` and the deployment name in `AGENTSUITE_MODEL`.
 `agentsessionsd` keeps its default `-model-path`, `/chat/completions`, which its model client
 appends to the base URL's path (`model/openai` `joinEndpoint`), so requests go to

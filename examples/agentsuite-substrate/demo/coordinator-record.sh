@@ -10,7 +10,9 @@
 #   coordinator-record.sh collect   the logs, the scripts, the diagram, demo.mp4.sha256, the checks and
 #                                   README.md with chapter times
 #   coordinator-record.sh run       what coordinator.tape types: show through present.awk, then the end marker
-#   coordinator-record.sh setup|probe|teardown   coordinator.sh's own mode on the host, its logs fetched
+#   coordinator-record.sh setup|probe|lifecycle|crash|teardown   coordinator.sh's own mode on the
+#                                   host, its logs fetched; COORD_TEMPLATE and LIFECYCLE_* are passed
+#                                   through when set
 #
 # coordinator.sh runs on a Linux host with KVM, Docker, kind and the cluster: through `hq remote-test`
 # (a private tool that syncs the checkout to its host and runs the command in a container there) in
@@ -55,6 +57,10 @@ load_env() {
 coord() {
 	local env_args=() v
 	for v in "${MODEL_VARS[@]}" DEMO_READ DEMO_COLS DEMO_ROWS; do env_args+=(-e "${v}"); done
+	# Optional settings of coordinator.sh's modes, passed only when set here.
+	for v in COORD_TEMPLATE LIFECYCLE_RUNS LIFECYCLE_PAUSE LIFECYCLE_MIN_WAKES; do
+		if [[ -n "${!v:-}" ]]; then env_args+=(-e "${v}"); fi
+	done
 	mkdir -p "${ROOT}/_local" && touch "${ROOT}/_local/.hq-remote-keep"
 	(cd "${ROOT}" && hq remote-test --image "${IMAGE}" --timeout "$2" "${env_args[@]}" \
 		-e "AGENTSUITE_DEMO_CLUSTER=${CLUSTER}" -e "AGENTSUITE_DEMO_WORK=/work/${WORK_REL}" -e "COORD_LOGS=/work/${WORK_REL}/logs" \
@@ -234,7 +240,7 @@ reset)
 	load_env
 	coord reset 600
 	;;
-setup | teardown)
+setup | teardown | lifecycle | crash)
 	load_env
 	coord "$1" 2400
 	;;
@@ -247,7 +253,7 @@ record) record ;;
 collect) collect ;;
 run) run_show ;;
 *)
-	echo "usage: $0 setup|probe|show|reset|record|collect|run|teardown" >&2
+	echo "usage: $0 setup|probe|lifecycle|crash|show|reset|record|collect|run|teardown" >&2
 	exit 2
 	;;
 esac

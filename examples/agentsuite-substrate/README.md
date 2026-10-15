@@ -48,7 +48,7 @@ The recipe is for a disposable kind cluster you trust: nothing in it authenticat
 | `suite/` | An AgentSuite (`support-desk`) with one tool-free agent, `triage`, and compositions for `linux/amd64` and `linux/arm64`. The default suite (`AGENTSUITE_DEMO_SUITE`, `AGENTSUITE_DEMO_AGENT`). |
 | `suites/kaimahi-minimal/` | kaimahi's `agentsuite/testdata/minimal` (agent `writer`, `linux/amd64` only), copied byte for byte from kaimahi `9c5c993`. `SOURCE` lists each file's git blob id at that commit and its sha256. |
 | `binding-microvm.json`, `binding.json` | Draft `AgentSessionsBinding`s (`kmx.kaimahi.dev/v1alpha1`) for kind: atespace, the micro-VM (`microvm`) or gVisor sandbox, MEMORY snapshots, worker selector. `up.sh` refuses an atespace other than `agentsuite-demo`, the one `deploy/` uses. |
-| `render/`, `cmd/emit` | `emit bundle` stages the agent layer (manifest and instructions) for the image. `emit render` writes the ActorTemplate, the harness registration and the daemon flag; `-tier memory` renders the memory tier. `emit check-model` refuses model settings `agentsessionsd` would refuse at startup. |
+| `render/`, `cmd/emit` | `emit bundle` stages the agent layer (manifest and instructions) for the image. `emit render` writes the ActorTemplate, the harness registration and the daemon flag; `-tier memory` renders the memory tier. `emit validate` runs kaimahi's `agentsuite.ValidateDirectory` over a suite and prints the kaimahi module version it ran. `emit check-model` refuses model settings `agentsessionsd` would refuse at startup. |
 | `agent/`, `cmd/harness`, `Dockerfile.harness` | The harness image. It serves harnesswire on :80 and `/readyz` on :8081. The instructions are the system prompt, and the harness checks them against the digest in the agent manifest. Each model call is `sink.Model`. With `AGENTSUITE_MEMORY=ram` it keeps the conversation in RAM, ignores the history the host sends, and describes itself as `REQUIRES_MEMORY_SNAPSHOT`. |
 | `demo/` | The recorded demo: `driver.sh`, `smoke-microvm.sh`, `present.awk`, `demo.tape`, `record.sh`, `chapters.py` and the tools image (`Dockerfile.tools`). |
 | `fakemodel/`, `cmd/fakemodel` | A deterministic OpenAI-compatible endpoint. Its reply lists the user's issues so far, and `GET /stats` reports how many calls it has served. |
@@ -56,8 +56,8 @@ The recipe is for a disposable kind cluster you trust: nothing in it authenticat
 | `deploy/` | The micro-VM and gVisor WorkerPools, the fake model, and `agentsessionsd` (substrate build), rendered once per tier. |
 
 The suite is validated with kaimahi's `agentsuite` package, imported as a Go module at kaimahi
-`ccde3079`, not copied. `render` also loads kaimahi's own `testdata/minimal` suite (see the tests);
-its files are identical at `ccde3079` and `9c5c993`. `demo.sh` uses its own fixture by default
+`9c5c993`, not copied. `render` also loads kaimahi's own `testdata/minimal` suite (see the tests),
+the files `suites/kaimahi-minimal` copies from that commit. `demo.sh` uses its own fixture by default
 because kaimahi's fixtures declare only `linux/amd64`, and a kind node on an arm64 Mac needs an arm64
 image. On amd64, `AGENTSUITE_DEMO_SUITE=suites/kaimahi-minimal AGENTSUITE_DEMO_AGENT=writer` selects
 kaimahi's.

@@ -4,6 +4,8 @@
 //	    stage the agent manifest and instructions for the harness image (the image's agent layer)
 //	emit render -suite DIR -agent ID -platform os/arch -binding FILE -image REF@sha256:... [-model ID] -out DIR
 //	    write actortemplate.json, harness-registration.json, agentsessionsd.args and template-name
+//	emit validate -suite DIR
+//	    run kaimahi's agentsuite validator (the imported module) over the suite and print its version
 //	emit check-model -base-url URL -model ID [-path PATH] [-auth-header NAME] [-api-key-set]
 //	    refuse model settings agentsessionsd would refuse at startup, a URL that is not http(s), or
 //	    a URL or path that could carry a credential
@@ -91,8 +93,8 @@ func bundle(args []string) error {
 const kaimahiModule = "github.com/kaimahi-agents/kaimahi"
 
 // validate runs kaimahi's own validator (agentsuite.ValidateDirectory, from the imported module, not
-// a copy) over a suite directory and prints one line: the suite, its agents and compositions, and
-// the kaimahi module version the binary was built against.
+// a copy) over a suite directory and prints two lines: the suite with its agents and compositions,
+// then the kaimahi module version the binary was built against.
 func validate(args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	suite := fs.String("suite", "suite", "AgentSuite content directory")
@@ -110,22 +112,44 @@ func validate(args []string, w io.Writer) error {
 	for _, s := range report.CompositionSelections {
 		comps = append(comps, fmt.Sprintf("%s %s/%s profile %s", s.Agent, s.Platform.OS, s.Platform.Architecture, s.BuildProfile))
 	}
-	_, err = fmt.Fprintf(w, "suite %s valid (%s/agentsuite %s): %d agent, compositions: %s\n",
-		report.Name, kaimahiModule, moduleVersion(kaimahiModule), report.Agents, strings.Join(comps, "; "))
+	_, err = fmt.Fprint(w, validLines(report.Name, moduleVersion(kaimahiModule), report.Agents, comps))
 	return err
+}
+
+// validLines is what validate prints for a valid suite, each line short enough for an 80-column
+// terminal for a one-agent suite.
+func validLines(suite, version string, agents int, comps []string) string {
+	noun := "agents"
+	if agents == 1 {
+		noun = "agent"
+	}
+	return fmt.Sprintf("suite %s valid: %d %s; compositions: %s\nvalidated by %s/agentsuite %s\n",
+		suite, agents, noun, strings.Join(comps, "; "), kaimahiModule, version)
 }
 
 // moduleVersion is the version of module path this binary was built with, or "(unknown)".
 func moduleVersion(path string) string {
 	if bi, ok := debug.ReadBuildInfo(); ok {
-		for _, d := range bi.Deps {
-			if d.Path == path {
-				if d.Replace != nil {
-					return d.Replace.Version
-				}
-				return d.Version
-			}
+		return depVersion(bi.Deps, path)
+	}
+	return "(unknown)"
+}
+
+// depVersion is the version of module path in deps: its replacement's version when it is replaced
+// by another module version, "(local replace of <version>)" when it is replaced by a directory
+// (which has no version), and "(unknown)" when deps do not list it.
+func depVersion(deps []*debug.Module, path string) string {
+	for _, d := range deps {
+		if d.Path != path {
+			continue
 		}
+		if d.Replace == nil {
+			return d.Version
+		}
+		if d.Replace.Version != "" {
+			return d.Replace.Version
+		}
+		return "(local replace of " + d.Version + ")"
 	}
 	return "(unknown)"
 }

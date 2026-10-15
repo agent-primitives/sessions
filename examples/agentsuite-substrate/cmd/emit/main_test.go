@@ -1,6 +1,7 @@
 package main
 
 import (
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -159,13 +160,14 @@ func TestValidate(t *testing.T) {
 	if err := validate([]string{"-suite", "../../suites/kaimahi-minimal"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"suite minimal valid (github.com/kaimahi-agents/kaimahi/agentsuite ", "1 agent", "writer linux/amd64 profile default"} {
-		if !strings.Contains(out.String(), want) {
-			t.Errorf("validate printed %q, want it to contain %q", out.String(), want)
-		}
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 2 || lines[0] != "suite minimal valid: 1 agent; compositions: writer linux/amd64 profile default" ||
+		!strings.HasPrefix(lines[1], "validated by github.com/kaimahi-agents/kaimahi/agentsuite ") {
+		t.Errorf("validate printed %q, want the suite line and the validator line", out.String())
 	}
-	if strings.Count(out.String(), "\n") != 1 {
-		t.Errorf("validate printed %q, want one line", out.String())
+	if got, want := validLines("s", "v1", 2, []string{"a linux/amd64 profile p", "b linux/arm64 profile p"}),
+		"suite s valid: 2 agents; compositions: a linux/amd64 profile p; b linux/arm64 profile p\nvalidated by github.com/kaimahi-agents/kaimahi/agentsuite v1\n"; got != want {
+		t.Errorf("validLines for two agents = %q, want %q", got, want)
 	}
 	dir := t.TempDir()
 	if err := validate([]string{"-suite", dir}, &out); err == nil {
@@ -173,5 +175,25 @@ func TestValidate(t *testing.T) {
 	}
 	if err := validate([]string{"-suite", dir, "extra"}, &out); err == nil || !strings.Contains(err.Error(), "unexpected arguments") {
 		t.Errorf("validate with an extra argument: %v", err)
+	}
+}
+
+func TestDepVersion(t *testing.T) {
+	const kaimahi = "github.com/kaimahi-agents/kaimahi"
+	for _, tc := range []struct {
+		name string
+		deps []*debug.Module
+		want string
+	}{
+		{"required", []*debug.Module{{Path: kaimahi, Version: "v0.5.2"}}, "v0.5.2"},
+		{"replaced by a version", []*debug.Module{{Path: kaimahi, Version: "v0.5.2", Replace: &debug.Module{Path: "example.com/fork", Version: "v0.6.0"}}}, "v0.6.0"},
+		{"replaced by a directory", []*debug.Module{{Path: kaimahi, Version: "v0.5.2", Replace: &debug.Module{Path: "../kaimahi"}}}, "(local replace of v0.5.2)"},
+		{"not a dependency", []*debug.Module{{Path: "example.com/other", Version: "v1.0.0"}}, "(unknown)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := depVersion(tc.deps, kaimahi); got != tc.want {
+				t.Errorf("depVersion = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

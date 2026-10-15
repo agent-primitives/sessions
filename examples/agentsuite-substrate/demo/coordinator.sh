@@ -377,7 +377,9 @@ lifecycle() {
 	local i uid runs="${LIFECYCLE_RUNS:-8}"
 	for i in $(seq "${runs}"); do
 		step "run ${i}: a writer delegation, then a follow-up to the same writer session"
-		ctl exec --harness coordinator --input "Have the writer write a two-line poem about tides. Then delegate a follow-up to that same writer session (give its session id) asking it to make the two lines rhyme. Do not use the reviewer. Reply with the final poem." >"${LOGS}/lifecycle-${i}-exec.txt"
+		# The task does not ask for the session id up front: gpt-5.4-mini refused four of eight runs
+		# that did ("I don't have the writer's session id"); the writer's reply says how to follow up.
+		ctl exec --harness coordinator --input "First delegate to the writer: write a two-line poem about tides. After the writer replies, delegate a second task to the writer, as a follow-up in the session its reply names: make the two lines rhyme. Do not use the reviewer. Then reply with the final poem." >"${LOGS}/lifecycle-${i}-exec.txt"
 		uid="$(sed -n 's/^session //p' "${LOGS}/lifecycle-${i}-exec.txt" | head -1)"
 		[[ -n "${uid}" ]] || fail "run ${i}: no session uid"
 		ctl replay --session "${uid}" -v >"${LOGS}/lifecycle-${i}-journal.txt"

@@ -46,6 +46,11 @@ type transcript struct {
 	mu       sync.Mutex
 	messages []api.Message
 	turns    int
+	// lastExecution is the execution ID of the turn last applied to messages, and lastBase the
+	// length of messages before it. The host journals END only after Run returns, so a turn can be
+	// in RAM while the journal still holds it open; Resume then runs the same execution again.
+	lastExecution string
+	lastBase      int
 }
 
 var _ api.Harness = Harness{}
@@ -152,19 +157,28 @@ func reportUsage(ctx context.Context, sink api.EventSink, resp api.ModelResponse
 
 // runFromMemory is Run for the memory tier. The transcript gains this turn's inputs and the model's
 // reply only when the model call and its usage record succeed, so a failed turn leaves RAM as it
-// was. It logs how much it holds, which is what a resumed or replaced actor shows in its logs.
+// was. A Run with the execution ID of the turn last applied (Resume re-driving a turn whose END the
+// host did not journal) rebuilds that turn from the transcript held before it, so the model request
+// matches the one the journal recorded and RAM ends with the turn once. It logs how much it holds,
+// which is what a resumed or replaced actor shows in its logs.
 func (h Harness) runFromMemory(ctx context.Context, start *api.Start, sink api.EventSink) error {
 	t := h.memory
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	messages := make([]api.Message, 0, 1+len(t.messages)+len(start.Inputs))
+	base, turn := t.messages, t.turns+1
+	if start.ExecutionID != "" && start.ExecutionID == t.lastExecution {
+		base, turn = t.messages[:t.lastBase], t.turns
+		log.Printf("harness: memory tier: execution %s ran before; running turn %d again from the %d messages in RAM before it",
+			start.ExecutionID, turn, len(base))
+	}
+	messages := make([]api.Message, 0, 1+len(base)+len(start.Inputs))
 	if h.Instructions != "" {
 		messages = append(messages, *api.TextMessage("system", h.Instructions))
 	}
-	messages = append(messages, t.messages...)
+	messages = append(messages, base...)
 	messages = append(messages, start.Inputs...)
 	log.Printf("harness: memory tier: turn %d of this process; %d messages in RAM, %d journal events not used",
-		t.turns+1, len(t.messages), len(start.History))
+		turn, len(base), len(start.History))
 	resp, err := sink.Model(ctx, api.ModelRequest{Model: h.Model, Messages: messages})
 	if err != nil {
 		return err
@@ -172,8 +186,12 @@ func (h Harness) runFromMemory(ctx context.Context, start *api.Start, sink api.E
 	if err := reportUsage(ctx, sink, resp); err != nil {
 		return err
 	}
-	t.messages = append(t.messages, start.Inputs...)
-	t.messages = append(t.messages, resp.Message)
-	t.turns++
+	// Copy rather than append to base: base may be a prefix of the transcript a re-run replaces.
+	next := make([]api.Message, 0, len(base)+len(start.Inputs)+1)
+	next = append(next, base...)
+	next = append(next, start.Inputs...)
+	next = append(next, resp.Message)
+	t.messages, t.turns = next, turn
+	t.lastExecution, t.lastBase = start.ExecutionID, len(base)
 	return nil
 }

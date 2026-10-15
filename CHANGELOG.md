@@ -117,6 +117,17 @@ not provide.
   reclaims a socket file left behind by a crashed instance. It never removes a socket another
   process created, and it refuses a lock file that is a symlink, a hard link, or owned by another
   user.
+- `integrations/substrate/cmd/agentsessionsd` is `agentsessionsd` with the substrate backend linked
+  in. `-substrate-harness name=atespace/template[,memory]` serves a harness as one actor per session
+  in `-substrate-atespace`, controlled over the ate-api (`-ateapi-addr`, TLS, with
+  `-ateapi-token-file` re-read on every call, `-ateapi-ca-file` or `-ateapi-insecure-skip-verify`)
+  and reached through `-atenet-router`. It requires `-model`, and refuses the other substrate flags
+  without a `-substrate-harness`. It takes one `-substrate-harness` and exits with status 2 on a
+  second: actors are named by session UID in the one atespace, so two substrate harnesses would
+  share a session's actor. The rule is per daemon: two hosts sharing a journal and an atespace with
+  different `-substrate-harness` names share it too (see `docs/substrate-conformance.md`). The
+  neutral `cmd/agentsessionsd` does not offer these flags; both binaries are now built from
+  `internal/agentsessionsd`.
 - `HarnessRegistry` API (`api/harness_registry.proto`): register, get, list and retire harnesses on a
   running host. A registration is immutable and identified by its name and `spec_digest`. Retiring a
   harness refuses new sessions while existing sessions keep running, resuming and forking;
@@ -225,9 +236,11 @@ not provide.
 - `agentsessionsd` exits at startup with a model API key and a plain-`http` `-model-base-url` to a
   host that is not loopback, `localhost` or a `.svc` name (see Security). Switch such an
   endpoint to `https`, or unset the key, before upgrading.
+- `agentsessionsd` now refuses positional arguments, naming them, and exits with status 2. It used
+  to ignore them, along with every flag after the first one, since flag parsing stops there.
 - `runtime/substrate` no longer cold-creates an actor for a `REQUIRES_MEMORY_SNAPSHOT` session that
   has a started turn on that harness (completed, failed or interrupted) but no actor (deleted out of
-  band, or a host restarted with another atespace). `Exec` fails with
+  band, or the daemon restarted with another `-substrate-atespace`). `Exec` fails with
   `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and nothing is created, where it used to continue
   the journal on a fresh harness that had lost the session's RAM state. `Runtime.Create` gets a
   journal counter in the new `api.SessionSpec.StartedTurns`, which `runtime/substrate` calls only
@@ -235,8 +248,9 @@ not provide.
   backends ignore it. The count is per harness: a turn an `ExecRequest.harness` override ran
   elsewhere does not count, while a turn with no recorded harness name, or one this host does not
   serve, does. Two substrate backends on one atespace share each session's actor, so the count
-  misses the turns the other one ran there: hosts sharing a journal and an atespace must serve the
-  same substrate harness, and a program that builds its own registry must use one. `Sessions.Resume` of any
+  misses the turns the other one ran there; `agentsessionsd` allows one substrate harness for this
+  reason, but the rule is per daemon, so hosts sharing a journal and an atespace must serve the same
+  one, and a program that builds its own registry must do the same. `Sessions.Resume` of any
   memory-tier session whose actor is gone, whatever its journal records, is `FAILED_PRECONDITION`
   (`api.ErrMemoryStateLost`) too, where it used to be `INTERNAL`; a stateless session's `Resume`
   keeps its error.

@@ -1,11 +1,14 @@
-package main
+package agentsessionsd
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -124,7 +127,7 @@ func TestHarnessRegistry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			registry, closeBackends, err := harnessRegistry(tt.model, nil, modelFn, streamFn, nil)
+			registry, closeBackends, err := harnessRegistry(tt.model, nil, modelFn, streamFn, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -193,7 +196,7 @@ func TestHarnessRegistry(t *testing.T) {
 }
 
 func TestHarnessRegistryClosesBackends(t *testing.T) {
-	registry, closeBackends, err := harnessRegistry("test-model", nil, echoagent.Model, nil, nil)
+	registry, closeBackends, err := harnessRegistry("test-model", nil, echoagent.Model, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +267,7 @@ func TestChatSessionConversation(t *testing.T) {
 					return resp, err
 				}
 			}
-			registry, closeBackends, err := harnessRegistry("test-model", nil, modelFn, streamFn, nil)
+			registry, closeBackends, err := harnessRegistry("test-model", nil, modelFn, streamFn, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -343,7 +346,7 @@ func TestChatSessionModelFailure(t *testing.T) {
 	modelFn := func(context.Context, api.ModelRequest) (api.ModelResponse, error) {
 		return api.ModelResponse{}, modelErr
 	}
-	registry, closeBackends, err := harnessRegistry("test-model", nil, modelFn, nil, nil)
+	registry, closeBackends, err := harnessRegistry("test-model", nil, modelFn, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +501,7 @@ func TestRemoteHarnessFlagParsing(t *testing.T) {
 func TestRemoteHarnessCannotShadowABuiltInName(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		remotes := remoteHarnesses{"echo": "127.0.0.1:9000", "chat": "127.0.0.1:9001"}
-		_, closeBackends, err := harnessRegistry("test-model", remotes, echoagent.Model, nil, nil)
+		_, closeBackends, err := harnessRegistry("test-model", remotes, echoagent.Model, nil, nil, nil)
 		if err == nil {
 			closeBackends()
 			t.Fatal("registry accepted remote harnesses named echo and chat, shadowing the built-ins")
@@ -628,7 +631,7 @@ func TestCheckRemotes(t *testing.T) {
 // Without -model a remote harness's model calls would be answered by the built-in echo stub and
 // journaled as if a model had produced them. Refuse at startup instead.
 func TestRemoteHarnessRequiresAModel(t *testing.T) {
-	_, closeBackends, err := harnessRegistry("", remoteHarnesses{"mine": "127.0.0.1:9000"}, echoagent.Model, nil, nil)
+	_, closeBackends, err := harnessRegistry("", remoteHarnesses{"mine": "127.0.0.1:9000"}, echoagent.Model, nil, nil, nil)
 	if err == nil {
 		closeBackends()
 		t.Fatal("registry accepted a remote harness with no -model")
@@ -647,7 +650,7 @@ func TestRemoteHarnessRoutesThroughTheRegistry(t *testing.T) {
 		"ctr":  serveHarness(t, &counteragent.Harness{}),
 		"gone": goneAddr,
 	}
-	registry, closeBackends, err := harnessRegistry("test-model", remotes, echoagent.Model, nil, nil)
+	registry, closeBackends, err := harnessRegistry("test-model", remotes, echoagent.Model, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -731,14 +734,14 @@ func serveHarness(t *testing.T, h api.Harness) string {
 // one of its built-in names, active or retired, chat even when it is not configured, or a name
 // given with -harness.
 func TestSessionServiceRefusesRegistrationCollision(t *testing.T) {
-	registry, closeBackends, err := harnessRegistry("", nil, echoagent.Model, nil, nil)
+	registry, closeBackends, err := harnessRegistry("", nil, echoagent.Model, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(closeBackends)
 	// A -harness name is a static entry like the built-in ones. Building the registry dials nothing,
 	// so the address need not be served.
-	withRemote, closeWithRemote, err := harnessRegistry("test-model", remoteHarnesses{"shouty": "127.0.0.1:9000"}, echoagent.Model, nil, nil)
+	withRemote, closeWithRemote, err := harnessRegistry("test-model", remoteHarnesses{"shouty": "127.0.0.1:9000"}, echoagent.Model, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -773,5 +776,27 @@ func TestSessionServiceRefusesRegistrationCollision(t *testing.T) {
 			t.Errorf("registration %q (retired %v): got %v, want error %v", tc.name, tc.retire, err, tc.wantErr)
 		}
 		_ = store.Close()
+	}
+}
+
+// withOutput sends Run's command-line errors and usage to w.
+func withOutput(w io.Writer) Option { return func(o *options) { o.output = w } }
+
+// A stray positional argument is refused before anything is opened, and the operator is told which
+// one: the flag package does not report it, so Run must. Parsing stops at the first non-flag, so a
+// placeholder left in a manifest's args turns every later flag into an argument too.
+func TestRunRefusesPositionalArguments(t *testing.T) {
+	journal := filepath.Join(t.TempDir(), "journal.db")
+	var out bytes.Buffer
+	err := Run([]string{"-journal", journal, "-addr", "127.0.0.1:0", "PLACEHOLDER", "-model", "m"}, withOutput(&out))
+	if !errors.Is(err, ErrUsage) || !strings.Contains(err.Error(), `unexpected arguments ["PLACEHOLDER" "-model" "m"]`) {
+		t.Fatalf("Run error = %v, want a usage error naming the arguments", err)
+	}
+	reason, usage, ok := strings.Cut(out.String(), "Usage of agentsessionsd:")
+	if !ok || !strings.Contains(reason, `unexpected arguments ["PLACEHOLDER" "-model" "m"]`) || !strings.Contains(usage, "-journal") {
+		t.Fatalf("output = %q, want the unexpected arguments, then the usage", out.String())
+	}
+	if _, statErr := os.Stat(journal); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("a refused start left a journal behind: %v", statErr)
 	}
 }

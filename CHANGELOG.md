@@ -99,6 +99,11 @@ provide.
   handles the error; it cannot enable later effects or successful completion. Callbacks must
   not re-enter the same sink. Ordinary handled pre-intent rejections and operational executor
   errors retain their continuation behavior.
+- Queued controller and bridge sink calls now honor their own context cancellation while
+  waiting for another effect. Canceled calls start no effects; replay also honors per-call
+  contexts without consuming recorded evidence. An uncontended call still returns an existing
+  sticky park/failure before cancellation. Request/reply serialization and Run shutdown drainage
+  are unchanged.
 - SQLite schema version 3 adds the approval projection and captured cursor. Opening a version 2
   database backfills them atomically without changing event bytes or hashes. An undecodable v2
   session is isolated with no actionable reference; healthy sessions remain readable. SQL faults

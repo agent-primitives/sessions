@@ -193,8 +193,10 @@ retrying. A new Exec can supersede an ordinary interrupted turn and records its 
 identity; an owned approval call blocks new inputs until its receipt commits.
 An override is still per-turn: session metadata is unchanged and a later Exec with no override uses
 the stored default. Completed Resume, ordinary Suspend and Fork retain their existing session-default
-routing. An unreceipted approval's Suspend uses its recorded invocation route, including retry after
-a failed automatic snapshot or append.
+routing. An owned unreceipted approval's Suspend uses its recorded invocation route, including retry
+after a failed automatic snapshot or append. An inherited approval instead suspends through the
+child's stored default to checkpoint its own compute; Resume still refuses unresolved inherited
+tool intents.
 
 Older start markers without a name fall back to the session's stored harness; those without a
 version retain unversioned behavior. These rules apply independently if only one field is missing,

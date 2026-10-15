@@ -346,6 +346,83 @@ func TestPlacementApprovalHandoffPhases(t *testing.T) {
 	}
 }
 
+// An inherited override call does not own the child's cloned memory-tier actor.
+func TestInheritedApprovalSuspendUsesSessionHarness(t *testing.T) {
+	for _, decided := range []bool{false, true} {
+		t.Run(map[bool]string{false: "pending", true: "decided"}[decided], func(t *testing.T) {
+			ctl := newSuspendControl()
+			memory, backend := newSuspendPlacer(t, ctl, true)
+			runtime := local.New(placementGateHarness{})
+			t.Cleanup(func() { _ = runtime.Close() })
+			overrideBackend := &approvalBackend{Backend: runtime}
+			override := placement.New(overrideBackend, nil)
+			r, err := placement.NewRegistry("memory", map[string]*placement.Placer{"memory": memory, "override": override})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := newSuspendStore(t)
+			parent, child := store.Session("parent"), store.Session("child")
+			execSuspendTurn(t, memory, parent, "parent", "first")
+			head, err := parent.Head()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := override.Exec(t.Context(), parent, "parent", nil, head, placement.WithHarness("override")); !errors.Is(err, api.ErrApprovalParked) {
+				t.Fatalf("override Exec=%v", err)
+			}
+			if decided {
+				request := placementApprovalRecord(t, parent, api.EventApprovalRequest)
+				if _, err := r.Approve(t.Context(), parent, "parent", api.ApprovalDecision{ExecutionID: request.Event.ExecutionID, ToolCallID: "c1", RequestSeq: request.Seq, Approved: true}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			head, err = parent.Head()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := memory.Fork(t.Context(), parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, head); err != nil {
+				t.Fatal(err)
+			}
+			state, err := controller.InspectApproval(child, 0)
+			if err != nil || state == nil || !state.Inherited || state.Receipt != nil || state.Invocation.Harness != "override" {
+				t.Fatalf("inherited approval=%+v, %v", state, err)
+			}
+			if live, err := backend.Status(t.Context(), api.Incarnation{ID: "child"}); err != nil || live != api.ComputeLive {
+				t.Fatalf("cloned actor=%s, %v", live, err)
+			}
+			// Resume must refuse before selecting the inherited override or touching compute.
+			before := suspendRecords(t, child)
+			calls := len(ctl.calls)
+			if err := r.Resume(t.Context(), child, "child", "memory"); !errors.Is(err, controller.ErrInheritedToolIntent) {
+				t.Fatalf("inherited Resume=%v", err)
+			}
+			if !reflect.DeepEqual(before, suspendRecords(t, child)) || len(ctl.calls) != calls {
+				t.Fatal("refused Resume changed the journal or actor")
+			}
+			snapshots := overrideBackend.snapshots
+			var resolved string
+			ref, err := r.Suspend(t.Context(), child, "child", "memory", placement.WithResolvedHarnessCheck(func(name string) error { resolved = name; return nil }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resolved != "memory" || ref.Local != "child" || !ref.Memory || ref.ExternalURI == "" {
+				t.Errorf("Suspend route=%q ref=%+v; want child's memory snapshot", resolved, ref)
+			}
+			assertSuspendRef(t, child, ref)
+			if cold, err := backend.Status(t.Context(), api.Incarnation{ID: "child"}); err != nil || cold != api.ComputeCold {
+				t.Errorf("suspended child=%s, %v; want cold", cold, err)
+			}
+			if overrideBackend.snapshots != snapshots {
+				t.Error("Suspend snapshotted the inherited override")
+			}
+			actor := ctl.actors[substrate.ActorRef{Atespace: "space", Name: "child"}]
+			if actor == nil || actor.worker || ctl.snapshots[actor.snapshot].turns != 1 {
+				t.Errorf("Suspend did not retain the child's RAM: %+v", actor)
+			}
+		})
+	}
+}
+
 func TestApprovalRepairCASAndSharedGuard(t *testing.T) {
 	for _, fenced := range []bool{false, true} {
 		t.Run(map[bool]string{false: "CAS", true: "fenced"}[fenced], func(t *testing.T) {

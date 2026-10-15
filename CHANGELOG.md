@@ -98,7 +98,9 @@ provide.
   recovers the existing current approval invocation with its recorded config, inputs, route and
   cursor, checking CAS/deadline under the guard before runtime IO or request repair. Unrelated
   inputless Exec retains ordinary new-turn behavior. Pending Resume queries do not touch compute;
-  recorded-route Suspend can retry failed automatic handoff, with no stored-default fallback.
+  recorded-route Suspend can retry failed automatic handoff for owned approvals, with no
+  stored-default fallback. Inherited approvals suspend through the child's stored-default harness
+  so its own compute is checkpointed; Resume still refuses unresolved inherited tool intents.
   Gated executor failures become handled EXECUTOR_ERROR receipts for model continuation; a
   missing executor is a recoverable precondition, not a receipt. Ordinary tool errors are unchanged.
 - Controller Start now carries the session UID on live, replay and resumed invocations, and the

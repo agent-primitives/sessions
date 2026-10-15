@@ -68,8 +68,9 @@ type SessionsClient interface {
 	Cancel(ctx context.Context, in *CancelRequest, opts ...grpc.CallOption) (*Session, error)
 	// Compute-layer durability. There is no warm Pause: no Runtime backend implements a
 	// node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
-	// Suspend routes an unreceipted approval to its recorded harness; ordinary sessions use
-	// their stored default. An unserved recorded name is FAILED_PRECONDITION, with no fallback.
+	// Suspend routes an owned unreceipted approval to its recorded harness; inherited approvals
+	// and ordinary sessions use their stored default. An unserved recorded name is
+	// FAILED_PRECONDITION, with no fallback.
 	Suspend(ctx context.Context, in *SuspendRequest, opts ...grpc.CallOption) (*Session, error)
 	// An unresolved owned approval returns its current paused Session without runtime IO.
 	// A call-only cut repairs the request; neither outcome proves cold compute. After a decision,
@@ -252,8 +253,9 @@ type SessionsServer interface {
 	Cancel(context.Context, *CancelRequest) (*Session, error)
 	// Compute-layer durability. There is no warm Pause: no Runtime backend implements a
 	// node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
-	// Suspend routes an unreceipted approval to its recorded harness; ordinary sessions use
-	// their stored default. An unserved recorded name is FAILED_PRECONDITION, with no fallback.
+	// Suspend routes an owned unreceipted approval to its recorded harness; inherited approvals
+	// and ordinary sessions use their stored default. An unserved recorded name is
+	// FAILED_PRECONDITION, with no fallback.
 	Suspend(context.Context, *SuspendRequest) (*Session, error)
 	// An unresolved owned approval returns its current paused Session without runtime IO.
 	// A call-only cut repairs the request; neither outcome proves cold compute. After a decision,

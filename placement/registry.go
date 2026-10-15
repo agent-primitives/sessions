@@ -348,8 +348,9 @@ func (r *Registry) Approve(ctx context.Context, log eventlog.Store, sessionUID s
 	return controller.Approve(log, decision)
 }
 
-// Suspend routes an unreceipted approval to its recorded harness, including retries after an
-// automatic snapshot/append failure. Ordinary sessions retain their stored-default route.
+// Suspend routes an owned unreceipted approval to its recorded harness, including retries after an
+// automatic snapshot/append failure. Inherited approvals and ordinary sessions retain their
+// stored-default route.
 func (r *Registry) Suspend(ctx context.Context, log eventlog.Store, sessionUID, sessionDefaultName string, opts ...RegistryResumeOption) (api.SnapshotRef, error) {
 	var cfg registryResumeConfig
 	for _, o := range opts {
@@ -365,7 +366,7 @@ func (r *Registry) Suspend(ctx context.Context, log eventlog.Store, sessionUID, 
 		return api.SnapshotRef{}, err
 	}
 	name := sessionDefaultName
-	recordedName := state != nil && state.Receipt == nil && state.Invocation != nil && state.Invocation.Harness != ""
+	recordedName := state != nil && !state.Inherited && state.Receipt == nil && state.Invocation != nil && state.Invocation.Harness != ""
 	if recordedName {
 		name = state.Invocation.Harness
 	}

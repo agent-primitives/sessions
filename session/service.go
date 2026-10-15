@@ -277,8 +277,8 @@ func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest)
 // FailedPrecondition when either one is registered: an override onto a registered harness would
 // let any session run turns on it, retired or not, and a session created on a registration keeps
 // its turns on that registration. Between harnesses that are not registered, the documented
-// per-turn override is unchanged.
-func (s *Service) placerFor(uid, override string) (*placement.Placer, string, error) {
+// per-turn override is unchanged except that a memory-tier session cannot use a stateless override.
+func (s *Service) placerFor(ctx context.Context, uid, override string) (*placement.Placer, string, error) {
 	if uid == "" {
 		return nil, "", status.Error(codes.InvalidArgument, "session is required")
 	}
@@ -332,6 +332,9 @@ func (s *Service) placerFor(uid, override string) (*placement.Placer, string, er
 		if err := s.checkStatic(override); err != nil {
 			return nil, "", err
 		}
+		if err := s.checkMemoryOverride(ctx, uid, harness, override); err != nil {
+			return nil, "", err
+		}
 		harness = override
 	}
 	p, err := s.registry.For(harness)
@@ -339,6 +342,44 @@ func (s *Service) placerFor(uid, override string) (*placement.Placer, string, er
 		return nil, "", harnessError(err)
 	}
 	return p, harness, nil
+}
+
+// checkMemoryOverride refuses a stateless override of a memory-tier session before Exec can
+// mint a fence or write an invocation. Parking only the override would leave the stored harness's
+// memory live while SUSPEND reports the whole session cold and routes later Suspend calls away.
+func (s *Service) checkMemoryOverride(ctx context.Context, uid, stored, override string) error {
+	// Older rows may name an unserved built-in; retain their existing explicit-override path.
+	if !s.registry.Has(stored) {
+		return nil
+	}
+	describe := func(name string) (api.Descriptor, error) {
+		p, err := s.registry.For(name)
+		if err != nil {
+			return api.Descriptor{}, harnessError(err)
+		}
+		dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		desc, err := p.Describe(dctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return api.Descriptor{}, status.FromContextError(ctx.Err()).Err()
+			}
+			return api.Descriptor{}, status.Errorf(codes.Unavailable, "describe harness %q before override: %v", name, err)
+		}
+		return desc, nil
+	}
+	desc, err := describe(stored)
+	if err != nil || desc.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
+		return err
+	}
+	desc, err = describe(override)
+	if err != nil {
+		return err
+	}
+	if desc.Capabilities.Resumability == api.ResumabilityStatelessReplay {
+		return status.Errorf(codes.FailedPrecondition, "session %q requires memory snapshots on harness %q; a stateless turn cannot override it with %q", uid, stored, override)
+	}
+	return nil
 }
 
 // checkResumedHarness applies the routing rules to the harness Resume resolved for a session whose
@@ -487,7 +528,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	var harness string
 	if recoveryInfo == nil {
 		var err error
-		placer, harness, err = s.placerFor(uid, req.GetHarness())
+		placer, harness, err = s.placerFor(ctx, uid, req.GetHarness())
 		if err != nil {
 			return err
 		}
@@ -701,7 +742,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		return nil, status.Error(codes.InvalidArgument, "ForkRequest.identity is unsupported: per-child principals are not enforced")
 	}
 
-	placer, _, err := s.placerFor(req.GetSession(), "")
+	placer, _, err := s.placerFor(ctx, req.GetSession(), "")
 	if err != nil {
 		return nil, err
 	}

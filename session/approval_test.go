@@ -472,6 +472,7 @@ func TestPublicApprovalDecidedRecordedRoute(t *testing.T) {
 					t.Fatal(err)
 				}
 				before := routingRecords(t, store.Session("s"))
+				defaultIO := a.ioCounts() // the initial override may Describe the stored harness
 				var current *v1.Session
 				if operation == "Resume" {
 					current, err = c.Resume(t.Context(), &v1.ResumeRequest{Session: "s"})
@@ -489,7 +490,7 @@ func TestPublicApprovalDecidedRecordedRoute(t *testing.T) {
 				if status.Code(err) != want {
 					t.Fatalf("decided recovery=%v want %v", err, want)
 				}
-				if a.ioCounts() != ([4]int32{}) || defaultHarness.runs.Load() != 0 || models.Load() != 0 {
+				if a.ioCounts() != defaultIO || defaultHarness.runs.Load() != 0 || models.Load() != 0 {
 					t.Fatalf("fallback: default IO=%v runs=%d models=%d", a.ioCounts(), defaultHarness.runs.Load(), models.Load())
 				}
 				if !tc.allowed {

@@ -574,12 +574,9 @@ func tcpDial(address string, opts []grpc.DialOption) (api.Harness, func() error,
 	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
 }
 
-// ErrCheckpointing is returned when a turn cannot proceed because its session is being
-// checkpointed as the parent of a stateful Fork, which lasts until every child is cloned from the
-// checkpoint: either the turn tried to open a harness connection meanwhile, or the checkpoint ended
-// the connection the turn was using. A stateful Fork, Suspend or Registry.Approve also returns it
-// when another operation holds the shared checkpoint mark. It is retryable once that operation
-// returns; session.Service maps it to codes.Aborted.
+// ErrCheckpointing is returned when another operation holds the session's checkpoint mark,
+// or a checkpoint ended the harness connection a turn was using. It is retryable once that
+// operation returns; session.Service maps it to codes.Aborted.
 var ErrCheckpointing = errors.New("placement: session is being checkpointed")
 
 // errSuperseded is the cancellation cause of a turn whose harness connection a checkpoint ended. The
@@ -716,12 +713,11 @@ func (p *Placer) refuseDuringCheckpoint(sessionUID string) error {
 // mark (checkSuperseded) and writes nothing. A connection stays marked even if the checkpoint
 // aborts. Every successful call must be paired with endCheckpoint.
 //
-// Checkpoints do not nest: while another fork holds the mark, from its checkpoint until its last
-// child is cloned, or a Suspend holds it, beginCheckpoint fails with ErrCheckpointing and changes
-// nothing. A second fork would otherwise mint a fence that fails the first one's SUSPEND record
-// after the parent is already cold, or checkpoint the parent again and replace the snapshot the
-// first one's remaining children clone from; a fork beside a Suspend would fail the Suspend's
-// record the same way.
+// Checkpoints do not nest: while another operation holds the mark, beginCheckpoint fails with
+// ErrCheckpointing and changes nothing. A second fork would otherwise mint a fence that fails the
+// first one's SUSPEND record after the parent is already cold, or checkpoint the parent again and
+// replace the snapshot the first one's remaining children clone from; a fork beside a Suspend
+// would fail the Suspend's record the same way.
 func (p *Placer) beginCheckpoint(sessionUID string) ([]*liveHarness, error) {
 	p.sessions.mu.Lock()
 	defer p.sessions.mu.Unlock()
@@ -738,7 +734,8 @@ func (p *Placer) beginCheckpoint(sessionUID string) ([]*liveHarness, error) {
 
 // markCheckpoint excludes a stateful Fork while a guarded Suspend or approval decision runs.
 // The caller holds the session guard; marking does not close harness connections. It fails with
-// ErrCheckpointing, changing nothing, while a fork holds the mark. Pair success with endCheckpoint.
+// ErrCheckpointing, changing nothing, while another operation holds the mark.
+// Pair success with endCheckpoint.
 func (s *sessionSet) markCheckpoint(sessionUID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -142,7 +142,9 @@ message ExecRequest {
   int64 resume_from_seq = 3;
   // Empty = the session's harness. A different harness runs this turn only, unless either one is
   // a registered harness (see HarnessRegistry): then the session is pinned and the call is
-  // FAILED_PRECONDITION.
+  // FAILED_PRECONDITION. A stored REQUIRES_MEMORY_SNAPSHOT harness also refuses a
+  // STATELESS_REPLAY override before any fence or journal write: parking only the override
+  // cannot checkpoint the stored harness's live memory.
   string harness = 4;
   // Opaque per-execution config, passed through to Start.config. Non-empty bytes are journaled
   // verbatim in EXECUTION_START before the harness runs, and restored for controller replay/resume.

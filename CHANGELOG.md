@@ -94,6 +94,10 @@ provide.
 
 ### Compatibility
 
+- `Exec` refuses a stateless harness override when the session's served stored harness requires
+  memory snapshots (`FAILED_PRECONDITION`, before any fence or journal write). Parking only the
+  override cannot checkpoint the stored harness's live memory. Suspend still checkpoints the
+  stored harness; stateless-to-stateless overrides are unchanged.
 - `Approve` and a stateful `Fork` on the same session now exclude each other through the shared
   checkpoint mark. A refused approval returns `ABORTED` without minting a fence or writing a
   decision; retry after the fork finishes. This coordination covers one Registry/host only.

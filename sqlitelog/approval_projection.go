@@ -28,6 +28,7 @@ CREATE TABLE approval_executions (
  input_messages INTEGER NOT NULL DEFAULT 0,
  completed INTEGER NOT NULL DEFAULT 0,
  call_id TEXT NOT NULL DEFAULT '',
+ call_seq INTEGER NOT NULL DEFAULT 0,
  request_seq INTEGER NOT NULL DEFAULT 0,
  decision_seq INTEGER NOT NULL DEFAULT 0,
  approved INTEGER NOT NULL DEFAULT 0,
@@ -104,18 +105,20 @@ func migrateV2ToV3(tx *sql.Tx) error {
 // references, matching strict inspection, while malformed nongated histories remain unrelated.
 // Input completeness is evaluated at the captured cursor, so a partial start may become valid.
 type approvalExecution struct {
-	firstSeq                 int64
-	gated, invalid, hasStart bool
-	expectedInputs           sql.NullInt64
-	inputs, messages         int64
-	completed                bool
-	callID                   string
-	requestSeq, decisionSeq  int64
-	approved, receipt        bool
+	firstSeq                         int64
+	gated, invalid, hasStart         bool
+	expectedInputs                   sql.NullInt64
+	inputs, messages                 int64
+	completed                        bool
+	callID                           string
+	callSeq, requestSeq, decisionSeq int64
+	approved, receipt                bool
 }
 
 func projectApproval(tx *sql.Tx, uid string, seq int64, ev api.Event) error {
-	if _, err := tx.Exec(`UPDATE sessions SET last_seq=? WHERE session=?`, seq, uid); err != nil {
+	// An already-open older writer can skip this reducer. Never regain reporting
+	// authority by advancing the cursor over events we have not inspected.
+	if _, err := tx.Exec(`UPDATE sessions SET approval_corrupt=CASE WHEN last_seq != ? THEN 1 ELSE approval_corrupt END, last_seq=? WHERE session=?`, seq-1, seq, uid); err != nil {
 		return err
 	}
 	if ev.Kind == api.EventLifecycle {
@@ -126,7 +129,7 @@ func projectApproval(tx *sql.Tx, uid string, seq int64, ev api.Event) error {
 		return nil
 	}
 	var state approvalExecution
-	err := tx.QueryRow(`SELECT first_seq,gated,invalid,has_start,expected_inputs,input_records,input_messages,completed,call_id,request_seq,decision_seq,approved,receipt FROM approval_executions WHERE session=? AND execution_id=?`, uid, ev.ExecutionID).Scan(&state.firstSeq, &state.gated, &state.invalid, &state.hasStart, &state.expectedInputs, &state.inputs, &state.messages, &state.completed, &state.callID, &state.requestSeq, &state.decisionSeq, &state.approved, &state.receipt)
+	err := tx.QueryRow(`SELECT first_seq,gated,invalid,has_start,expected_inputs,input_records,input_messages,completed,call_id,call_seq,request_seq,decision_seq,approved,receipt FROM approval_executions WHERE session=? AND execution_id=?`, uid, ev.ExecutionID).Scan(&state.firstSeq, &state.gated, &state.invalid, &state.hasStart, &state.expectedInputs, &state.inputs, &state.messages, &state.completed, &state.callID, &state.callSeq, &state.requestSeq, &state.decisionSeq, &state.approved, &state.receipt)
 	if errors.Is(err, sql.ErrNoRows) {
 		state.firstSeq = seq
 		if _, err := tx.Exec(`UPDATE sessions SET latest_execution=? WHERE session=?`, ev.ExecutionID, uid); err != nil {
@@ -155,9 +158,9 @@ func projectApproval(tx *sql.Tx, uid string, seq int64, ev api.Event) error {
 			return err
 		}
 	}
-	_, err = tx.Exec(`INSERT INTO approval_executions(session,execution_id,first_seq,gated,invalid,has_start,expected_inputs,input_records,input_messages,completed,call_id,request_seq,decision_seq,approved,receipt)
- VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session,execution_id) DO UPDATE SET
- gated=excluded.gated,invalid=excluded.invalid,has_start=excluded.has_start,expected_inputs=excluded.expected_inputs,input_records=excluded.input_records,input_messages=excluded.input_messages,completed=excluded.completed,call_id=excluded.call_id,request_seq=excluded.request_seq,decision_seq=excluded.decision_seq,approved=excluded.approved,receipt=excluded.receipt`, uid, ev.ExecutionID, state.firstSeq, state.gated, state.invalid, state.hasStart, state.expectedInputs, state.inputs, state.messages, state.completed, state.callID, state.requestSeq, state.decisionSeq, state.approved, state.receipt)
+	_, err = tx.Exec(`INSERT INTO approval_executions(session,execution_id,first_seq,gated,invalid,has_start,expected_inputs,input_records,input_messages,completed,call_id,call_seq,request_seq,decision_seq,approved,receipt)
+ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session,execution_id) DO UPDATE SET
+ gated=excluded.gated,invalid=excluded.invalid,has_start=excluded.has_start,expected_inputs=excluded.expected_inputs,input_records=excluded.input_records,input_messages=excluded.input_messages,completed=excluded.completed,call_id=excluded.call_id,call_seq=excluded.call_seq,request_seq=excluded.request_seq,decision_seq=excluded.decision_seq,approved=excluded.approved,receipt=excluded.receipt`, uid, ev.ExecutionID, state.firstSeq, state.gated, state.invalid, state.hasStart, state.expectedInputs, state.inputs, state.messages, state.completed, state.callID, state.callSeq, state.requestSeq, state.decisionSeq, state.approved, state.receipt)
 	return err
 }
 
@@ -214,6 +217,7 @@ func (s *approvalExecution) reduce(tx *sql.Tx, uid string, seq int64, ev api.Eve
 			break
 		}
 		s.callID = call.ID
+		s.callSeq = seq
 		s.requestSeq = 0
 		s.decisionSeq = 0
 		s.receipt = false

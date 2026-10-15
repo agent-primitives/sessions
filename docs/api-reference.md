@@ -979,7 +979,10 @@ refused. Retiring a harness refuses new sessions on it while every existing sess
 running, resuming and forking. Registering the identical spec again reactivates it.
 
 This service decides what the host dials and pays model calls for, so it is an operator
-surface, not a client one. agentsessionsd does not serve it; see docs/security.md.
+surface, not a client one. agentsessionsd serves it only on a separate optional literal-loopback
+listener (-registry-addr); Sessions never serves this API. Both listeners are plaintext and
+unauthenticated. Every local or same-pod process that can reach the operator port can administer
+registrations. See docs/security.md.
 
 
 <a name="agentsessions-v1-GetHarnessRequest"></a>
@@ -1206,7 +1209,8 @@ returns FAILED_PRECONDITION.
 ### HarnessRegistry
 HarnessRegistry manages the harnesses a host can place sessions on. It is an admin API: a caller
 that can register a harness decides where the host sends session history and whose model calls it
-pays for.
+pays for. Keep it off the Sessions listener and control access to it.
+See docs/security.md#operator-access for operator setup and CLI usage.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
@@ -1578,7 +1582,7 @@ stable when a session is created mid-pagination; an offset would skip or repeat 
 | model | [string](#string) |  | model-agnostic id |
 | exec_state | [ExecState](#agentsessions-v1-ExecState) |  | execution/turn axis |
 | compute_state | [ComputeState](#agentsessions-v1-ComputeState) |  | incarnation axis |
-| pending_approval | [ApprovalRef](#agentsessions-v1-ApprovalRef) |  | Output-only unresolved host-owned APPROVAL_REQUEST for hosts supporting approval reporting; the reference Sessions service leaves this field unset. It is not caller-writable metadata. Requests/decisions match execution_id, tool_call_id and request_seq. Supporting hosts exclude executions first seen before the child&#39;s latest FORK, including later calls in those turns, and suppress the reference for invalid approval-bearing evidence in the captured history. Metadata, correlation and cursor describe one captured prefix, not current runtime state. Clearing a reference after a decision does not prove a receipt or execution completion. |
+| pending_approval | [ApprovalRef](#agentsessions-v1-ApprovalRef) |  | Set by hosts supporting approval reporting for a valid unanswered host-owned APPROVAL_REQUEST in the latest first-seen execution at last_seq. Requests/decisions match execution_id, tool_call_id and request_seq. Calls whose TOOL_CALL precedes the child&#39;s latest FORK are excluded. Unset when no request is reportable, approval-bearing evidence is invalid, the projection lags last_seq, or the host does not support reporting. The reference Sessions service leaves it unset. |
 | last_seq | [int64](#int64) |  | event-log cursor |
 | parent_uid | [string](#string) |  | fork lineage |
 | fork_seq | [int64](#int64) |  |  |

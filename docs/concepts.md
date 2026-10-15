@@ -136,18 +136,21 @@ reasoning block, a model's tool call, or a tool's result).
 ### Captured storage approval projection
 
 SQLite schema 3 reduces approval evidence while appending each persisted protobuf event, in the
-same transaction as metadata and `last_seq`. `sqlitelog.SessionInfo.PendingApproval` is a value
-snapshot of that prefix, not command authority. It selects an unanswered request in the latest
-first-seen execution, matching execution ID, tool-call ID and request sequence. Executions first
-seen before the child's latest FORK are excluded even if their calls arrive later. Invalid
-approval-bearing evidence suppresses references; malformed nongated history does not.
+same transaction as metadata and the projection cursor. `SessionInfo.LastSeq` is derived from the
+indexed event head. `sqlitelog.SessionInfo.PendingApproval` selects a valid unanswered request in
+the latest first-seen execution, matching execution ID, tool-call ID and request sequence. Calls
+whose TOOL_CALL precedes the child's latest FORK are excluded; a later call in an inherited
+execution belongs to the child. Invalid approval-bearing evidence suppresses references;
+malformed nongated history does not. A projection that lags the event head also suppresses the
+reference. If an already-open older writer skips projection updates, later appends do not restore
+reporting for that session by skipping the missing evidence.
 
 This store-level projection does not enable the public approval workflow: Session replies still
 leave `pending_approval` unset. Host-only approval requests/decisions do not make cold compute live.
 The captured values remain valid after later appends, but are not an integrity check for direct
 out-of-band database edits. The v2 backfill preserves journal bytes/hashes and isolates undecodable
-sessions without exposing actionable references; SQL errors roll back. Schema 3 is not readable by
-older binaries, so keep a backup if downgrade may be needed.
+sessions without exposing actionable references; SQL errors roll back. Older binaries refuse to
+reopen schema 3, so keep a backup if downgrade may be needed.
 
 ### Durable execution invocation
 

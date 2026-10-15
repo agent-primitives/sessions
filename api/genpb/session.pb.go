@@ -385,13 +385,11 @@ type Session struct {
 	Model        string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`                                                                        // model-agnostic id
 	ExecState    ExecState              `protobuf:"varint,13,opt,name=exec_state,json=execState,proto3,enum=agentsessions.v1.ExecState" json:"exec_state,omitempty"`             // execution/turn axis
 	ComputeState ComputeState           `protobuf:"varint,14,opt,name=compute_state,json=computeState,proto3,enum=agentsessions.v1.ComputeState" json:"compute_state,omitempty"` // incarnation axis
-	// Output-only unresolved host-owned APPROVAL_REQUEST for hosts supporting approval reporting;
-	// the reference Sessions service leaves this field unset. It is not caller-writable metadata.
-	// Requests/decisions match execution_id, tool_call_id and request_seq. Supporting hosts exclude
-	// executions first seen before the child's latest FORK, including later calls in those turns,
-	// and suppress the reference for invalid approval-bearing evidence in the captured history.
-	// Metadata, correlation and cursor describe one captured prefix, not current runtime state.
-	// Clearing a reference after a decision does not prove a receipt or execution completion.
+	// Set by hosts supporting approval reporting for a valid unanswered host-owned APPROVAL_REQUEST
+	// in the latest first-seen execution at last_seq. Requests/decisions match execution_id,
+	// tool_call_id and request_seq. Calls whose TOOL_CALL precedes the child's latest FORK are excluded.
+	// Unset when no request is reportable, approval-bearing evidence is invalid, the projection lags
+	// last_seq, or the host does not support reporting. The reference Sessions service leaves it unset.
 	PendingApproval *ApprovalRef `protobuf:"bytes,15,opt,name=pending_approval,json=pendingApproval,proto3" json:"pending_approval,omitempty"`
 	LastSeq         int64        `protobuf:"varint,5,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`      // event-log cursor
 	ParentUid       string       `protobuf:"bytes,6,opt,name=parent_uid,json=parentUid,proto3" json:"parent_uid,omitempty"` // fork lineage

@@ -196,7 +196,7 @@ collect() {
 	# Chapter k starts at the first frame whose progress bar is k/11 full; a frame 1.5 s later is kept
 	# for each, to check against the table. collect fails unless every chapter is found, in order.
 	python3 -I "${DEMO}/chapters.py" "${mp4}" >"${OUT}/chapters.tsv"
-	[[ "$(cut -f1 "${OUT}/chapters.tsv" | paste -sd ' ' -)" == "$(seq -s ' ' 1 "${CHAPTERS}")" ]] || {
+	[[ "$(cut -f1 "${OUT}/chapters.tsv" | paste -sd ' ' -)" == "$(seq 1 "${CHAPTERS}" | paste -sd ' ' -)" ]] || {
 		echo "chapters.tsv does not list chapters 1-${CHAPTERS}" >&2
 		exit 1
 	}

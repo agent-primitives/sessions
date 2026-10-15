@@ -36,10 +36,19 @@ func TestTemplateNameIsContentAddressed(t *testing.T) {
 	if TemplateName("support-desk", "triage", "sha256:"+strings.Repeat("c", 64), "sha256:b", Options{}) == base {
 		t.Fatal("another image must give another template")
 	}
-	// The formula is kmx's: sha256(image digest + "\n" + binding digest).
-	sum := sha256.Sum256([]byte(digestA + "\n" + "sha256:b"))
+	// The formula is kmx's: sha256(renderer version + "\n" + image digest + "\n" + binding digest).
+	sum := sha256.Sum256([]byte(RendererVersion + "\n" + digestA + "\n" + "sha256:b"))
 	if want := "support-desk-triage-" + hex.EncodeToString(sum[:])[:8]; base != want {
 		t.Fatalf("name = %q, want %q", base, want)
+	}
+	if templateName("agentsessions-poc.actortemplate/v2", "support-desk", "triage", digestA, "sha256:b", Options{}) == base {
+		t.Fatal("another renderer version must give another template")
+	}
+	// Given kmx's renderer version, the formula gives the name kmx's TemplateName gives: this value
+	// came from kaimahi internal/kmx/agentsessions.TemplateName at 6610c37 on these inputs.
+	digestB := "sha256:" + strings.Repeat("b", 64)
+	if got := templateName("kmx.agentsessions-actortemplate/v1", "support-desk", "triage", digestA, digestB, Options{}); got != "support-desk-triage-03ac8c2a" {
+		t.Fatalf("with kmx's renderer version: name = %q, want kmx's support-desk-triage-03ac8c2a", got)
 	}
 	if TemplateName("support-desk", "triage", digestA, "sha256:b", Options{Memory: true}) == base {
 		t.Fatal("the memory tier must give another template")
@@ -510,6 +519,24 @@ func TestLoadBindingIsStrict(t *testing.T) {
 		{"a credential field", func(m map[string]any) { model(m)["apiKey"] = secretish }, "unknown field"},
 		{"an empty sandbox config", func(m map[string]any) { m["sandbox"].(map[string]any)["configName"] = "" }, "sandbox.configName"},
 		{"no fidelity", func(m map[string]any) { delete(m["snapshot"].(map[string]any), "fidelity") }, "snapshot.fidelity"},
+		{"ROOTFS on gvisor", func(m map[string]any) {
+			m["sandbox"].(map[string]any)["class"] = "gvisor"
+			m["snapshot"].(map[string]any)["fidelity"] = "ROOTFS"
+		}, "snapshot.fidelity ROOTFS requires sandbox.class microvm"},
+		{"no storage location", func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "" }, "snapshot.storageLocation is required"},
+		{"a dot-dot storage segment", func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "gs://b/x/../" + secretish }, "snapshot.storageLocation must be an object-storage URI"},
+		{"an encoded dot-dot storage segment", func(m map[string]any) {
+			m["snapshot"].(map[string]any)["storageLocation"] = "gs://b/%2e%2e/" + secretish
+		}, "snapshot.storageLocation must be an object-storage URI"},
+		{"an empty storage segment", func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "gs://b//" + secretish }, "snapshot.storageLocation must be an object-storage URI"},
+		{"a storage query", func(m map[string]any) {
+			m["snapshot"].(map[string]any)["storageLocation"] = "gs://b/x?sig=" + secretish
+		}, "snapshot.storageLocation must be an object-storage URI"},
+		{"storage userinfo", func(m map[string]any) {
+			m["snapshot"].(map[string]any)["storageLocation"] = "gs://u:" + secretish + "@b/x/"
+		}, "snapshot.storageLocation must be an object-storage URI"},
+		{"storage with no bucket", func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "gs:///" + secretish }, "snapshot.storageLocation must be an object-storage URI"},
+		{"a storage path, not a URI", func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "/var/" + secretish }, "snapshot.storageLocation must be an object-storage URI"},
 		{"a repeated gate", func(m map[string]any) {
 			m["approval"] = map[string]any{"invokes": []any{map[string]any{"caller": "coordinator", "agent": "reviewer"}, map[string]any{"caller": "coordinator", "agent": "reviewer"}}}
 		}, "coordinator -> reviewer is given more than once"},
@@ -526,6 +553,15 @@ func TestLoadBindingIsStrict(t *testing.T) {
 				t.Fatalf("err = %q repeats the value", err)
 			}
 		})
+	}
+	for _, ok := range []func(m map[string]any){
+		func(m map[string]any) { m["snapshot"].(map[string]any)["fidelity"] = "ROOTFS" }, // on microvm
+		func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "gs://bucket" },
+		func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "s3://bucket/a/b" },
+	} {
+		if _, err := LoadBinding(writeBinding(t, "../binding-coordinator.json", ok)); err != nil {
+			t.Errorf("a binding kmx accepts was refused: %v", err)
+		}
 	}
 	trailing := filepath.Join(t.TempDir(), "b.json")
 	raw, _ := os.ReadFile("../binding-coordinator.json")
@@ -565,6 +601,20 @@ func TestBindingDigest(t *testing.T) {
 	served, _ := LoadBinding(writeBinding(t, "../binding-microvm.json", func(m map[string]any) { model(m)["name"] = "other" }))
 	if served.Digest() == base.Digest() {
 		t.Fatal("the served model must change the digest")
+	}
+	// kmx computes the same digest: these values came from kaimahi
+	// internal/kmx/runtime.AgentSessionsBindingDigest at 6610c37 on the committed files.
+	for file, want := range map[string]string{
+		"../binding-microvm.json": "sha256:a8ce35e86590c6e1708907fd054718f8d5fc5a1b7ff838df0f065bc0c4b2ffa4",
+		"../binding.json":         "sha256:dea63034f38fb9f8b597c889143bc414e29c013368ca35c713019d733eb7863a",
+	} {
+		b, err := LoadBinding(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Digest() != want {
+			t.Errorf("%s: digest %s, want kmx's %s", file, b.Digest(), want)
+		}
 	}
 }
 

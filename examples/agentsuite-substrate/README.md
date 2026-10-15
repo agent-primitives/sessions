@@ -312,19 +312,23 @@ refuses a binding whose `model.name` is not exactly the agent's pinned model (no
 prefix or version matching). A different model is a new suite version and a new evaluation
 (`suites/coordinator-workers-v2`). The shape follows kmx's `AgentSessionsBinding`
 (kaimahi `internal/kmx/runtime/agentsessions_binding.go` on branch `aramase/f/kmx_agentsessions_binding`,
-read at `6a895a6` plus that worktree's uncommitted changes on 2026-10-15): the same `apiVersion`,
-`kind` and fields, the same required `model` (`name`, `provider: openai`, optional `baseURL`,
-`secretRef`), the same template name formula, and the digest computed the same way (JCS of the
-binding's fields, with an empty `workerSelector` the same as an omitted one; not cross-checked by
-running kmx's code). Every difference that remains:
+compared at `6610c37`): the same `apiVersion`, `kind` and fields, the same required `model` (`name`,
+`provider: openai`, optional `baseURL`, `secretRef`), the same cross-field and `snapshot.storageLocation`
+refusals (`ROOTFS` only on `microvm`; an object-storage URI with no credentials, query, fragment, or
+empty, `.` or `..` segments), the same template name formula (fed this renderer's own version, so
+the names differ; see the table), and the same digest (JCS of the
+binding's fields, with an empty `workerSelector` the same as an omitted one). The digest was
+cross-checked by running kmx's `AgentSessionsBindingDigest` at `6610c37` on `binding-microvm.json` and
+`binding.json`, and the formula by running kmx's `TemplateName`; `render_test.go` pins both results.
+Every difference that remains:
 
 | Difference | Why |
 |---|---|
 | `model.path` (PoC only) | An Azure OpenAI deployment's completions path carries its `api-version` query, and kmx's `model.baseURL` refuses a query. `TODO(spike): does Azure's v1 endpoint (<resource>/openai/v1, model in the body) work for this deployment with the managed-identity token, so kmx's shape needs no path?` |
 | `approval.invokes` (PoC only) | kmx has no approval field, and AgentSuite has none on an invokes edge. The PoC treats which delegation needs an operator as per-environment policy. kmx's strict parser refuses both PoC-only fields. |
 | `approval.invokes` is sorted before the digest | It is a set; kmx has no such field to order. |
-| JSON only | kmx reads YAML or JSON, refuses anchors, aliases and credential-shaped values, and checks Kubernetes quantities and label syntax; the PoC decodes strict JSON and checks names, URLs and the secret key shape, not quantities or labels. |
-| `snapshot.storageLocation` is checked for presence only | kmx also refuses credentials, queries and `.`/`..` segments in it. |
+| Template names differ from kmx's for the same image and binding | The formula is kmx's, `sha256(rendererVersion + "\n" + imageDigest + "\n" + bindingDigest)`, but the renderer version is the PoC's own (`agentsessions-poc.actortemplate/v1`, kmx's is `kmx.agentsessions-actortemplate/v1`): this renderer's ActorTemplate is not kmx's (its container env sets `AGENT_DIR` and `AGENTSUITE_APPROVAL`; kmx's sets `HARNESS_KIND` and `HARNESS_MODEL`), and kmx folds the version in so that two mappings never share a name. The memory tier also appends `"\nmemory"`; kmx has no memory tier. |
+| JSON only | kmx reads YAML or JSON, refuses anchors, aliases and credential-shaped values, and checks Kubernetes quantities and label syntax; the PoC decodes strict JSON and checks names, URLs, the storage location and the secret key shape, not quantities or labels (that would add `k8s.io/apimachinery` to the example module). |
 | One binding per agent atespace | kmx lift renders one chat member into `binding.atespace`. The coordinator's three agents share one daemon, whose session actors are named by session uid, so `coordinator.sh setup` writes one copy of the binding per agent with `atespace` set to `agentsuite-<agent>` (three digests). |
 | The binding's endpoint is filled in at setup | `binding-coordinator.json` names `https://example.openai.azure.com`; `setup` writes this environment's copy with the operator's `AGENTSUITE_MODEL*` values, so no Azure resource name is committed. |
 | No eval evidence | kmx eval takes one chat member and records the binding digest in its evidence, and kmx lift requires that evidence. A suite with invokes edges has no kmx eval path yet, so this PoC renders without evidence. |

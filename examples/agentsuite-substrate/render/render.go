@@ -157,13 +157,25 @@ type Options struct {
 	ActorAtespace string
 }
 
+// RendererVersion identifies this PoC's binding-to-ActorTemplate mapping and is part of hash8, as
+// kmx's RendererVersion is part of its own: a mapping change names a new template instead of reusing
+// a name whose rendered spec differs. It is not kmx's value, because this renderer's template is not
+// kmx's (its env sets AGENT_DIR, AGENTSUITE_APPROVAL and the memory tier; kmx's sets HARNESS_KIND
+// and HARNESS_MODEL), so the PoC and kmx never give one name two specs.
+const RendererVersion = "agentsessions-poc.actortemplate/v1"
+
 // TemplateName is <suite>-<agent>-<hash8>: hash8 is the first 8 hex of
-// sha256(imageDigest + "\n" + bindingDigest), with "\nmemory" appended when o.Memory is set (the
-// template then selects the memory tier in its env). The binding digest covers the served model and
-// the approval gates, so changing either names another template. The result is a DNS label of at
-// most 63 characters; suite and agent are lowercased, sanitized and truncated to fit, never hash8.
+// sha256(RendererVersion + "\n" + imageDigest + "\n" + bindingDigest), kmx's formula, with
+// "\nmemory" appended when o.Memory is set (the template then selects the memory tier in its env;
+// kmx has no memory tier). The binding digest covers the served model and the approval gates, so
+// changing either names another template. The result is a DNS label of at most 63 characters; suite
+// and agent are lowercased, sanitized and truncated to fit, never hash8.
 func TemplateName(suite, agent, imageDigest, bindingDigest string, o Options) string {
-	content := imageDigest + "\n" + bindingDigest
+	return templateName(RendererVersion, suite, agent, imageDigest, bindingDigest, o)
+}
+
+func templateName(renderer, suite, agent, imageDigest, bindingDigest string, o Options) string {
+	content := renderer + "\n" + imageDigest + "\n" + bindingDigest
 	if o.Memory {
 		content += "\nmemory"
 	}

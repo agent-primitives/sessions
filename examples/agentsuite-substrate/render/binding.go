@@ -29,10 +29,11 @@ const (
 // the exact model; the binding says where that model is served and where sessions are placed. It
 // lives outside the suite, one per environment.
 //
-// Its fields follow kmx's AgentSessionsBinding (kaimahi internal/kmx/runtime/agentsessions_binding.go
-// on branch aramase/f/kmx_agentsessions_binding), with two additions this PoC needs: model.path
-// (an Azure OpenAI deployment's completions path, which carries its api-version query) and
-// approval (the invokes edges this environment gates). README.md lists every difference.
+// Its fields and refusals follow kmx's AgentSessionsBinding (kaimahi
+// internal/kmx/runtime/agentsessions_binding.go on branch aramase/f/kmx_agentsessions_binding, at
+// 6610c37), with two additions this PoC needs: model.path (an Azure OpenAI deployment's completions
+// path, which carries its api-version query) and approval (the invokes edges this environment
+// gates). The README section "The binding and kmx" lists every difference, these two included.
 type Binding struct {
 	APIVersion     string                `json:"apiVersion"`
 	Kind           string                `json:"kind"`
@@ -174,8 +175,12 @@ func (b Binding) validate() error {
 		return fmt.Errorf("sandbox.configName %q is not a Kubernetes object name", b.Sandbox.ConfigName)
 	case b.Snapshot.Fidelity != "MEMORY" && b.Snapshot.Fidelity != "ROOTFS" && b.Snapshot.Fidelity != "VOLUMES":
 		return errors.New("snapshot.fidelity: want MEMORY, ROOTFS or VOLUMES")
-	case b.Snapshot.StorageLocation == "":
-		return errors.New("snapshot.storageLocation is required")
+	case b.Snapshot.Fidelity == "ROOTFS" && b.Sandbox.Class != "microvm":
+		// Substrate serves root filesystem snapshots on the micro-VM class only (kmx refuses it too).
+		return errors.New("snapshot.fidelity ROOTFS requires sandbox.class microvm")
+	}
+	if err := checkStorageLocation(b.Snapshot.StorageLocation); err != nil {
+		return err
 	}
 	if err := b.Model.validate(); err != nil {
 		return err
@@ -212,6 +217,39 @@ func (m BindingModel) validate() error {
 	if m.Path != "" {
 		if err := CheckModelPath(m.Path); err != nil {
 			return fmt.Errorf("model.path: %w", err)
+		}
+	}
+	return nil
+}
+
+// maxStorageLocation is kmx's limit: it leaves room under substrate's 1024-byte storage_location
+// for the "<template>/" suffix a render appends.
+const maxStorageLocation = 1024 - 64
+
+var uriScheme = regexp.MustCompile(`^[a-z][a-z0-9+.-]*$`)
+
+// checkStorageLocation applies kmx's snapshot.storageLocation rule: an object-storage base URI
+// (gs://bucket/prefix/) with a scheme and bucket, no credentials, query or fragment, and no empty,
+// "." or ".." path segments (object keys are not filesystem paths, so they are refused rather than
+// resolved; one trailing '/' is allowed). Its errors never contain the location.
+func checkStorageLocation(location string) error {
+	const msg = "snapshot.storageLocation must be an object-storage URI with a scheme and bucket, no credentials, query or fragment, and no empty, \".\" or \"..\" path segments"
+	if location == "" {
+		return errors.New("snapshot.storageLocation is required")
+	}
+	if len(location) > maxStorageLocation || strings.ContainsFunc(location, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+		return errors.New(msg)
+	}
+	u, err := url.Parse(location)
+	if err != nil || !uriScheme.MatchString(u.Scheme) || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(location, "#") {
+		return errors.New(msg)
+	}
+	// u.Path is decoded, so percent-encoded dot segments are refused too.
+	if u.Path != "" && u.Path != "/" {
+		for _, segment := range strings.Split(strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), "/"), "/") {
+			if segment == "" || segment == "." || segment == ".." {
+				return errors.New(msg)
+			}
 		}
 	}
 	return nil

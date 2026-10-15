@@ -389,16 +389,10 @@ type Session struct {
 	// COMPLETED is a compatibility fallback, not proof of END, a receipt, or admission.
 	ExecState    ExecState    `protobuf:"varint,13,opt,name=exec_state,json=execState,proto3,enum=agentsessions.v1.ExecState" json:"exec_state,omitempty"`
 	ComputeState ComputeState `protobuf:"varint,14,opt,name=compute_state,json=computeState,proto3,enum=agentsessions.v1.ComputeState" json:"compute_state,omitempty"` // incarnation axis
-	// Output-only, derived from an unresolved host-owned APPROVAL_REQUEST in the journal. Unset
-	// when no request is pending or after a committed decision; not caller-writable metadata or a
-	// mutable approval flag. Requests/decisions match execution_id, tool_call_id and request_seq.
-	// Executions first seen before the child's latest FORK marker are excluded, even when their
-	// call/request arrives later. Invalid approval-bearing evidence anywhere in the captured
-	// history suppresses the reference; malformed nongated history does not. Metadata, correlation
-	// and cursor are captured atomically for every Session reply, including a zero cursor; later
-	// appends cannot change that snapshot. Rendering never substitutes for strict command validation.
-	// Compute state independently reflects durable lifecycle metadata. Clearing this reference
-	// after a decision does not prove a receipt or completion.
+	// Set for a valid unanswered host-owned APPROVAL_REQUEST in the latest first-seen execution
+	// at last_seq. Requests/decisions match execution_id, tool_call_id and request_seq. Calls whose
+	// TOOL_CALL precedes the child's latest FORK are excluded. Unset when no request is reportable,
+	// approval-bearing evidence is invalid, or the projection lags last_seq.
 	PendingApproval *ApprovalRef `protobuf:"bytes,15,opt,name=pending_approval,json=pendingApproval,proto3" json:"pending_approval,omitempty"`
 	LastSeq         int64        `protobuf:"varint,5,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`      // event-log cursor
 	ParentUid       string       `protobuf:"bytes,6,opt,name=parent_uid,json=parentUid,proto3" json:"parent_uid,omitempty"` // fork lineage

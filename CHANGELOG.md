@@ -7,6 +7,13 @@ provide.
 
 ## Unreleased
 
+### Security
+
+- `model/openai` no longer sends configured headers (`WithHeader`, `WithAPIKey`) to another host on
+  a redirect. net/http copied custom headers such as `api-key` to any redirect target, so a provider
+  or proxy answering with a cross-host redirect received the credential. A redirect that changes
+  scheme, host or port is now refused; same-origin redirects are followed as before.
+
 ### Fixed
 
 - Session-level suspend no longer destroys the Substrate actor needed by resume. Both replay-based
@@ -47,10 +54,11 @@ provide.
   the latest Session and maximum committed cursor, including partial failure.
 - Approval wire types provide correlated request references, explicit receipt statuses/sequences
   and transport-only park acknowledgements without changing old field numbers or default hashes.
-- SQLite `SessionInfo` captures `last_seq` and a reporting-only `PendingApproval` with metadata,
-  using an incremental projection in the append transaction instead of event aggregation.
-  The reference excludes inherited first-seen executions and invalid approval-bearing history;
-  it is not command authority or a runtime/integrity probe.
+- SQLite `SessionInfo` captures the journal-derived `last_seq` and a reporting-only
+  `PendingApproval` with metadata, using an incremental approval projection in the append
+  transaction. Calls whose `TOOL_CALL` precedes the child's latest `FORK` are excluded, as are
+  invalid approval-bearing histories and projections lagging the journal head; the reference
+  is not command authority or a runtime/integrity probe.
 - Go SDK callers can pass opaque per-execution config through `client.ExecOptions.Config`.
   Omitting it keeps the existing empty-config behavior. Config is durable journal content exposed
   by Replay; do not include credentials. No wire or journal schema change.
@@ -79,8 +87,10 @@ provide.
   and `Fork` are refused with `FAILED_PRECONDITION`, before anything is journaled, if the harness
   reports another id (`placement.WithDescriptorID`). A harness added with `placement.Registry.Add`
   shares the Registry's session guard, so overlapping calls for one session through it and a static
-  harness are `ABORTED` too. It is an admin API and `agentsessionsd` does not serve it yet: it is
-  available in-process through `session.NewHarnessRegistry` (see [security.md](docs/security.md)).
+  harness are `ABORTED` too. It is an admin API available in-process through
+  `session.NewHarnessRegistry` and, optionally, on `agentsessionsd`'s separate loopback operator
+  listener (see [security.md](docs/security.md)). `agentctl harness register|get|list|retire`
+  uses that listener with an explicit `--server` address.
 
 ### Compatibility
 
@@ -107,11 +117,28 @@ provide.
   session is isolated with no actionable reference; healthy sessions remain readable. SQL faults
   roll back the migration, and the older version 1 namespace migration still fails closed.
   Builds supporting at most version 2 refuse the upgraded database; back it up before upgrading
-  if rollback may be needed. Direct out-of-band journal changes do not refresh the projection.
+  if rollback may be needed. An already-open older writer can still append without updating
+  the projection: `last_seq` stays current, but references remain suppressed for that session
+  rather than skipping missing evidence. Direct out-of-band edits do not refresh the projection.
 - Approval additions preserve old field numbers, default receipt/decision bytes and model-input
   hashes. New durable receipt status/correlation fields are hash-bound; transient Go approval
-  carriers are excluded from wire receipts and model-input hashing. Low-level Append remains
-  permissive; projection suppression does not replace validation at command boundaries.
+  carriers are excluded from wire receipts and model-input hashing. Low-level Append refuses
+  transport-only `PARKED` events but otherwise remains permissive; projection suppression does
+  not replace validation at command boundaries. Remote harness reports with host receipt
+  status/correlation fields are rejected by approval-aware Report validation.
+- `agentsessionsd -registry-addr` is off by default. Enabling it creates a plaintext,
+  unauthenticated **local admin surface** on a separate literal-loopback listener; Sessions still
+  refuses registry RPCs, and neither listener gains TLS or authentication. Any local or same-pod
+  process that can reach it can administer harnesses. The daemon now loads persisted registrations
+  even when the listener is off, so existing sessions can still use retired harnesses after restart
+  with `-model` set. Both new and stored remote registrations require `-model`; without it, stored
+  remote registrations load as unservable and their existing sessions fail `FAILED_PRECONDITION`,
+  whether active or retired. Inspecting, listing and retiring do not require `-model`; substrate
+  placements are unsupported by this reference daemon. No Sessions transport/access guarantees
+  change.
+- `model/openai` refuses a redirect to another origin instead of following it. Set the base URL
+  to the endpoint that serves the request. A client passed to `WithHTTPClient` is copied, not
+  modified; its own `CheckRedirect` still runs for same-origin redirects.
 - An unsupported stored harness registration (unknown spec fields or enum values, or a local
   placement/factory failure) no longer prevents other harnesses from starting. Its name stays
   reserved, and Get/List/Retire retain its metadata, original digest and ACTIVE/RETIRED state.

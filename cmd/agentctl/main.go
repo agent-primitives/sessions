@@ -13,6 +13,8 @@
 //	agentctl resume  --session <uid>
 //	agentctl approve <uid>                  # commit approval, then Resume
 //	agentctl deny    <uid> --reason "no"    # commit denial, then Resume
+//	agentctl harness register --server 127.0.0.1:8081 --name mine --spec spec.json
+//	agentctl harness get|list|retire --server 127.0.0.1:8081 [flags]
 package main
 
 import (
@@ -54,6 +56,7 @@ func main() {
 		"approve": cmdApprove,
 		"deny":    cmdDeny,
 		"version": cmdVersion,
+		"harness": cmdHarness,
 	}
 	run, ok := cmds[os.Args[1]]
 	if !ok {
@@ -67,7 +70,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: agentctl <create|list|get|exec|replay|fork|suspend|resume|approve|deny|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: agentctl <create|list|get|exec|replay|fork|suspend|resume|approve|deny|harness|version> [flags]")
 }
 
 type config struct {

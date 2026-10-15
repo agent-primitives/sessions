@@ -73,8 +73,8 @@ nor duplicates a row.
 
 The cursor and lifecycle status are derived rather than caller-writable:
 
-- `last_seq` is maintained with each append and backfilled from the existing log, so the cursor
-  a listing reports is always the log's own.
+- `last_seq` is derived from the indexed event head, including events appended by an older writer
+  that does not update the approval projection.
 - `compute_state` is a projection maintained in the same transaction that appends an event, since an
   event body is an opaque blob no query can filter on. It records **what the log implies about
   compute**, not a live probe of the backend. Execution activity implies `LIVE`; `SUSPEND` and
@@ -97,13 +97,16 @@ the latest execution (ordered by first-seen non-lifecycle identity) reports `AWA
 sequence. Errors and ordinary lifecycle markers do not resolve it; a decision, END, or newer
 execution removes the pending reference.
 
-Executions first seen before a child's latest FORK marker are inherited and excluded from reporting,
-even if their gated call/request arrives after the marker. A genuinely new child execution can
-report its own request. This ownership filter is reporting only; controller admission, decisions
-and recovery continue to validate the journal independently.
+Calls whose TOOL_CALL precedes a child's latest FORK marker are inherited and excluded from
+reporting. A later call in an inherited execution belongs to the child and can report its own
+request. Controller admission, decisions and recovery validate the same per-call ownership rule
+independently of the reporting projection.
 
 Malformed approval-bearing evidence anywhere in the captured history suppresses actionable references,
-matching strict inspection. Malformed nongated histories do not. A v2→v3 backfill isolates an
+matching strict inspection. Malformed nongated histories do not. A projection lagging the journal
+head also suppresses references. If an already-open older writer skips projection updates, later
+appends do not restore reporting for that session by skipping the missing evidence. A v2→v3
+backfill isolates an
 undecodable session, preserving its cursor/metadata but permanently withholding references while
 healthy neighbors remain readable. SQL faults abort the migration. Queries are not integrity checks:
 raw journal reads/Verify and strict commands still detect undecodable evidence.

@@ -307,8 +307,9 @@ Real today, and worth knowing before you build on it:
 - **A harness registered by address is stateless-replay only.** `runtime/remote` attaches to a
   harness it did not start, so it cannot capture that process's memory and `CanPlace` refuses a
   `REQUIRES_MEMORY_SNAPSHOT` harness on it. Run those on a backend that owns the sandbox.
-- **Registering a harness by address takes a restart.** `agentsessionsd` reads `--harness` at
-  startup; there is no API to add one to a running host.
+- **`--harness` is read at startup.** Adding a harness with the flag takes a restart. To register
+  one on a running host, use the operator-only `HarnessRegistry` API on `--registry-addr` (see
+  [security.md](security.md#operator-access)).
 - **History is pushed whole on every turn.** The controller hands the harness the full log each
   time, which is fine for demos and does not scale to long sessions.
 - **Execution status is not admission authority.** An owned unresolved host approval is narrowly

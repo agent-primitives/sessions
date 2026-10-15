@@ -406,6 +406,9 @@ func (l *Log) NewFence() (int64, error) {
 // is current, inside one transaction. It assigns seq, computes content_hash once via canon, and
 // stores it alongside the wire-encoded event.
 func (l *Log) Append(expectedLastSeq, fence int64, ev api.Event) (eventlog.Record, error) {
+	if ev.Kind == api.EventParked {
+		return eventlog.Record{}, errors.New("sqlitelog: PARKED is transport-only")
+	}
 	tx, err := l.store.db.Begin()
 	if err != nil {
 		return eventlog.Record{}, err

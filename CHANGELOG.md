@@ -20,7 +20,8 @@ not provide.
   trusted-network exception: it checks the name only, not that it resolves to a cluster service or
   that the traffic stays in the cluster, and that traffic is still cleartext on the pod network. The
   error names the host and asks for `https`; it never prints the key. `https`, and `http` with no
-  key, are unchanged. The check is in `internal/modelconfig.New`.
+  key, are unchanged. The check is in `internal/modelconfig.New`, which the AgentSuite demo's
+  `up.sh` runs too.
 
 ### Fixed
 

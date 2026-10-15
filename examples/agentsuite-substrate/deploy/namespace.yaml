@@ -1,0 +1,5 @@
+# Everything the demo runs in Kubernetes: the gVisor WorkerPool, the fake model and agentsessionsd.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentsuite-demo

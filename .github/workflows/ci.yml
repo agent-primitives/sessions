@@ -152,6 +152,39 @@ jobs:
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
+  examples:
+    # `examples/agentsuite-substrate` is its own Go module (it imports kaimahi's agentsuite package and
+    # substrate's ateapi types, which neither other module may). Its demo needs a cluster; its unit
+    # tests do not, so they run per PR to keep the example from rotting.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/agentsuite-substrate
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: examples/agentsuite-substrate/go.mod
+
+      - name: go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          working-directory: examples/agentsuite-substrate
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
   integrity:
     # Full cross-language provenance audit: record a real journal, have an INDEPENDENT Python
     # implementation (protobuf + RFC 8785 JCS) reproduce and verify the whole chain, then prove it

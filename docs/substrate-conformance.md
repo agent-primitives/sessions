@@ -188,6 +188,9 @@ TODO(spike): should `runtime/substrate` verify the live harness's `Describe` res
 
 TODO(spike): should a substrate actor name carry the harness as well as the session, or `Create` refuse to attach to an actor created from another template, so `agentsessionsd` can accept more than one `-substrate-harness` without them sharing a session's actor (and without the per-harness cold-create guard undercounting the turns that ran on it)? Existing actors are named by session UID only, so this needs a migration story.
 
+`examples/agentsuite-substrate` runs this end to end on kind: an AgentSuite agent rendered into an
+ActorTemplate and served with `-substrate-harness`, then suspended, resumed, replayed and forked.
+
 ### A fork child's clone UID
 
 A memory-tier fork child runs on a clone of the parent's actor, with its own UID, and its copied

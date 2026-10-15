@@ -11,8 +11,7 @@
   "model": {
     "name": "gpt-5.4-mini",
     "provider": "openai",
-    "baseURL": "https://example.openai.azure.com",
-    "path": "/openai/deployments/gpt-5.4-mini/chat/completions?api-version=2025-04-01-preview",
+    "baseURL": "https://example.openai.azure.com/openai/v1",
     "secretRef": {"name": "agentsessionsd-model", "key": "api-key"}
   },
   "approval": {"invokes": [{"caller": "coordinator", "agent": "reviewer"}]}

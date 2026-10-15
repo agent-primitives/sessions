@@ -65,7 +65,7 @@ refuse() {
 
 # The placeholders in deploy/agentsessionsd.yaml. Each is replaced literally, never through a sed
 # expression, so a value is copied as written ('&', '#' and '\' included).
-DAEMON_PLACEHOLDERS=(MODEL_ID MODEL_BASE_URL MODEL_PATH MODEL_AUTH_HEADER DAEMON_NAME DAEMON_IMAGE SUBSTRATE_HARNESS_FLAG MODEL_SECRET_VERSION)
+DAEMON_PLACEHOLDERS=(MODEL_ID MODEL_BASE_URL MODEL_AUTH_HEADER DAEMON_NAME DAEMON_IMAGE SUBSTRATE_HARNESS_FLAG MODEL_SECRET_VERSION)
 # unfilled prints the placeholders the text $1 still contains, in DAEMON_PLACEHOLDERS order.
 unfilled() {
 	local p left=""
@@ -75,11 +75,16 @@ unfilled() {
 	echo "${left}"
 }
 
+# The daemon keeps its default -model-path; a run that still sets the retired AGENTSUITE_MODEL_PATH
+# is refused rather than silently served from <base URL>/chat/completions (common.sh).
+if [[ -n "$(retired_model_path)" ]]; then
+	refuse "$(retired_model_path)"
+fi
 # Only AGENTSUITE_MODEL_BASE_URL selects a real provider. Any other provider setting without it is a
 # provider run that lost its URL: going on would switch to the fake model, delete the stored key and
 # replace the daemon's pod, dropping its emptyDir journal.
 if [[ -z "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
-	for var in AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH AGENTSUITE_MODEL_AUTH_HEADER MODEL_API_KEY; do
+	for var in AGENTSUITE_MODEL AGENTSUITE_MODEL_AUTH_HEADER MODEL_API_KEY; do
 		if [[ -n "${!var:-}" ]]; then
 			refuse "${var} is set without AGENTSUITE_MODEL_BASE_URL; set both for a real provider, or unset ${var} for the fake model"
 		fi
@@ -98,11 +103,11 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 		refuse "AGENTSUITE_MODEL_BASE_URL is set without AGENTSUITE_MODEL; set the provider's model"
 	fi
 	MODEL_ID="${AGENTSUITE_MODEL}"
-	# The completions path under the base URL and the header that carries MODEL_API_KEY, which
-	# agentsessionsd takes as -model-path and -model-auth-header. An Azure OpenAI deployment needs
-	# both: /openai/deployments/<name>/chat/completions?api-version=<date> and api-key. Unset, they
-	# are the daemon's defaults.
-	MODEL_PATH="${AGENTSUITE_MODEL_PATH:-/chat/completions}"
+	# The header that carries MODEL_API_KEY, which agentsessionsd takes as -model-auth-header (an
+	# Azure OpenAI key goes in api-key). Unset, it is the daemon's default. The completions path is
+	# always the daemon's default (/chat/completions, appended to the base URL's path): Azure OpenAI's
+	# v1 endpoint, https://<resource>.openai.azure.com/openai/v1, takes the deployment as the
+	# request's model and no api-version.
 	MODEL_AUTH_HEADER="${AGENTSUITE_MODEL_AUTH_HEADER:-Authorization}"
 	# Each lands in a YAML plain scalar ("- -model=VALUE"): whitespace or a control character would
 	# change the YAML around it, a trailing ':' would turn the item into a map that kubectl refuses
@@ -110,7 +115,7 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	# With no whitespace allowed, a trailing ':' is the one remaining way to end a plain scalar
 	# early (": " and " #" both need a space).
 	unsafe='[[:space:][:cntrl:]]'
-	for var in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH AGENTSUITE_MODEL_AUTH_HEADER; do
+	for var in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_AUTH_HEADER; do
 		if [[ "${!var:-}" =~ ${unsafe} ]]; then
 			refuse "${var} contains whitespace or a control character"
 		fi
@@ -122,11 +127,10 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 		fi
 	done
 	# agentsessionsd refuses model settings its model client cannot be built from at startup.
-	# check-model also refuses a URL with userinfo, a query or a fragment, a path whose query holds
-	# anything but a date-shaped api-version, and an auth header that is not a header name: the URL
-	# is printed below, the daemon logs the URL and path, and both are rendered into the
-	# Deployment's arguments and ${STATE}/agentsessionsd.yaml, so a credential in either would
-	# bypass the Secret that holds MODEL_API_KEY.
+	# check-model also refuses a URL with userinfo, a query or a fragment, and an auth header that
+	# is not a header name: the URL is printed below, the daemon logs it, and it is rendered into the
+	# Deployment's arguments and ${STATE}/agentsessionsd.yaml, so a credential in it would bypass
+	# the Secret that holds MODEL_API_KEY.
 	# The Deployment recreates its pod, and the journal is an emptyDir, so letting such a value
 	# through would delete the running daemon's sessions and leave a pod that never starts. emit
 	# check-model builds the client with the daemon's own constructor, and also requires http(s).
@@ -136,15 +140,14 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	key_set=()
 	if [[ -n "${MODEL_API_KEY:-}" ]]; then key_set=(-api-key-set); fi
 	if ! reason="$("${WORK}/bin/emit" check-model -base-url "${AGENTSUITE_MODEL_BASE_URL}" -model "${MODEL_ID}" \
-		-path "${MODEL_PATH}" -auth-header "${MODEL_AUTH_HEADER}" ${key_set[@]+"${key_set[@]}"} 2>&1)"; then
-		# Neither the URL nor the path is repeated here: check-model refuses one that could carry a
-		# credential before anything prints it, and its reasons do not quote them either.
-		refuse "the model settings (AGENTSUITE_MODEL_BASE_URL, AGENTSUITE_MODEL '${MODEL_ID}', AGENTSUITE_MODEL_PATH, AGENTSUITE_MODEL_AUTH_HEADER) would not start agentsessionsd: ${reason}"
+		-auth-header "${MODEL_AUTH_HEADER}" ${key_set[@]+"${key_set[@]}"} 2>&1)"; then
+		# The URL is not repeated here: check-model refuses one that could carry a credential
+		# before anything prints it, and its reasons do not quote it either.
+		refuse "the model settings (AGENTSUITE_MODEL_BASE_URL, AGENTSUITE_MODEL '${MODEL_ID}', AGENTSUITE_MODEL_AUTH_HEADER) would not start agentsessionsd: ${reason}"
 	fi
 else
 	MODEL_BASE_URL="http://fakemodel.${NS}.svc:8080/v1"
 	MODEL_ID=triage-model
-	MODEL_PATH=/chat/completions
 	MODEL_AUTH_HEADER=Authorization
 fi
 # Render the model settings into the agentsessionsd manifest now, so a value that cannot be
@@ -152,7 +155,6 @@ fi
 DAEMON_MANIFEST="$(<"${HERE}/deploy/agentsessionsd.yaml")"
 DAEMON_MANIFEST=${DAEMON_MANIFEST//MODEL_ID/"${MODEL_ID}"}
 DAEMON_MANIFEST=${DAEMON_MANIFEST//MODEL_BASE_URL/"${MODEL_BASE_URL}"}
-DAEMON_MANIFEST=${DAEMON_MANIFEST//MODEL_PATH/"${MODEL_PATH}"}
 DAEMON_MANIFEST=${DAEMON_MANIFEST//MODEL_AUTH_HEADER/"${MODEL_AUTH_HEADER}"}
 if [[ "$(unfilled "${DAEMON_MANIFEST}")" != "DAEMON_NAME DAEMON_IMAGE SUBSTRATE_HARNESS_FLAG MODEL_SECRET_VERSION" ]]; then
 	refuse "deploy/agentsessionsd.yaml: after the model settings it holds the placeholders '$(unfilled "${DAEMON_MANIFEST}")', want DAEMON_NAME, DAEMON_IMAGE, SUBSTRATE_HARNESS_FLAG and MODEL_SECRET_VERSION"

@@ -236,7 +236,7 @@ type Output struct {
 	// substrate placement on this base (internal/agentsessionsd registeredPlacer refuses one).
 	DaemonFlag string
 	// ModelFlags are the agentsessionsd flags that serve the binding's model (-model and, when the
-	// binding sets them, -model-base-url and -model-path).
+	// binding sets one, -model-base-url; never -model-path, whose default the daemon keeps).
 	ModelFlags []string
 }
 

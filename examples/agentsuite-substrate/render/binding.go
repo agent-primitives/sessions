@@ -38,10 +38,11 @@ const (
 //
 // Its fields and refusals follow kmx's AgentSessionsBinding (kaimahi
 // internal/kmx/runtime/agentsessions_binding.go on branch aramase/f/kmx_agentsessions_binding, at
-// KmxCommit), with two additions this PoC needs: model.path (an Azure OpenAI deployment's
-// completions path, which carries its api-version query) and approval (the invokes edges this
-// environment gates). The README section "The binding and kmx" lists every difference, these two
-// included.
+// KmxCommit), with one addition this PoC needs: approval (the invokes edges this environment
+// gates). Its model is kmx's exactly (name, provider, baseURL, secretRef): an Azure OpenAI
+// deployment is served from its v1 endpoint (https://<resource>.openai.azure.com/openai/v1) with
+// agentsessionsd's default completions path and no api-version, so the binding needs no path. The
+// README section "The binding and kmx" lists every difference.
 type Binding struct {
 	APIVersion     string                `json:"apiVersion"`
 	Kind           string                `json:"kind"`
@@ -90,14 +91,14 @@ type BindingWorkerSelector struct {
 }
 
 // BindingModel says where the suite's pinned model is served: Name must equal the model every
-// rendered agent pins, BaseURL and Path are agentsessionsd's -model-base-url and -model-path, and
-// SecretRef names the Secret key that holds the credential. It cannot hold a credential value.
+// rendered agent pins, BaseURL is agentsessionsd's -model-base-url (the daemon keeps its default
+// -model-path, /chat/completions, which it appends to the base URL's path), and SecretRef names the
+// Secret key that holds the credential. It cannot hold a credential value. It has kmx's members
+// only, so the strict decoder refuses any other (a model.path included).
 type BindingModel struct {
-	Name     string `json:"name"`
-	Provider string `json:"provider"`
-	BaseURL  string `json:"baseURL,omitempty"`
-	// Path is PoC-only: kmx's binding has no path, and its baseURL refuses a query.
-	Path      string           `json:"path,omitempty"`
+	Name      string           `json:"name"`
+	Provider  string           `json:"provider"`
+	BaseURL   string           `json:"baseURL,omitempty"`
 	SecretRef BindingSecretRef `json:"secretRef"`
 }
 
@@ -130,7 +131,7 @@ func validSecretKey(s string) bool {
 // decoder is encoding/json/v2's, which refuses what kmx's YAML decoder refuses in a JSON document:
 // an unknown member, a member name in another case ("Kind" for "kind"), a member given twice in one
 // object, invalid UTF-8, and anything after the one document. Its errors name members, never their
-// values, so they never repeat model.baseURL or model.path.
+// values, so they never repeat model.baseURL.
 func LoadBinding(path string) (*Binding, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -236,11 +237,6 @@ func (m BindingModel) validate() error {
 	if m.BaseURL != "" {
 		if err := CheckModelBaseURL(m.BaseURL); err != nil {
 			return fmt.Errorf("model.baseURL: %w", err)
-		}
-	}
-	if m.Path != "" {
-		if err := CheckModelPath(m.Path); err != nil {
-			return fmt.Errorf("model.path: %w", err)
 		}
 	}
 	return nil
@@ -373,14 +369,12 @@ func (b *Binding) ApprovalTargets(caller string) []string {
 }
 
 // DaemonModelFlags are the agentsessionsd flags that serve the binding's model: -model, and
-// -model-base-url and -model-path when the binding sets them (the daemon's defaults otherwise).
+// -model-base-url when the binding sets one (the daemon's default otherwise). The daemon's
+// -model-path keeps its default, /chat/completions, which it appends to the base URL's path.
 func (b *Binding) DaemonModelFlags() []string {
 	flags := []string{"-model=" + b.Model.Name}
 	if b.Model.BaseURL != "" {
 		flags = append(flags, "-model-base-url="+b.Model.BaseURL)
-	}
-	if b.Model.Path != "" {
-		flags = append(flags, "-model-path="+b.Model.Path)
 	}
 	return flags
 }
@@ -388,13 +382,10 @@ func (b *Binding) DaemonModelFlags() []string {
 // hidden ends every refusal of a value that may hold a credential.
 const hidden = " (the value is not shown, since it may hold a credential)"
 
-// apiVersion is the api-version value a model path may carry: a date, optionally with Azure
-// OpenAI's -preview suffix. Its shape leaves no room for a key.
-var apiVersion = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}(-preview)?$`)
-
 // CheckModelBaseURL refuses a model base URL that is not http(s) with a host, or that carries
 // userinfo, a query or a fragment: it is printed, logged and rendered into the daemon's arguments,
-// so a credential in it would bypass the Secret. Its errors never contain the URL or any part of
+// so a credential in it would bypass the Secret. A path is allowed (Azure OpenAI's v1 endpoint is
+// https://<resource>.openai.azure.com/openai/v1). Its errors never contain the URL or any part of
 // it: a parse error can quote the userinfo of a URL that does not parse
 // ("https://user:secret/x@host" reads "secret" as the port).
 func CheckModelBaseURL(raw string) error {
@@ -406,7 +397,7 @@ func CheckModelBaseURL(raw string) error {
 	case u.User != nil:
 		return errors.New("the base URL carries userinfo (user:password@); pass the provider's key in MODEL_API_KEY, which up.sh stores in a Secret" + hidden)
 	case u.RawQuery != "" || u.ForceQuery:
-		return errors.New("the base URL carries a query; a credential there would be printed and rendered into the Deployment, so pass the provider's key in MODEL_API_KEY and an api-version in AGENTSUITE_MODEL_PATH" + hidden)
+		return errors.New("the base URL carries a query; a credential there would be printed and rendered into the Deployment, so pass the provider's key in MODEL_API_KEY (Azure OpenAI's v1 endpoint takes no api-version)" + hidden)
 	case strings.Contains(raw, "#"):
 		return errors.New("the base URL carries a fragment, which the model client drops" + hidden)
 	case u.Scheme != "http" && u.Scheme != "https":
@@ -415,46 +406,6 @@ func CheckModelBaseURL(raw string) error {
 	case u.Hostname() == "":
 		// Hostname, not Host, as kmx checks it: "https://:443" has a port and no host.
 		return errors.New("the base URL has no host (want scheme://host[/path])" + hidden)
-	}
-	return nil
-}
-
-// CheckModelPath refuses a completions path the demo will not render or let the daemon log. The
-// path must be one absolute path ("//host" would read as an authority), with no '@' or fragment,
-// and its only query parameter may be a single api-version whose value is a date (2024-10-21,
-// 2025-04-01-preview): an Azure OpenAI deployment needs it there, and that shape cannot hold a key.
-// Any other parameter (Azure's own api-key, a signature) is refused. Like CheckModelBaseURL, its
-// errors never contain the path.
-func CheckModelPath(raw string) error {
-	switch {
-	case !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//"):
-		return errors.New("the model path does not start with a single '/' (want /path[?api-version=YYYY-MM-DD])" + hidden)
-	case strings.Contains(raw, "#"):
-		return errors.New("the model path carries a fragment, which the model client drops" + hidden)
-	case strings.Contains(raw, "@"):
-		return errors.New("the model path contains '@', which could be read as userinfo" + hidden)
-	case strings.HasSuffix(raw, ":"):
-		// up.sh renders the path into a YAML plain scalar, where a trailing ':' makes a map key.
-		return errors.New("the model path ends with ':'" + hidden)
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return errors.New("the model path is not a valid URL path" + hidden)
-	}
-	if u.ForceQuery && u.RawQuery == "" {
-		return errors.New("the model path ends with an empty query" + hidden)
-	}
-	q, err := url.ParseQuery(u.RawQuery)
-	if err != nil {
-		return errors.New("the model path's query does not parse" + hidden)
-	}
-	for k, vs := range q {
-		if k != "api-version" {
-			return errors.New("the model path carries a query parameter other than api-version; pass the provider's key in MODEL_API_KEY" + hidden)
-		}
-		if len(vs) != 1 || !apiVersion.MatchString(vs[0]) {
-			return errors.New("the model path's api-version is not one date (YYYY-MM-DD, optionally -preview)" + hidden)
-		}
 	}
 	return nil
 }

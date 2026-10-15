@@ -614,9 +614,9 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 		return path
 	}
 	provider := []string{"AGENTSUITE_MODEL_BASE_URL=https://llm.example/v1", "AGENTSUITE_MODEL=m", "MODEL_API_KEY=k"}
+	// Azure OpenAI's v1 endpoint: the deployment is the request's model, with no api-version.
 	azure := []string{
-		"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com", "AGENTSUITE_MODEL=dep", "MODEL_API_KEY=k",
-		"AGENTSUITE_MODEL_PATH=/openai/deployments/dep/chat/completions?api-version=2024-10-21",
+		"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com/openai/v1", "AGENTSUITE_MODEL=dep", "MODEL_API_KEY=k",
 		"AGENTSUITE_MODEL_AUTH_HEADER=api-key",
 	}
 	for _, tc := range []struct {
@@ -648,7 +648,7 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			env: func(*testing.T) []string {
 				return append(provider, "AGENTSUITE_MODEL_BASE_URL=api.example.com/v1")
 			},
-			wantOut: "the model settings (AGENTSUITE_MODEL_BASE_URL, AGENTSUITE_MODEL 'm', AGENTSUITE_MODEL_PATH, AGENTSUITE_MODEL_AUTH_HEADER) would not start agentsessionsd: emit: check-model: the base URL is not http or https (the value is not shown, since it may hold a credential); nothing was changed",
+			wantOut: "the model settings (AGENTSUITE_MODEL_BASE_URL, AGENTSUITE_MODEL 'm', AGENTSUITE_MODEL_AUTH_HEADER) would not start agentsessionsd: emit: check-model: the base URL is not http or https (the value is not shown, since it may hold a credential); nothing was changed",
 		},
 		{
 			// emit is built and run as a binary, so go run's own "exit status 1" line is not
@@ -755,49 +755,23 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			wantOut: "the base URL is not http or https (the value is not shown, since it may hold a credential); nothing was changed",
 		},
 		{
-			// Azure OpenAI's api-key belongs in MODEL_API_KEY, which up.sh stores in a Secret; in the
-			// path it would be rendered into the Deployment and logged by the daemon.
-			name: "an Azure path with a key in its query",
+			// AGENTSUITE_MODEL_PATH is retired: the daemon keeps its default -model-path, so a run
+			// that still sets one is refused first (not served from <base URL>/chat/completions), and
+			// the refusal does not repeat the value.
+			name: "a retired model path",
 			env: func(*testing.T) []string {
 				return append(azure, "AGENTSUITE_MODEL_PATH=/openai/deployments/dep/chat/completions?api-version=2024-10-21&api-key=secret")
 			},
-			wantOut: "the model path carries a query parameter other than api-version; pass the provider's key in MODEL_API_KEY (the value is not shown, since it may hold a credential); nothing was changed",
+			wantOut: "AGENTSUITE_MODEL_PATH is retired: put Azure OpenAI's v1 endpoint, https://<resource>.openai.azure.com/openai/v1, in AGENTSUITE_MODEL_BASE_URL and unset AGENTSUITE_MODEL_PATH; nothing was changed",
 		},
 		{
-			name: "an Azure path whose api-version is a key",
+			// An api-version on the v1 endpoint is refused: Azure answers it with 400 (API version
+			// not supported), and a query on the base URL could hold a credential.
+			name: "an Azure v1 base URL with an api-version in its query",
 			env: func(*testing.T) []string {
-				return append(azure, "AGENTSUITE_MODEL_PATH=/openai/deployments/dep/chat/completions?api-version=secret")
-			},
-			wantOut: "the model path's api-version is not one date",
-		},
-		{
-			name: "an Azure path with userinfo",
-			env: func(*testing.T) []string {
-				return append(azure, "AGENTSUITE_MODEL_PATH=//user:secret@res.openai.azure.com/chat/completions")
-			},
-			wantOut: "does not start with a single '/'",
-		},
-		{
-			// The api-version belongs in the path: a query on the base URL could hold a credential.
-			name: "an Azure base URL with the api-version in its query",
-			env: func(*testing.T) []string {
-				return append(azure, "AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com?api-version=2024-10-21&api-key=secret")
+				return append(azure, "AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com/openai/v1?api-version=2025-04-01-preview&api-key=secret")
 			},
 			wantOut: "the base URL carries a query",
-		},
-		{
-			name: "a path with whitespace",
-			env: func(*testing.T) []string {
-				return append(azure, "AGENTSUITE_MODEL_PATH=/chat/completions - -evil")
-			},
-			wantOut: "AGENTSUITE_MODEL_PATH contains whitespace or a control character; nothing was changed",
-		},
-		{
-			name: "a path naming a placeholder",
-			env: func(*testing.T) []string {
-				return append(azure, "AGENTSUITE_MODEL_PATH=/DAEMON_IMAGE")
-			},
-			wantOut: "AGENTSUITE_MODEL_PATH contains DAEMON_IMAGE, a placeholder of deploy/agentsessionsd.yaml",
 		},
 		{
 			name: "an auth header that is not a header name",
@@ -819,21 +793,17 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			wantOut: "AGENTSUITE_MODEL_BASE_URL ends with ':', which deploy/agentsessionsd.yaml would read as a map key; nothing was changed",
 		},
 		{
-			name:    "a path ending with ':'",
-			env:     func(*testing.T) []string { return append(azure, "AGENTSUITE_MODEL_PATH=/openai/deployments/dep:") },
-			wantOut: "AGENTSUITE_MODEL_PATH ends with ':', which deploy/agentsessionsd.yaml would read as a map key; nothing was changed",
-		},
-		{
 			name:    "an auth header ending with ':'",
 			env:     func(*testing.T) []string { return append(azure, "AGENTSUITE_MODEL_AUTH_HEADER=x:") },
 			wantOut: "AGENTSUITE_MODEL_AUTH_HEADER ends with ':', which deploy/agentsessionsd.yaml would read as a map key; nothing was changed",
 		},
 		{
-			name: "a path without a base URL",
+			// Alone, the retired path is refused as retired, not as a provider setting without a URL.
+			name: "a retired model path without a base URL",
 			env: func(*testing.T) []string {
 				return []string{"AGENTSUITE_MODEL_PATH=/openai/deployments/dep/chat/completions?api-version=2024-10-21"}
 			},
-			wantOut: "AGENTSUITE_MODEL_PATH is set without AGENTSUITE_MODEL_BASE_URL; set both for a real provider, or unset AGENTSUITE_MODEL_PATH for the fake model; nothing was changed",
+			wantOut: "AGENTSUITE_MODEL_PATH is retired: put Azure OpenAI's v1 endpoint, https://<resource>.openai.azure.com/openai/v1, in AGENTSUITE_MODEL_BASE_URL and unset AGENTSUITE_MODEL_PATH; nothing was changed",
 		},
 		{
 			name:    "an auth header without a base URL",
@@ -925,8 +895,9 @@ func stdin(t *testing.T, s *stubs) string {
 // The model base URL is copied into the Deployment as written: '&' is not special to the
 // substitution. up.sh refuses a URL with a query or fragment (it could carry a credential), so the
 // URL's '&' is in its path. With a real provider, up.sh renders from this environment's binding:
-// binding-microvm.json with the provider's model, base URL and path, which must be the model the
-// suite's triage agent pins (triage-model); the fake model renders from binding-microvm.json.
+// binding-microvm.json with the provider's model and base URL (no path: the daemon keeps its default
+// -model-path), which must be the model the suite's triage agent pins (triage-model); the fake
+// model renders from binding-microvm.json.
 func TestUpRendersTheDaemon(t *testing.T) {
 	const (
 		url   = "https://llm.example/v1&tenant=a/b"
@@ -938,14 +909,14 @@ func TestUpRendersTheDaemon(t *testing.T) {
 		wantLines   []string
 		wantSecret  string // the Secret call that precedes the apply
 		wantVersion string
-		// wantModel is the binding's model up.sh renders from: name, baseURL, path ("" for none).
-		// Empty name: the committed binding-microvm.json.
-		wantModel [3]string
+		// wantModel is the binding's model up.sh renders from: name and baseURL. Empty name: the
+		// committed binding-microvm.json.
+		wantModel [2]string
 	}{
 		{
 			name: "fake provider",
 			wantLines: []string{"- -model=triage-model", "- -model-base-url=http://fakemodel.agentsuite-demo.svc:8080/v1",
-				"- -model-path=/chat/completions", "- -model-auth-header=Authorization"},
+				"- -model-auth-header=Authorization"},
 			wantSecret:  "delete secret agentsessionsd-model --ignore-not-found",
 			wantVersion: "none",
 		},
@@ -953,10 +924,10 @@ func TestUpRendersTheDaemon(t *testing.T) {
 			name: "real provider",
 			env:  []string{"AGENTSUITE_MODEL_BASE_URL=" + url, "AGENTSUITE_MODEL=" + model, "MODEL_API_KEY=k", "STUB_SECRET_VERSION=7"},
 			wantLines: []string{"- -model=" + model, "- -model-base-url=" + url,
-				"- -model-path=/chat/completions", "- -model-auth-header=Authorization"},
+				"- -model-auth-header=Authorization"},
 			wantSecret:  "apply --server-side",
 			wantVersion: "7",
-			wantModel:   [3]string{model, url, ""},
+			wantModel:   [2]string{model, url},
 		},
 		{
 			// An in-cluster provider may take a key over plain http.
@@ -964,25 +935,25 @@ func TestUpRendersTheDaemon(t *testing.T) {
 			env: []string{"AGENTSUITE_MODEL_BASE_URL=http://vllm.models.svc.cluster.local:8000/v1", "AGENTSUITE_MODEL=" + model,
 				"MODEL_API_KEY=k", "STUB_SECRET_VERSION=9"},
 			wantLines: []string{"- -model=" + model, "- -model-base-url=http://vllm.models.svc.cluster.local:8000/v1",
-				"- -model-path=/chat/completions", "- -model-auth-header=Authorization"},
+				"- -model-auth-header=Authorization"},
 			wantSecret:  "apply --server-side",
 			wantVersion: "9",
-			wantModel:   [3]string{model, "http://vllm.models.svc.cluster.local:8000/v1", ""},
+			wantModel:   [2]string{model, "http://vllm.models.svc.cluster.local:8000/v1"},
 		},
 		{
-			// An Azure OpenAI deployment: the api-version rides in the path, the key in the api-key
-			// header from the Secret.
+			// An Azure OpenAI deployment through its v1 endpoint: the deployment is the request's
+			// model, the daemon's default -model-path is appended to /openai/v1, and the key goes in
+			// the api-key header from the Secret.
 			name: "Azure OpenAI",
 			env: []string{
-				"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com", "AGENTSUITE_MODEL=" + model, "MODEL_API_KEY=azure-key",
-				"AGENTSUITE_MODEL_PATH=/openai/deployments/dep/chat/completions?api-version=2024-10-21",
+				"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com/openai/v1", "AGENTSUITE_MODEL=" + model, "MODEL_API_KEY=azure-key",
 				"AGENTSUITE_MODEL_AUTH_HEADER=api-key", "STUB_SECRET_VERSION=8",
 			},
-			wantLines: []string{"- -model=" + model, "- -model-base-url=https://res.openai.azure.com",
-				"- -model-path=/openai/deployments/dep/chat/completions?api-version=2024-10-21", "- -model-auth-header=api-key"},
+			wantLines: []string{"- -model=" + model, "- -model-base-url=https://res.openai.azure.com/openai/v1",
+				"- -model-auth-header=api-key"},
 			wantSecret:  "apply --server-side",
 			wantVersion: "8",
-			wantModel:   [3]string{model, "https://res.openai.azure.com", "/openai/deployments/dep/chat/completions?api-version=2024-10-21"},
+			wantModel:   [2]string{model, "https://res.openai.azure.com/openai/v1"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -995,7 +966,7 @@ func TestUpRendersTheDaemon(t *testing.T) {
 				t.Fatalf("up.sh exit %d, want 0\noutput:\n%s\ncalls:\n%s", code, out, calls)
 			}
 			// emit render reads the committed binding with the fake model, and this environment's
-			// binding (the provider's model, base URL and path) with a real one.
+			// binding (the provider's model and base URL) with a real one.
 			got, err := os.ReadFile(filepath.Join(s.dir, "render-binding"))
 			if err != nil {
 				t.Fatal(err)
@@ -1007,7 +978,7 @@ func TestUpRendersTheDaemon(t *testing.T) {
 			} else {
 				var b struct {
 					Atespace string
-					Model    struct{ Name, Provider, BaseURL, Path string }
+					Model    map[string]any
 				}
 				raw, err := os.ReadFile(string(got))
 				if err != nil {
@@ -1016,8 +987,10 @@ func TestUpRendersTheDaemon(t *testing.T) {
 				if err := json.Unmarshal(raw, &b); err != nil {
 					t.Fatal(err)
 				}
-				if m := b.Model; [3]string{m.Name, m.BaseURL, m.Path} != tc.wantModel || m.Provider != "openai" || b.Atespace != "agentsuite-demo" {
-					t.Errorf("rendered binding %s = %+v, want model %v", got, b, tc.wantModel)
+				// kmx's model members only: no path.
+				if m := b.Model; m["name"] != tc.wantModel[0] || m["baseURL"] != tc.wantModel[1] || m["provider"] != "openai" ||
+					m["secretRef"] == nil || len(m) != 4 || b.Atespace != "agentsuite-demo" {
+					t.Errorf("rendered binding %s = %+v, want model %v with name, provider, baseURL and secretRef only", got, b, tc.wantModel)
 				}
 			}
 			path := filepath.Join(s.work, "cluster-"+cluster, "agentsessionsd.yaml")
@@ -1042,6 +1015,12 @@ func TestUpRendersTheDaemon(t *testing.T) {
 			for _, p := range []string{"DAEMON_NAME", "DAEMON_IMAGE", "MODEL_ID", "MODEL_BASE_URL", "MODEL_PATH", "MODEL_AUTH_HEADER", "SUBSTRATE_HARNESS_FLAG", "MODEL_SECRET_VERSION"} {
 				if strings.Contains(string(b), p) {
 					t.Errorf("rendered manifest still contains %s", p)
+				}
+			}
+			// The daemon keeps its default -model-path (/chat/completions after the base URL's path).
+			for l := range lines {
+				if strings.HasPrefix(l, "- -model-path") {
+					t.Errorf("rendered manifest sets %q:\n%s", l, b)
 				}
 			}
 			// The memory tier gets its own Deployment and Service, with the same model settings and
@@ -1468,8 +1447,7 @@ func TestCoordinatorSetupRefusesAnotherAuthHeader(t *testing.T) {
 	s := newStubs(t)
 	const refused = "COORDINATOR FAILED: AGENTSUITE_MODEL_AUTH_HEADER names a header other than Authorization"
 	model := []string{
-		"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com", "AGENTSUITE_MODEL=gpt-5.4-mini",
-		"AGENTSUITE_MODEL_PATH=/openai/deployments/gpt-5.4-mini/chat/completions?api-version=2025-04-01-preview",
+		"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com/openai/v1", "AGENTSUITE_MODEL=gpt-5.4-mini",
 		"AZURE_MI_CLIENT_ID=00000000-0000-0000-0000-000000000000",
 	}
 	for _, tc := range []struct {
@@ -1506,6 +1484,56 @@ func TestCoordinatorSetupRefusesAnotherAuthHeader(t *testing.T) {
 			// The go stub reports no GOARCH, so setup stops at the next check, past the header.
 			if strings.Contains(string(out), refused) || !strings.Contains(string(out), "run on an amd64 host") {
 				t.Fatalf("output %q: want the header accepted and the amd64 check reached", out)
+			}
+		})
+	}
+}
+
+// AGENTSUITE_MODEL_PATH is retired: the binding has no model.path and the daemon keeps its default
+// -model-path, which Azure OpenAI's v1 endpoint takes. coordinator.sh setup refuses a run that still
+// sets it before it runs any tool (so before any cluster change), without repeating its value; an
+// empty one is not a path and passes to the next check.
+func TestCoordinatorSetupRefusesTheRetiredModelPath(t *testing.T) {
+	s := newStubs(t)
+	const refused = "COORDINATOR FAILED: AGENTSUITE_MODEL_PATH is retired: put Azure OpenAI's v1 endpoint, https://<resource>.openai.azure.com/openai/v1, in AGENTSUITE_MODEL_BASE_URL and unset AGENTSUITE_MODEL_PATH"
+	model := []string{
+		"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com/openai/v1", "AGENTSUITE_MODEL=gpt-5.4-mini",
+		"AZURE_MI_CLIENT_ID=00000000-0000-0000-0000-000000000000",
+	}
+	for _, tc := range []struct {
+		name    string
+		env     []string
+		refused bool
+	}{
+		{name: "a deployment path", env: []string{"AGENTSUITE_MODEL_PATH=/openai/deployments/gpt-5.4-mini/chat/completions?api-version=2025-04-01-preview&api-key=secret"}, refused: true},
+		{name: "the default path", env: []string{"AGENTSUITE_MODEL_PATH=/chat/completions"}, refused: true},
+		{name: "a path with no other setting", env: []string{"AGENTSUITE_MODEL_PATH=/chat/completions", "AGENTSUITE_MODEL_BASE_URL=", "AGENTSUITE_MODEL=", "AZURE_MI_CLIENT_ID="}, refused: true},
+		{name: "empty", env: []string{"AGENTSUITE_MODEL_PATH="}},
+		{name: "unset"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Remove(filepath.Join(s.dir, "calls")); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("./demo/coordinator.sh", "setup")
+			cmd.Env = append(append(append([]string{}, s.env...), model...), tc.env...)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("setup succeeded against stubs: %s", out)
+			}
+			if strings.Contains(string(out), "secret") {
+				t.Fatalf("output repeats the path: %s", out)
+			}
+			calls, _ := os.ReadFile(filepath.Join(s.dir, "calls"))
+			if tc.refused {
+				if !strings.Contains(string(out), refused) || len(calls) != 0 {
+					t.Fatalf("output %q, calls %q: want %q before any tool runs", out, calls, refused)
+				}
+				return
+			}
+			// The go stub reports no GOARCH, so setup stops at the amd64 check, past this one.
+			if strings.Contains(string(out), "is retired") || !strings.Contains(string(out), "run on an amd64 host") {
+				t.Fatalf("output %q: want no path accepted and the amd64 check reached", out)
 			}
 		})
 	}

@@ -79,25 +79,31 @@ gvisor) BINDING_FILE=binding.json WORKERPOOL_FILE=workerpool.yaml ;;
 esac
 POOL="agentsuite-demo-${SANDBOX}"
 # write_binding SRC OUT [ATESPACE] writes this environment's AgentSessionsBinding: SRC with
-# model.name, model.baseURL and model.path set from AGENTSUITE_MODEL, AGENTSUITE_MODEL_BASE_URL and
-# AGENTSUITE_MODEL_PATH (no path when that is unset, so the daemon's default applies), and atespace
-# set to ATESPACE when one is given. python writes the JSON, so no value is read as markup; emit
-# validates the result (check-binding, render) with the code that consumes it.
+# model.name and model.baseURL set from AGENTSUITE_MODEL and AGENTSUITE_MODEL_BASE_URL, and atespace
+# set to ATESPACE when one is given. The model has kmx's members only (no path): the daemon keeps its
+# default -model-path, which Azure OpenAI's v1 endpoint (<resource>/openai/v1) takes. python writes
+# the JSON, so no value is read as markup; emit validates the result (check-binding, render) with
+# the code that consumes it.
 write_binding() {
 	python3 -c '
 import json, os, sys
 b = json.load(open(sys.argv[1]))
 old = b.get("model", {})
-m = {"name": os.environ["AGENTSUITE_MODEL"], "provider": old.get("provider"), "baseURL": os.environ["AGENTSUITE_MODEL_BASE_URL"]}
-if os.environ.get("AGENTSUITE_MODEL_PATH"):
-    m["path"] = os.environ["AGENTSUITE_MODEL_PATH"]
-m["secretRef"] = old.get("secretRef")
-b["model"] = m
+b["model"] = {"name": os.environ["AGENTSUITE_MODEL"], "provider": old.get("provider"), "baseURL": os.environ["AGENTSUITE_MODEL_BASE_URL"], "secretRef": old.get("secretRef")}
 if len(sys.argv) > 3:
     b["atespace"] = sys.argv[3]
 with open(sys.argv[2], "w") as f:
     json.dump(b, f, indent=2)
     f.write("\n")' "$@"
+}
+# retired_model_path prints why AGENTSUITE_MODEL_PATH is refused when it is set (never its value),
+# and nothing otherwise. Azure OpenAI's v1 endpoint takes the deployment as the request's model and
+# no api-version, so the binding has no path and the daemon keeps its default -model-path; a run that
+# still sets one would otherwise drop it silently and post to <base URL>/chat/completions.
+retired_model_path() {
+	if [[ -n "${AGENTSUITE_MODEL_PATH:-}" ]]; then
+		echo "AGENTSUITE_MODEL_PATH is retired: put Azure OpenAI's v1 endpoint, https://<resource>.openai.azure.com/openai/v1, in AGENTSUITE_MODEL_BASE_URL and unset AGENTSUITE_MODEL_PATH"
+	fi
 }
 # Every cluster call names the demo's kind context explicitly; nothing here uses the caller's
 # current context.

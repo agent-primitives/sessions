@@ -15,9 +15,9 @@
 //	emit validate -suite DIR
 //	    run kaimahi's agentsuite validator (the imported module) over the suite and print the suite's
 //	    digest and the validator's version
-//	emit check-model -base-url URL -model ID [-path PATH] [-auth-header NAME] [-api-key-set]
-//	    refuse model settings agentsessionsd would refuse at startup, a URL that is not http(s), or
-//	    a URL or path that could carry a credential
+//	emit check-model -base-url URL -model ID [-auth-header NAME] [-api-key-set]
+//	    refuse model settings agentsessionsd would refuse at startup (with its default
+//	    -model-path), a URL that is not http(s), or a URL that could carry a credential
 package main
 
 import (
@@ -370,23 +370,22 @@ func stableJSON(m proto.Message) ([]byte, error) {
 // checkModel refuses model settings agentsessionsd would refuse at startup, so up.sh can stop before
 // the Deployment replaces the running pod and its emptyDir journal with one that never starts. It
 // builds the client with the constructor the daemon uses (internal/modelconfig), with the same base
-// URL, model, path and auth header up.sh renders into deploy/agentsessionsd.yaml, so it refuses
-// exactly the settings the daemon would. -api-key-set says MODEL_API_KEY is set, without passing
-// the key: the constructor then refuses a plain-http URL to a host that is not loopback, localhost
-// or an in-cluster service, as the daemon does with the key from the Secret.
+// URL, model and auth header up.sh renders into deploy/agentsessionsd.yaml and the daemon's default
+// -model-path (up.sh renders none), so it refuses exactly the settings the daemon would.
+// -api-key-set says MODEL_API_KEY is set, without passing the key: the constructor then refuses a
+// plain-http URL to a host that is not loopback, localhost or an in-cluster service, as the daemon
+// does with the key from the Secret.
 //
 // The demo also requires an http or https URL with a host, which the client itself does not, and
 // refuses one with userinfo, a query or a fragment: up.sh prints the URL and renders it into the
 // Deployment's arguments and a manifest on disk, so a credential in it would bypass the Secret that
-// holds MODEL_API_KEY. The path is rendered the same way and the daemon logs it, so its only query
-// may be a date-shaped api-version (what Azure OpenAI pins there); see render.CheckModelPath. These checks run
-// before the client is built, and their errors do not repeat the URL or the path, since either may
-// hold a credential.
+// holds MODEL_API_KEY. A path is allowed: Azure OpenAI's v1 endpoint is
+// https://<resource>.openai.azure.com/openai/v1, with no api-version. These checks run before the
+// client is built, and their errors do not repeat the URL, since it may hold a credential.
 func checkModel(args []string) error {
 	fs := flag.NewFlagSet("check-model", flag.ContinueOnError)
 	baseURL := fs.String("base-url", "", "the -model-base-url agentsessionsd will be given")
 	model := fs.String("model", "", "the -model agentsessionsd will be given")
-	path := fs.String("path", "", "the -model-path agentsessionsd will be given; empty is the daemon's default")
 	authHeader := fs.String("auth-header", "Authorization", "the -model-auth-header agentsessionsd will be given")
 	keySet := fs.Bool("api-key-set", false, "agentsessionsd will be given a MODEL_API_KEY")
 	if err := fs.Parse(args); err != nil {
@@ -401,15 +400,10 @@ func checkModel(args []string) error {
 	if err := render.CheckModelBaseURL(*baseURL); err != nil {
 		return fmt.Errorf("check-model: %w", err)
 	}
-	if *path != "" {
-		if err := render.CheckModelPath(*path); err != nil {
-			return fmt.Errorf("check-model: %w", err)
-		}
-	}
 	if !headerName.MatchString(*authHeader) {
 		return errors.New("check-model: the auth header is not an HTTP header name (letters, digits and '-')")
 	}
-	cfg := modelconfig.Config{Model: *model, BaseURL: *baseURL, Path: *path, AuthHeader: *authHeader}
+	cfg := modelconfig.Config{Model: *model, BaseURL: *baseURL, AuthHeader: *authHeader}
 	if *keySet {
 		cfg.APIKey = "set" // a stand-in: the constructor only checks that one is present
 	}

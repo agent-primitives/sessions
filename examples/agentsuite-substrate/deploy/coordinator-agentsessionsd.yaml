@@ -27,7 +27,6 @@ spec:
             - -journal=/data/agentsessions.db
             - -model=MODEL_ID
             - -model-base-url=MODEL_BASE_URL
-            - -model-path=MODEL_PATH
             - -model-auth-header=MODEL_AUTH_HEADER
             - COORDINATOR_FLAG
             - WRITER_FLAG

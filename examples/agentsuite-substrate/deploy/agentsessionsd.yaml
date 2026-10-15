@@ -4,8 +4,9 @@
 #
 # It reaches the ate-api with the pod's projected ServiceAccount token and verifies the ate-api's
 # serving certificate against the cluster's servicedns ClusterTrustBundle, and reaches the agent's
-# actors through the atenet-router. Model calls go to MODEL_BASE_URL, the in-cluster fake model by
-# default; the optional key comes from the agentsessionsd-model Secret, never from the manifest.
+# actors through the atenet-router. Model calls go to MODEL_BASE_URL plus the daemon's default
+# -model-path (/chat/completions), the in-cluster fake model by default; the optional key comes from
+# the agentsessionsd-model Secret, never from the manifest.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,7 +33,6 @@ spec:
             - -journal=/data/agentsessions.db
             - -model=MODEL_ID
             - -model-base-url=MODEL_BASE_URL
-            - -model-path=MODEL_PATH
             - -model-auth-header=MODEL_AUTH_HEADER
             - SUBSTRATE_HARNESS_FLAG
             - -substrate-atespace=agentsuite-demo

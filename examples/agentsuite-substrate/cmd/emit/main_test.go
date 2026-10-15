@@ -3,6 +3,10 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -13,7 +17,9 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/aramase/agentsessions/api"
 	"github.com/aramase/agentsessions/examples/agentsuite-substrate/render"
+	"github.com/aramase/agentsessions/internal/modelconfig"
 )
 
 // check-model refuses what agentsessionsd's model client refuses at startup (model/openai), which
@@ -27,6 +33,8 @@ func TestCheckModel(t *testing.T) {
 		wantErr              string // "" accepts
 	}{
 		{name: "https", baseURL: "https://api.example.com/v1", model: "m"},
+		{name: "Azure OpenAI's v1 endpoint", baseURL: "https://llm.example.openai.azure.com/openai/v1", model: "m"},
+		{name: "an api-version on the v1 endpoint", baseURL: "https://llm.example.openai.azure.com/openai/v1?api-version=2025-04-01-preview", model: "m", wantErr: "carries a query"},
 		{name: "uppercase scheme with port", baseURL: "HTTP://llm.example:8080/v1", model: "m"},
 		{name: "bracketed IPv6", baseURL: "http://[::1]:8080/v1", model: "m"},
 		{name: "userinfo", baseURL: "https://user:secret@llm.example/v1", model: "m", wantErr: "carries userinfo"},
@@ -73,38 +81,22 @@ func TestCheckModel(t *testing.T) {
 	}
 }
 
-// check-model's -path may carry only a date-shaped api-version, the one query Azure OpenAI needs on a
-// deployment path, since up.sh renders the path into the Deployment and the daemon logs it; and
-// -auth-header must be a header name. No refusal repeats any part of the path.
-func TestCheckModelPathAndAuthHeader(t *testing.T) {
-	const azure = "https://res.openai.azure.com"
+// check-model's -auth-header must be a header name. It has no -path: the daemon keeps its default
+// -model-path, which Azure OpenAI's v1 endpoint takes, so a -path is a usage error.
+func TestCheckModelAuthHeader(t *testing.T) {
+	const azure = "https://res.openai.azure.com/openai/v1"
 	for _, tc := range []struct {
-		name, path, header string
-		wantErr            string // "" accepts
+		name, header string
+		wantErr      string // "" accepts
 	}{
-		{name: "the default path", path: ""},
-		{name: "an Azure deployment path", path: "/openai/deployments/dep/chat/completions?api-version=2024-10-21", header: "api-key"},
-		{name: "a preview api-version", path: "/openai/deployments/dep/chat/completions?api-version=2025-04-01-preview", header: "api-key"},
-		{name: "a path without a query", path: "/v1/chat/completions"},
-		{name: "a key in the query", path: "/openai/deployments/dep/chat/completions?api-version=2024-10-21&api-key=secret", wantErr: "other than api-version"},
-		{name: "only a key in the query", path: "/chat/completions?api-key=secret", wantErr: "other than api-version"},
-		{name: "a key as the api-version", path: "/chat/completions?api-version=secret", wantErr: "is not one date"},
-		{name: "two api-versions", path: "/chat/completions?api-version=2024-10-21&api-version=2024-10-22", wantErr: "is not one date"},
-		{name: "an empty api-version", path: "/chat/completions?api-version=", wantErr: "is not one date"},
-		{name: "an empty query", path: "/chat/completions?", wantErr: "empty query"},
-		{name: "a query that does not parse", path: "/chat/completions?api-version=2024-10-21;secret", wantErr: "does not parse"},
-		{name: "a fragment", path: "/chat/completions#secret", wantErr: "carries a fragment"},
-		{name: "userinfo", path: "/user:secret@llm.example/chat", wantErr: "contains '@'"},
-		{name: "an authority", path: "//secret.example/chat", wantErr: "single '/'"},
-		{name: "a relative path", path: "secret/chat", wantErr: "single '/'"},
-		{name: "a bad escape", path: "/secret%zz", wantErr: "not a valid URL path"},
-		{name: "a trailing colon", path: "/openai/deployments/secret:", wantErr: "ends with ':'"},
-		{name: "a header with a space", path: "", header: "api key", wantErr: "not an HTTP header name"},
-		{name: "a header with a colon", path: "", header: "api-key:", wantErr: "not an HTTP header name"},
-		{name: "x-api-key", path: "", header: "x-api-key"},
+		{name: "the default header"},
+		{name: "api-key", header: "api-key"},
+		{name: "x-api-key", header: "x-api-key"},
+		{name: "a header with a space", header: "api key", wantErr: "not an HTTP header name"},
+		{name: "a header with a colon", header: "api-key:", wantErr: "not an HTTP header name"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			args := []string{"-base-url", azure, "-model", "dep", "-path", tc.path}
+			args := []string{"-base-url", azure, "-model", "dep"}
 			if tc.header != "" {
 				args = append(args, "-auth-header", tc.header)
 			}
@@ -115,17 +107,50 @@ func TestCheckModelPathAndAuthHeader(t *testing.T) {
 			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
 				t.Fatalf("err=%v, want one containing %q", err, tc.wantErr)
 			}
-			if err != nil {
-				for _, leak := range []string{"secret", "deployments", "llm.example", "%zz", "chat"} {
-					if strings.Contains(err.Error(), leak) {
-						t.Errorf("err=%q repeats %q from the path", err, leak)
-					}
-				}
-			}
 		})
 	}
 	if err := checkModel([]string{"-base-url", azure, "-model", "dep", "-auth-header", ""}); err == nil || !strings.Contains(err.Error(), "not an HTTP header name") {
 		t.Fatalf("empty -auth-header: err=%v", err)
+	}
+	if err := checkModel([]string{"-base-url", azure, "-model", "dep", "-path", "/chat/completions"}); err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -path") {
+		t.Fatalf("-path: err=%v, want the retired flag refused", err)
+	}
+}
+
+// The coordinator binding's base URL is Azure OpenAI's v1 endpoint (<resource>/openai/v1). Built
+// with the constructor agentsessionsd uses and the daemon's default -model-path, the client posts to
+// <resource>/openai/v1/chat/completions with no query, the deployment as the body's model and the
+// key as a bearer token: the request Azure answered with HTTP 200 on 2026-10-15.
+func TestV1BaseURLReachesTheCompletionsPath(t *testing.T) {
+	b, err := render.LoadBinding("../../binding-coordinator.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(b.Model.BaseURL)
+	if err != nil || u.Path != "/openai/v1" {
+		t.Fatalf("binding-coordinator.json's model.baseURL path = %q (err %v), want /openai/v1", u.Path, err)
+	}
+	var gotPath, gotQuery, gotAuth, gotModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery, gotAuth = r.URL.Path, r.URL.RawQuery, r.Header.Get("Authorization")
+		var body struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotModel = body.Model
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := modelconfig.New(modelconfig.Config{Model: b.Model.Name, BaseURL: srv.URL + u.Path, AuthHeader: "Authorization", APIKey: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Model(t.Context(), api.ModelRequest{Messages: []api.Message{*api.TextMessage("user", "q")}}); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/openai/v1/chat/completions" || gotQuery != "" || gotModel != "gpt-5.4-mini" || gotAuth != "Bearer k" {
+		t.Fatalf("request path=%q query=%q model=%q auth=%q, want /openai/v1/chat/completions, no query, gpt-5.4-mini, Bearer k",
+			gotPath, gotQuery, gotModel, gotAuth)
 	}
 }
 
@@ -341,7 +366,8 @@ func TestRenderChecksTheModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "-model=gpt-5.4-mini\n-model-base-url=https://example.openai.azure.com\n-model-path=/openai/deployments/gpt-5.4-mini/chat/completions?api-version=2025-04-01-preview\n"; string(got) != want {
+	// No -model-path: the daemon keeps its default, which Azure OpenAI's v1 endpoint takes.
+	if want := "-model=gpt-5.4-mini\n-model-base-url=https://example.openai.azure.com/openai/v1\n"; string(got) != want {
 		t.Fatalf("agentsessionsd.model-args = %q, want %q", got, want)
 	}
 	if err := renderCmd([]string{"-suite", pinnedSuite, "-agent", "coordinator", "-model", "gpt-x", "-binding", coordBinding, "-image", image, "-out", dir}); err == nil {

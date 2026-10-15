@@ -24,9 +24,10 @@
 #                    there; DEMO_HOST must be that host, since the tools image Dockerfile.tools
 #                    describes is built on it over ssh first
 # The model settings come from AZURE_OPENAI_ENV, a file of non-secret NAME=value lines
-# (AGENTSUITE_MODEL_BASE_URL, AGENTSUITE_MODEL, AGENTSUITE_MODEL_PATH, AZURE_MI_CLIENT_ID); the token
-# is fetched on the host by the driver and never reaches this machine. DEMO_READ (driver.sh) is how
-# long a result stays on screen. Recording needs vhs, ffmpeg and npx (for @mermaid-js/mermaid-cli).
+# (AGENTSUITE_MODEL_BASE_URL, Azure OpenAI's v1 endpoint https://<resource>.openai.azure.com/openai/v1;
+# AGENTSUITE_MODEL, the deployment name; AZURE_MI_CLIENT_ID); the token is fetched on the host by
+# the driver and never reaches this machine. DEMO_READ (driver.sh) is how long a result stays on
+# screen. Recording needs vhs, ffmpeg and npx (for @mermaid-js/mermaid-cli).
 set -euo pipefail
 DEMO="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${DEMO}/../../.." && pwd)"
@@ -43,7 +44,7 @@ MERMAID_CLI="@mermaid-js/mermaid-cli@11.17.0"
 # between jobs when the same ignored directory exists here.
 WORK_REL=_local/demo-work
 LOGS="${ROOT}/${WORK_REL}/demo-logs"
-MODEL_VARS=(AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH AZURE_MI_CLIENT_ID)
+MODEL_VARS=(AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AZURE_MI_CLIENT_ID)
 # The files the recording runs or shows, hashed at record time (source.sha256) and copied by collect.
 DEMO_FILES=(driver.sh screen.sh present.awk demo.tape record.sh chapters.py splice.py build.mmd run.mmd bat.conf
 	split-view.py trace-turn.sh trace-hop.py image-files.sh wait-golden.sh smoke-microvm.sh Dockerfile.tools diagrams.md)
@@ -53,6 +54,11 @@ load_env() {
 	# shellcheck disable=SC1090
 	source "${ENV_FILE}"
 	set +a
+	# Only MODEL_VARS reach the host, so a retired AGENTSUITE_MODEL_PATH would be dropped silently.
+	[[ -z "${AGENTSUITE_MODEL_PATH:-}" ]] || {
+		echo "AGENTSUITE_MODEL_PATH is set (in ${ENV_FILE} or the environment) but is retired: put Azure OpenAI's v1 endpoint, https://<resource>.openai.azure.com/openai/v1, in AGENTSUITE_MODEL_BASE_URL and remove AGENTSUITE_MODEL_PATH" >&2
+		exit 1
+	}
 	for v in "${MODEL_VARS[@]}"; do
 		[[ -n "${!v:-}" ]] || {
 			echo "${v} is not set in ${ENV_FILE}" >&2

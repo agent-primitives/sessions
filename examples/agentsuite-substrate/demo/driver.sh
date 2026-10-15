@@ -29,7 +29,8 @@
 # It runs where Docker, kind and the cluster run (the recording runs it on a Linux host with KVM
 # through `hq remote-test`, see record.sh), with the tools Dockerfile.tools installs. Settings:
 #
-#   AGENTSUITE_MODEL_BASE_URL, AGENTSUITE_MODEL, AGENTSUITE_MODEL_PATH  the Azure OpenAI deployment
+#   AGENTSUITE_MODEL_BASE_URL, AGENTSUITE_MODEL  the Azure OpenAI deployment: its v1 endpoint
+#                          (https://<resource>.openai.azure.com/openai/v1) and the deployment name
 #   AZURE_MI_CLIENT_ID     the user-assigned managed identity whose token is the model API key; setup
 #                          fetches it from the instance metadata endpoint into a mode-0600 file, hands
 #                          it to up.sh (the daemon's Secret) and deletes the file; only its expiry is
@@ -140,7 +141,8 @@ template_name() { cat "${STATE}/render/template-name"; }
 # ================================================================================================
 setup() {
 	local v
-	for v in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH AZURE_MI_CLIENT_ID; do
+	[[ -z "$(retired_model_path)" ]] || fail "$(retired_model_path)"
+	for v in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AZURE_MI_CLIENT_ID; do
 		[[ -n "${!v:-}" ]] || fail "${v} is not set"
 	done
 	# phase NAME CMD...: one setup phase, its output in setup.log, a one-line status on stdout.
@@ -527,7 +529,7 @@ kubectl ate get actor-template $TEMPLATE -a agentsuite-demo -o yaml
 EOF
 	page "Registering it is a flag on agentsessionsd, also by hand here; this step will be automated."
 	run <<'EOF'
-kubectl get deploy agentsessionsd -n agentsuite-demo -o jsonpath='{.spec.template.spec.containers[0].args[6]}'
+kubectl get deploy agentsessionsd -n agentsuite-demo -o jsonpath='{.spec.template.spec.containers[0].args[5]}'
 EOF
 	[[ "${SHOWN}" == "-substrate-harness=writer=${ATESPACE}/${TEMPLATE}" ]] || fail "agentsessionsd's flag is not writer=${ATESPACE}/${TEMPLATE}"
 	run <<'EOF'

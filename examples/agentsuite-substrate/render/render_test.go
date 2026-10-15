@@ -202,7 +202,9 @@ func TestRenderRefusesAModelTheBindingDoesNotServe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the suite pins gpt-5.4-mini and the binding serves it: %v", err)
 	}
-	if got := strings.Join(out.ModelFlags, " "); got != "-model=gpt-5.4-mini -model-base-url=https://example.openai.azure.com -model-path=/openai/deployments/gpt-5.4-mini/chat/completions?api-version=2025-04-01-preview" {
+	// Azure OpenAI's v1 endpoint: the deployment is the request's model and the daemon keeps its
+	// default -model-path, so no path flag is rendered.
+	if got := strings.Join(out.ModelFlags, " "); got != "-model=gpt-5.4-mini -model-base-url=https://example.openai.azure.com/openai/v1" {
 		t.Fatalf("model flags = %q", got)
 	}
 	for _, e := range out.Template.GetContainers()[0].GetEnv() {
@@ -586,7 +588,20 @@ func TestLoadBindingIsStrict(t *testing.T) {
 		{"another provider", func(m map[string]any) { model(m)["provider"] = "anthropic" }, `model.provider "anthropic": want openai`},
 		{"a key in the base URL query", func(m map[string]any) { model(m)["baseURL"] = "https://h.example?api-key=" + secretish }, "model.baseURL: the base URL carries a query"},
 		{"userinfo in the base URL", func(m map[string]any) { model(m)["baseURL"] = "https://u:" + secretish + "@h.example" }, "model.baseURL: the base URL carries userinfo"},
-		{"a key in the path", func(m map[string]any) { model(m)["path"] = "/chat?api-key=" + secretish }, "model.path: the model path carries a query parameter other than api-version"},
+		// kmx's model has no path (an Azure OpenAI deployment is served from its v1 endpoint, with
+		// no api-version), so a binding that still carries one is refused as an unknown member, as
+		// kmx's strict decoder refuses it.
+		{"a model path", func(m map[string]any) {
+			model(m)["path"] = "/openai/deployments/d/chat/completions?api-version=2025-04-01-preview&api-key=" + secretish
+		}, `unknown object member name "path" within "/model"`},
+		{"an api-version on the v1 base URL", func(m map[string]any) {
+			model(m)["baseURL"] = "https://res.openai.azure.com/openai/v1?api-version=2025-04-01-preview&api-key=" + secretish
+		}, "model.baseURL: the base URL carries a query"},
+		{"an empty query on the v1 base URL", func(m map[string]any) { model(m)["baseURL"] = "https://res.openai.azure.com/openai/v1?" }, "model.baseURL: the base URL carries a query"},
+		{"a fragment on the v1 base URL", func(m map[string]any) { model(m)["baseURL"] = "https://res.openai.azure.com/openai/v1#" + secretish }, "model.baseURL: the base URL carries a fragment"},
+		{"userinfo on the v1 base URL", func(m map[string]any) {
+			model(m)["baseURL"] = "https://u:" + secretish + "@res.openai.azure.com/openai/v1"
+		}, "model.baseURL: the base URL carries userinfo"},
 		{"no secretRef", func(m map[string]any) { delete(model(m), "secretRef") }, "model.secretRef.name"},
 		{"a dot secret key", func(m map[string]any) { model(m)["secretRef"].(map[string]any)["key"] = "." }, "model.secretRef.key"},
 		{"a dot-dot secret key", func(m map[string]any) { model(m)["secretRef"].(map[string]any)["key"] = "..k" }, "model.secretRef.key"},
@@ -662,6 +677,9 @@ func TestLoadBindingIsStrict(t *testing.T) {
 		})
 	}
 	for _, ok := range []func(m map[string]any){
+		// Azure OpenAI's v1 endpoint: a base URL with a path, with or without a trailing slash.
+		func(m map[string]any) { model(m)["baseURL"] = "https://res.openai.azure.com/openai/v1" },
+		func(m map[string]any) { model(m)["baseURL"] = "https://res.openai.azure.com/openai/v1/" },
 		func(m map[string]any) { m["snapshot"].(map[string]any)["fidelity"] = "ROOTFS" }, // on microvm
 		func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "gs://bucket" },
 		func(m map[string]any) { m["snapshot"].(map[string]any)["storageLocation"] = "s3://bucket/a/b" },
@@ -693,7 +711,7 @@ func TestLoadBindingIsStrict(t *testing.T) {
 	}
 	// What kmx's YAML decoder refuses in the same JSON text (kaimahi
 	// internal/kmx/runtime.ParseAgentSessionsBinding at KmxCommit refused these edits of
-	// binding-coordinator.json, with its PoC-only fields removed, all but the model given twice): a
+	// binding-coordinator.json, with its PoC-only approval removed, all but the model given twice): a
 	// member given twice, in the binding or in a map; a member name in another case, which
 	// encoding/json v1 would have matched; invalid UTF-8.
 	for _, tc := range []struct {

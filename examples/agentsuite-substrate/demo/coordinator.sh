@@ -11,9 +11,10 @@
 #   coordinator.sh teardown   down.sh
 #
 # Runs on a Linux host with KVM and Docker (kind, the cluster and the port-forward all there), as
-# driver.sh does. Settings: AGENTSUITE_MODEL_BASE_URL, AGENTSUITE_MODEL, AGENTSUITE_MODEL_PATH (the
+# driver.sh does. Settings: AGENTSUITE_MODEL_BASE_URL (Azure OpenAI's v1 endpoint,
+# https://<resource>.openai.azure.com/openai/v1) and AGENTSUITE_MODEL (the deployment name), the
 # served model, written into this environment's binding: binding-coordinator.json with them, see
-# common.sh write_binding) and AZURE_MI_CLIENT_ID, the user-assigned managed identity whose token is
+# common.sh write_binding; and AZURE_MI_CLIENT_ID, the user-assigned managed identity whose token is
 # the model API key; it is fetched from the instance metadata endpoint, piped into the
 # agentsessionsd-model Secret with no file on the host, and never printed; the daemon sends it in
 # Authorization, so AGENTSUITE_MODEL_AUTH_HEADER (which up.sh honors) must be unset or Authorization
@@ -99,7 +100,7 @@ print(" ".join(a["metadata"]["name"] for a in items if a["metadata"]["name"].sta
 
 # The placeholders of deploy/coordinator-agentsessionsd.yaml. render_manifest fills them with literal
 # (not sed) substitution, the computed values first, so an operator value cannot be read as one.
-COORDINATOR_PLACEHOLDERS=(DAEMON_IMAGE MODEL_SECRET_VERSION COORDINATOR_FLAG WRITER_FLAG REVIEWER_FLAG INVOKES_VALUE MODEL_BASE_URL MODEL_PATH MODEL_AUTH_HEADER MODEL_ID)
+COORDINATOR_PLACEHOLDERS=(DAEMON_IMAGE MODEL_SECRET_VERSION COORDINATOR_FLAG WRITER_FLAG REVIEWER_FLAG INVOKES_VALUE MODEL_BASE_URL MODEL_AUTH_HEADER MODEL_ID)
 # unfilled prints the placeholders the text $1 still contains.
 unfilled() {
 	local p left=""
@@ -109,8 +110,8 @@ unfilled() {
 	echo "${left}"
 }
 # render_manifest DAEMON_IMAGE SECRET_VERSION COORDINATOR_FLAG WRITER_FLAG REVIEWER_FLAG INVOKES MODEL
-# BASE_URL PATH: the last three are the served model, from the binding (emit render's
-# agentsessionsd.model-args).
+# BASE_URL: the last two are the served model, from the binding (emit render's
+# agentsessionsd.model-args). The daemon keeps its default -model-path.
 render_manifest() {
 	local m
 	m="$(<"${HERE}/deploy/coordinator-agentsessionsd.yaml")"
@@ -121,7 +122,6 @@ render_manifest() {
 	m=${m//REVIEWER_FLAG/"$5"}
 	m=${m//INVOKES_VALUE/"$6"}
 	m=${m//MODEL_BASE_URL/"$8"}
-	m=${m//MODEL_PATH/"$9"}
 	m=${m//MODEL_AUTH_HEADER/Authorization}
 	m=${m//MODEL_ID/"$7"}
 	printf '%s\n' "${m}"
@@ -131,10 +131,12 @@ model_arg() { sed -n "s/^-$1=//p" "$2"; }
 
 setup() {
 	local v
-	for v in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH AZURE_MI_CLIENT_ID; do
+	# Before anything else: a run that still sets the retired AGENTSUITE_MODEL_PATH (common.sh).
+	[[ -z "$(retired_model_path)" ]] || fail "$(retired_model_path)"
+	for v in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AZURE_MI_CLIENT_ID; do
 		[[ -n "${!v:-}" ]] || fail "${v} is not set"
 	done
-	for v in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH; do
+	for v in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL; do
 		[[ -z "$(unfilled "${!v:-}")" ]] || fail "${v} contains $(unfilled "${!v:-}"), a placeholder of deploy/coordinator-agentsessionsd.yaml"
 	done
 	# The key is a managed identity's Entra token, which Azure OpenAI takes as a bearer token in
@@ -143,8 +145,8 @@ setup() {
 	[[ "$(printf '%s' "${AGENTSUITE_MODEL_AUTH_HEADER:-Authorization}" | tr '[:upper:]' '[:lower:]')" == authorization ]] ||
 		fail "AGENTSUITE_MODEL_AUTH_HEADER names a header other than Authorization; this demo sends the managed identity's token in Authorization, so unset it"
 	# Before the first cluster change: the manifest renders with no placeholder left.
-	[[ -z "$(unfilled "$(render_manifest image 1 c w r i m u p)")" ]] ||
-		fail "deploy/coordinator-agentsessionsd.yaml holds placeholders this script does not fill: $(unfilled "$(render_manifest image 1 c w r i m u p)")"
+	[[ -z "$(unfilled "$(render_manifest image 1 c w r i m u)")" ]] ||
+		fail "deploy/coordinator-agentsessionsd.yaml holds placeholders this script does not fill: $(unfilled "$(render_manifest image 1 c w r i m u)")"
 	[[ "$(go env GOARCH)" == amd64 ]] || fail "the suite declares linux/amd64 compositions only; run on an amd64 host"
 	(cd "${HERE}" && go build -o "${WORK}/bin/emit" ./cmd/emit)
 	(cd "${ROOT}" && go build -o "${WORK}/bin/agentctl" ./cmd/agentctl)
@@ -204,9 +206,10 @@ setup() {
 	for agent in writer reviewer; do
 		cmp -s "${margs}" "${STATE}/render-${agent}/agentsessionsd.model-args" || fail "the ${agent} render serves another model than the coordinator's"
 	done
-	local model base path
-	model="$(model_arg model "${margs}")" base="$(model_arg model-base-url "${margs}")" path="$(model_arg model-path "${margs}")"
-	[[ -n "${model}" && -n "${base}" && -n "${path}" ]] || fail "the binding does not give the model, base URL and path the daemon needs"
+	local model base
+	model="$(model_arg model "${margs}")" base="$(model_arg model-base-url "${margs}")"
+	[[ -n "${model}" && -n "${base}" ]] || fail "the binding does not give the model and base URL the daemon needs"
+	[[ -z "$(model_arg model-path "${margs}")" ]] || fail "the render sets -model-path; the daemon keeps its default"
 
 	step "a model token for the VM's managed identity (never printed, never in a file)"
 	model_secret "${NS}" "${AZURE_MI_CLIENT_ID}" "${K[@]}"
@@ -216,7 +219,7 @@ setup() {
 	step "agentsessionsd with the invocation executor (examples/agentsuite-substrate/cmd/agentsessionsd)"
 	local daemon manifest
 	daemon="$(cd "${HERE}" && KO_DOCKER_REPO=localhost:5001 ko build --base-import-paths --platform=linux/amd64 ./cmd/agentsessionsd)"
-	manifest="$(render_manifest "${daemon}" "${version}" "${flags[0]}" "${flags[1]}" "${flags[2]}" "${INVOKES}" "${model}" "${base}" "${path}")"
+	manifest="$(render_manifest "${daemon}" "${version}" "${flags[0]}" "${flags[1]}" "${flags[2]}" "${INVOKES}" "${model}" "${base}")"
 	[[ -z "$(unfilled "${manifest}")" ]] || fail "deploy/coordinator-agentsessionsd.yaml still holds the placeholders '$(unfilled "${manifest}")' after rendering"
 	printf '%s\n' "${manifest}" >"${STATE}/coordinator-agentsessionsd.yaml"
 	"${K[@]}" apply -f "${STATE}/coordinator-agentsessionsd.yaml"
@@ -390,8 +393,8 @@ EOF
 	python3 -c '
 import json, sys
 b = json.load(open(sys.argv[1]))
-ok = b["model"]["name"] == sys.argv[2] and b["approval"]["invokes"] == [{"caller": "coordinator", "agent": "reviewer"}] and "path" in b["model"]
-sys.exit(0 if ok else 1)' "${BINDING}" "${model}" || fail "the binding does not serve ${model} and gate coordinator -> reviewer"
+ok = b["model"]["name"] == sys.argv[2] and b["approval"]["invokes"] == [{"caller": "coordinator", "agent": "reviewer"}] and "path" not in b["model"] and b["model"]["baseURL"].rstrip("/").endswith("/openai/v1")
+sys.exit(0 if ok else 1)' "${BINDING}" "${model}" || fail "the binding does not serve ${model} from an Azure OpenAI v1 endpoint with no model.path and gate coordinator -> reviewer"
 	page "kaimahi's original suite pins example-model, which this binding does not serve: emit render refuses it"
 	run -x <<'EOF'
 emit render -suite suites/coordinator-workers -agent coordinator -platform linux/amd64 -binding $BINDING -image $IMAGE -out /tmp/render-refused 2>&1
@@ -420,8 +423,8 @@ EOF
 	run -n 8 <<'EOF'
 cat /tmp/render-coordinator/agentsessionsd.args /tmp/render-coordinator/agentsessionsd.model-args
 EOF
-	[[ "${SHOWN}" == "-substrate-harness=coordinator=agentsuite-coordinator/${template},actors=agentsuite-coordinator"$'\n'"-model=${model}"$'\n'"-model-base-url="*$'\n'"-model-path="* ]] ||
-		fail "the coordinator's flags are not ${template} and the binding's model"
+	[[ "${SHOWN}" == "-substrate-harness=coordinator=agentsuite-coordinator/${template},actors=agentsuite-coordinator"$'\n'"-model=${model}"$'\n'"-model-base-url="* && "${SHOWN}" != *-model-path=* ]] ||
+		fail "the coordinator's flags are not ${template} and the binding's model (with the daemon's default -model-path)"
 
 	# ---------------------------------------------------------------------------------------------
 	chapter 3 "In the cluster" "Created before recording with kubectl ate create, from the three renders: one ActorTemplate per agent"
@@ -431,9 +434,9 @@ EOF
 	[[ "${SHOWN}" == *"${template}"* && "${SHOWN}" == *"${wtemplate}"* && "${SHOWN}" == *"${rtemplate}"* ]] || fail "the three templates are not in the cluster"
 	page "Manual step: three -substrate-harness flags register them; the HarnessRegistry does not take substrate placements"
 	run <<'EOF'
-kubectl get deploy agentsessionsd-coordinator -n agentsuite-demo -o jsonpath='{range .spec.template.spec.containers[0].args[6:9]}{@}{"\n"}{end}'
+kubectl get deploy agentsessionsd-coordinator -n agentsuite-demo -o jsonpath='{range .spec.template.spec.containers[0].args[5:8]}{@}{"\n"}{end}'
 EOF
-	[[ "$(printf '%s\n' "${SHOWN}" | grep -c '^-substrate-harness=')" == 3 ]] || fail "the Deployment does not carry three -substrate-harness flags at args 6-8"
+	[[ "$(printf '%s\n' "${SHOWN}" | grep -c '^-substrate-harness=')" == 3 ]] || fail "the Deployment does not carry three -substrate-harness flags at args 5-7"
 	page "The suite's invokes edges reach agentsessionsd's invocation executor as one env value"
 	run <<'EOF'
 kubectl get deploy agentsessionsd-coordinator -n agentsuite-demo -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="AGENTSUITE_INVOKES")].value}'
@@ -560,7 +563,7 @@ EOF
 	# ---------------------------------------------------------------------------------------------
 	chapter 8 "Open questions" "Open questions, each tagged with whose it is"
 	show_lines "kmx: the binding has no approval field; this PoC adds approval.invokes per environment. Add it, or declare it in AgentSuite?
-kmx: the binding has no model.path, and model.baseURL refuses a query; Azure's deployment path carries api-version. Add path?
+kmx: no model.path needed: Azure's v1 endpoint (<resource>/openai/v1) takes the deployment as model and no api-version.
 kmx: eval and lift take one chat member; a suite with invokes edges has no eval yet, so this render has no eval evidence.
 kmx: a binding names one atespace; here each agent's actors need their own, so setup writes one binding per agent.
 AgentSuite: maxConcurrent bounds the declaring agent's calls; across runtime replicas too? This PoC counts per daemon.

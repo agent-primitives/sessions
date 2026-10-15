@@ -29,7 +29,7 @@ MERMAID_CLI="@mermaid-js/mermaid-cli@11.17.0"
 CLUSTER=agentsuite-coord
 WORK_REL=_local/coord-work
 LOGS="${ROOT}/${WORK_REL}/logs"
-MODEL_VARS=(AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH AZURE_MI_CLIENT_ID)
+MODEL_VARS=(AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AZURE_MI_CLIENT_ID)
 DEMO_FILES=(coordinator.sh screen.sh model-token.sh coordinator.tape coordinator-record.sh present.awk chapters.py splice.py invoke.mmd bat.conf)
 
 load_env() {
@@ -38,6 +38,11 @@ load_env() {
 	source "${ENV_FILE}"
 	set +a
 	local v
+	# Only MODEL_VARS reach the host, so a retired AGENTSUITE_MODEL_PATH would be dropped silently.
+	[[ -z "${AGENTSUITE_MODEL_PATH:-}" ]] || {
+		echo "AGENTSUITE_MODEL_PATH is set (in ${ENV_FILE} or the environment) but is retired: put Azure OpenAI's v1 endpoint, https://<resource>.openai.azure.com/openai/v1, in AGENTSUITE_MODEL_BASE_URL and remove AGENTSUITE_MODEL_PATH" >&2
+		exit 1
+	}
 	for v in "${MODEL_VARS[@]}"; do
 		[[ -n "${!v:-}" ]] || {
 			echo "${v} is not set in ${ENV_FILE}" >&2

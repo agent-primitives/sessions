@@ -78,7 +78,9 @@ kaimahi's.
 | `workerSelector` | `binding.workerSelector` |
 
 The harness registration is a `HarnessRegistration` with `spec.substrate {atespace, template}`,
-`STATELESS_REPLAY` and `descriptor_id: triage`. `agentsessionsd` does not serve the registry, so
+`STATELESS_REPLAY` and `descriptor_id: triage`. `agentsessionsd` serves the HarnessRegistry API
+(`-registry-addr`) but refuses a substrate placement there (`registeredPlacer` in
+`internal/agentsessionsd/registry_listener.go`), so
 the registration is applied as `-substrate-harness=triage=<atespace>/<template>`. The memory tier's
 is named `triage-memory`, is `REQUIRES_MEMORY_SNAPSHOT`, and is applied as
 `-substrate-harness=triage-memory=<atespace>/<template>,memory`.
@@ -140,6 +142,30 @@ and two entries may not share one.
   bridge implement durable approval/park for STATELESS_REPLAY only"; `controller.ErrApprovalUnavailable`
   otherwise). The coordinator is therefore rendered stateless. The workers are stateless too: their
   sessions are one-turn children and nothing needs their RAM.
+
+### What implements it
+
+| Path | What it is |
+|---|---|
+| `invoke/` | The host executor: `Policy` (edges from the suite, `-approve` choice), `Executor.For(agent)` as a `controller.ToolFunc`, the edge, mediation, `maxConcurrent` and `maxDepth` checks, and the child session. `suite_test.go` runs the vendored suite's three agents in process (local backends, the real controller and approval engine) through an approve and a deny. |
+| `agent/coordinator.go` | The coordinator loop: the model asks for a delegation as one line of JSON; the harness makes the `agentsuite.invoke` call with id `<execution>-invoke-<n>`, stable across replay and resume. |
+| `cmd/agentsessionsd` | The substrate build of `agentsessionsd` plus the executor (`internal/agentsessionsd.WithToolExecutors`). The edges come from `AGENTSUITE_INVOKES`, which `emit invokes -approve reviewer` prints. |
+| `emit render -approve -actors` | Sets `AGENTSUITE_APPROVAL` in the coordinator's template (folded into its name) and `,actors=<atespace>` on each daemon flag. |
+| `demo/coordinator.sh` | `setup`: kind and substrate (`up.sh --substrate-only`), one image, binding atespace and ActorTemplate per agent, one daemon with three `-substrate-harness` flags. `probe`: one request approved and one denied through `agentctl`. |
+
+### Gaps in the invocation PoC
+
+- Child creation is not idempotent: if the host crashes after the child turn but before the
+  `TOOL_RESULT` commits, recovery runs the executor again and creates a second child.
+  `CreateSession` has no client-chosen id or idempotency key to deduplicate on.
+- `maxConcurrent` is counted in memory per calling session and per daemon. Two daemons sharing a
+  journal each allow `maxConcurrent`.
+- The executor reaches the daemon's own Sessions API over plaintext loopback without
+  authentication, like every other caller of this PoC's daemon. The child session's labels
+  (`agentsuite.invoked-by`) are client-set metadata; the tamper-evident link is the child's first
+  `EXECUTION_START` config and the parent's `TOOL_RESULT`.
+- Tool definitions are not offered to the model (`model/openai` refuses them), so a delegation is a
+  JSON reply the harness parses. A reply that is not exactly one JSON object is the final answer.
 
 ## Requirements
 
@@ -386,8 +412,9 @@ only whole lines.
 
 `demo/build.mmd` (how the suite becomes a template and a flag) and `demo/run.mmd` (how one turn
 travels) are the Mermaid sources; `demo/diagrams.md` lists, for each arrow, where the code does it.
-The harness registration `emit render` writes is not applied as an API object: agentsessionsd does
-not serve the HarnessRegistry API yet, so only the flag reaches it. The trace shows one log line per
+The harness registration `emit render` writes is not applied as an API object: the v3 recording
+predates the HarnessRegistry listener, and on this base that listener refuses substrate placements,
+so only the flag reaches agentsessionsd. The trace shows one log line per
 component of the run diagram for the same turn: agentsessionsd (the substrate adapter runs in it and
 logs nothing of its own), ate-api, the worker, the actor's lifecycle in its micro-VM, the router, the
 harness's token line, and the journal's `EVENT_MODEL_CALL` record for the model call.

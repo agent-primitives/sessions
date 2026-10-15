@@ -172,7 +172,7 @@ with `:` (the manifest would read it as a YAML map key); a URL that is not `http
 carries userinfo, a query or a fragment; with `MODEL_API_KEY` set, a plain `http` URL whose host is
 not a loopback address, `localhost`, or a name ending in `.svc` or `.svc.cluster.local`, as
 `agentsessionsd` does (the last is a trusted-network exception: it checks the name, not where the
-traffic goes, so the key still crosses the cluster network unencrypted); a path that carries a query other than one
+traffic goes, and the key still travels in cleartext); a path that carries a query other than one
 date-shaped `api-version`; a header that is not a header name; and any combination `agentsessionsd`
 would refuse at startup. It does so before it changes the cluster, so a misconfigured rerun leaves
 the running daemon, its journal and an existing key in place. `emit check-model` makes the last

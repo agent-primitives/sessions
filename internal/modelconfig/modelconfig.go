@@ -48,10 +48,13 @@ func New(cfg Config) (*openai.Client, error) {
 
 // checkKeyedHTTP refuses an http BaseURL when an APIKey is set, unless the host (case-insensitive,
 // port ignored) is a loopback IP literal, localhost, or a Kubernetes service name ending in .svc or
-// .svc.cluster.local: there the traffic stays on the machine or the cluster network. https, and
-// http with no key, are left alone. Any key counts, whatever AuthHeader says, so a configuration
-// that might send one fails closed. A BaseURL that does not parse is left to openai.New. The error
-// names the host only: the key is never printed, and the URL's other parts are the caller's to show.
+// .svc.cluster.local, names that resolve on the machine or the cluster network. It checks the host
+// name only: the client uses net/http's proxy settings (HTTP_PROXY and NO_PROXY), so with a proxy
+// configured an allowed in-cluster host must be listed in NO_PROXY, or the key and prompts go to the
+// proxy over plain http. https, and http with no key, are left alone. Any key counts, whatever
+// AuthHeader says, so a configuration that might send one fails closed. A BaseURL that does not
+// parse is left to openai.New. The error names the host only: the key is never printed, and the
+// URL's other parts are the caller's to show.
 func checkKeyedHTTP(cfg Config) error {
 	if cfg.APIKey == "" || cfg.BaseURL == "" {
 		return nil

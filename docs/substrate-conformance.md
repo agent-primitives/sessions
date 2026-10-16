@@ -351,14 +351,25 @@ capability on `runtime/local`, accepts on substrate) is `placement`'s `TestNeutr
 
 ## CI
 
-`.github/workflows/substrate-e2e.yml` runs the whole suite in one cluster, on every PR and nightly
-(heavy — kind + KVM + micro-VM assets — but the claims it checks are the ones no unit test can
-make). A concurrency group cancels a superseded run so one push does not leave two clusters
-standing. It copies substrate's own recipe: `create-kind-cluster` + `install-ate-kind`, then
-`install-microvm-deps.sh --install` before either tier runs (stages the kata + cloud-hypervisor
-asset cache and installs the micro-VM SandboxConfig both templates name). Substrate publishes no
-images, so its binaries are built from source at `SUBSTRATE_REF`; the workflow caches the Go build
-and module caches and the envoy-dataplane image's buildx cache between runs.
+`.github/workflows/substrate-e2e.yml` runs the whole suite in one cluster, on every PR that can
+affect it and nightly (heavy — kind + KVM + micro-VM assets — but the claims it checks are the ones
+no unit test can make). A concurrency group cancels a superseded run so one push does not leave two
+clusters standing. It copies substrate's own recipe: `create-kind-cluster` + `install-ate-kind`,
+then `install-microvm-deps.sh --install` before either tier runs (stages the kata +
+cloud-hypervisor asset cache and installs the micro-VM SandboxConfig both templates name).
+Substrate publishes no images, so its binaries are built from source at `SUBSTRATE_REF`; the
+workflow caches the Go build and module caches and the envoy-dataplane image's buildx cache between
+runs.
+
+`substrate-conformance` is a required check, so the workflow has no trigger path filter: a workflow
+a filter skips never reports, and the pull request could not merge. Its first job,
+`substrate-e2e path filter`, diffs the pull request's merge commit against the base branch with
+`hack/ci-path-filter.sh`. When every changed path is one the suite does not read (`docs/`, any
+`*.md`, `site/`, `cmd/agentui/`, `demos/`, `LICENSE`, `.github/CODEOWNERS`,
+`.github/dependabot.yml`, `.github/copilot-instructions.md`), `substrate-conformance` skips every
+step and reports success in seconds. Any other path, including any workflow file, runs the suite.
+Push to main, the nightly schedule and manual runs always run it. `ci.yml` gates its required jobs
+the same way, skipping only markdown (other than `docs/api-reference.md`) and `LICENSE`.
 
 Scheduled and manual runs add a canary job, `substrate-conformance (substrate main)`, that runs the
 same suite against agent-substrate's `main` head, with the adapter's client moved to that commit in

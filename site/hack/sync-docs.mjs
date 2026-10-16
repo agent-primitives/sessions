@@ -6,6 +6,11 @@
 //
 // Two transformations are needed. Starlight requires frontmatter, which the plain markdown does not
 // carry, and it serves pages at extensionless routes, so `concepts.md` has to become `/concepts/`.
+//
+// Because the published copy is generated and gitignored, Starlight cannot see where a page came
+// from: its edit link would point at the copy (a 404 on GitHub) and git has no history for it. So
+// the frontmatter also carries the edit URL of the source under docs/ and its last commit date.
+import { execFileSync } from "node:child_process";
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +18,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const docsDir = join(here, "..", "..", "docs");
 const outDir = join(here, "..", "src", "content", "docs");
+const repoRoot = join(here, "..", "..");
 const repo = "https://github.com/agent-primitives/sessions";
 
 // README.md is the docs index; the Starlight sidebar replaces it, so it is not published.
@@ -101,6 +107,35 @@ function stripBanner(markdown) {
   return markdown.replace(/^<!--[\s\S]*?-->\n+/, "");
 }
 
+/** Runs git in the repository root; null if git or the repository is unavailable. */
+function git(...args) {
+  try {
+    return execFileSync("git", args, {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+// A shallow clone (CI's default checkout) would date every page with the one commit it has, which
+// is wrong rather than missing, so dates are left out there. site.yml fetches full history.
+const shallow = git("rev-parse", "--is-shallow-repository");
+const haveHistory = shallow === "false";
+if (!haveHistory) {
+  console.warn(
+    "sync-docs: no full git history (shallow clone or no git), so pages carry no last-updated date",
+  );
+}
+
+/** The last commit that touched docs/<file>, as an ISO 8601 timestamp, or null. */
+function lastUpdated(file) {
+  if (!haveHistory) return null;
+  return git("log", "-1", "--format=%cI", "--", `docs/${file}`) || null;
+}
+
 function yamlQuote(value) {
   return `"${value.replace(/"/g, '\\"')}"`;
 }
@@ -137,10 +172,14 @@ for (const file of files) {
   const source = await readFile(join(docsDir, file), "utf8");
   assertNoInternalMarkers(`docs/${file}`, source);
   const body = rewriteLinks(stripTitle(stripBanner(source)));
+  const updated = lastUpdated(file);
   const frontmatter = [
     "---",
     `title: ${yamlQuote(info.title)}`,
     `description: ${yamlQuote(info.description)}`,
+    `editUrl: ${yamlQuote(`${repo}/edit/main/docs/${file}`)}`,
+    // Unquoted, so YAML reads it as a timestamp, which is what Starlight's schema expects.
+    ...(updated ? [`lastUpdated: ${updated}`] : []),
     "---",
     "",
   ].join("\n");

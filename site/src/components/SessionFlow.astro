@@ -7,16 +7,22 @@
 // seq 5, which is what `agentctl replay` prints on a freshly forked child.
 //
 // Progressive enhancement: the SVG renders the complete graph with no JS, and the script only
-// adds `is-animating` to hide pieces and reveal them on a timeline.
+// adds `is-animating` to hide pieces and reveal them on a timeline. The loop never ends, so the
+// chrome bar carries a pause button.
+//
+// Below 60rem the wide graph would shrink its captions to a few pixels, so a portrait drawing of
+// the same graph takes its place. Both carry the same data-* hooks, so one script drives both.
+import MotionToggle from "./MotionToggle.astro";
 ---
 
 <figure class="flow panel" data-flow>
   <div class="panel__bar">
+    <MotionToggle label="Pause the session graph animation" />
     <span class="flow__step" data-step>exec</span>
     <span class="panel__note flow__compute">compute <b data-compute>LIVE</b></span>
   </div>
 
-  <svg viewBox="0 0 900 232" role="img" aria-labelledby="flow-title" class="flow__svg">
+  <svg viewBox="0 0 900 232" role="img" aria-labelledby="flow-title" class="flow__svg flow__svg--wide">
     <title id="flow-title">
       A session log growing by four records, being replayed, forked into a child, then suspended
       and resumed.
@@ -66,29 +72,79 @@
     <text class="flow__rail flow__rail--child" data-rail="child" x="14" y="150">fork</text>
   </svg>
 
+  <svg viewBox="0 0 340 392" role="img" aria-labelledby="flow-title-tall" class="flow__svg flow__svg--tall">
+    <title id="flow-title-tall">
+      A session log growing by four records, being replayed, forked into a child, then suspended
+      and resumed.
+    </title>
+
+    <path class="flow__link" data-link="p2" d="M 120 73 V 99" pathLength="1"></path>
+    <path class="flow__link" data-link="p3" d="M 120 133 V 159" pathLength="1"></path>
+    <path class="flow__link" data-link="p4" d="M 120 193 V 219" pathLength="1"></path>
+    <path class="flow__link" data-link="p5" d="M 120 253 V 279" pathLength="1"></path>
+
+    <path class="flow__link flow__link--fork" data-link="fork" d="M 137 236 H 200 Q 230 236 230 266 V 279" pathLength="1"></path>
+    <path class="flow__link flow__link--fork" data-link="c6" d="M 230 313 V 339" pathLength="1"></path>
+
+    <g class="flow__node" data-node="p1">
+      <circle cx="120" cy="56" r="17"></circle><text x="120" y="61">1</text>
+      <text class="flow__cap flow__cap--left" x="94" y="61">INPUT</text>
+    </g>
+    <g class="flow__node" data-node="p2">
+      <circle cx="120" cy="116" r="17"></circle><text x="120" y="121">2</text>
+      <text class="flow__cap flow__cap--left" x="94" y="121">MODEL_CALL</text>
+    </g>
+    <g class="flow__node" data-node="p3">
+      <circle cx="120" cy="176" r="17"></circle><text x="120" y="181">3</text>
+      <text class="flow__cap flow__cap--left" x="94" y="181">OUTPUT</text>
+    </g>
+    <g class="flow__node" data-node="p4">
+      <circle cx="120" cy="236" r="17"></circle><text x="120" y="241">4</text>
+      <text class="flow__cap flow__cap--left" x="94" y="241">END</text>
+    </g>
+    <g class="flow__node flow__node--new" data-node="p5">
+      <circle cx="120" cy="296" r="17"></circle><text x="120" y="301">5</text>
+      <text class="flow__cap flow__cap--left" x="94" y="301">resumed</text>
+    </g>
+
+    <g class="flow__node flow__node--child" data-node="c5">
+      <circle cx="230" cy="296" r="17"></circle><text x="230" y="301">5</text>
+      <text class="flow__cap flow__cap--right" x="256" y="301">LIFECYCLE</text>
+    </g>
+    <g class="flow__node flow__node--child" data-node="c6">
+      <circle cx="230" cy="356" r="17"></circle><text x="230" y="361">6</text>
+      <text class="flow__cap flow__cap--right" x="256" y="361">child turn</text>
+    </g>
+
+    <text class="flow__rail" data-rail="parent" x="120" y="22" text-anchor="middle">session</text>
+    <text class="flow__rail flow__rail--child" data-rail="child" x="160" y="226">fork</text>
+  </svg>
+
   <figcaption class="panel__caption flow__caption" data-caption>
     Each turn appends typed, hash-chained records to one append-only log.
   </figcaption>
 </figure>
 
 <script>
+  import { loopControl, prefersReducedMotion, timeline } from "../scripts/motion";
+
   const root = document.querySelector<HTMLElement>("[data-flow]");
 
-  if (root && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  if (root && !prefersReducedMotion()) {
     const step = root.querySelector<HTMLElement>("[data-step]")!;
     const compute = root.querySelector<HTMLElement>("[data-compute]")!;
     const caption = root.querySelector<HTMLElement>("[data-caption]")!;
-    const el = (sel: string) => root.querySelector<SVGElement>(sel)!;
-    const node = (k: string) => el(`[data-node="${k}"]`);
-    const link = (k: string) => el(`[data-link="${k}"]`);
-    const childRail = el('[data-rail="child"]');
+    // Every hook matches twice, once in the wide drawing and once in the portrait one.
+    const els = (sel: string) => [...root.querySelectorAll<SVGElement>(sel)];
+    const node = (k: string) => els(`[data-node="${k}"]`);
+    const link = (k: string) => els(`[data-link="${k}"]`);
+    const childRail = els('[data-rail="child"]');
 
     root.classList.add("is-animating");
 
-    let timers: number[] = [];
-    let running = false;
-    const at = (ms: number, fn: () => void) => timers.push(window.setTimeout(fn, ms));
-    const on = (e: Element) => e.classList.add("is-on");
+    const tl = timeline();
+    const at = (ms: number, fn: () => void) => tl.at(ms, fn);
+    const on = (...es: Element[][]) => es.flat().forEach((e) => e.classList.add("is-on"));
     const off = (e: Element) => e.classList.remove("is-on");
 
     const phase = (name: string, text: string) => {
@@ -97,8 +153,7 @@
     };
 
     const reset = () => {
-      timers.forEach(clearTimeout);
-      timers = [];
+      tl.reset();
       root.querySelectorAll(".flow__node, .flow__link, .flow__rail--child").forEach((e) => {
         off(e);
         e.classList.remove("is-hot", "is-cold");
@@ -116,10 +171,7 @@
       phase("exec", "Each turn appends typed, hash-chained records to one append-only log.");
       at(t, () => on(node("p1")));
       for (const [i, k] of ["p2", "p3", "p4"].entries()) {
-        at(t + 380 + i * 380, () => {
-          on(link(k));
-          on(node(k));
-        });
+        at(t + 380 + i * 380, () => on(link(k), node(k)));
       }
       t += 380 * 3 + 500;
 
@@ -129,22 +181,18 @@
         phase("replay", "Replay re-reads those records. The harness never runs, the provider is never called."),
       );
       for (const [i, k] of ["p1", "p2", "p3", "p4"].entries()) {
-        at(t + 120 + i * 150, () => node(k).classList.add("is-hot"));
-        at(t + 420 + i * 150, () => node(k).classList.remove("is-hot"));
+        at(t + 120 + i * 150, () => node(k).forEach((n) => n.classList.add("is-hot")));
+        at(t + 420 + i * 150, () => node(k).forEach((n) => n.classList.remove("is-hot")));
       }
       t += 1400;
 
       // 3. fork: the child inherits the prefix; its first new record is the LIFECYCLE at seq 5.
       at(t, () => {
         phase("fork", "A fork copies the prefix, so children start from identical state at zero model cost.");
-        on(childRail);
-        on(link("fork"));
+        on(childRail, link("fork"));
       });
       at((t += 520), () => on(node("c5")));
-      at((t += 340), () => {
-        on(link("c6"));
-        on(node("c6"));
-      });
+      at((t += 340), () => on(link("c6"), node("c6")));
       t += 700;
 
       // 4. suspend: compute goes away, the log does not.
@@ -163,29 +211,12 @@
         compute.classList.remove("is-cold");
         root.classList.remove("is-suspended");
       });
-      at((t += 620), () => {
-        on(link("p5"));
-        on(node("p5"));
-      });
+      at((t += 620), () => on(link("p5"), node("p5")));
 
       at((t += 3200), play);
     };
 
-    new IntersectionObserver(
-      (entries) => {
-        for (const e of entries) {
-          if (e.isIntersecting && !running) {
-            running = true;
-            play();
-          } else if (!e.isIntersecting && running) {
-            running = false;
-            timers.forEach(clearTimeout);
-            timers = [];
-          }
-        }
-      },
-      { threshold: 0.2 },
-    ).observe(root);
+    loopControl(root, { threshold: 0.2, start: play, pause: tl.pause, resume: tl.resume });
   }
 </script>
 
@@ -195,7 +226,7 @@
   }
 
   .flow__step {
-    font-family: var(--sl-font-mono, ui-monospace, monospace);
+    font-family: var(--p-mono);
     font-size: 0.78rem;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -214,13 +245,13 @@
   }
 
   .flow__compute b {
-    font-family: var(--sl-font-mono, ui-monospace, monospace);
+    font-family: var(--p-mono);
     color: #3fb950;
     transition: color 0.3s ease;
   }
 
   .flow__compute b.is-cold {
-    color: #6e7681;
+    color: var(--p-dim);
   }
 
   .flow__svg {
@@ -229,6 +260,25 @@
     height: auto;
     padding: 1rem 1rem 0.5rem;
     overflow: visible;
+  }
+
+  .flow__svg--tall {
+    display: none;
+  }
+
+  /* Captions in the wide graph fall below about 11px once the panel is narrower than this, so the
+     portrait drawing takes over, capped so it does not balloon on a tablet. */
+  @media (max-width: 60rem) {
+    .flow__svg--wide {
+      display: none;
+    }
+
+    .flow__svg--tall {
+      display: block;
+      max-width: 26rem;
+      margin-inline: auto;
+      padding: 0.75rem 0.5rem 0.5rem;
+    }
   }
 
   .flow__link {
@@ -253,7 +303,7 @@
 
   .flow__node text {
     fill: var(--p-white);
-    font-family: var(--sl-font-mono, ui-monospace, monospace);
+    font-family: var(--p-mono);
     font-size: 15px;
     text-anchor: middle;
   }
@@ -262,6 +312,14 @@
     fill: var(--p-dim);
     font-size: 12px;
     letter-spacing: 0.03em;
+  }
+
+  .flow__node .flow__cap--left {
+    text-anchor: end;
+  }
+
+  .flow__node .flow__cap--right {
+    text-anchor: start;
   }
 
   .flow__node--child circle {
@@ -280,7 +338,7 @@
 
   .flow__rail {
     fill: var(--p-dim);
-    font-family: var(--sl-font-mono, ui-monospace, monospace);
+    font-family: var(--p-mono);
     font-size: 12px;
     letter-spacing: 0.08em;
     text-transform: uppercase;

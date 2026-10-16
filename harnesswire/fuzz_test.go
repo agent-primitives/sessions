@@ -17,9 +17,10 @@ import (
 	"github.com/agent-primitives/sessions/wire"
 )
 
-// fuzzDeadline bounds one input. Both ends must return once the peer's frames run out; a run that
-// does not is a hang the fuzzer reports.
-const fuzzDeadline = 10 * time.Second
+// fuzzDeadline bounds one input. Both ends must return once the peer's frames run out, which takes
+// microseconds; a run that returns only because this deadline expired is a hang the fuzzer reports.
+// It is short so a hang does not eat the PR fuzz budget.
+const fuzzDeadline = 2 * time.Second
 
 // fuzzServerStream feeds a fixed list of host frames to Server.Connect. A frame that leaves
 // execution_id or model_call_id empty gets the current one, so the fuzzer reaches the decoding
@@ -87,10 +88,15 @@ func (fuzzHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink
 	return sink.Output(ctx, "done")
 }
 
+// decodeFrames decodes the fuzz arguments into frames. An empty argument is no frame rather than an
+// empty one, so an input can end the stream early and reach the peer-closed paths.
 func decodeFrames(raw ...[]byte) ([]*v1.ControllerFrame, int, bool) {
 	var frames []*v1.ControllerFrame
 	n := 0
 	for _, b := range raw {
+		if len(b) == 0 {
+			continue
+		}
 		f := &v1.ControllerFrame{}
 		if err := proto.Unmarshal(b, f); err != nil {
 			return nil, 0, false
@@ -126,7 +132,8 @@ func FuzzServerConnect(f *testing.F) {
 	park := mustMarshal(f, &v1.ControllerFrame{Frame: &v1.ControllerFrame_Park{Park: &v1.ApprovalRef{ExecutionId: "e", ToolCallId: "t2", RequestSeq: 4}}})
 	f.Add(start, model, tool, decision, receipt)
 	f.Add(start, model, tool, park, []byte{})
-	f.Add(start, []byte{}, []byte{}, []byte{}, []byte{})
+	f.Add(start, []byte{}, []byte{}, []byte{}, []byte{}) // the host goes away mid-turn
+	f.Add(start, model, []byte{}, []byte{}, []byte{})
 	f.Fuzz(func(t *testing.T, a, b, c, d, e []byte) {
 		frames, n, ok := decodeFrames(a, b, c, d, e)
 		if !ok {
@@ -147,6 +154,9 @@ func FuzzServerConnect(f *testing.F) {
 				t.Fatal("Connect did not return after the frames ran out")
 			}
 		})
+		if ctx.Err() != nil {
+			t.Fatal("Connect returned only because its stream context expired, not when the frames ran out")
+		}
 		stream.mu.Lock()
 		defer stream.mu.Unlock()
 		for _, ev := range stream.sent {
@@ -205,9 +215,13 @@ func FuzzClientRun(f *testing.F) {
 	for i := range seeds {
 		f.Add(seeds[i], seeds[(i+1)%len(seeds)], seeds[(i+2)%len(seeds)])
 	}
+	f.Add(seeds[0], []byte{}, []byte{}) // the harness goes away mid-turn
 	f.Fuzz(func(t *testing.T, a, b, c []byte) {
 		var events []*v1.Event
 		for _, raw := range [][]byte{a, b, c} {
+			if len(raw) == 0 {
+				continue // no event, so the stream can end early
+			}
 			ev := &v1.Event{}
 			if err := proto.Unmarshal(raw, ev); err != nil {
 				return
@@ -221,8 +235,8 @@ func FuzzClientRun(f *testing.F) {
 		fuzzcheck.Allocs(t, len(a)+len(b)+len(c), func() {
 			err = NewClientHarness(fuzzClient{stream: stream}).Run(ctx, &api.Start{SessionUID: "s", ExecutionID: "e"}, &hostSink{})
 		})
-		if errors.Is(err, context.DeadlineExceeded) {
-			t.Fatal("Run did not return after the events ran out")
+		if errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+			t.Fatal("Run returned only because its context expired, not when the events ran out")
 		}
 		// Run handles events in order and stops at END, so only a host-owned event before any END
 		// is certain to be reached.

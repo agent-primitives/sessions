@@ -747,8 +747,8 @@ These are named in the reference controller. The numbering is the code's.
 | Unknown session (Get, Exec, Suspend, Resume, Fork, Approve) | `NOT_FOUND` |
 | Compare-and-swap conflict, stale fence, session busy, checkpoint in progress, snapshot superseded | `ABORTED` |
 | Unplaceable harness, descriptor mismatch, pin violation, retired or unservable harness, static harness name with a registration row, approval state violation, inherited intent, memory fork at a historical `seq` | `FAILED_PRECONDITION` |
-| Harness `Describe` (admission `RT-1`, the `RT-3` recheck, or a `Describe` during the turn) could not reach the harness while the caller's context is live: the peer returned `UNAVAILABLE` or `DEADLINE_EXCEEDED`, or the host's own bound expired | `UNAVAILABLE` |
-| Any other `Describe` error on those paths, for example a peer `UNIMPLEMENTED` or `INTERNAL`, or a plain error from an in-process harness | `INTERNAL` |
+| Harness `Describe` (admission `RT-1`, the `RT-3` recheck, or a `Describe` during the turn) could not reach the harness while the caller's context is live: the peer returned `UNAVAILABLE` or `DEADLINE_EXCEEDED`; or, on admission and the recheck, the host's own bound expired; or, during the turn, the error wraps `context.DeadlineExceeded` | `UNAVAILABLE` |
+| Any other `Describe` error on those paths, for example a peer `UNIMPLEMENTED` or `INTERNAL`, or a plain error from an in-process harness (during the turn, even one returned after the host's bound expired) | `INTERNAL` |
 | Any `Describe` error in the memory-tier override check (`OPS-7`) while the caller's context is live | `UNAVAILABLE` |
 | Caller deadline or cancellation during admission or any `Describe` above | `DEADLINE_EXCEEDED` or `CANCELLED` |
 | `DeleteSession`, `Cancel` | `UNIMPLEMENTED` |

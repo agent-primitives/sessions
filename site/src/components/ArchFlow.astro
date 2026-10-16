@@ -430,4 +430,26 @@ import MotionToggle from "./MotionToggle.astro";
       display: none;
     }
   }
+
+  /* On the narrowest phones even the portrait drawing scales its 12px labels to about 9px, so the
+     labels grow and the side padding shrinks to keep them at 11px or more down to 320px. */
+  @media (max-width: 24rem) {
+    .arch__svg--tall {
+      padding-inline: 0.25rem;
+    }
+
+    .arch__svg--tall text {
+      font-size: 14.5px;
+    }
+
+    /* Node names keep their step above the labels. */
+    .arch__svg--tall .arch__node text {
+      font-size: 16px;
+    }
+
+    /* Centred on the model node it would now run past the host zone's right edge. */
+    .arch__svg--tall .arch__elabel--key {
+      transform: translateX(-10px);
+    }
+  }
 </style>

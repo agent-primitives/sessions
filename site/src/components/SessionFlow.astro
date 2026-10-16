@@ -404,4 +404,23 @@ import MotionToggle from "./MotionToggle.astro";
       min-height: 4em;
     }
   }
+
+  /* On the narrowest phones the portrait drawing scales its 12px captions to about 9.5px, so they
+     grow and the side padding shrinks to keep them at 11px or more down to 320px. */
+  @media (max-width: 24rem) {
+    .flow__svg--tall {
+      padding-inline: 0.25rem;
+    }
+
+    .flow__svg--tall .flow__cap,
+    .flow__svg--tall .flow__rail {
+      font-size: 13.5px;
+    }
+
+    /* Without the tracking, the longest right-hand caption ("child turn") still ends inside the
+       drawing at this size. */
+    .flow__svg--tall .flow__cap {
+      letter-spacing: 0;
+    }
+  }
 </style>

@@ -162,7 +162,7 @@ func TestDeletionMigrationAddsActiveRows(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if info.DeletionState != api.DeletionActive || !info.DeletionRequestedAt.IsZero() || !info.DeletionCompletedAt.IsZero() || info.DeletionSeq != 0 || info.LastSeq != 0 {
+				if info.DeletionState != api.DeletionActive || !info.DeletionRequestedAt.IsZero() || info.DeletionSeq != 0 || info.LastSeq != 0 {
 					t.Fatalf("migrated deletion metadata invented history: %+v", info)
 				}
 			}
@@ -224,7 +224,7 @@ func TestDeletionMigrationRetainsReleaseFixtureBytesAndRegistry(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if info.LastSeq != tc.head || info.ComputeState != api.ComputeCold || info.DeletionState != api.DeletionActive || !info.DeletionRequestedAt.IsZero() || !info.DeletionCompletedAt.IsZero() || info.DeletionSeq != 0 {
+				if info.LastSeq != tc.head || info.ComputeState != api.ComputeCold || info.DeletionState != api.DeletionActive || !info.DeletionRequestedAt.IsZero() || info.DeletionSeq != 0 {
 					t.Fatalf("legacy projection/history = %+v", info)
 				}
 				if err := s.Session(tc.uid).Verify(); err != nil {
@@ -279,5 +279,55 @@ func TestDeletionMigrationFailureRollsBackColumnsAndStamp(t *testing.T) {
 	}
 	if got := schemaOf(t, path); !reflect.DeepEqual(got, before) {
 		t.Fatalf("failed migration changed shape: %v -> %v", before, got)
+	}
+}
+
+// deletion_completed_at stays in the v4 shape, reserved for cleanup: a v4 database keeps opening
+// without a migration, and this build neither reads nor writes the column.
+func TestDeletionV4ReservedCompletionColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v4.db")
+	s := mustOpen(t, path)
+	for _, uid := range []string{"deleted", "seeded"} {
+		if err := s.PutSession(sqlitelog.SessionMeta{UID: uid}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.DeleteSession(context.Background(), "deleted"); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	db := rawDB(t, path)
+	const reserved = `SELECT session, deletion_completed_at FROM sessions ORDER BY session`
+	if got, want := queryValues(t, db, reserved), [][]any{{"deleted", int64(0)}, {"seeded", int64(0)}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("DeleteSession wrote the reserved column: %v", got)
+	}
+	// A nonzero value stands in for one this build did not write; it must be ignored and kept.
+	if _, err := db.Exec(`UPDATE sessions SET deletion_completed_at = 42 WHERE session = 'seeded'`); err != nil {
+		t.Fatal(err)
+	}
+	if got := readUserVersion(t, path); got != 4 {
+		t.Fatalf("stamp = %d, want 4", got)
+	}
+	schema := schemaOf(t, path)
+
+	s = mustOpen(t, path)
+	if got := readUserVersion(t, path); got != 4 {
+		t.Fatalf("reopen stamp = %d, want 4", got)
+	}
+	if got := schemaOf(t, path); !reflect.DeepEqual(got, schema) {
+		t.Fatalf("reopen changed the v4 schema: %v != %v", got, schema)
+	}
+	if info, err := s.SessionInfo("deleted"); err != nil || info.DeletionState != api.DeletionPending || info.DeletionRequestedAt.IsZero() {
+		t.Fatalf("reopened deleted session = %+v, %v", info, err)
+	}
+	seeded, err := s.SessionInfo("seeded")
+	if err != nil || seeded.DeletionState != api.DeletionActive || !seeded.DeletionRequestedAt.IsZero() {
+		t.Fatalf("reopened seeded session = %+v, %v", seeded, err)
+	}
+	if deleted, err := s.DeleteSession(context.Background(), "seeded"); err != nil || deleted.DeletionState != api.DeletionPending || deleted.DeletionSeq != seeded.LastSeq+1 {
+		t.Fatalf("delete after reopen = %+v, %v", deleted, err)
+	}
+	if got, want := queryValues(t, db, reserved), [][]any{{"deleted", int64(0)}, {"seeded", int64(42)}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("reserved column after reopen = %v, want %v", got, want)
 	}
 }

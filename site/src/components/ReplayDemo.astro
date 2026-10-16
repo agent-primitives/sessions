@@ -140,21 +140,7 @@ import MotionToggle from "./MotionToggle.astro";
     text-align: left;
   }
 
-  /* A slow sheen across the top edge, so the panel reads as live rather than a screenshot. */
-  .term::before {
-    content: "";
-    position: absolute;
-    inset: 0 0 auto;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, var(--term-accent), transparent);
-    opacity: 0.55;
-  }
-
   @media (prefers-reduced-motion: no-preference) {
-    .term::before {
-      animation: term-sheen 6s ease-in-out infinite;
-    }
-
     .term__caret {
       animation: term-blink 1.1s step-end infinite;
     }
@@ -165,20 +151,9 @@ import MotionToggle from "./MotionToggle.astro";
   }
 
   /* The pause button holds the decorative loops too, not only the timeline. */
-  .term.is-paused::before,
   .term.is-paused .term__caret,
   .term.is-paused .term__spin {
     animation-play-state: paused;
-  }
-
-  @keyframes term-sheen {
-    0%,
-    100% {
-      transform: translateX(-60%);
-    }
-    50% {
-      transform: translateX(60%);
-    }
   }
 
   .term__meter {

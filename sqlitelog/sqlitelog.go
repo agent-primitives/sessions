@@ -94,6 +94,10 @@ var migrations = [SchemaVersion - 1]func(*sql.Tx) error{
 	migrateV3ToV4,
 }
 
+// migrateV3ToV4 adds the deletion columns. deletion_completed_at is reserved for resource cleanup
+// (#88): it defaults to 0, and this build never reads or writes it, so values a later build wrote are
+// left as is. It stays in the v4 shape so databases already at v4 keep opening unchanged; cleanup
+// defines its meaning when it lands.
 func migrateV3ToV4(tx *sql.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE sessions ADD COLUMN deletion_state TEXT NOT NULL DEFAULT 'ACTIVE';
 		ALTER TABLE sessions ADD COLUMN deletion_requested_at INTEGER NOT NULL DEFAULT 0;

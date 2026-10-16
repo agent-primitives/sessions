@@ -346,3 +346,42 @@ func TestToolChoiceRejectsUnknownMode(t *testing.T) {
 		t.Fatal("ToolChoiceToProto accepted an unknown mode")
 	}
 }
+
+// A bytes source set to empty bytes decodes to nil, as the encoders treat empty bytes as no source.
+// The journal stores and hashes the encoded form, so a non-nil empty slice would make the decoded
+// message differ from the one read back from the journal.
+func TestEmptyBytesSourceDecodesToNil(t *testing.T) {
+	pb := &v1.Event{Kind: v1.EventKind_EVENT_INPUT, Body: &v1.Event_Message{Message: &v1.Message{
+		Role: "user",
+		Parts: []*v1.Part{
+			{Part: &v1.Part_File{File: &v1.FilePart{Name: "empty.txt", Source: &v1.FilePart_Bytes{Bytes: []byte{}}}}},
+			{Part: &v1.Part_Reasoning{Reasoning: &v1.ReasoningPart{
+				Provider: "p", Opaque: &v1.ReasoningPart_OpaqueBytes{OpaqueBytes: []byte{}},
+			}}},
+		},
+	}}}
+	// Decode the encoded bytes, not the struct: that is how the journal and a peer read it, and
+	// it is where protobuf-go yields a non-nil empty slice for a present bytes field.
+	data, err := proto.Marshal(pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := &v1.Event{}
+	if err := proto.Unmarshal(data, decoded); err != nil {
+		t.Fatal(err)
+	}
+	if b := decoded.GetMessage().GetParts()[0].GetFile().GetBytes(); b == nil {
+		t.Fatal("precondition: protobuf-go decoded the empty bytes source as nil")
+	}
+
+	ev := wire.EventFromProto(decoded)
+	if got := ev.Message.Parts[0].File.Bytes; got != nil {
+		t.Errorf("file part Bytes = %#v, want nil", got)
+	}
+	if got := ev.Message.Parts[1].Reasoning.Opaque; got != nil {
+		t.Errorf("reasoning part Opaque = %#v, want nil", got)
+	}
+	if again := wire.EventFromProto(wire.EventToProto(ev)); !reflect.DeepEqual(ev, again) {
+		t.Fatalf("event changed across a wire round trip:\n%#v\n%#v", ev.Message.Parts, again.Message.Parts)
+	}
+}

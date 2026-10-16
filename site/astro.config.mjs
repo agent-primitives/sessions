@@ -2,6 +2,7 @@
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import mermaid from "astro-mermaid";
+import { readFileSync } from "node:fs";
 
 // The docs under ../docs are the source of truth; hack/sync-docs.mjs copies them into
 // src/content/docs before a build, so the site cannot drift from the repository.
@@ -19,6 +20,15 @@ export default defineConfig({
     mermaid({
       theme: "neutral",
       autoTheme: true,
+      mermaidConfig: {
+        // Starlight's body font, so a diagram's labels match the prose around them. A var() rather
+        // than a copied stack: mermaid sizes its boxes by measuring the text in the page, where the
+        // variable resolves, so the boxes fit the font that is actually drawn.
+        fontFamily: "var(--sl-font, var(--sl-font-system))",
+        // Colours come from Starlight's tokens, which already differ per theme, so one stylesheet
+        // serves both. Mermaid scopes it to each diagram and places it after its own theme rules.
+        themeCSS: readFileSync(new URL("./src/styles/mermaid.css", import.meta.url), "utf8"),
+      },
     }),
     starlight({
       title: "agentsessions",
@@ -69,6 +79,8 @@ export default defineConfig({
         // page offers no route into the docs.
         SiteTitle: "./src/components/SiteTitle.astro",
       },
+      // src/pages/404.astro replaces Starlight's 404 page with one that links back into the site.
+      disable404Route: true,
       customCss: ["./src/styles/custom.css"],
       lastUpdated: true,
     }),

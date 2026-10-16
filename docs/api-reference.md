@@ -8,111 +8,6 @@ Source of truth: api/*.proto. Edit the proto comments, not this file.
 # Protocol Documentation
 <a name="top"></a>
 
-## Table of Contents
-
-- [common.proto](#common-proto)
-    - [ApprovalRef](#agentsessions-v1-ApprovalRef)
-    - [ApprovalRequest](#agentsessions-v1-ApprovalRequest)
-    - [ApprovalResult](#agentsessions-v1-ApprovalResult)
-    - [DataPart](#agentsessions-v1-DataPart)
-    - [Error](#agentsessions-v1-Error)
-    - [Event](#agentsessions-v1-Event)
-    - [ExecutionStart](#agentsessions-v1-ExecutionStart)
-    - [FilePart](#agentsessions-v1-FilePart)
-    - [HarnessEnd](#agentsessions-v1-HarnessEnd)
-    - [IdentityRef](#agentsessions-v1-IdentityRef)
-    - [Lifecycle](#agentsessions-v1-Lifecycle)
-    - [LogRecord](#agentsessions-v1-LogRecord)
-    - [Message](#agentsessions-v1-Message)
-    - [ModelCall](#agentsessions-v1-ModelCall)
-    - [ModelCall.ParamsEntry](#agentsessions-v1-ModelCall-ParamsEntry)
-    - [Origin](#agentsessions-v1-Origin)
-    - [Origin.AttributesEntry](#agentsessions-v1-Origin-AttributesEntry)
-    - [Part](#agentsessions-v1-Part)
-    - [ReasoningPart](#agentsessions-v1-ReasoningPart)
-    - [ResourceMetadata](#agentsessions-v1-ResourceMetadata)
-    - [TextPart](#agentsessions-v1-TextPart)
-    - [ToolCall](#agentsessions-v1-ToolCall)
-    - [ToolChoice](#agentsessions-v1-ToolChoice)
-    - [ToolDefinition](#agentsessions-v1-ToolDefinition)
-    - [ToolResult](#agentsessions-v1-ToolResult)
-    - [Usage](#agentsessions-v1-Usage)
-  
-    - [EventKind](#agentsessions-v1-EventKind)
-    - [Lifecycle.Kind](#agentsessions-v1-Lifecycle-Kind)
-    - [Mediation](#agentsessions-v1-Mediation)
-    - [ToolChoice.Mode](#agentsessions-v1-ToolChoice-Mode)
-    - [ToolResult.Code](#agentsessions-v1-ToolResult-Code)
-  
-- [harness.proto](#harness-proto)
-    - [Cancel](#agentsessions-v1-Cancel)
-    - [Capabilities](#agentsessions-v1-Capabilities)
-    - [ControllerFrame](#agentsessions-v1-ControllerFrame)
-    - [DescribeRequest](#agentsessions-v1-DescribeRequest)
-    - [HarnessDescriptor](#agentsessions-v1-HarnessDescriptor)
-    - [IdentityContext](#agentsessions-v1-IdentityContext)
-    - [ModelResult](#agentsessions-v1-ModelResult)
-    - [Start](#agentsessions-v1-Start)
-    - [ToolSpec](#agentsessions-v1-ToolSpec)
-  
-    - [Resumability](#agentsessions-v1-Resumability)
-  
-    - [Harness](#agentsessions-v1-Harness)
-  
-- [harness_registry.proto](#harness_registry-proto)
-    - [GetHarnessRequest](#agentsessions-v1-GetHarnessRequest)
-    - [HarnessRegistration](#agentsessions-v1-HarnessRegistration)
-    - [HarnessSpec](#agentsessions-v1-HarnessSpec)
-    - [ListHarnessesRequest](#agentsessions-v1-ListHarnessesRequest)
-    - [ListHarnessesResponse](#agentsessions-v1-ListHarnessesResponse)
-    - [RegisterHarnessRequest](#agentsessions-v1-RegisterHarnessRequest)
-    - [RegisterHarnessResponse](#agentsessions-v1-RegisterHarnessResponse)
-    - [RemotePlacement](#agentsessions-v1-RemotePlacement)
-    - [RetireHarnessRequest](#agentsessions-v1-RetireHarnessRequest)
-    - [SubstratePlacement](#agentsessions-v1-SubstratePlacement)
-  
-    - [HarnessSource](#agentsessions-v1-HarnessSource)
-    - [HarnessState](#agentsessions-v1-HarnessState)
-    - [RegisterOutcome](#agentsessions-v1-RegisterOutcome)
-  
-    - [HarnessRegistry](#agentsessions-v1-HarnessRegistry)
-  
-- [session.proto](#session-proto)
-    - [ApproveRequest](#agentsessions-v1-ApproveRequest)
-    - [ApproveResponse](#agentsessions-v1-ApproveResponse)
-    - [CancelRequest](#agentsessions-v1-CancelRequest)
-    - [ComputeRef](#agentsessions-v1-ComputeRef)
-    - [ComputeRef.AttributesEntry](#agentsessions-v1-ComputeRef-AttributesEntry)
-    - [CreateSessionRequest](#agentsessions-v1-CreateSessionRequest)
-    - [DeleteSessionRequest](#agentsessions-v1-DeleteSessionRequest)
-    - [Delta](#agentsessions-v1-Delta)
-    - [ExecRequest](#agentsessions-v1-ExecRequest)
-    - [ExecUpdate](#agentsessions-v1-ExecUpdate)
-    - [ForkRequest](#agentsessions-v1-ForkRequest)
-    - [ForkRequest.LabelsEntry](#agentsessions-v1-ForkRequest-LabelsEntry)
-    - [ForkResponse](#agentsessions-v1-ForkResponse)
-    - [GetSessionRequest](#agentsessions-v1-GetSessionRequest)
-    - [ListSessionsRequest](#agentsessions-v1-ListSessionsRequest)
-    - [ListSessionsResponse](#agentsessions-v1-ListSessionsResponse)
-    - [ReplayRequest](#agentsessions-v1-ReplayRequest)
-    - [ResumeRequest](#agentsessions-v1-ResumeRequest)
-    - [RuntimeCapabilities](#agentsessions-v1-RuntimeCapabilities)
-    - [Session](#agentsessions-v1-Session)
-    - [Session.AnnotationsEntry](#agentsessions-v1-Session-AnnotationsEntry)
-    - [Session.LabelsEntry](#agentsessions-v1-Session-LabelsEntry)
-    - [SnapshotRef](#agentsessions-v1-SnapshotRef)
-    - [SuspendRequest](#agentsessions-v1-SuspendRequest)
-  
-    - [ComputeState](#agentsessions-v1-ComputeState)
-    - [DeletionState](#agentsessions-v1-DeletionState)
-    - [ExecState](#agentsessions-v1-ExecState)
-  
-    - [Sessions](#agentsessions-v1-Sessions)
-  
-- [Scalar Value Types](#scalar-value-types)
-
-
-
 <a name="common-proto"></a>
 <p align="right"><a href="#top">Top</a></p>
 
@@ -1392,7 +1287,7 @@ reasoning) part. No seq; never hash-chained (§8, A2A TaskArtifactUpdateEvent).
 | resume_from_seq | [int64](#int64) |  | Cursor handed to the harness as Start.resume_from_seq. The host does not interpret it; only a harness knows what resuming from a sequence means for its own state. To re-read committed records after a disconnect, use Replay, which is the read path for exactly that. Non-zero cursors are journaled in EXECUTION_START and restored during controller replay/interrupted resume. |
 | harness | [string](#string) |  | Empty = the session&#39;s harness. A different harness runs this turn only, unless either one is a registered harness (see HarnessRegistry): then the session is pinned and the call is FAILED_PRECONDITION. A stored REQUIRES_MEMORY_SNAPSHOT harness also refuses a STATELESS_REPLAY override before any fence or journal write: parking only the override cannot checkpoint the stored harness&#39;s live memory. |
 | config | [bytes](#bytes) |  | Opaque per-execution config, passed through to Start.config. Non-empty bytes are journaled verbatim in EXECUTION_START before the harness runs, and restored for controller replay/resume. Do not put credentials here: config is durable journal content exposed by Replay. |
-| expected_last_seq | [int64](#int64) | optional | Single-writer CAS: the host commits this execution&#39;s first event only if the log head equals expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log. It is optional because the guarantee should be opt-in rather than the price of a simple call. Unset means &#34;append at whatever the head is now&#34;, which is what a caller with a single writer wants. Set means the strict check, and 0 is a real value there: it asserts the session has no events yet. That distinction is why this carries explicit presence instead of treating 0 as &#34;unset&#34; -- a caller could not otherwise say &#34;this must be the first turn&#34;. |
+| expected_last_seq | [int64](#int64) | optional | Single-writer CAS: the host commits this execution&#39;s first event only if the log head equals expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log. A deleted session returns FAILED_PRECONDITION regardless of this cursor&#39;s value. It is optional because the guarantee should be opt-in rather than the price of a simple call. Unset means &#34;append at whatever the head is now&#34;, which is what a caller with a single writer wants. Set means the strict check, and 0 is a real value there: it asserts the session has no events yet. That distinction is why this carries explicit presence instead of treating 0 as &#34;unset&#34; -- a caller could not otherwise say &#34;this must be the first turn&#34;. |
 | deadline_unix | [int64](#int64) |  | optional execution deadline (unix seconds); host cancels past it |
 
 
@@ -1547,7 +1442,7 @@ stable when a session is created mid-pagination; an offset would skip or repeat 
 | ----- | ---- | ----- | ----------- |
 | session | [string](#string) |  |  |
 | boot | [bool](#bool) |  | **Deprecated.** Ignored. The service never reads it; the Runtime backend decides how a resumed session comes back. On substrate that is the actor&#39;s own snapshot, else the template&#39;s golden snapshot, else a cold boot, and substrate has no per-resume boot flag to forward it to. The field stays so existing clients keep encoding; do not reuse its number. |
-| expected_last_seq | [int64](#int64) | optional | Optional recovery precondition: ABORTED with expected/head values on a mismatch. Checked under the session guard before inspection, after an early fence before restore or approval repair, and after a restored turn&#39;s regular writer fence before Run. A late mismatch may already have restored compute, but does not run the harness or append records. These checks catch other hosts&#39; writes committed before each acquired fence. Taking a fence supersedes older writers even on refusal: their remaining writes fail with ErrFenced, leaving any unanswered tool intent eligible for retry on a later Resume. Fencing cannot cancel effects already in flight, and a later writer can still supersede this operation: this is not an execution lease or exactly-once tool guarantee. Explicit zero requires an empty journal; absent skips this precondition. |
+| expected_last_seq | [int64](#int64) | optional | Optional recovery precondition: ABORTED with expected/head values on a mismatch. A deleted session returns FAILED_PRECONDITION regardless of this cursor&#39;s value. Checked under the session guard before inspection, after an early fence before restore or approval repair, and after a restored turn&#39;s regular writer fence before Run. A late mismatch may already have restored compute, but does not run the harness or append records. These checks catch other hosts&#39; writes committed before each acquired fence. Taking a fence supersedes older writers even on refusal: their remaining writes fail with ErrFenced, leaving any unanswered tool intent eligible for retry on a later Resume. Fencing cannot cancel effects already in flight, and a later writer can still supersede this operation: this is not an execution lease or exactly-once tool guarantee. Explicit zero requires an empty journal; absent skips this precondition. |
 
 
 
@@ -1758,6 +1653,9 @@ flattened lifecycle enum, because collapsing them loses which axis actually move
 
 ## Scalar Value Types
 
+<details>
+<summary>How each scalar type maps to C++, Java, Python, Go, C#, PHP and Ruby</summary>
+
 | .proto Type | Notes | C++ | Java | Python | Go | C# | PHP | Ruby |
 | ----------- | ----- | --- | ---- | ------ | -- | -- | --- | ---- |
 | <a name="double" /> double |  | double | double | float | float64 | double | float | Float |
@@ -1775,4 +1673,6 @@ flattened lifecycle enum, because collapsing them loses which axis actually move
 | <a name="bool" /> bool |  | bool | boolean | boolean | bool | bool | boolean | TrueClass/FalseClass |
 | <a name="string" /> string | A string must always contain UTF-8 encoded or 7-bit ASCII text. | string | String | str/unicode | string | string | string | String (UTF-8) |
 | <a name="bytes" /> bytes | May contain any arbitrary sequence of bytes. | string | ByteString | str | []byte | ByteString | string | String (ASCII-8BIT) |
+
+</details>
 

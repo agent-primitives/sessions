@@ -896,6 +896,7 @@ type ExecRequest struct {
 	Config []byte `protobuf:"bytes,5,opt,name=config,proto3" json:"config,omitempty"`
 	// Single-writer CAS: the host commits this execution's first event only if the log head equals
 	// expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log.
+	// A deleted session returns FAILED_PRECONDITION regardless of this cursor's value.
 	//
 	// It is optional because the guarantee should be opt-in rather than the price of a simple call.
 	// Unset means "append at whatever the head is now", which is what a caller with a single writer
@@ -1256,6 +1257,7 @@ type ResumeRequest struct {
 	// Deprecated: Marked as deprecated in session.proto.
 	Boot bool `protobuf:"varint,2,opt,name=boot,proto3" json:"boot,omitempty"`
 	// Optional recovery precondition: ABORTED with expected/head values on a mismatch.
+	// A deleted session returns FAILED_PRECONDITION regardless of this cursor's value.
 	// Checked under the session guard before inspection, after an early fence before restore
 	// or approval repair, and after a restored turn's regular writer fence before Run. A late
 	// mismatch may already have restored compute, but does not run the harness or append records.

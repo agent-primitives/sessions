@@ -147,7 +147,7 @@ func TestDeleteSessionAtomicIntent(t *testing.T) {
 					}
 				}
 				before := captureDeletion(t, s, "s")
-				if before.Info.DeletionState != api.DeletionActive || !before.Info.DeletionRequestedAt.IsZero() || !before.Info.DeletionCompletedAt.IsZero() || before.Info.DeletionSeq != 0 {
+				if before.Info.DeletionState != api.DeletionActive || !before.Info.DeletionRequestedAt.IsZero() || before.Info.DeletionSeq != 0 {
 					t.Fatalf("fresh deletion metadata = %+v", before.Info)
 				}
 				start := time.Now()
@@ -160,7 +160,7 @@ func TestDeleteSessionAtomicIntent(t *testing.T) {
 				if !reflect.DeepEqual(got, after.Info) {
 					t.Fatalf("returned uncommitted/wrong info: %+v != %+v", got, after.Info)
 				}
-				if got.DeletionState != api.DeletionPending || got.DeletionSeq != before.Info.LastSeq+1 || got.LastSeq != got.DeletionSeq || !got.DeletionCompletedAt.IsZero() {
+				if got.DeletionState != api.DeletionPending || got.DeletionSeq != before.Info.LastSeq+1 || got.LastSeq != got.DeletionSeq {
 					t.Fatalf("intent = %+v", got)
 				}
 				if got.DeletionRequestedAt.Before(start) || got.DeletionRequestedAt.After(end) || !got.UpdatedAt.Equal(got.DeletionRequestedAt) {
@@ -244,22 +244,14 @@ func TestDeletedWriteBarriersPrecedeCASAndFence(t *testing.T) {
 	if _, err := s.DeleteSession(context.Background(), "s"); err != nil {
 		t.Fatal(err)
 	}
-	for _, state := range []api.DeletionState{api.DeletionPending, api.DeletionComplete} {
+	// An unrecognized state (e.g. one a later build may define) is seeded only to prove that every
+	// non-ACTIVE state is a durable barrier, not to define it.
+	for _, state := range []api.DeletionState{api.DeletionPending, "UNRECOGNIZED"} {
 		t.Run(string(state), func(t *testing.T) {
-			// COMPLETE is future wire vocabulary; seed it only to prove the durable terminal barrier.
 			if _, err := s.db.Exec(`UPDATE sessions SET deletion_state = ? WHERE session = 's'`, string(state)); err != nil {
 				t.Fatal(err)
 			}
-			completed := time.Unix(1700000000, 123)
-			if state == api.DeletionComplete {
-				if _, err := s.db.Exec(`UPDATE sessions SET deletion_completed_at = ?, updated_at = ? WHERE session = 's'`, completed.UnixNano(), completed.UnixNano()); err != nil {
-					t.Fatal(err)
-				}
-			}
 			before := captureDeletion(t, s, "s")
-			if state == api.DeletionComplete && !before.Info.DeletionCompletedAt.Equal(completed) {
-				t.Fatalf("completed time lost: %+v", before.Info)
-			}
 			for _, fence := range []int64{0, before.Fence, 1 << 60} {
 				for _, head := range []int64{0, before.Info.LastSeq, 1 << 60} {
 					_, err := s.Session("s").Append(head, fence, api.Event{Kind: api.EventOutput, Message: api.TextMessage("assistant", "forbidden")})
@@ -305,8 +297,12 @@ func TestDeletedWriteBarriersPrecedeCASAndFence(t *testing.T) {
 				t.Fatalf("retired-harness deleted Put = %v", err)
 			}
 			retry, err := s.DeleteSession(context.Background(), "s")
-			if err != nil || !reflect.DeepEqual(retry, before.Info) {
-				t.Fatalf("terminal retry = %+v, %v", retry, err)
+			if state == api.DeletionPending {
+				if err != nil || !reflect.DeepEqual(retry, before.Info) {
+					t.Fatalf("PENDING retry = %+v, %v", retry, err)
+				}
+			} else if !errors.Is(err, eventlog.ErrDeleted) || !reflect.DeepEqual(retry, SessionInfo{}) {
+				t.Fatalf("unrecognized-state retry = %+v, %v, want ErrDeleted", retry, err)
 			}
 			assertDeletionUnchanged(t, s, "s", before)
 		})

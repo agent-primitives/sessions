@@ -13,7 +13,8 @@ import (
 
 // DeleteSession commits permanent deletion intent, not runtime cleanup. The retained journal
 // anchors audit evidence; its predecessor remains the pre-delete head, independent of compute.
-// Retries of either terminal deletion state return the original snapshot without any writes.
+// A retry against PENDING returns the original snapshot without any writes; an unrecognized
+// state fails closed with eventlog.ErrDeleted.
 func (s *Store) DeleteSession(ctx context.Context, uid string) (SessionInfo, error) {
 	if uid == "" {
 		return SessionInfo{}, errors.New("sqlitelog: delete session requires a uid")
@@ -36,7 +37,7 @@ func (s *Store) DeleteSession(ctx context.Context, uid string) (SessionInfo, err
 		return fail("read", err)
 	}
 	switch info.DeletionState {
-	case api.DeletionPending, api.DeletionComplete:
+	case api.DeletionPending:
 		return info, nil
 	case api.DeletionActive:
 	default:

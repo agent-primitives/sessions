@@ -370,14 +370,19 @@ returns the generated stub for anything the SDK does not model.
 
 ## 10. Permanently tombstone a session (no cleanup)
 
-Use a source build containing DeleteSession; the v0.1.2 archive above predates it. This is
-irreversible for the UID. Do it only after completing any desired execution/fork/resume examples.
+Use a source build containing DeleteSession; the v0.1.2 archive above predates it. Use a fresh
+journal here, leaving `/tmp/qs.db` from the earlier examples untouched. Any open with the new binary,
+including `get`, migrates an older journal; the older binary cannot reopen it afterward.
+Deletion is irreversible for the UID.
 
 ```bash
-agentctl delete --journal /tmp/qs.db --session "$SID"
-agentctl get    --journal /tmp/qs.db --session "$SID"
-agentctl replay --journal /tmp/qs.db --session "$SID"
-agentctl list   --journal /tmp/qs.db --project default
+DELETE_JOURNAL=$(mktemp /tmp/qs-delete.XXXXXX.db)
+DELETE_SID=$(agentctl create --journal "$DELETE_JOURNAL")
+agentctl exec   --journal "$DELETE_JOURNAL" --session "$DELETE_SID" --input "audit before deletion"
+agentctl delete --journal "$DELETE_JOURNAL" --session "$DELETE_SID"
+agentctl get    --journal "$DELETE_JOURNAL" --session "$DELETE_SID"
+agentctl replay --journal "$DELETE_JOURNAL" --session "$DELETE_SID"
+agentctl list   --journal "$DELETE_JOURNAL" --project default
 ```
 
 Delete/Get report `deletion=PENDING` and the committed RFC3339 request time. PENDING means durable

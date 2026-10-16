@@ -423,7 +423,9 @@ These are named in the reference controller. The numbering is the code's.
   re-issued `input_hash` matches, recovery MUST invoke the provider once and append the `OUTPUT`
   after the existing `MODEL_CALL`. A hash mismatch is divergence: the provider is not called and
   no `OUTPUT` is appended (the failed run's `EVENT_ERROR`, `EXE-23`, still applies). A
-  non-trailing `MODEL_CALL` without `OUTPUT` MUST fail without calling the provider.
+  non-trailing `MODEL_CALL` without `OUTPUT` MUST NOT reach the provider: the re-issued call
+  returns an error to the harness, which is not divergence. The execution fails only if the
+  harness does not handle that error.
 - `EXE-23`: Recovery that fails after the harness has started running appends a best-effort
   `EVENT_ERROR`; recovery that succeeds appends `EVENT_END`. Failures raised before the harness
   runs (invalid log, incomplete invocation `EXE-24`, harness identity `EXE-25`, inherited intent
@@ -624,15 +626,18 @@ These are named in the reference controller. The numbering is the code's.
   session as it was before the turn. Committed records and deltas follow. A caller MUST read the
   stream to completion. Whether an error arrives before or after that frame depends on the path:
   - Ordinary execution: the host resolves the session and routes the harness before the frame.
-    Auto-create failure, the approval block (`OPS-14`), and every session lookup or routing error
-    end the stream with no frame. Routing errors include an unknown session or harness
-    (`OPS-10`), the pin (`OPS-6`), and the memory-tier override check (`OPS-7`), which runs
-    `Describe` on both harnesses and can fail `UNAVAILABLE`, `FAILED_PRECONDITION`, or with a
-    context error. Placement admission (`RT-1`: `Describe`, descriptor id, `CanPlace`),
-    `expected_last_seq` (`OPS-13`), and the run itself fail after the frame.
-  - Input-less approval recovery (`OPS-14`): only the session lookup and the approval inspection
-    precede the frame. Routing by the recorded harness (`OPS-8`), the pin, the memory-tier override
-    check, the deadline, `expected_last_seq`, and recovery itself fail after the frame.
+    Auto-create failure, an approval-inspection failure, the approval block (`OPS-14`), every
+    session lookup or routing error, a journal head read failure, and a failure to materialize
+    the session for the frame end the stream with no frame. Routing errors include an unknown
+    session or harness (`OPS-10`), the pin (`OPS-6`), and the memory-tier override check
+    (`OPS-7`), which runs `Describe` on both harnesses and can fail `UNAVAILABLE`,
+    `FAILED_PRECONDITION`, or with a context error. Placement admission (`RT-1`: `Describe`,
+    descriptor id, `CanPlace`), `expected_last_seq` (`OPS-13`), and the run itself fail after the
+    frame.
+  - Input-less approval recovery (`OPS-14`): only the session lookup, the approval inspection,
+    the journal head read, and materializing the session for the frame precede it. Routing by the
+    recorded harness (`OPS-8`), the pin, the memory-tier override check, the deadline,
+    `expected_last_seq`, and recovery itself fail after the frame.
 - `OPS-12`: On an approval park or input-less recovery, the host MUST send a final
   `ExecUpdate.session` frame with the latest cursor and `pending_approval` before closing the
   stream with OK. A park is not a terminal `END` or `ERROR`.

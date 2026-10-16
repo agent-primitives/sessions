@@ -1,7 +1,7 @@
 name: site
 
-# The site renders docs/ and spec.md through Astro + Starlight. Pushes to main publish; pull requests only
-# build, so a broken site is caught before it can be deployed.
+# The site renders docs/ and spec.md through Astro + Starlight. Pushes to main publish;
+# pull requests only build, so a broken site is caught before it can be deployed.
 on:
   push:
     branches: [main]

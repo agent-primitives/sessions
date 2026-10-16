@@ -143,11 +143,15 @@ function yamlQuote(value) {
   return `"${value.replace(/"/g, '\\"')}"`;
 }
 
-function frontmatterFor(info) {
+// Starlight builds the "Edit page" link from editLink.baseUrl and the generated file's path, which
+// is gitignored and does not exist on GitHub. Pointing each page at its repository source sends an
+// editor to the file that is actually the source of truth.
+function frontmatterFor(info, source) {
   return [
     "---",
     `title: ${yamlQuote(info.title)}`,
     `description: ${yamlQuote(info.description)}`,
+    `editUrl: ${yamlQuote(`${repo}/edit/main/${source}`)}`,
     "---",
     "",
   ].join("\n");
@@ -185,14 +189,14 @@ for (const file of files) {
   const source = await readFile(join(docsDir, file), "utf8");
   assertNoInternalMarkers(`docs/${file}`, source);
   const body = rewriteLinks(stripTitle(stripBanner(source)));
-  await writeFile(join(outDir, file), frontmatterFor(info) + body);
+  await writeFile(join(outDir, file), frontmatterFor(info, `docs/${file}`) + body);
 }
 
 for (const [file, info] of Object.entries(rootDocs)) {
   const source = renderOpenQuestions(await readFile(join(here, "..", "..", file), "utf8"));
   assertNoInternalMarkers(file, source);
   const body = rewriteRootLinks(stripTitle(source));
-  await writeFile(join(outDir, file), frontmatterFor(info) + body);
+  await writeFile(join(outDir, file), frontmatterFor(info, file) + body);
 }
 
 // The landing page is hand-written rather than synced from a doc, so it lives outside the generated

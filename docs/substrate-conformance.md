@@ -225,6 +225,13 @@ current substrate supports: through `atenet-router`, the cluster's actor ingress
 
 ```mermaid
 flowchart LR
+  accTitle: Conformance traffic on agent-substrate
+  accDescr {
+    The in-cluster conformance Job calls ate-api-server over Control gRPC with a service-account
+    token, and opens Harness.Connect over h2c to atenet-router, addressed by ate-target-actor.
+    The router resumes the actor through ate-api-server if needed, then forwards over mTLS h2 to
+    atunnel on the worker, which reaches the actor harness on port 80 over h2c on a veth pair.
+  }
   job["conformance Job<br/>in-cluster `go test`"]
   api["ate-api-server"]
   router["atenet-router<br/>(Envoy + ext_proc)"]

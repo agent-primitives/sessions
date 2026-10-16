@@ -36,6 +36,12 @@ collapsing them loses which one actually moved. The diagram below reads them tog
 
 ```mermaid
 stateDiagram-v2
+  accTitle: Session lifecycle states
+  accDescr {
+    A new session starts PENDING and becomes RUNNING on exec. From RUNNING it can be suspended
+    to SUSPENDED and resumed, forked through FORKING and back, ended as TERMINATED with its log
+    kept, or fail as FAILED.
+  }
   [*] --> PENDING
   PENDING --> RUNNING: exec
   RUNNING --> SUSPENDED: suspend (cold, snapshot in storage)
@@ -359,6 +365,13 @@ Putting it together, a single `exec` turn on a stateless-replay harness:
 
 ```mermaid
 sequenceDiagram
+  accTitle: One exec turn on a stateless-replay harness
+  accDescr {
+    The client calls Exec. The controller appends EXECUTION_START and INPUT to the event log and
+    starts the harness. The harness asks the controller for a completion; the controller invokes
+    the model, appends MODEL_CALL and OUTPUT, and returns the recorded completion. When the
+    harness returns, the controller appends END and streams the new records to the client.
+  }
   participant C as Client (Sessions)
   participant Ctrl as Controller
   participant Log as Event log

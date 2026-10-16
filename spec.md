@@ -135,7 +135,8 @@ flowchart LR
   MUST be replaced by the host's default harness.
 - `SES-4`: `CreateSession` appends no event. A new session reports `last_seq = 0`.
 - `SES-5`: `labels`, `annotations`, `origin`, and `identity` MUST be returned unchanged by
-  `CreateSession`, `GetSession`, and `ListSessions`.
+  `CreateSession`, `GetSession`, and `ListSessions`, with one exception: an `origin` or
+  `identity` that is set but has no populated field is stored as absent and returned unset.
 - `SES-6`: `identity` is recorded provenance. A host conforming to this draft MUST NOT treat it as
   an authorization decision (§17).
 - `Session.compute` (`ComputeRef`) is not populated by the reference host. The suspend snapshot
@@ -403,7 +404,10 @@ These are named in the reference controller. The numbering is the code's.
   Lifecycle events are skipped. Any other event without an `execution_id` after the legacy prefix
   (§8.7) is an invalid log.
 - `EXE-17`: Reconstruction replay re-runs only completed executions and appends nothing. Failed or
-  unfinished executions remain visible in later executions' history.
+  unfinished executions remain visible in later executions' history. The legacy execution (§8.7)
+  is the exception: a log that is only a legacy prefix is replayed whole even if unfinished, and a
+  legacy prefix followed by modern executions is replayed up to its last `END` (not at all if it
+  has none).
 - `EXE-18`: Before running any harness, reconstruction MUST check every selected execution's
   recorded harness identity (§8.6) and input completeness (§8.6).
 - `EXE-19`: Inputs, config, and `resume_from_seq` MUST come from the journal, not from the caller.
@@ -417,10 +421,14 @@ These are named in the reference controller. The numbering is the code's.
   the live path for new effects only.
 - `EXE-22`: Model cut rule: if the trailing effect is a `MODEL_CALL` with no `OUTPUT` and the
   re-issued `input_hash` matches, recovery MUST invoke the provider once and append the `OUTPUT`
-  after the existing `MODEL_CALL`. A hash mismatch is divergence and records nothing. A
+  after the existing `MODEL_CALL`. A hash mismatch is divergence: the provider is not called and
+  no `OUTPUT` is appended (the failed run's `EVENT_ERROR`, `EXE-23`, still applies). A
   non-trailing `MODEL_CALL` without `OUTPUT` MUST fail without calling the provider.
-- `EXE-23`: Recovery that fails appends a best-effort `EVENT_ERROR`; recovery that succeeds appends
-  `EVENT_END`.
+- `EXE-23`: Recovery that fails after the harness has started running appends a best-effort
+  `EVENT_ERROR`; recovery that succeeds appends `EVENT_END`. Failures raised before the harness
+  runs (invalid log, incomplete invocation `EXE-24`, harness identity `EXE-25`, inherited intent
+  `EXE-26`) append nothing. A run stopped after an approval intent is recorded (a park, or a
+  failure recording the approval request or receipt, §10) appends neither `ERROR` nor `END`.
 - `EXE-24`: Input completeness: a recorded `input_count` that is missing or negative, an
   `EVENT_INPUT` with no message, or a count different from the committed `EVENT_INPUT` records is
   an invalid log for a completed or selected execution. A trailing execution with fewer inputs than
@@ -473,8 +481,10 @@ These are named in the reference controller. The numbering is the code's.
 - `TOOL-5`: The host MUST append `TOOL_CALL`, then call the executor with the session uid as scope,
   then append `TOOL_RESULT` with `id` set to the call id. A host MUST NOT run a tool executor
   without a non-empty session uid.
-- `TOOL-6`: An executor that returns a transport error leaves the intent without a receipt; the
-  error is returned to the harness and no `TOOL_RESULT` is written.
+- `TOOL-6`: For an ordinary host-executed call, an executor that returns a transport error leaves
+  the intent without a receipt; the error is returned to the harness and no `TOOL_RESULT` is
+  written. An approved `REQUIRES_APPROVAL` call is different: an executor error becomes a durable
+  receipt with `code = EXECUTOR_ERROR` and `is_error` set (§10).
 - A reference host with no tool executor configured records `TOOL_CALL`, then fails the call ("no
   tool executor configured") and the execution ends with `EVENT_ERROR`. The intent stays without a
   receipt, as in `TOOL-6`.
@@ -490,7 +500,9 @@ These are named in the reference controller. The numbering is the code's.
   be called. A receipt whose `id` differs from the call is divergence.
 - `TOOL-10`: A trailing `TOOL_CALL` without a receipt MUST be re-driven on recovery with the
   recorded call (same `idempotency_key`) and the same session uid. A non-trailing `TOOL_CALL`
-  without a receipt MUST fail and MUST NOT be re-executed.
+  without a receipt MUST NOT be re-executed: the re-issued call returns an error to the harness,
+  which is not divergence. The execution fails only if the harness does not handle that error; a
+  harness that handled it originally can continue and complete.
 - `TOOL-11`: The executor MUST deduplicate on (session uid, `idempotency_key`) and MUST NOT repeat
   the external effect for a key it has already applied. The host re-drives on every recovery that
   finds the intent unresolved, so at-most-once holds only if the executor deduplicates.
@@ -605,14 +617,22 @@ These are named in the reference controller. The numbering is the code's.
 
 - `OPS-9`: An empty `ExecRequest.session` MUST create a session first (as `CreateSession` with only
   `harness` set) and run against it.
-- `OPS-10`: An unknown session is `NOT_FOUND`, except that a non-empty unknown harness override is
-  reported first as `INVALID_ARGUMENT`.
-- `OPS-11`: Once the session and its placer are resolved (before admission), the first stream
-  frame MUST be `ExecUpdate.session` with the session as it was before the turn. Committed records
-  and deltas follow. Errors detected before that point (unknown session or harness, pin, approval
-  block, auto-create failure) end the stream with no frame. Admission errors (`Describe`,
-  descriptor id, `CanPlace`: `FAILED_PRECONDITION`, `UNAVAILABLE`, `DEADLINE_EXCEEDED`) arrive
-  after the session frame. A caller MUST read the stream to completion.
+- `OPS-10`: An unknown session is `NOT_FOUND`, except that a non-empty harness override on an
+  unknown session is checked first: an unknown name is `INVALID_ARGUMENT` and a known but
+  unservable registered harness is `FAILED_PRECONDITION`.
+- `OPS-11`: The first frame of a stream that sends any frame MUST be `ExecUpdate.session` with the
+  session as it was before the turn. Committed records and deltas follow. A caller MUST read the
+  stream to completion. Whether an error arrives before or after that frame depends on the path:
+  - Ordinary execution: the host resolves the session and routes the harness before the frame.
+    Auto-create failure, the approval block (`OPS-14`), and every session lookup or routing error
+    end the stream with no frame. Routing errors include an unknown session or harness
+    (`OPS-10`), the pin (`OPS-6`), and the memory-tier override check (`OPS-7`), which runs
+    `Describe` on both harnesses and can fail `UNAVAILABLE`, `FAILED_PRECONDITION`, or with a
+    context error. Placement admission (`RT-1`: `Describe`, descriptor id, `CanPlace`),
+    `expected_last_seq` (`OPS-13`), and the run itself fail after the frame.
+  - Input-less approval recovery (`OPS-14`): only the session lookup and the approval inspection
+    precede the frame. Routing by the recorded harness (`OPS-8`), the pin, the memory-tier override
+    check, the deadline, `expected_last_seq`, and recovery itself fail after the frame.
 - `OPS-12`: On an approval park or input-less recovery, the host MUST send a final
   `ExecUpdate.session` frame with the latest cursor and `pending_approval` before closing the
   stream with OK. A park is not a terminal `END` or `ERROR`.
@@ -740,14 +760,19 @@ sequenceDiagram
   `model_call_id` equals that `id`. A `ModelResult` with zero usage leaves `usage` unset.
 - `WIRE-7`: A host-executed tool call is `EVENT_TOOL_CALL`; the host answers with
   `ControllerFrame.tool` whose `id` equals the call id.
-- `WIRE-8`: Every control frame MUST match the `Start` envelope's `session` and `execution_id`, and
-  the outstanding call id. A mismatch MUST fail the execution. Every event the harness sends MUST
-  carry the `Start` `execution_id`.
+- `WIRE-8`: Every control frame MUST carry the `Start` `execution_id`. A `ModelResult` MUST carry
+  the outstanding `model_call_id`. A tool reply (`tool`, `approval`, `park`) MUST also carry the
+  `Start` `session` and the outstanding call id. The reference harness server fails the call on a
+  mismatch; it does not check `session` on a model reply. Every event the harness sends MUST carry
+  the `Start` `execution_id`; the host fails the execution otherwise.
 - `WIRE-9`: An unknown `ToolChoice.mode` MUST be rejected in both directions; it is never treated
   as the provider default.
 - `WIRE-10`: The harness MUST issue one model or tool request at a time and wait for its reply.
-- `WIRE-11`: A protocol or correlation failure, or a park, MUST be sticky for the rest of the
-  execution.
+- `WIRE-11`: A park, and a protocol or correlation failure on a tool reply, MUST be sticky for the
+  rest of the execution. In the reference harness server a failed model reply (wrong
+  `execution_id` or `model_call_id`) fails that call only and is not sticky.
+- TODO(spike): Should a model reply also be checked against `Start.session`, and should its
+  correlation failures be sticky like tool replies?
 - `WIRE-12`: A normal run MUST end with exactly one `EVENT_END`. The reference harness server sends
   `state = "COMPLETED"`, or `state = "FAILED"` with `error.description`. The host treats any state
   other than `COMPLETED` as a failed execution. An approval park ends with `EVENT_PARKED` instead
@@ -798,7 +823,8 @@ is not a wire protocol in this draft.
   handle between calls.
 - `RT-4a`: A runtime MUST key each incarnation by its session uid. `Create` receives it as
   `SessionSpec.SessionUID`; `Fork` receives the child's as `ForkOpts.ChildSessionUID`, and a
-  later `Restore` of the child arrives as `{local: child uid}`.
+  later `Restore` of the child arrives as `{local: child uid}` until the child writes its own
+  `SUSPEND` (`RT-4c`).
 - `RT-4b`: `Snapshot` and `Stop` receive an `Incarnation` carrying only `ID` (the session uid).
   The runtime MUST resolve everything it needs from that uid.
 - `RT-4c`: `Restore` receives this session's own latest `SUSPEND` ref, or `{local: uid}` when the
@@ -806,13 +832,23 @@ is not a wire protocol in this draft.
   (`OPS-24`).
 - The returned `Incarnation.ID` is used by the reference host only for diagnostics; every in-repo
   backend sets it to the session uid.
-- `RT-5`: `Snapshot(EXTERNAL)` MUST make compute cold while returning a `SnapshotRef` that a later
+- `RT-4d`: The `Incarnation` returned by `Create` and `Restore` MUST carry an `Address` at which
+  the harness is reachable (the reference dialer takes `unix://<path>` or `host:port`). The host
+  dials that address and attaches the incarnation's `CallMetadata` to every call it makes to the
+  harness, replacing any value set for the same keys. `CallMetadata` is routing (for example,
+  naming a sandbox behind a shared ingress), not authentication. The reference host discards the
+  `Incarnation` returned by `Fork`; a child is reached through its own later `Create` or `Restore`.
+- `RT-5`: `Snapshot(EXTERNAL)` is the suspend step. It MUST return a `SnapshotRef` that a later
   `Restore` can use, and its `local` MUST equal the session uid. Resume ignores a `SUSPEND` ref
   whose `local` names another session (it treats it as inherited from a fork parent, `OPS-19`)
-  and restores `{local: uid}` instead, so a runtime that puts its own handle in `local` loses the
-  captured state. `memory = true` only if process memory was captured. The host stores the ref
-  on the `LIFECYCLE_SUSPEND` record (`snapshot_local`, `snapshot_external_uri`, `snapshot_memory`,
-  `snapshot_sealed`); there is no side table.
+  and falls back to an earlier `SUSPEND` of its own, or `{local: uid}`, so a runtime that puts its
+  own handle in `local` loses the captured state. `memory = true` only if process memory was
+  captured. The host stores the ref on the `LIFECYCLE_SUSPEND` record (`snapshot_local`,
+  `snapshot_external_uri`, `snapshot_memory`, `snapshot_sealed`); there is no side table.
+- Cold is the session's `compute_state`, which the host derives from the journal (`OPS-17`), not
+  a runtime `Status`. A backend with per-session compute (`runtime/substrate`) suspends it in
+  `Snapshot`; a backend with none (`runtime/local`) releases nothing, and its `Status` still
+  reports `LIVE`.
 - `RT-6`: `Fork` MUST tear down a partially created child on failure, and MUST return an error
   wrapping `api.ErrSnapshotSuperseded` when the parent no longer holds the referenced snapshot. The
   host maps that error to `ABORTED`.
@@ -839,8 +875,9 @@ The `HarnessRegistry` service ([`api/harness_registry.proto`](api/harness_regist
 operator API. The reference host serves it only on a separate listener bound to a literal loopback
 address, never on the Sessions listener.
 
-- `REG-1`: A name MUST be an RFC 1123 DNS label. A reserved or statically configured name is
-  `ALREADY_EXISTS`.
+- `REG-1`: A `RegisterHarness` name MUST be an RFC 1123 DNS label (`INVALID_ARGUMENT`). A
+  reserved or statically configured name is `ALREADY_EXISTS`. Statically configured names are
+  not validated this way.
 - `REG-2`: A spec MUST have exactly one placement, a resumability other than unspecified, no unknown
   fields or enum values, and canonical bytes (`CHAIN-1`) of at most 4096 bytes; else
   `INVALID_ARGUMENT`.
@@ -908,7 +945,7 @@ CI also runs `python3 hack/verify_chain.py --golden` and `hack/verify_chain.sh` 
 - TODO(spike): Package `conformance/` (or a subset) as a black-box suite with requirement ids, so
   independent implementations can claim a class from §4.
 - Requirements without a conformance test are pinned by unit tests in the implementing package;
-  some are untested and are listed as `TODO(spike)` items in this document.
+  some are untested and are listed in §19.
 
 ## 17. Security considerations
 
@@ -972,6 +1009,7 @@ Each item is also marked inline where it applies.
 - TODO(spike): Repeated `Suspend` and `Resume` without `Suspend` (§11.5).
 - TODO(spike): Fork journal atomicity and `at_seq > head` (§11.7).
 - TODO(spike): Stream close without `EVENT_END` and ignored harness event kinds (§12.2).
+- TODO(spike): Session check and stickiness for model reply correlation failures (§12.2).
 - TODO(spike): Black-box conformance packaging (§16.2).
 
 ## 20. References

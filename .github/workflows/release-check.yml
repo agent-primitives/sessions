@@ -10,6 +10,9 @@ on:
       - go.mod
       - go.sum
       - Dockerfile
+      # Every release archive packs these; goreleaser fails when one is missing.
+      - LICENSE
+      - README.md
       - .goreleaser.yaml
       - .ko.yaml
       - .github/workflows/release.yml

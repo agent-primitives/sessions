@@ -586,7 +586,8 @@ These are named in the reference controller. The numbering is the code's.
   overlapping call MUST fail with `ABORTED` without changing compute or the journal. The reference
   guard is non-blocking.
 - `OPS-2`: A per-session checkpoint mark MUST be held by `Suspend`, `Approve`, an approval park
-  handoff, and a `REQUIRES_MEMORY_SNAPSHOT` fork from checkpoint until its last child is cloned.
+  handoff, a cursor-checked `Resume` while it mints each fence and re-reads the head (`OPS-29`),
+  and a `REQUIRES_MEMORY_SNAPSHOT` fork from checkpoint until its last child is cloned.
   `Exec` and `Resume` during a checkpoint, and a second checkpoint holder, MUST fail with
   `ABORTED`.
 - `OPS-3`: A `REQUIRES_MEMORY_SNAPSHOT` fork MUST end any in-flight execution on the parent; that
@@ -676,8 +677,26 @@ These are named in the reference controller. The numbering is the code's.
 - `OPS-19`: `Resume` MUST, in order: admit the harness (§13.2), restore from this session's own
   latest `SUSPEND` snapshot reference (one inherited from a parent is skipped; with none, it uses
   `{local: uid}`), connect, mint a fence, run recovery (§8.6), and append `LIFECYCLE_RESUME` at the
-  current head.
+  current head. A cursor-checked `Resume` (`OPS-29`) also mints an early fence after admission and
+  before restore.
 - `OPS-20`: `ResumeRequest.boot` is deprecated and ignored.
+- `OPS-29`: `ResumeRequest.expected_last_seq` has explicit presence. When unset, `Resume` performs
+  no cursor check. When set (0 asserts an empty journal), the host MUST compare it with the journal
+  head and fail with `ABORTED` on a mismatch; the reference host's message names both values. The
+  comparison runs at each of these points that the call reaches:
+  - under the session guard, before approval inspection, harness resolution, and invocation
+    validation, so a moved head is reported ahead of `EXE-24`, `EXE-26`, and routing errors;
+  - after the fence minted for an approval repair (`APR-13`), before the missing
+    `APPROVAL_REQUEST` is appended; an undecided approval whose request is committed needs no
+    fence and gets only the first check;
+  - after an early fence minted after admission and before restore;
+  - after the turn's regular fence, minted once the harness is connected, before the harness runs.
+- A refusal at the first check mints no fence and performs no runtime IO. A refusal after a fence
+  leaves that fence minted, so older writers are superseded (`LOG-12`) even though `Resume` refused.
+  A refusal at the last check may already have restored compute, but the harness does not run and
+  nothing is appended.
+- `expected_last_seq` is not an execution lease and does not make tool execution exactly-once: it
+  cannot cancel effects already in flight, and a later writer can still supersede the `Resume`.
 - Approval cases are in §10.4.
 
 ### 11.7 Fork
@@ -989,6 +1008,9 @@ The reference implementation protects the integrity of the record, not access to
   release tag. The gate armed at the first tag (v0.1.0) and is active now. `FILE_SAME_GO_PACKAGE`
   is excepted until v0.2.0 is tagged, because the Go module path moved.
 - Generated Go stubs and `docs/api-reference.md` MUST match the protos; CI fails on drift.
+- A server built before `ResumeRequest.expected_last_seq` (`OPS-29`) ignores the field, and the
+  API has no capability query. A client cannot learn from the API that the check ran; it needs to
+  know which server version is deployed.
 - Journal compatibility:
   - `CHAIN-2` and the canonical options in `CHAIN-1` are compatibility surface. Changing them
     invalidates every existing chain and requires a migration and new golden vectors.

@@ -282,3 +282,74 @@ func TestWireControllerMediatedTool(t *testing.T) {
 		t.Fatalf("verify: %v", err)
 	}
 }
+
+// handlesModelErrorHarness handles a failed model call and completes the turn with its own output.
+type handlesModelErrorHarness struct{}
+
+func (handlesModelErrorHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "handles-model-error"}, nil
+}
+
+func (handlesModelErrorHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	if _, err := sink.Model(ctx, api.ModelRequest{Model: "m", Messages: start.Inputs}); err == nil {
+		return errors.New("model call succeeded; want the provider error")
+	}
+	return sink.Output(ctx, "handled")
+}
+
+// TestWireSinkErrorEndsInvocation pins EXE-33: an in-process harness can handle a sink error and
+// complete the turn, but over Harness.Connect the host has no error reply frame, so the same
+// harness's turn fails with the sink error and is journaled as EVENT_ERROR. An approval park is
+// the exception (APR-10); TestApprovalRawProtocol covers it.
+func TestWireSinkErrorEndsInvocation(t *testing.T) {
+	errProvider := errors.New("provider unavailable")
+	failing := func(context.Context, api.ModelRequest) (api.ModelResponse, error) {
+		return api.ModelResponse{}, errProvider
+	}
+	for _, test := range []struct {
+		name    string
+		harness func(t *testing.T) api.Harness
+		wantErr error
+		want    []api.EventKind
+	}{
+		{
+			name:    "in-process",
+			harness: func(*testing.T) api.Harness { return handlesModelErrorHarness{} },
+			want:    []api.EventKind{api.EventExecutionStart, api.EventInput, api.EventModelCall, api.EventOutput, api.EventEnd},
+		},
+		{
+			name:    "wire",
+			harness: func(t *testing.T) api.Harness { return wireHarnessFrom(t, handlesModelErrorHarness{}) },
+			wantErr: errProvider,
+			want:    []api.EventKind{api.EventExecutionStart, api.EventInput, api.EventModelCall, api.EventError},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s, _ := openFile(t)
+			defer s.Close()
+			log := s.Session("s")
+			c, err := controller.New(log, failing)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.Exec(t.Context(), test.harness(t), []api.Message{*api.TextMessage("user", "hi")}, 0)
+			if test.wantErr == nil && err != nil {
+				t.Fatalf("exec: %v", err)
+			}
+			if test.wantErr != nil && !errors.Is(err, test.wantErr) {
+				t.Fatalf("exec error = %v; want %v", err, test.wantErr)
+			}
+			recs, err := log.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []api.EventKind
+			for _, r := range recs {
+				got = append(got, r.Event.Kind)
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("journal kinds = %v; want %v", got, test.want)
+			}
+		})
+	}
+}

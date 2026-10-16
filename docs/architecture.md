@@ -80,9 +80,9 @@ companion determinism contract, exercised by `conformance/`):
   `MODEL_CALL` costs one provider call when the child resumes. This applies to journals with execution IDs; a v0.1.2 journal
   without them is not re-driven and `Resume` still fails with "recorded completion missing".
 - **I4 — memory-restore is not replay.** When a memory snapshot is restored the harness already holds its state
-  in RAM, so `Start.History` is empty and the journal is **not** replayed into it (replaying would
-  double-apply). The `REQUIRES_MEMORY_SNAPSHOT` harness carries this on its side by never reconstructing
-  state from `History`.
+  in RAM, so the journal is **not** replayed into it (replaying would double-apply). The host still
+  sends the full prior log as `Start.History`; the `REQUIRES_MEMORY_SNAPSHOT` harness carries this
+  rule on its side by never reconstructing state from `History`.
 - **I5 — byte-identical replay.** Replay reproduces the recorded events byte-for-byte (checked against the
   canonical hash), not merely equivalent output.
 

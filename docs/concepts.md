@@ -395,8 +395,9 @@ replay-conformance suite (`conformance/`) enforces a numbered contract. The load
 - **I3: at-most-once effect re-drive.** A crash between an effect's intent and its result is re-driven at
   most once. Host-executed tools carry an idempotency key so the re-drive dedups.
 - **I4: memory-restore is not replay.** After a memory restore the harness already holds its state in
-  RAM, so `Start.History` is empty and must not be replayed into it. A `REQUIRES_MEMORY_SNAPSHOT` harness
-  never reconstructs state from `History` (see [`harness-authoring.md`](harness-authoring.md)).
+  RAM. The host still sends the full prior log as `Start.History`, and it must not be replayed into
+  that state: a `REQUIRES_MEMORY_SNAPSHOT` harness never reconstructs state from `History` (see
+  [`harness-authoring.md`](harness-authoring.md)).
 - **I5: byte-identical replay.** Replay reproduces the recorded events byte-for-byte (checked against the
   canonical hash), not merely output that looks equivalent.
 

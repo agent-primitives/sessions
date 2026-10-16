@@ -900,7 +900,8 @@ The Message carries text, opaque reasoning, and tool_call parts, recorded verbat
 
 ### Start
 Start begins one execution. History is pushed here (pull-by-range is a later
-addition); it is empty when the sandbox was memory-restored.
+addition): every event before this execution&#39;s EXECUTION_START, also after a memory
+restore. A REQUIRES_MEMORY_SNAPSHOT harness does not rebuild in-memory state from it.
 
 
 | Field | Type | Label | Description |

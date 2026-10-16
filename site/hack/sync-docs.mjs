@@ -9,7 +9,8 @@
 //
 // Because the published copy is generated and gitignored, Starlight cannot see where a page came
 // from: its edit link would point at the copy (a 404 on GitHub) and git has no history for it. So
-// the frontmatter also carries the edit URL of the source under docs/ and its last commit date.
+// the frontmatter also carries the edit URL of the source (under docs/, or spec.md at the root) and
+// its last commit date.
 // A doc that is itself generated (api-reference.md, from the proto comments) has no single file to
 // edit, so it gets no edit link rather than one to a file whose banner says not to edit it.
 import { execFileSync } from "node:child_process";
@@ -79,6 +80,16 @@ const meta = {
   },
 };
 
+// Documents published from the repository root rather than docs/. The specification lives at the
+// root, where implementers look for it, so its links are relative to the root, not to docs/.
+const rootDocs = {
+  "spec.md": {
+    title: "Specification (draft)",
+    description:
+      "The normative rules of the AgentSessions protocol: session model, event log, provenance chain, harness wire protocol, runtime contract, and conformance classes.",
+  },
+};
+
 /** Rewrite links so they resolve on the site instead of on GitHub. */
 function rewriteLinks(markdown) {
   return (
@@ -97,6 +108,34 @@ function rewriteLinks(markdown) {
       // Anything above docs/ only exists in the repository, so point at GitHub.
       .replace(/\]\(\.\.\/([^)]+)\)/g, (_m, path) => `](${repo}/blob/main/${path})`)
   );
+}
+
+/** Rewrite a root document's links: docs/ pages become site routes, everything else GitHub. */
+function rewriteRootLinks(markdown) {
+  return (
+    markdown
+      // (docs/concepts.md#anchor) -> (/concepts/#anchor), with a bare filename label swapped for
+      // the page title, as rewriteLinks does for docs/.
+      .replace(
+        /\[([^\]]+)\]\(docs\/([a-z0-9-]+)\.md(#[^)]*)?\)/g,
+        (_m, text, name, anchor) => {
+          const isFilename = text.replace(/`/g, "") === `docs/${name}.md`;
+          const label = isFilename ? (meta[`${name}.md`]?.title ?? text) : text;
+          return `[${label}](/${name}/${anchor ?? ""})`;
+        },
+      )
+      // Any other relative path only exists in the repository, so point at GitHub.
+      .replace(/\]\((?!https?:|\/|#)([^)]+)\)/g, (_m, path) => `](${repo}/blob/main/${path})`)
+  );
+}
+
+/**
+ * The specification marks unresolved questions `TODO(spike): <question>` in the repository, where
+ * they are the review checklist. Published, they are open questions of a draft, so they render as
+ * such. Only this exact form is rewritten; any other marker still fails the check below.
+ */
+function renderOpenQuestions(markdown) {
+  return markdown.replace(/\bTODO\(spike\):\s*/g, "Open question: ");
 }
 
 /** Strip the leading H1; Starlight renders the title from frontmatter. */
@@ -137,14 +176,33 @@ if (!haveHistory) {
   );
 }
 
-/** The last commit that touched docs/<file>, as an ISO 8601 timestamp, or null. */
-function lastUpdated(file) {
+/** The last commit that touched `path` (repository-relative), as an ISO 8601 timestamp, or null. */
+function lastUpdated(path) {
   if (!haveHistory) return null;
-  return git("log", "-1", "--format=%cI", "--", `docs/${file}`) || null;
+  return git("log", "-1", "--format=%cI", "--", path) || null;
 }
 
 function yamlQuote(value) {
   return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * Frontmatter for a page synced from `path` (repository-relative, e.g. docs/concepts.md or
+ * spec.md), whose raw content is `source`: the edit URL and last-updated date of that file, not of
+ * the gitignored copy (see the header).
+ */
+function frontmatterFor(info, path, source) {
+  const updated = lastUpdated(path);
+  return [
+    "---",
+    `title: ${yamlQuote(info.title)}`,
+    `description: ${yamlQuote(info.description)}`,
+    `editUrl: ${isGenerated(source) ? "false" : yamlQuote(`${repo}/edit/main/${path}`)}`,
+    // Unquoted, so YAML reads it as a timestamp, which is what Starlight's schema expects.
+    ...(updated ? [`lastUpdated: ${updated}`] : []),
+    "---",
+    "",
+  ].join("\n");
 }
 
 // Markers that are fine in a working repository but must never reach a published page: they read
@@ -179,19 +237,14 @@ for (const file of files) {
   const source = await readFile(join(docsDir, file), "utf8");
   assertNoInternalMarkers(`docs/${file}`, source);
   const body = rewriteLinks(stripTitle(stripBanner(source)));
-  const updated = lastUpdated(file);
-  const frontmatter = [
-    "---",
-    `title: ${yamlQuote(info.title)}`,
-    `description: ${yamlQuote(info.description)}`,
-    `editUrl: ${isGenerated(source) ? "false" : yamlQuote(`${repo}/edit/main/docs/${file}`)}`,
-    // Unquoted, so YAML reads it as a timestamp, which is what Starlight's schema expects.
-    ...(updated ? [`lastUpdated: ${updated}`] : []),
-    "---",
-    "",
-  ].join("\n");
+  await writeFile(join(outDir, file), frontmatterFor(info, `docs/${file}`, source) + body);
+}
 
-  await writeFile(join(outDir, file), frontmatter + body);
+for (const [file, info] of Object.entries(rootDocs)) {
+  const source = renderOpenQuestions(await readFile(join(repoRoot, file), "utf8"));
+  assertNoInternalMarkers(file, source);
+  const body = rewriteRootLinks(stripTitle(source));
+  await writeFile(join(outDir, file), frontmatterFor(info, file, source) + body);
 }
 
 // The landing page is hand-written rather than synced from a doc, so it lives outside the generated
@@ -202,4 +255,6 @@ const landing = join(here, "..", "src", "landing", "index.mdx");
 assertNoInternalMarkers("site/src/landing/index.mdx", await readFile(landing, "utf8"));
 await copyFile(landing, join(outDir, "index.mdx"));
 
-console.log(`synced ${files.length} docs + the landing page into src/content/docs`);
+console.log(
+  `synced ${files.length} docs, ${Object.keys(rootDocs).length} root docs, and the landing page into src/content/docs`,
+);

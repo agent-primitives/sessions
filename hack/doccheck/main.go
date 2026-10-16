@@ -259,8 +259,9 @@ func extract(path string) ([]block, []string) {
 }
 
 func parseMarker(m string, b *block) error {
-	if m, ok := strings.CutPrefix(m, "skip"); ok {
-		if strings.TrimSpace(m) == "" {
+	// "skip" must be its own word: "skipfoo" is an unknown marker, not a skip with reason "foo".
+	if reason, ok := strings.CutPrefix(m, "skip"); ok && (reason == "" || reason[0] == ' ' || reason[0] == '\t') {
+		if strings.TrimSpace(reason) == "" {
 			return errors.New("doccheck: skip needs a reason")
 		}
 		b.mode = "skip"

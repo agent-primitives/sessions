@@ -25,6 +25,10 @@ func TestCheck(t *testing.T) {
 		{"type-arg", "<!-- doccheck: decls -->\n```go\nfunc f[T int]() {}\n\nvar _ = f[string]\n```\n", "string does not satisfy int"},
 		{"undefined", client + "```go\n_ = c.NoSuchMethod\n```\n", "c.NoSuchMethod undefined"},
 		{"no-marker", "```go\nx := 1\n```\n", "has no <!-- doccheck: ... --> marker"},
+		{"skip", "<!-- doccheck: skip an excerpt -->\n```go\nnot Go\n```\n", ""},
+		{"skip-tab", "<!-- doccheck: skip\tan excerpt -->\n```go\nnot Go\n```\n", ""},
+		{"skip-no-reason", "<!-- doccheck: skip -->\n```go\nnot Go\n```\n", "skip needs a reason"},
+		{"skip-no-delimiter", "<!-- doccheck: skipgarbage -->\n```go\nnot Go\n```\n", `unknown marker "skipgarbage"`},
 	}
 	dir := t.TempDir()
 	var files []string

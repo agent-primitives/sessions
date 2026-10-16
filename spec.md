@@ -338,7 +338,8 @@ no flattened lifecycle enum.
 - TODO(spike): The independent verifier is exercised on golden vectors and echo-harness journals.
   The tool-call vector pins one exactly representable float (`1.5`). Parity with the Go encoder is
   not verified for floats that are not exactly representable or that serialize in exponent form
-  (for example `0.1`, `1e21`, `-0`), or for timestamps with fractional seconds.
+  (for example `0.1`, `1e21`), for negative zero (`-0`, which RFC 8785 serializes as `0`), or for
+  timestamps with fractional seconds.
 
 ### 7.5 Related digests
 
@@ -750,9 +751,16 @@ invokes no harness and stays a no-op without one.
 - `OPS-18`: `Suspend` routes to the stored harness, except that an owned unreceipted approval routes
   to its recorded harness (`OPS-8`).
 - The reference host accepts `Suspend` on a session that is already cold or has never run, and
-  appends another `SUSPEND`. `Resume` without a prior `Suspend` is also accepted.
+  appends another `SUSPEND`. `Resume` without a prior `Suspend` is also accepted. The host does not
+  check either case itself; whether the call succeeds is up to the backend (`RT-4b`, `RT-4c`).
+  With `runtime/local` and `runtime/remote` both succeed. With `runtime/substrate`, a session that
+  has no actor yet (no successful `Exec` and not a fork child) fails both: `SuspendActor` and
+  `ResumeActor` return `NOT_FOUND`, the reference session service reports `INTERNAL`, and no
+  marker is appended (§13.4). `agentsessionsd` itself does not build substrate placements
+  (`REG-2a`).
 - TODO(spike): Should a repeated `Suspend`, or `Resume` without a prior `Suspend`, be refused or be
-  a no-op? Current behavior appends a marker each time and no test pins it.
+  a no-op? Current behavior appends a marker each time the backend call succeeds, and no test pins
+  it.
 
 ### 11.6 Resume
 
@@ -924,6 +932,9 @@ sequenceDiagram
   rebuild that state from the log.
 - The host does not read `SnapshotRef.memory` to choose a path. It records it on `SUSPEND`
   (`RT-5`) and decides by the harness tier.
+- Neither tier promises that `Suspend`, `Resume`, or a memory-tier fork succeeds before the session
+  has had an incarnation. The host makes the same `Snapshot` and `Restore` calls, and the backend
+  MAY refuse them (`RT-4b`, `RT-4c`).
 
 ### 13.2 Admission
 
@@ -965,13 +976,21 @@ The reference host takes it as `placement.Backend` in
   later `Restore` of the child arrives as `{local: child uid}` until the child writes its own
   `SUSPEND` (`RT-4c`).
 - `RT-4b`: `Snapshot` and `Stop` receive an `Incarnation` carrying only `ID` (the session uid).
-  The runtime MUST resolve everything it needs from that uid.
+  The runtime MUST resolve everything it needs from that uid. The host does not check that the uid
+  has an incarnation: `Suspend` (`OPS-17`) and the memory-tier fork source step (`OPS-25`) call
+  `Snapshot` for a session that may never have had a successful `Create`. A backend MAY fail
+  `Snapshot` for a uid it has no incarnation for; the host returns the error and appends no
+  `SUSPEND` (`RT-5`). `runtime/local` and `runtime/remote` accept it; `runtime/substrate` fails it
+  (§13.4).
 - `RT-4c`: `Restore` receives this session's own latest `SUSPEND` ref, or `{local: uid}` when the
   session has none (`OPS-19`). A `STATELESS_REPLAY` `Fork` receives `{local: parent uid}`
   (`OPS-24`). A `REQUIRES_MEMORY_SNAPSHOT` `Fork` receives the ref the parent's
   `Snapshot(EXTERNAL)` returned in the same call; the host refuses one without `external_uri`
   before calling `Fork` (`OPS-25`). `Fork` is not told the tier: `runtime/substrate` chooses clone
-  or replay from the descriptor it was built with.
+  or replay from the descriptor it was built with. `{local: uid}` can name a uid that has never
+  had an incarnation: `Resume` before any `Exec` (§11.5). A backend MAY fail that `Restore`; the
+  host returns the error before it dials and appends nothing. `runtime/local` and `runtime/remote`
+  accept it; `runtime/substrate` fails it (§13.4).
 - The returned `Incarnation.ID` is used by the reference host only for diagnostics; every in-repo
   backend sets it to the session uid.
 - `RT-4d`: The `Incarnation` returned by `Create` and `Restore` MUST carry an `Address` at which
@@ -1001,11 +1020,13 @@ The reference host takes it as `placement.Backend` in
   the dial and returns, and the host never calls `Stop` for it (`RT-7`), so anything provisioned
   would leak.
 - `RT-5`: `Snapshot(EXTERNAL)` is the suspend step. It MUST return a `SnapshotRef` that a later
-  `Restore` can use, and its `local` MUST equal the session uid. Resume ignores a `SUSPEND` ref
-  whose `local` names another session (it treats it as inherited from a fork parent, `OPS-19`)
-  and falls back to an earlier `SUSPEND` of its own, or `{local: uid}`, so a runtime that puts its
-  own handle in `local` loses the captured state. `memory = true` only if process memory was
-  captured; either tier may report it (§13.1). The reference host calls only `Snapshot(EXTERNAL)`,
+  `Restore` can use, and its `local` MUST equal the session uid. A failed `Snapshot` (including
+  the refusal `RT-4b` allows) returns no ref; `Suspend` then appends no `SUSPEND` and
+  `compute_state` does not change. Resume ignores a `SUSPEND` ref whose `local` names another
+  session (it treats it as inherited from a fork parent, `OPS-19`) and falls back to an earlier
+  `SUSPEND` of its own, or `{local: uid}`, so a runtime that puts its own handle in `local` loses
+  the captured state. `memory = true` only if process memory was captured; either tier may report
+  it (§13.1). The reference host calls only `Snapshot(EXTERNAL)`,
   and every in-repo backend refuses `LOCAL`. The host stores the ref on the `LIFECYCLE_SUSPEND`
   record (`snapshot_local`, `snapshot_external_uri`, `snapshot_memory`, `snapshot_sealed`); there
   is no side table.
@@ -1038,7 +1059,13 @@ The reference host takes it as `placement.Backend` in
   `Describe` returns the descriptor it was built with. `Create` attaches to a running actor,
   resumes a suspended one, and creates one only when none exists (`RT-4e`). `Snapshot` suspends the
   actor's per-session compute and returns `memory = true` and the snapshot URI substrate reports,
-  whatever the harness tier. `Fork` clones the parent's snapshot for a `REQUIRES_MEMORY_SNAPSHOT`
+  whatever the harness tier. `Snapshot` and `Restore` call `SuspendActor` and `ResumeActor`
+  without the existence check `Create` makes, so for a session with no actor (no successful
+  `Create` and not a fork child) both fail with the control API's `NOT_FOUND` (substrate module
+  pinned in `integrations/substrate/go.mod`, `cmd/ateapi/internal/controlapi/actor.go`). In that
+  module a `SuspendActor` on a suspended actor and a `ResumeActor` on a running one succeed
+  without doing anything, so a repeated `Suspend` and a `Resume` after an `Exec` without a
+  `Suspend` both succeed. `Fork` clones the parent's snapshot for a `REQUIRES_MEMORY_SNAPSHOT`
   descriptor and creates a fresh actor otherwise.
   The adapter that talks to agent-substrate is the separate Go module
   [`integrations/substrate`](integrations/substrate/), an example of the runtime contract. The core
@@ -1189,8 +1216,8 @@ Each item is also marked inline where it applies.
 
 - TODO(spike): Should a store reject a `fence` greater than the last minted value (§6.4)?
 - TODO(spike): External head anchor for tail truncation (§7.3).
-- TODO(spike): Python verifier parity for inexact or exponent-form float `Struct` numbers and
-  fractional timestamps (§7.4).
+- TODO(spike): Python verifier parity for inexact or exponent-form float `Struct` numbers,
+  negative zero, and fractional timestamps (§7.4).
 - TODO(spike): Language-neutral `input_hash` (§8.3).
 - TODO(spike): Authoritative invariant numbering, `I4` and `I5` (§8.6).
 - TODO(spike): Compare re-reported `IN_HARNESS_REPORTED` results on reconstruction (§9.3).

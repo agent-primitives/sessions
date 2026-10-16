@@ -68,6 +68,17 @@ TOOL_CALL_GOLDEN = (
     "e8911826d1370b0b96f3d3a1efaf63bc20f3808cdc189d937b5155ac3f8d509c",
 )
 
+# FORK markers (canon TestForkMarkerGoldenVectors): one recording no compute instance, as every
+# marker written before Lifecycle.compute_instance existed does (its bytes are unchanged), and one
+# recording the clone a stateful fork made.
+FORK_GOLDENS = [
+    ({"kind": "EVENT_LIFECYCLE", "lifecycle": {"kind": "LIFECYCLE_FORK", "detail": "parent@2"}},
+     "a545aeac12036c2b871c394990207d101b93074c6b687830016925bbb3617ea4"),
+    ({"kind": "EVENT_LIFECYCLE", "lifecycle": {"kind": "LIFECYCLE_FORK", "detail": "parent@2",
+                                               "compute_instance": "uid-1"}},
+     "a10f9c7c0bc86360e712fdd926fffa45d56168af238c451d2b494ce0feb8dc8c"),
+]
+
 EVENT_TYPE = "agentsessions.v1.Event"
 
 
@@ -79,7 +90,7 @@ def _stdlib_jcs(value):
 
 
 def golden_check():
-    vectors = [(GOLDEN_EVENT, GOLDEN_EXPECTED), *START_GOLDENS, TOOL_CALL_GOLDEN]
+    vectors = [(GOLDEN_EVENT, GOLDEN_EXPECTED), *START_GOLDENS, TOOL_CALL_GOLDEN, *FORK_GOLDENS]
     for event, expected in vectors:
         record = {"event": event, "prev_hash": "", "seq": "1"}
         digest = hashlib.sha256(_stdlib_jcs(record)).hexdigest()

@@ -12,19 +12,21 @@ import (
 )
 
 // FuzzEventFromProto decodes arbitrary Events the way the host reads a journal record or a peer's
-// event. Conversion must not panic or allocate out of proportion to the input, and it must be
-// stable: converting the decoded event back to the wire and decoding it again yields the same event,
-// so a record survives being re-sent (Replay, a fork copy) unchanged.
+// event. Decoding and conversion must not panic or allocate out of proportion to the input, and
+// conversion must be stable: converting the decoded event back to the wire and decoding it again
+// yields the same event, so a record survives being re-sent (Replay, a fork copy) unchanged.
 func FuzzEventFromProto(f *testing.F) {
 	for _, blob := range fuzzcheck.JournalEvents(f) {
 		f.Add(blob)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		pb := &v1.Event{}
-		if err := proto.Unmarshal(data, pb); err != nil {
-			return
-		}
+		// The bound covers decoding the protobuf too: that is where a claimed length or count would
+		// size an allocation.
 		fuzzcheck.Allocs(t, len(data), func() {
+			pb := &v1.Event{}
+			if err := proto.Unmarshal(data, pb); err != nil {
+				return
+			}
 			first := wire.EventFromProto(pb)
 			again := wire.EventFromProto(wire.EventToProto(first))
 			if !reflect.DeepEqual(first, again) {

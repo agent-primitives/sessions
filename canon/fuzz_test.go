@@ -28,12 +28,18 @@ func FuzzEventCanonical(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, data []byte, seq int64) {
 		pb := &v1.Event{}
-		if err := proto.Unmarshal(data, pb); err != nil {
-			return // not an Event; decoding protobuf is the protobuf library's contract
-		}
 		var first []byte
-		var err error
-		fuzzcheck.Allocs(t, len(data), func() { first, err = canon.Event(wire.EventFromProto(pb)) })
+		var decodeErr, err error
+		// The bound covers the protobuf decode as well as conversion and canonicalization.
+		fuzzcheck.Allocs(t, len(data), func() {
+			if decodeErr = proto.Unmarshal(data, pb); decodeErr != nil {
+				return
+			}
+			first, err = canon.Event(wire.EventFromProto(pb))
+		})
+		if decodeErr != nil {
+			return // not an Event; the host refuses a record it cannot decode
+		}
 		if err != nil {
 			return // not canonicalizable (for example a Struct NaN); the host refuses to append it
 		}

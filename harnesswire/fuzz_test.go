@@ -217,24 +217,30 @@ func FuzzClientRun(f *testing.F) {
 	}
 	f.Add(seeds[0], []byte{}, []byte{}) // the harness goes away mid-turn
 	f.Fuzz(func(t *testing.T, a, b, c []byte) {
-		var events []*v1.Event
-		for _, raw := range [][]byte{a, b, c} {
-			if len(raw) == 0 {
-				continue // no event, so the stream can end early
-			}
-			ev := &v1.Event{}
-			if err := proto.Unmarshal(raw, ev); err != nil {
-				return
-			}
-			events = append(events, ev)
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), fuzzDeadline)
 		defer cancel()
-		stream := &fuzzClientStream{execution: "e", events: events}
+		var events []*v1.Event
+		decoded := true
 		var err error
+		// The bound covers decoding the events as well as Run.
 		fuzzcheck.Allocs(t, len(a)+len(b)+len(c), func() {
+			for _, raw := range [][]byte{a, b, c} {
+				if len(raw) == 0 {
+					continue // no event, so the stream can end early
+				}
+				ev := &v1.Event{}
+				if proto.Unmarshal(raw, ev) != nil {
+					decoded = false
+					return
+				}
+				events = append(events, ev)
+			}
+			stream := &fuzzClientStream{execution: "e", events: events}
 			err = NewClientHarness(fuzzClient{stream: stream}).Run(ctx, &api.Start{SessionUID: "s", ExecutionID: "e"}, &hostSink{})
 		})
+		if !decoded {
+			return
+		}
 		if errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
 			t.Fatal("Run returned only because its context expired, not when the events ran out")
 		}

@@ -24,6 +24,8 @@ const (
 )
 
 // Allocs runs fn and fails the test if it allocates more than the bound for an input of n bytes.
+// fn should do all the decoding of the input, protobuf unmarshal included, since that is where a
+// claimed length or count would size an allocation.
 // TotalAlloc is process-wide, so a concurrent allocation elsewhere counts too; the base allowance
 // absorbs that.
 func Allocs(t testing.TB, n int, fn func()) {

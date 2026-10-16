@@ -1,17 +1,19 @@
 name: site
 
-# The site renders docs/ through Astro + Starlight. Pushes to main publish; pull requests only
+# The site renders docs/ and spec.md through Astro + Starlight. Pushes to main publish; pull requests only
 # build, so a broken site is caught before it can be deployed.
 on:
   push:
     branches: [main]
     paths:
       - "docs/**"
+      - "spec.md"
       - "site/**"
       - ".github/workflows/site.yml"
   pull_request:
     paths:
       - "docs/**"
+      - "spec.md"
       - "site/**"
       - ".github/workflows/site.yml"
   workflow_dispatch:

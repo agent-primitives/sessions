@@ -6,7 +6,9 @@ Starlight and deployed to GitHub Pages by `.github/workflows/site.yml`.
 `../docs` is the source of truth. `hack/sync-docs.mjs` copies those files into
 `src/content/docs/` before every build, adding frontmatter and rewriting GitHub-relative links into
 site routes, so the published site cannot drift from the repository. That directory is generated and
-gitignored; do not edit it.
+gitignored; do not edit it. The root `../spec.md` is synced the same way from the `rootDocs` map,
+with its `TODO(spike):` markers rendered as "Open question:"; any other internal marker still fails
+the sync.
 
 Edit `../docs/*.md` for documentation. Edit `src/landing/index.mdx` for the landing page. A new doc
 needs an entry in the `meta` map in `hack/sync-docs.mjs` and a sidebar entry in `astro.config.mjs`;

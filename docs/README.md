@@ -30,8 +30,8 @@ Start here. Each document is small and problem-scoped; this page is the index.
   `./hack/gen-api-reference.sh`. CI fails if the two drift apart.
 - **[spec.md](../spec.md)**: the draft protocol specification. The normative rules (BCP 14
   keywords) for sessions, the event log, the provenance chain, the harness wire protocol, the
-  runtime contract, and conformance. It lives at the repository root and is not published on the
-  site.
+  runtime contract, and conformance. It lives at the repository root; the site publishes it with
+  its `TODO(spike)` markers rendered as open questions.
 
 ## By goal
 

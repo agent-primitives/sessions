@@ -3,7 +3,7 @@ name: docs
 # Deliberately has no paths filter. On a markdown-only change, ci's and substrate-e2e's required
 # jobs report success without running their steps, which is what makes a prose pull request fast,
 # but it would leave those pull requests with nothing that verifies the README. This runs
-# everywhere and takes seconds.
+# everywhere; the links job takes seconds, go-blocks as long as compiling the module.
 on:
   push:
     branches: [main]

@@ -362,7 +362,8 @@ and harness checks. To upgrade from v0.1.x:
 - The substrate backend now builds against agent-substrate `96dffb28` (v0.1.2 pinned `b1bd558a`)
   and needs an ate-api at or after `f03327bd`. The two pins are not wire-compatible: the old client
   decodes a current `Actor` without an error but with the wrong state and garbage for the worker
-  address. Upgrade the backend and the substrate cluster together. `integrations/substrate` now requires Go 1.27, following substrate.
+  address. Upgrade the backend and the substrate cluster together. `integrations/substrate` now
+  requires Go 1.27, following substrate.
 - The substrate backend reaches the harness through `atenet-router` (h2c, `ate-target-actor`
   metadata) instead of dialing the worker pod's IP on port 80, which current substrate no longer
   serves. The host must be able to reach `atenet-router.ate-system.svc:80`

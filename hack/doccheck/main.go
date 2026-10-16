@@ -16,7 +16,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -193,10 +192,11 @@ func extract(path string) ([]block, []string) {
 		buf      bytes.Buffer
 		fence    string
 	)
-	sc := bufio.NewScanner(bytes.NewReader(data))
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
-	for n := 1; sc.Scan(); n++ {
-		line := sc.Text()
+	// Split the whole file rather than scan it: a bufio.Scanner stops at its first over-long line, and
+	// every block after that line would then pass unchecked.
+	for i, line := range strings.Split(string(data), "\n") {
+		n := i + 1
+		line = strings.TrimSuffix(line, "\r")
 		trimmed := strings.TrimSpace(line)
 		if cur != nil {
 			if strings.HasPrefix(trimmed, fence) && strings.Trim(trimmed, "`~") == "" {

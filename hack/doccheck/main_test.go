@@ -59,6 +59,24 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+// TestCheckAfterALongLine checks that a line longer than any scanner buffer does not end extraction:
+// the block after it is still checked and its error reported at the right line.
+func TestCheckAfterALongLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "doc.md")
+	md := "# doc\n\n" + strings.Repeat("x", 2<<20) + "\n\n<!-- doccheck: body() -->\n```go\n_ = noSuchName\n```\n"
+	if err := os.WriteFile(path, []byte(md), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checked, _, problems, err := check([]string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checked != 1 || len(problems) != 1 || !strings.HasPrefix(problems[0], path+":7:") ||
+		!strings.Contains(problems[0], "undefined: noSuchName") {
+		t.Fatalf("want 1 block checked and one problem at %s:7 naming noSuchName, got %d checked, %q", path, checked, problems)
+	}
+}
+
 // TestCheckReportsTheDocLine checks that a problem points at the Markdown line to fix.
 func TestCheckReportsTheDocLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "doc.md")

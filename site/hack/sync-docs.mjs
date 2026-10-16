@@ -73,6 +73,11 @@ const meta = {
     description:
       "What is protected, what is not, and how to deploy it accordingly. Read before exposing a host.",
   },
+  "tool-executors.md": {
+    title: "Tool executors",
+    description:
+      "Configure exact harness/tool routes to operator-run Unix sockets, with approval gates and safe recovery.",
+  },
   "substrate-conformance.md": {
     title: "Running on agent-substrate",
     description:

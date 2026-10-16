@@ -8,7 +8,7 @@ approval-gated tools park, but approved Resume requires an executor. Denial need
 
 ## Start an executor and configure the daemon
 
-The [tiny Python example](tool-executor-example.py) uses only Python's standard library.
+The [tiny Python example](../docs/tool-executor-example.py) uses only Python's standard library.
 Its `publish` effect inserts a row in a local SQLite database, atomically with its durable
 receipt. From the repository root, in a private directory on a Unix host:
 

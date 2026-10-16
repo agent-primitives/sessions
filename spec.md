@@ -193,7 +193,7 @@ no flattened lifecycle enum.
 |---|---|---|---|
 | `EVENT_EXECUTION_START` | `ExecutionStart` | host | First record of every new execution (§8.1). |
 | `EVENT_INPUT` | `Message` | host | One per input message. |
-| `EVENT_MODEL_CALL` | `ModelCall` | host | Recorded before the provider is invoked. Journal form keeps `model`, `params`, `input_hash`, `id`. |
+| `EVENT_MODEL_CALL` | `ModelCall` | host | Recorded before the provider is invoked. Journal form keeps `model`, `params`, `input_hash`, `id`; the reference host records only `model`, `input_hash` and `id`, so `params` is covered by `input_hash` alone (`EXE-11`). |
 | `EVENT_OUTPUT` | `Message` | host | The finalized completion. Deltas are never journaled. |
 | `EVENT_TOOL_CALL` | `ToolCall` | host | Intent, recorded before a host-executed tool runs. |
 | `EVENT_TOOL_RESULT` | `ToolResult` | host | Receipt, or a harness-reported result. |
@@ -231,8 +231,15 @@ no flattened lifecycle enum.
   1. A token of 0 is never minted.
 - `LOG-12`: `Append` MUST fail with a fenced error (`eventlog.ErrFenced`) when `fence` is lower than
   the session's current fence, and commit nothing. A host MUST map it to `ABORTED`.
-- `LOG-13`: A writer that receives the fenced error has been superseded. The host MUST end that
-  operation and report `ABORTED`; it does not retry the append.
+- `LOG-13`: A writer that receives the fenced error has been superseded and MUST NOT retry the
+  append. When the fenced error reaches the host, the host MUST end that operation and report
+  `ABORTED`.
+- In the reference host a fenced append is not sticky in the sink, except for the approval
+  request and approval receipt appends (§10). Every later append fails fenced too, so the
+  superseded writer journals nothing more. A wire harness's sink errors reach the host unchanged,
+  and a harness that returns without error fails on its `EVENT_END` append. An in-process
+  `api.Harness` that returns its own error without wrapping the sink error (`%w`) is reported
+  `INTERNAL`; to have `ABORTED` reported, it returns the sink error unchanged or wrapped with `%w`.
 - The reference store accepts a `fence` equal to or greater than the current fence and does not
   store a greater value as current. For a session with no metadata row, the current fence is 0.
 - TODO(spike): Should a store reject a `fence` greater than the last minted value? The reference
@@ -592,15 +599,16 @@ These are named in the reference controller. The numbering is the code's.
   `ABORTED`.
 - `OPS-3`: A `REQUIRES_MEMORY_SNAPSHOT` fork MUST end any in-flight execution on the parent; that
   execution fails with `ABORTED`.
-- `CreateSession`, `GetSession`, `ListSessions`, `Replay`, and a `STATELESS_REPLAY` `Fork` do not
-  take the session guard.
+- `CreateSession`, `GetSession`, `ListSessions`, `Replay`, and `Fork` (either tier) do not take the
+  session guard. A `REQUIRES_MEMORY_SNAPSHOT` fork holds the checkpoint mark instead (`OPS-2`).
 
 ### 11.2 Create, Get, List
 
 - See §5. `GetSession` with an empty `uid` is `INVALID_ARGUMENT`; an unknown `uid` is `NOT_FOUND`.
-- `OPS-4`: `CreateSession` with a harness the host does not know is `INVALID_ARGUMENT`; a known but
-  unservable or retired registered harness is `FAILED_PRECONDITION`, checked in the same
-  transaction as the insert.
+- `OPS-4`: `CreateSession` with a harness the host does not know is `INVALID_ARGUMENT`. A known but
+  unservable registered harness is `FAILED_PRECONDITION`, refused when the name is resolved, before
+  the insert. A retired registered harness, or a static harness name that also has a registration
+  row, is `FAILED_PRECONDITION`, checked in the same transaction as the insert.
 
 ### 11.3 Harness selection
 
@@ -738,9 +746,11 @@ These are named in the reference controller. The numbering is the code's.
 | Missing required field, bad page token, unknown harness name, fork `count > 128`, `child_names` length mismatch, fork `identity` set | `INVALID_ARGUMENT` |
 | Unknown session (Get, Exec, Suspend, Resume, Fork, Approve) | `NOT_FOUND` |
 | Compare-and-swap conflict, stale fence, session busy, checkpoint in progress, snapshot superseded | `ABORTED` |
-| Unplaceable harness, descriptor mismatch, pin violation, retired or unservable harness, approval state violation, inherited intent, memory fork at a historical `seq` | `FAILED_PRECONDITION` |
-| Harness `Describe` failed or timed out (host's own bound) | `UNAVAILABLE` |
-| Caller deadline or cancellation during admission | `DEADLINE_EXCEEDED` or `CANCELLED` |
+| Unplaceable harness, descriptor mismatch, pin violation, retired or unservable harness, static harness name with a registration row, approval state violation, inherited intent, memory fork at a historical `seq` | `FAILED_PRECONDITION` |
+| Harness `Describe` (admission `RT-1`, the `RT-3` recheck, or a `Describe` during the turn) could not reach the harness while the caller's context is live: the peer returned `UNAVAILABLE` or `DEADLINE_EXCEEDED`, or the host's own bound expired | `UNAVAILABLE` |
+| Any other `Describe` error on those paths, for example a peer `UNIMPLEMENTED` or `INTERNAL`, or a plain error from an in-process harness | `INTERNAL` |
+| Any `Describe` error in the memory-tier override check (`OPS-7`) while the caller's context is live | `UNAVAILABLE` |
+| Caller deadline or cancellation during admission or any `Describe` above | `DEADLINE_EXCEEDED` or `CANCELLED` |
 | `DeleteSession`, `Cancel` | `UNIMPLEMENTED` |
 | Any other failure | `INTERNAL` |
 

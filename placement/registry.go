@@ -265,8 +265,16 @@ func (r *Registry) For(harness string) (*Placer, error) {
 type RegistryResumeOption func(*registryResumeConfig)
 
 type registryResumeConfig struct {
-	check    func(name string) error
-	observer controller.Observer
+	check           func(name string) error
+	observer        controller.Observer
+	expectedLastSeq *int64
+}
+
+// WithResumeExpectedLastSeq makes Registry.Resume refuse a different journal head with
+// eventlog.ErrConflict. The check runs under the shared session guard before recovery inspection,
+// repair, compute changes or fencing. Without this option Resume keeps its existing behavior.
+func WithResumeExpectedLastSeq(seq int64) RegistryResumeOption {
+	return func(c *registryResumeConfig) { c.expectedLastSeq = &seq }
 }
 
 // WithRegistryResumeObserver reports newly committed recovery records and streaming chunks.
@@ -300,6 +308,15 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 	}
 	defer release()
 
+	if cfg.expectedLastSeq != nil {
+		head, err := log.Head()
+		if err != nil {
+			return err
+		}
+		if head != *cfg.expectedLastSeq {
+			return eventlog.ErrConflict
+		}
+	}
 	state, err := controller.InspectApproval(log, 0)
 	if err != nil {
 		return err

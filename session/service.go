@@ -938,7 +938,11 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 		}
 		return refused
 	}
-	err = s.registry.Resume(ctx, log, uid, info.Harness, placement.WithResolvedHarnessCheck(check))
+	opts := []placement.RegistryResumeOption{placement.WithResolvedHarnessCheck(check)}
+	if req.ExpectedLastSeq != nil {
+		opts = append(opts, placement.WithResumeExpectedLastSeq(req.GetExpectedLastSeq()))
+	}
+	err = s.registry.Resume(ctx, log, uid, info.Harness, opts...)
 	var park *api.ApprovalParkedError
 	if err != nil && (!errors.As(err, &park) || !api.IsParkUnwind(err, park.Ref)) {
 		if refused != nil && err == refused {

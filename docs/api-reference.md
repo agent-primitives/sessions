@@ -1543,6 +1543,7 @@ stable when a session is created mid-pagination; an offset would skip or repeat 
 | ----- | ---- | ----- | ----------- |
 | session | [string](#string) |  |  |
 | boot | [bool](#bool) |  | **Deprecated.** Ignored. The service never reads it; the Runtime backend decides how a resumed session comes back. On substrate that is the actor&#39;s own snapshot, else the template&#39;s golden snapshot, else a cold boot, and substrate has no per-resume boot flag to forward it to. The field stays so existing clients keep encoding; do not reuse its number. |
+| expected_last_seq | [int64](#int64) | optional | Optional recovery precondition: ABORTED if the journal head differs, before recovery, approval repair, compute changes or fencing. Explicit zero requires an empty journal; absent skips this precondition. Checked under this host&#39;s shared session guard, not a cross-host transaction or an exactly-once tool-execution guarantee. |
 
 
 

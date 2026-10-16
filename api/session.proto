@@ -202,6 +202,11 @@ message ResumeRequest {
   // cold boot, and substrate has no per-resume boot flag to forward it to. The field stays so
   // existing clients keep encoding; do not reuse its number.
   bool boot = 2 [deprecated = true];
+  // Optional recovery precondition: ABORTED if the journal head differs, before recovery,
+  // approval repair, compute changes or fencing. Explicit zero requires an empty journal;
+  // absent skips this precondition. Checked under this host's shared session guard,
+  // not a cross-host transaction or an exactly-once tool-execution guarantee.
+  optional int64 expected_last_seq = 3;
 }
 
 // Children inherit the parent's annotations and origin.

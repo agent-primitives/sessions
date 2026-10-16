@@ -131,6 +131,11 @@ provide.
 
 ### Compatibility
 
+- Optional `ResumeRequest.expected_last_seq` checks the journal head under the shared session
+  guard before recovery inspection, approval repair, compute changes or fencing. A mismatch is
+  `ABORTED`; explicit zero requires an empty journal. Omission preserves existing behavior.
+  This coordinates one Registry/host, not a cross-host transaction or exactly-once tool execution;
+  older servers ignore the new field.
 - `Exec` refuses a stateless harness override when the session's served stored harness requires
   memory snapshots (`FAILED_PRECONDITION`, before any fence or journal write). `Resume` and
   no-input Exec recovery also refuse an older interrupted override before compute changes or

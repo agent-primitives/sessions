@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -103,6 +104,62 @@ func TestRenderMapsTheComposition(t *testing.T) {
 	}
 	if _, err := Render(comp, "localhost:5001/agentsuite-harness:latest", b, Options{}); err == nil {
 		t.Fatal("a tag-only image must be refused: substrate requires a digest-pinned reference")
+	}
+}
+
+// Substrate sizes the sandbox (the micro-VM's vCPUs and RAM) and books the worker from the
+// template's resources, so the binding's resources go there. The container declares none: a
+// micro-VM guest gets the template's memory less a 128MiB VMM reserve, and ateom-microvm refuses a
+// container memory limit above the guest, so a copy of the binding's memory on the container (512Mi
+// in a 384MiB guest for the demo binding) would fail the golden snapshot. A binding without
+// resources leaves the template unset.
+func TestRenderSizesTheSandboxFromTheTemplate(t *testing.T) {
+	comp, err := Load("../suite", "triage", "linux/arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := "localhost:5001/agentsuite-harness@" + digestA
+	limits := func(r *atepb.Resources) map[string]string {
+		if r == nil {
+			return nil
+		}
+		m := map[string]string{}
+		for _, l := range r.GetLimits() {
+			m[l.GetName()] = l.GetQuantity()
+		}
+		return m
+	}
+	for _, tc := range []struct {
+		name, cpu, memory string
+		want              map[string]string
+	}{
+		{name: "the demo binding", cpu: "-", memory: "-", want: map[string]string{"cpu": "1", "memory": "512Mi"}},
+		{name: "memory only", cpu: "", memory: "2Gi", want: map[string]string{"memory": "2Gi"}},
+		{name: "cpu only", cpu: "500m", memory: "", want: map[string]string{"cpu": "500m"}},
+		{name: "none", cpu: "", memory: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := LoadBinding("../binding-microvm.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.cpu != "-" {
+				b.Resources.CPU = tc.cpu
+			}
+			if tc.memory != "-" {
+				b.Resources.Memory = tc.memory
+			}
+			out, err := Render(comp, image, b, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := limits(out.Template.GetResources()); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("template resources = %v, want %v", got, tc.want)
+			}
+			if c := out.Template.GetContainers()[0].GetResources(); c != nil {
+				t.Errorf("container resources = %v, want none: the sandbox bounds the container", limits(c))
+			}
+		})
 	}
 }
 

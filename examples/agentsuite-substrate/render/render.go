@@ -318,16 +318,13 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.MemoryEnv, Value: agent.MemoryRAM})
 		harness, resumability, tier = c.Agent.ID+"-memory", v1.Resumability_RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT, ",memory"
 	}
-	var limits []*atepb.Limits
-	if b.Resources.CPU != "" {
-		limits = append(limits, &atepb.Limits{Name: "cpu", Quantity: b.Resources.CPU})
-	}
-	if b.Resources.Memory != "" {
-		limits = append(limits, &atepb.Limits{Name: "memory", Quantity: b.Resources.Memory})
-	}
-	if len(limits) > 0 {
-		container.Resources = &atepb.Resources{Limits: limits}
-	}
+	// The binding's resources go on the template only. At substrate 96dffb2, the template's
+	// resources size the sandbox and book the worker (cmd/ateapi/internal/controlapi/
+	// workflow_resume.go, actorResourceLimits and schedulingConstraints). ateom-gvisor writes them
+	// into the container's OCI spec (internal/sizing.ApplyToOCISpec). ateom-microvm boots a guest
+	// with the template's memory less a VMM reserve (128MiB by default, resolveGuestMemMiB) and
+	// refuses a container limit above the guest (checkResourceEnvelope), so a container copy of
+	// the same memory limit would fail the golden snapshot; the guest bounds the container instead.
 	tmpl := &atepb.ActorTemplate{
 		Metadata:   &atepb.ResourceMetadata{Atespace: b.Atespace, Name: name},
 		Containers: []*atepb.Container{container},
@@ -336,6 +333,7 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 			StorageLocation:   strings.TrimSuffix(b.Snapshot.StorageLocation, "/") + "/" + name + "/",
 		},
 		SandboxConfig: &atepb.SandboxConfig{SandboxClass: class, ConfigName: b.Sandbox.ConfigName},
+		Resources:     resourceLimits(b.Resources.CPU, b.Resources.Memory),
 	}
 	if len(b.WorkerSelector.MatchLabels) > 0 {
 		tmpl.WorkerSelector = &atepb.Selector{MatchLabels: b.WorkerSelector.MatchLabels}
@@ -355,6 +353,21 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 		Registration: reg,
 		DaemonFlag:   fmt.Sprintf("%s=%s/%s%s", harness, b.Atespace, name, tier),
 	}, nil
+}
+
+// resourceLimits is the Resources for a binding's cpu and memory, nil when it sets neither.
+func resourceLimits(cpu, memory string) *atepb.Resources {
+	var limits []*atepb.Limits
+	if cpu != "" {
+		limits = append(limits, &atepb.Limits{Name: "cpu", Quantity: cpu})
+	}
+	if memory != "" {
+		limits = append(limits, &atepb.Limits{Name: "memory", Quantity: memory})
+	}
+	if len(limits) == 0 {
+		return nil
+	}
+	return &atepb.Resources{Limits: limits}
 }
 
 func sandboxClass(s string) (atepb.SandboxClass, error) {

@@ -1,0 +1,87 @@
+name: release-check
+
+# The release workflow runs only when a tag is pushed, so a change that breaks goreleaser, a cross
+# build or an image would otherwise surface at tag time, after the tag is public. This builds the same
+# artifacts on the pull request that could break them, and publishes nothing.
+on:
+  pull_request:
+    paths:
+      - "**.go"
+      - go.mod
+      - go.sum
+      - Dockerfile
+      - .goreleaser.yaml
+      - .ko.yaml
+      - .github/workflows/release.yml
+      - .github/workflows/release-check.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # As in release.yml: goreleaser drives ko for the images and needs only the binary on PATH.
+      - name: install ko
+        run: go install github.com/google/ko@latest
+
+      - name: goreleaser check
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: check
+
+      # --snapshot builds every binary and archive for linux and darwin on amd64 and arm64, and has ko
+      # load the images into the runner's Docker daemon (goreleaser.ko.local) instead of pushing.
+      # SBOMs are skipped: they need syft, which only the release job installs.
+      - name: snapshot build (no publish)
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean --skip=sbom
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: every archive and image was built
+        run: |
+          for os in linux darwin; do
+            for arch in amd64 arm64; do
+              ls dist/*_"${os}"_"${arch}".tar.gz
+            done
+          done
+          images="$(docker image ls --format '{{.Repository}}' | grep -c '^goreleaser.ko.local$' || true)"
+          if [ "$images" -lt 2 ]; then
+            echo "expected the agentsessionsd and harnessnode images in the local daemon, found ${images}"
+            docker image ls
+            exit 1
+          fi
+
+  dockerfile:
+    # The Dockerfile packages agentnode for the pod-resume demo (hack/demo.sh), which builds the
+    # binary on the host first.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: build agentnode as hack/demo.sh does
+        run: CGO_ENABLED=0 GOOS=linux go build -trimpath -o agentnode ./cmd/agentnode
+
+      - name: docker build (no push)
+        run: docker build -t agentnode:release-check .

@@ -82,8 +82,15 @@ determinism guarantees are exercised by a replay-conformance suite (`conformance
 - **Approval status:** Get/List and final paused Exec frames expose `pending_approval` at their
   captured `last_seq`. Decisions clear that reference, but new inputs stay blocked until a receipt
   commits. Execution and compute axes remain independent. Retained snapshots and unresolved requests
-  have no expiry; `Cancel` and `DeleteSession` return `UNIMPLEMENTED`. See
+  have no expiry; `Cancel` returns `UNIMPLEMENTED`. See
   [approval recovery](docs/interaction-model.md#approval-decisions-and-recovery) for SDK/CLI examples.
+- **Permanent soft deletion:** `DeleteSession` / `agentctl delete --session <uid>` hides the UID from
+  List and refuses Exec, Fork (including historical forks), Resume, Suspend and Approve (including
+  exact retries). Get and raw Replay remain audit reads; UID, metadata and journal are retained
+  forever, without cascade or erasure.
+  `PENDING` acknowledges durable intent only: actors, snapshots and fork-child pins remain retained
+  indefinitely. No Stop or cleanup is attempted; ownership and reclamation belong to #88. See
+  [deletion semantics and admission limits](docs/concepts.md#permanent-soft-deletion).
 
 ## Documentation
 
@@ -123,7 +130,7 @@ The sources live in [`docs/`](docs/README.md):
 | `session/` | The `Sessions` gRPC service: the client-facing seam over the log and the Placer. |
 | `client/` | Go client SDK: dialing, the session frame, pagination, and stream draining. |
 | `cmd/agentsessionsd` | The Sessions server: a TCP entry point over the journal and the harness registry. |
-| `cmd/agentctl` | Client CLI (create / exec / replay / fork / suspend / resume / approve / deny). |
+| `cmd/agentctl` | Client CLI (create / list / get / exec / replay / fork / suspend / resume / approve / deny / delete). |
 | `conformance/` | The replay-conformance suite (the neutral determinism checks). |
 | `integrations/substrate/` | The substrate `ControlClient` adapter — a **separate module** so the core stays substrate-free. |
 | `deploy/substrate/`, `.github/workflows/substrate-e2e.yml` | Manifests + CI for the real-substrate conformance. |

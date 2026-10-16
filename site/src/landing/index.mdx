@@ -159,8 +159,9 @@ Signed archives and container images are on the
 
 :::caution[Pre-1.0, and not yet secured]
 No authentication, authorization, or transport security. `IdentityRef` is recorded as provenance and
-never enforced, `project` is a filter rather than a tenancy boundary, and `DeleteSession` and
-`Cancel` are declared in the proto but not implemented. `agentsessions.v1` is a proto namespace, not
+never enforced, and `project` is a filter rather than a tenancy boundary. `DeleteSession` commits
+permanent intent only: actors, snapshots and fork pins remain retained, and audit reads stay
+available. `Cancel` is declared but not implemented. `agentsessions.v1` is a proto namespace, not
 a stability promise.
 :::
 </Reveal>

@@ -101,8 +101,9 @@ The `Placer` wires Sessions to the `Runtime` SPI and owns the incarnation lifecy
   Before a stateful fork checkpoints its parent the Placer closes the parent's open harness streams,
   because substrate waits for an actor's in-flight requests to drain before it snapshots; `Suspend`
   instead refuses a session whose turn is still running.
-- **Lifecycle map** — session `Suspend → Runtime.Snapshot`, `Resume → Runtime.Restore`, session-end
-  `→ Runtime.Stop`.
+- **Lifecycle map** — session `Suspend → Runtime.Snapshot` checkpoints compute and `Resume →
+  Runtime.Restore` restores it. Execution `END` does not automatically call `Runtime.Stop`.
+  `DeleteSession` records permanent `PENDING` intent without releasing actors, pins or snapshots.
 - **Fork** — capability-driven. A `STATELESS_REPLAY` session replay-forks (the child cold-boots and
   the copied journal reconstructs it, parent untouched). A `REQUIRES_MEMORY_SNAPSHOT` session holds
   live state the journal cannot rebuild (I4), so the Placer checkpoints the parent via
@@ -199,8 +200,10 @@ stateDiagram-v2
   placement still gates every turn on the live `Describe`. `descriptor_id` is not checked at
   registration, only when a call places the harness, and like the capability check it is not bound
   to the turn's `Connect` stream (see [security.md](security.md)). A registration made by another
-  process sharing the database is served after this host restarts. There is no delete, because
-  `DeleteSession` does not exist yet and a harness with sessions must stay resolvable.
+  process sharing the database is served after this host restarts. Harness-registry deletion is not
+  implemented: `DeleteSession` tombstones a session but retains its metadata and audit log, so its
+  recorded harness identity remains relevant. Session deletion returns `PENDING` without stopping
+  resources; ownership and cleanup-target persistence and teardown belong to #88.
 
 The registry is an admin API. `agentsessionsd` loads stored registrations on every start, even
 without the operator listener: existing sessions on retired harnesses still route to their backend

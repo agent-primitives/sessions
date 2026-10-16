@@ -309,7 +309,7 @@ jobs:
         # session while the turn runs and succeed promptly once it returns.
         env:
           ECHO_SANDBOX_CLASS: microvm
-        run: hack/run-e2e-job.sh '^(TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream)$' "${E2E_IMAGE}" 900
+        run: hack/run-e2e-job.sh '^(TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestSessionDeletePending)$' "${E2E_IMAGE}" 1200
 
       - name: Idle harness stream across the router's route timeout (in-cluster Job)
         # A turn parked on a slow model call holds its Connect stream idle. The router bounds streams
@@ -336,7 +336,7 @@ jobs:
         # Then two sessions' calls through the router at once, each of which must reach its own actor.
         env:
           COUNTER_SANDBOX_CLASS: microvm
-        run: hack/run-e2e-job.sh 'TestMemorySnapshotSuspendResume|TestFork|TestConcurrentSessionsReachTheirOwnActors' "${E2E_IMAGE}" 1500
+        run: hack/run-e2e-job.sh 'TestMemorySnapshotSuspendResume|TestFork|TestConcurrentSessionsReachTheirOwnActors|TestSessionDeletePendingOnMicroVM' "${E2E_IMAGE}" 2400
 
       - name: Dump diagnostics on failure
         if: failure()

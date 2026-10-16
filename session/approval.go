@@ -27,8 +27,17 @@ func (s *Service) Approve(ctx context.Context, req *v1.ApproveRequest) (response
 	}
 	uid := req.GetSession()
 	// Session(uid) can create a journal on mutation; lookup must precede the decision primitive.
-	if _, err := s.store.SessionInfo(uid); err != nil {
-		return nil, sessionStoreError(err, uid)
+	if err := s.registry.WithSessionRead(uid, func() error {
+		info, err := s.store.SessionInfo(uid)
+		if err != nil {
+			return sessionStoreError(err, uid)
+		}
+		return deletedSessionError(info)
+	}); err != nil {
+		if errors.Is(err, placement.ErrSessionBusy) {
+			return nil, approvalError(err)
+		}
+		return nil, err
 	}
 	decision, err := s.registry.Approve(ctx, s.store.Session(uid), uid, api.ApprovalDecision{
 		ExecutionID: req.GetExecutionId(), ToolCallID: req.GetToolCallId(), RequestSeq: req.GetRequestSeq(),
@@ -50,6 +59,8 @@ func (s *Service) Approve(ctx context.Context, req *v1.ApproveRequest) (response
 
 func approvalError(err error) error {
 	switch {
+	case errors.Is(err, eventlog.ErrDeleted):
+		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, controller.ErrInvalidApprovalDecision), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, controller.ErrReplayDiverged), errors.Is(err, controller.ErrApprovalUnavailable):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, placement.ErrCheckpointing), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):

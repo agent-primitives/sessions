@@ -9,6 +9,7 @@
 package sqlitelog
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -30,6 +31,8 @@ import (
 // canonicalize/decode failure (a bug or storage corruption), which is returned wrapped and does
 // NOT satisfy errors.Is(err, ErrTampered) — different severities, per the integrity contract.
 var ErrTampered = errors.New("sqlitelog: hash-chain verification failed (tamper-evident)")
+
+var errReservedDelete = errors.New("sqlitelog: DELETE is reserved for atomic DeleteSession")
 
 // sqliteConstraint is SQLITE_CONSTRAINT — the primary result code (low byte) for any constraint
 // violation. Extended codes such as SQLITE_CONSTRAINT_PRIMARYKEY (1555) share this low byte.
@@ -79,14 +82,24 @@ CREATE INDEX IF NOT EXISTS sessions_project_created
 
 // SchemaVersion is the schema shape this build writes, stamped into PRAGMA user_version so a
 // build can identify a database without inspecting its columns. Version 1 is what v0.1.0 through
-// v0.1.2 shipped. Version 2 adds the harness registry; version 3 adds approval reporting.
-const SchemaVersion = 3
+// v0.1.2 shipped. Version 2 adds the harness registry; version 3 adds approval reporting;
+// version 4 adds permanent deletion intent.
+const SchemaVersion = 4
 
 // migrations[i] moves a database from version i+1 to i+2, inside the migration transaction. The
 // array length is tied to SchemaVersion, so bumping one without the other does not compile.
 var migrations = [SchemaVersion - 1]func(*sql.Tx) error{
 	migrateV1ToV2,
 	migrateV2ToV3,
+	migrateV3ToV4,
+}
+
+func migrateV3ToV4(tx *sql.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE sessions ADD COLUMN deletion_state TEXT NOT NULL DEFAULT 'ACTIVE';
+		ALTER TABLE sessions ADD COLUMN deletion_requested_at INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE sessions ADD COLUMN deletion_completed_at INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE sessions ADD COLUMN deletion_seq INTEGER NOT NULL DEFAULT 0;`)
+	return err
 }
 
 // v1ToV2 is the SQL half of the 1 -> 2 rung: harnesses registered through the HarnessRegistry API.
@@ -397,8 +410,12 @@ func (l *Log) NewFence() (int64, error) {
 		   project    = CASE WHEN sessions.project = '' THEN excluded.project ELSE sessions.project END,
 		   created_at = CASE WHEN sessions.created_at = 0 THEN excluded.created_at ELSE sessions.created_at END,
 		   updated_at = excluded.updated_at
+		 WHERE sessions.deletion_state = 'ACTIVE'
 		 RETURNING fence`, l.session, l.store.defaultProject, now, now,
 	).Scan(&fence)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("sqlitelog: new fence session %q: %w", l.session, eventlog.ErrDeleted)
+	}
 	return fence, err
 }
 
@@ -414,6 +431,12 @@ func (l *Log) Append(expectedLastSeq, fence int64, ev api.Event) (eventlog.Recor
 		return eventlog.Record{}, err
 	}
 	defer tx.Rollback()
+	if err := checkWritable(tx, l.session); err != nil {
+		return eventlog.Record{}, err
+	}
+	if ev.Kind == api.EventLifecycle && ev.Lifecycle != nil && ev.Lifecycle.Kind == api.LifecycleDelete {
+		return eventlog.Record{}, errReservedDelete
+	}
 
 	var head int64
 	if err := tx.QueryRow(
@@ -435,28 +458,8 @@ func (l *Log) Append(expectedLastSeq, fence int64, ev api.Event) (eventlog.Recor
 		return eventlog.Record{}, eventlog.ErrFenced
 	}
 
-	prev := ""
-	if head > 0 {
-		if err := tx.QueryRow(
-			`SELECT hash FROM events WHERE session = ? AND seq = ?`, l.session, head,
-		).Scan(&prev); err != nil {
-			return eventlog.Record{}, err
-		}
-	}
-	seq := head + 1
-	hash, err := canon.HashRecord(prev, seq, ev)
+	record, pb, err := appendRecord(context.Background(), tx, l.session, head, fence, ev)
 	if err != nil {
-		return eventlog.Record{}, fmt.Errorf("sqlitelog: canonicalize seq %d: %w", seq, err)
-	}
-	pb := wire.EventToProto(ev)
-	blob, err := proto.Marshal(pb)
-	if err != nil {
-		return eventlog.Record{}, fmt.Errorf("sqlitelog: marshal seq %d: %w", seq, err)
-	}
-	if _, err := tx.Exec(
-		`INSERT INTO events(session, seq, prev_hash, hash, fence, event) VALUES(?,?,?,?,?,?)`,
-		l.session, seq, prev, hash, fence, blob,
-	); err != nil {
 		// A PRIMARY KEY(session, seq) violation means another writer already committed this seq —
 		// it advanced the log out from under us. That is exactly a single-writer CAS conflict, so
 		// map it. Defense-in-depth for the cross-process race that MaxOpenConns cannot serialize
@@ -470,13 +473,40 @@ func (l *Log) Append(expectedLastSeq, fence int64, ev api.Event) (eventlog.Recor
 		return eventlog.Record{}, err
 	}
 	// Report only the selected wire body and normalized enums that strict journal reads see.
-	if err := projectApproval(tx, l.session, seq, wire.EventFromProto(pb)); err != nil {
-		return eventlog.Record{}, fmt.Errorf("sqlitelog: project approval seq %d: %w", seq, err)
+	if err := projectApproval(tx, l.session, record.Seq, wire.EventFromProto(pb)); err != nil {
+		return eventlog.Record{}, fmt.Errorf("sqlitelog: project approval seq %d: %w", record.Seq, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return eventlog.Record{}, err
 	}
-	return eventlog.Record{Seq: seq, PrevHash: prev, Hash: hash, Fence: fence, Event: ev}, nil
+	return record, nil
+}
+
+// appendRecord shares canonical encoding with atomic deletion but does not publish metadata or
+// commit. It returns the persisted proto so projection uses the same normalized body as reads.
+// Only the transaction owner may admit a write and decide its lifecycle projection.
+func appendRecord(ctx context.Context, tx *sql.Tx, session string, head, fence int64, ev api.Event) (eventlog.Record, *v1.Event, error) {
+	prev := ""
+	if head > 0 {
+		if err := tx.QueryRowContext(ctx, `SELECT hash FROM events WHERE session = ? AND seq = ?`, session, head).Scan(&prev); err != nil {
+			return eventlog.Record{}, nil, err
+		}
+	}
+	seq := head + 1
+	hash, err := canon.HashRecord(prev, seq, ev)
+	if err != nil {
+		return eventlog.Record{}, nil, fmt.Errorf("sqlitelog: canonicalize seq %d: %w", seq, err)
+	}
+	pb := wire.EventToProto(ev)
+	blob, err := proto.Marshal(pb)
+	if err != nil {
+		return eventlog.Record{}, nil, fmt.Errorf("sqlitelog: marshal seq %d: %w", seq, err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO events(session, seq, prev_hash, hash, fence, event) VALUES(?,?,?,?,?,?)`,
+		session, seq, prev, hash, fence, blob); err != nil {
+		return eventlog.Record{}, nil, err
+	}
+	return eventlog.Record{Seq: seq, PrevHash: prev, Hash: hash, Fence: fence, Event: ev}, pb, nil
 }
 
 // touchSession keeps the session's metadata row in step with its log, inside Append's transaction.

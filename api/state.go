@@ -15,6 +15,16 @@ const (
 	ExecCanceled  ExecState = "CANCELED"
 )
 
+// DeletionState is the permanent-deletion axis, independent of execution and compute.
+// Pending acknowledges durable intent only; retained resources have not been reclaimed.
+type DeletionState string
+
+const (
+	DeletionActive   DeletionState = "ACTIVE"
+	DeletionPending  DeletionState = "PENDING"
+	DeletionComplete DeletionState = "COMPLETE" // future cleanup state, not emitted by intent-only deletion
+)
+
 // ComputeState is the incarnation (compute/sandbox) axis of a session's lifecycle.
 type ComputeState string
 

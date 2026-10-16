@@ -2,21 +2,44 @@ package placement
 
 import "sync"
 
-// sessionGuard rejects overlapping operations for one session without retaining idle entries.
-// References include acquisition attempts, so releasing a holder cannot replace a lock that a
-// contender is about to acquire with a second live lock for the same session.
+// sessionGuard preserves exclusive turn/lifecycle admission while separately fencing deletion.
+// Fork and routing reads hold shared deletion admission without blocking an ordinary operation:
+// a stateful fork may supersede a running turn, and rollback releases the parent for new turns.
+// Every admission and release shares mu; entries disappear only after the last hold is released.
 type sessionGuard struct {
 	mu      sync.Mutex
 	entries map[string]*sessionGuardEntry
 }
 
 type sessionGuardEntry struct {
-	mu   sync.Mutex
-	refs int
+	operation bool
+	readers   int
+	deleting  bool
 }
 
+type guardKind uint8
+
+const (
+	guardOperation guardKind = iota
+	guardRead
+	guardDelete
+)
+
 func (g *sessionGuard) tryLock(uid string) (func(), error) {
+	return g.acquire(uid, guardOperation)
+}
+
+func (g *sessionGuard) tryReadLock(uid string) (func(), error) {
+	return g.acquire(uid, guardRead)
+}
+
+func (g *sessionGuard) tryDeleteLock(uid string) (func(), error) {
+	return g.acquire(uid, guardDelete)
+}
+
+func (g *sessionGuard) acquire(uid string, kind guardKind) (func(), error) {
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	entry := g.entries[uid]
 	if entry == nil {
 		entry = new(sessionGuardEntry)
@@ -25,31 +48,36 @@ func (g *sessionGuard) tryLock(uid string) (func(), error) {
 		}
 		g.entries[uid] = entry
 	}
-	entry.refs++
-	g.mu.Unlock()
-
-	if !entry.mu.TryLock() {
-		g.unref(uid, entry)
+	if entry.deleting || (kind == guardOperation && entry.operation) ||
+		(kind == guardDelete && (entry.operation || entry.readers > 0)) {
 		return nil, ErrSessionBusy
 	}
+	switch kind {
+	case guardOperation:
+		entry.operation = true
+	case guardRead:
+		entry.readers++
+	case guardDelete:
+		entry.deleting = true
+	}
 	return func() {
-		// Unlock before dropping the reference: no live lock may be removed from the table.
-		entry.mu.Unlock()
-		g.unref(uid, entry)
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		switch kind {
+		case guardOperation:
+			entry.operation = false
+		case guardRead:
+			entry.readers--
+		case guardDelete:
+			entry.deleting = false
+		}
+		if !entry.operation && entry.readers == 0 && !entry.deleting {
+			delete(g.entries, uid)
+		}
 	}, nil
 }
 
-func (g *sessionGuard) unref(uid string, entry *sessionGuardEntry) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	entry.refs--
-	if entry.refs == 0 {
-		delete(g.entries, uid)
-	}
-}
-
-// busy reports whether any session holds the guard or is trying to. Entries are deleted when their
-// last reference is released, so an idle guard is empty.
+// busy reports whether any session holds operation, read or deletion admission.
 func (g *sessionGuard) busy() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()

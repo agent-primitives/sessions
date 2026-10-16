@@ -32,6 +32,33 @@ func goldenEvent() api.Event {
 // an independent JCS-over-proto3-JSON implementation must reproduce this exact value.
 const goldenHash = "551bd146050c8d630b0c3b999a4445f3792a470db9bca443d8d4a67706283fcc"
 
+// This session-scoped intent has no execution ID or cleanup target. The literal was derived
+// from proto3-JSON and hashed independently with Python, not from the Go serializer's output.
+func TestLifecycleDeleteCanonicalVector(t *testing.T) {
+	event := api.Event{
+		Kind: api.EventLifecycle, SchemaVersion: 1,
+		Timestamp: time.Unix(1_700_000_000, 123456789).UTC(),
+		Lifecycle: &api.Lifecycle{Kind: api.LifecycleKind("DELETE")},
+	}
+	const want = `{"event":{"kind":"EVENT_LIFECYCLE","lifecycle":{"kind":"LIFECYCLE_DELETE"},"schema_version":1,"ts":"2023-11-14T22:13:20.123456789Z"},"prev_hash":"","seq":"1"}`
+	const wantHash = "bfbda987672b922ac194edadeec95fad94093740ab2a6bf9786f09c4a56d3d90"
+	for name, ev := range map[string]api.Event{
+		"domain": event,
+		"wire":   wire.EventFromProto(wire.EventToProto(event)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := canon.Record("", 1, ev)
+			if err != nil || string(got) != want {
+				t.Errorf("canonical DELETE = %s, %v; want %s", got, err, want)
+			}
+			hash, err := canon.HashRecord("", 1, ev)
+			if err != nil || hash != wantHash {
+				t.Fatalf("DELETE hash = %s, %v; want %s (also update hack/verify_chain.py)", hash, err, wantHash)
+			}
+		})
+	}
+}
+
 func TestExecutionStartCanonicalBytes(t *testing.T) {
 	event := api.Event{
 		ExecutionID: "exec-config", Kind: api.EventExecutionStart,

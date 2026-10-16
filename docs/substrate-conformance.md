@@ -129,11 +129,13 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
 - The fork checkpoint is committed under a fence and a CAS on the seq the caller validated, so a turn
   racing the fork can never widen the children's prefix past the RAM they were cloned from. A fork
   that is *refused* takes the fence path not at all: a request that changes nothing must not
-  supersede a turn in flight on the parent. A fork that proceeds does supersede it, since the
-  checkpoint frees the parent's worker. Unlike `Suspend`, `Fork` is not covered by the Registry's
-  session guard; `Suspend` rejects overlap instead of interrupting the running turn. The one rough
-  edge is a fork that mints its fence and then aborts on the re-check: it
-  supersedes the writer that beat it even though it gives up. Closing that needs a read-only fence
+  supersede a turn in flight on the parent. A stateful fork that proceeds does supersede it,
+  closing its harness stream before checkpointing; Suspend instead refuses overlap with a turn.
+  Fork holds shared deletion admission through checkpoint, fan-out and rollback, so Delete is
+  refused until it returns. Failed fan-out releases the checkpoint before rollback, allowing new
+  parent turns while the failed children are stopped. Independent Registries or hosts are outside
+  this local admission. A fork that mints its fence and then aborts on the re-check still supersedes
+  the writer that beat it even though it gives up. Closing that needs a read-only fence
   accessor on `eventlog.Store` (`NewFence` is currently the only way to obtain one, and it mutates),
   which is a wider API change than this path warrants.
 - Ending the parent's harness streams sits between two fences. The first stops an in-flight turn
@@ -464,11 +466,12 @@ RESUME marker. These tests prove orchestration and retention behavior, not real 
 - **Fork tag lifecycle.** A fork tags the parent (`fork-<child-uid>`) so `CreateActor` can seed the
   child from it, and each tag owns a full copy of the parent's snapshot. The tag name is derived from
   the child session UID, so `Stop` deletes it after the child and a failed fork deletes it on the way
-  out. A child's tag is kept indefinitely: `DeleteSession` is unimplemented and no session teardown
-  calls `Stop`. Suspended actors are likewise retained indefinitely. Operators must reclaim actors
-  and fork tags directly in Substrate; there is no automatic retention deadline. One tag per fan-out
-  instead of per child would save N-1 copies, but a shared tag can only be deleted once every child
-  has suspended at least once.
+  out. `DeleteSession` permanently tombstones the UID and returns `PENDING`: durable deletion intent
+  only, without calling `Stop` or reclaiming resources. Suspended actors and fork tags remain retained
+  indefinitely. Ownership and cleanup-target persistence, retryable teardown and completion belong
+  to #88; until that lands, operators must reconcile and reclaim actors and fork tags directly in
+  Substrate. There is no automatic retention deadline. One tag per fan-out instead of per child would
+  save N-1 copies, but a shared tag can only be deleted once every child has suspended at least once.
 - **Controller-side I4.** `controller.Exec` sends the full journal as `Start.History` even on the
   post-restore turn; for the general case the controller should send empty `History` on memory-restore.
   The counter's harness-side I4 carries the stateful tier today.

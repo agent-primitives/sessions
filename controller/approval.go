@@ -45,6 +45,10 @@ func InspectApproval(log eventlog.Store, throughSeq int64) (*ApprovalState, erro
 // Callers must serialize this operation with other session work; CAS also protects against
 // external writers advancing the journal between validation and append.
 func Approve(log eventlog.Store, decision api.ApprovalDecision) (eventlog.Record, error) {
+	// Durable deletion authority applies even to read-only historical retries.
+	if err := eventlog.CheckWritable(log); err != nil {
+		return eventlog.Record{}, err
+	}
 	if decision.ExecutionID == "" || decision.ToolCallID == "" || decision.RequestSeq <= 0 {
 		return eventlog.Record{}, fmt.Errorf("%w: execution, call and positive request sequence are required", ErrInvalidApprovalDecision)
 	}

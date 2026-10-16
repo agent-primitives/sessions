@@ -78,9 +78,13 @@ The `Sessions` service. You implement none of it.
 | `Fork` | branch a session into one or more children | available |
 | `Suspend` / `Resume` | free and restore compute, or recover an approval-bearing turn | available |
 | `Approve` | commit an explicit approval or denial; no implicit Resume | available, stateless replay only |
-| `DeleteSession`, `Cancel` | — | declared, **not implemented** |
+| `DeleteSession` | permanently tombstone a UID while retaining metadata and journal audit access | available; returns **PENDING**, durable intent only, without stopping resources |
+| `Cancel` | — | declared, **not implemented** |
 
-Treat that last row as unavailable regardless of what a generated client offers.
+Treat `Cancel` as unavailable regardless of what a generated client offers. `DeleteSession` hides the
+session from ordinary listings and refuses further mutation, but does not reclaim actors or pins.
+Ownership and cleanup-target persistence and retryable teardown belong to #88; until then, `PENDING`
+means the irreversible tombstone committed, not that resources were released.
 
 ### Run a turn
 
@@ -154,9 +158,10 @@ use `Suspend` to retry the recorded route's cold transition when needed.
 
 All Session replies use the same durable append-transaction projection, read atomically with
 metadata and `last_seq`; no query decodes journal events. An owned unanswered request in the latest
-first-seen execution exposes `pending_approval` and `EXEC_AWAITING`. Requests/decisions match
-execution ID, call ID and request sequence. A child's FORK excludes calls whose TOOL_CALL precedes
-that marker; a later call in an inherited execution can own a request.
+first-seen execution reports `EXEC_AWAITING`; it exposes `pending_approval` only while the session
+is ACTIVE. Requests/decisions match execution ID, call ID and request sequence. A child's FORK
+excludes calls whose TOOL_CALL precedes that marker; a later call in an inherited execution can
+own a request.
 
 Malformed approval-bearing history withholds references even for a valid latest request, matching
 strict command inspection; malformed nongated history does not. Undecodable v2 journals are isolated
@@ -174,7 +179,8 @@ session UID, execution ID, tool call ID, positive request sequence, and explicit
 `false` is denial, not an omitted choice. It commits only `APPROVAL_RESULT` and returns that record plus
 the current Session, without resolving a harness, describing compute, or running a tool. Identical
 retries of tuple, decision, reason and identity return the original record even after a receipt or
-later turn; changed choices/provenance and stale or inherited requests fail `FAILED_PRECONDITION`.
+later turn while the session remains ACTIVE; deleted sessions, changed choices/provenance and stale
+or inherited requests fail `FAILED_PRECONDITION`.
 Missing fields fail `INVALID_ARGUMENT`, unknown UIDs `NOT_FOUND`, and local overlap/CAS/fence conflict
 `ABORTED`.
 
@@ -233,7 +239,9 @@ continuation rather than turning that handled receipt into an RPC transport fail
 
 This gate is stateless only. Identity is provenance, not authorization; there is no policy hook,
 automatic decision, approval timeout or expiry. Snapshots and unresolved requests are retained
-indefinitely. Cancel/DeleteSession remain `UNIMPLEMENTED`; a decision is not cancellation or teardown.
+indefinitely. Cancel remains `UNIMPLEMENTED`; a decision is not cancellation or teardown.
+DeleteSession commits permanent intent without reclaiming resources and refuses all decisions,
+including exact historical retries.
 A fork's inherited unresolved request cannot authorize effects in the child; fork at/after a receipt,
 or explicitly Exec a new turn in the child. See [security.md](security.md) and the
 [executor requirements](harness-authoring.md#host-composition-for-controller-mediated-tools).

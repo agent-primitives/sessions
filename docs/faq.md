@@ -43,12 +43,32 @@ This is how a session with automatic failover still has exactly one writer. If a
 incarnation wakes up and tries to write (a zombie), its stale fence is refused. Fencing plus compare-and-
 swap on append is what makes "single writer" enforceable rather than a hope.
 
-## Can Exec, Suspend, and Resume overlap?
+## Can Exec, Fork, Delete, Suspend, and Resume overlap?
 
-Across all Placers in one Registry, overlapping calls for one session return gRPC `ABORTED` without
-changing compute or the journal. Suspend will not interrupt a running turn. Retry after the active call
-finishes, using the current cursor for Exec. Other sessions remain independent. A standalone Placer
-has its own guard; separate Registries or hosts are not fenced by this local guard.
+Across all Placers in one Registry, Exec, Suspend and Resume refuse conflicting operations for one
+session with gRPC `ABORTED`, without changing compute or the journal. Suspend will not interrupt a
+running turn. Delete also refuses overlap with those operations or a fork's fan-out and rollback.
+Fork holds shared deletion admission instead of the exclusive turn guard: a stateful fork can
+supersede a running turn, and its checkpoint mark remains held through the last child clone.
+Retry refused calls after the holder finishes, using the current cursor for Exec. Other sessions
+remain independent. A standalone Placer has its own guard; separate Registries or hosts are not
+fenced by this local guard.
+
+## Does deleting a session stop its actor or erase its history?
+
+No. `DeleteSession` permanently tombstones the UID and returns `PENDING`: durable intent only, not
+resource release. Until #88 defines ownership and cleanup, actors, snapshots and fork-child pins
+remain retained indefinitely. Delete does not call Stop or report cleanup completion. Get and raw
+Replay still expose the UID, metadata and journal, retained forever; List hides it. There is no cascade,
+erasure or UID reuse. Existing children and grandchildren remain usable and can fork themselves.
+
+Exec, historical Fork, Resume, Suspend and Approve (including exact retries) on the tombstone
+return `FAILED_PRECONDITION`. Repeated Delete preserves the original request timestamp and audit
+chain; Get/delete CLI show the request time. Unknown UID is `NOT_FOUND`; empty UID is
+`INVALID_ARGUMENT`. Local busy is `ABORTED`, without interrupting the holder. The Registry guard is
+local only: another host can provision before its first fence. See
+[deletion semantics](concepts.md#permanent-soft-deletion), including migration and downgrade limits.
+`Cancel` remains unimplemented.
 
 ## Is the provenance chain Go-specific?
 
@@ -135,8 +155,8 @@ for an explicit caller decision. RPC/SDK `Approve` commits only that decision; c
 CLI approve and deny do both, and say "decision committed" if recovery fails. Get/List and final paused
 Exec frames expose the pending tuple at their captured cursor. A decision clears that reference, but
 new input stays blocked until its receipt commits. Identity is not authorization; there is no policy
-hook, timeout or expiry. Snapshots and unresolved requests are retained indefinitely, and Cancel and
-DeleteSession remain `UNIMPLEMENTED`. Tool calls align with the MCP shape (name plus structured
+hook, timeout or expiry. Snapshots and unresolved requests are retained indefinitely, and Cancel
+remains `UNIMPLEMENTED`. DeleteSession commits permanent intent without reclaiming resources. Tool calls align with the MCP shape (name plus structured
 arguments), but the stock daemon has no executor and the bundled model adapter does not map tools;
 this is not a complete MCP/provider integration. See
 [approval recovery](interaction-model.md#approval-decisions-and-recovery).

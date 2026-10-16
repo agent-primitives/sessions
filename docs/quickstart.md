@@ -368,6 +368,38 @@ next, err := c.Exec(ctx, client.ExecOptions{
 `ListSessions` walks pagination for you, `Replay` and `Fork` return slices, and `c.Sessions()`
 returns the generated stub for anything the SDK does not model.
 
+## 10. Permanently tombstone a session (no cleanup)
+
+Use a source build containing DeleteSession; the v0.1.2 archive above predates it. This is
+irreversible for the UID. Do it only after completing any desired execution/fork/resume examples.
+
+```bash
+agentctl delete --journal /tmp/qs.db --session "$SID"
+agentctl get    --journal /tmp/qs.db --session "$SID"
+agentctl replay --journal /tmp/qs.db --session "$SID"
+agentctl list   --journal /tmp/qs.db --project default
+```
+
+Delete/Get report `deletion=PENDING` and the committed RFC3339 request time. PENDING means durable
+intent only until #88 supplies ownership and cleanup: actors, snapshots and fork-child pins remain
+retained indefinitely. No Stop or reclamation is attempted. List hides the UID, but Get and raw
+Replay retain metadata and the full audit chain, including DELETE. Retry returns the original
+timestamps; use Get/retry after a lost response. Exec, historical Fork, Resume, Suspend and Approve
+(including exact retries) now return `FAILED_PRECONDITION`. Existing children remain usable. There
+is no cascade, UID reuse or data erasure; UID, metadata and journal remain forever. See [deletion
+and admission limits](concepts.md#permanent-soft-deletion) before sharing a journal between hosts or
+upgrading its schema.
+
+The SDK returns the raw Session; inspect its deletion state rather than interpreting OK as cleanup:
+
+```go
+deleted, err := c.DeleteSession(ctx, turn.Session.GetMetadata().GetUid())
+if err != nil {
+    return err
+}
+fmt.Println(deleted.GetDeletionState(), deleted.GetDeletionRequestedTime())
+```
+
 ## Where next
 
 - [`concepts.md`](concepts.md): the nouns and why each exists.

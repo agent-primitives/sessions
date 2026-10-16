@@ -164,6 +164,7 @@ const (
 	LifecycleFork     LifecycleKind = "FORK"
 	LifecycleBaseline LifecycleKind = "BASELINE"
 	LifecycleCancel   LifecycleKind = "CANCEL"
+	LifecycleDelete   LifecycleKind = "DELETE" // host-owned permanent intent, not compute teardown
 )
 
 // ModelCall records a call to a model (model-agnostic) for audit and cost.

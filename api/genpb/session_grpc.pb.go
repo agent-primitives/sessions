@@ -42,14 +42,47 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type SessionsClient interface {
 	CreateSession(ctx context.Context, in *CreateSessionRequest, opts ...grpc.CallOption) (*Session, error)
+	// GetSession remains available for audit after deletion, including metadata and deletion intent
+	// time.
 	GetSession(ctx context.Context, in *GetSessionRequest, opts ...grpc.CallOption) (*Session, error)
 	ListSessions(ctx context.Context, in *ListSessionsRequest, opts ...grpc.CallOption) (*ListSessionsResponse, error)
-	// Not implemented: the server returns UNIMPLEMENTED. Declared so the delete path can land
-	// without a breaking change to the service.
+	// DeleteSession commits irreversible soft-deletion intent for a known UID. The host atomically
+	// appends a session-scoped, host-owned LIFECYCLE_DELETE (empty execution_id), advances the writer
+	// fence and marks PENDING. Metadata, the UID and the hash-chained journal are retained forever;
+	// the UID cannot be reused. Children and their copied prefixes are unaffected: no cascade or
+	// data erasure is promised. ListSessions hides the UID; GetSession and raw Sessions.Replay remain
+	// read-only audit access, without reconstructing or running a harness.
+	//
+	// Valid mutation requests against PENDING fail with FAILED_PRECONDITION before routing,
+	// recovery or compute effects: Exec, Fork (including historical at_seq), Resume, Suspend and
+	// Approve are refused, including exact historical decision retries. Pending approval metadata
+	// grants no permission.
+	//
+	// Until ownership and cleanup land (#88), OK + PENDING acknowledges durable intent only. No
+	// Runtime.Stop, actor/pin release, physical snapshot GC or TERMINATED transition is attempted
+	// or promised. Execution and compute reporting stay independent. The retained journal
+	// is audit evidence, not a complete or authoritative cleanup-target inventory; the allocation
+	// ownership and cleanup-target schema belong to #88, not an inferred default harness or owner.
+	// Repeated PENDING deletion returns the identical Session: no timestamp, update_time, journal,
+	// fence or compute-projection changes. Clients must inspect deletion_state, not infer reclamation
+	// from an OK status.
+	//
+	// Empty uid is INVALID_ARGUMENT; an unknown nonempty uid is NOT_FOUND without creating a row.
+	// Overlap with a mutation in the same Registry/host is ABORTED before mutation, without canceling
+	// the holder; retry after it finishes. Storage faults are INTERNAL, cancellation/deadline retain
+	// CANCELLED/DEADLINE_EXCEEDED. An error or lost reply after intent commits cannot undo the hidden
+	// PENDING tombstone or erase its audit evidence: use GetSession or retry to learn the outcome.
+	//
+	// Admission serialization is local to one Registry/host. Durable fences block subsequent writes
+	// from this build's writers; already-open older binaries do not enforce tombstones. A separate
+	// host can provision compute before its first fence; cross-host exclusion of compute effects is
+	// not guaranteed. Operators still need runtime-side resource reconciliation.
 	DeleteSession(ctx context.Context, in *DeleteSessionRequest, opts ...grpc.CallOption) (*Session, error)
 	// Exec runs one execution/turn. The live stream carries committed LogRecords plus
 	// ephemeral Deltas; Replay re-delivers committed records only (read-only).
 	Exec(ctx context.Context, in *ExecRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExecUpdate], error)
+	// Raw read-only audit: remains available for tombstoned UIDs, including LIFECYCLE_DELETE records.
+	// Unlike controller replay, this does not reconstruct or run the harness.
 	Replay(ctx context.Context, in *ReplayRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogRecord], error)
 	// Implemented durable approval decisions for STATELESS_REPLAY executions.
 	// OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple,
@@ -229,14 +262,47 @@ func (c *sessionsClient) Fork(ctx context.Context, in *ForkRequest, opts ...grpc
 // for forward compatibility.
 type SessionsServer interface {
 	CreateSession(context.Context, *CreateSessionRequest) (*Session, error)
+	// GetSession remains available for audit after deletion, including metadata and deletion intent
+	// time.
 	GetSession(context.Context, *GetSessionRequest) (*Session, error)
 	ListSessions(context.Context, *ListSessionsRequest) (*ListSessionsResponse, error)
-	// Not implemented: the server returns UNIMPLEMENTED. Declared so the delete path can land
-	// without a breaking change to the service.
+	// DeleteSession commits irreversible soft-deletion intent for a known UID. The host atomically
+	// appends a session-scoped, host-owned LIFECYCLE_DELETE (empty execution_id), advances the writer
+	// fence and marks PENDING. Metadata, the UID and the hash-chained journal are retained forever;
+	// the UID cannot be reused. Children and their copied prefixes are unaffected: no cascade or
+	// data erasure is promised. ListSessions hides the UID; GetSession and raw Sessions.Replay remain
+	// read-only audit access, without reconstructing or running a harness.
+	//
+	// Valid mutation requests against PENDING fail with FAILED_PRECONDITION before routing,
+	// recovery or compute effects: Exec, Fork (including historical at_seq), Resume, Suspend and
+	// Approve are refused, including exact historical decision retries. Pending approval metadata
+	// grants no permission.
+	//
+	// Until ownership and cleanup land (#88), OK + PENDING acknowledges durable intent only. No
+	// Runtime.Stop, actor/pin release, physical snapshot GC or TERMINATED transition is attempted
+	// or promised. Execution and compute reporting stay independent. The retained journal
+	// is audit evidence, not a complete or authoritative cleanup-target inventory; the allocation
+	// ownership and cleanup-target schema belong to #88, not an inferred default harness or owner.
+	// Repeated PENDING deletion returns the identical Session: no timestamp, update_time, journal,
+	// fence or compute-projection changes. Clients must inspect deletion_state, not infer reclamation
+	// from an OK status.
+	//
+	// Empty uid is INVALID_ARGUMENT; an unknown nonempty uid is NOT_FOUND without creating a row.
+	// Overlap with a mutation in the same Registry/host is ABORTED before mutation, without canceling
+	// the holder; retry after it finishes. Storage faults are INTERNAL, cancellation/deadline retain
+	// CANCELLED/DEADLINE_EXCEEDED. An error or lost reply after intent commits cannot undo the hidden
+	// PENDING tombstone or erase its audit evidence: use GetSession or retry to learn the outcome.
+	//
+	// Admission serialization is local to one Registry/host. Durable fences block subsequent writes
+	// from this build's writers; already-open older binaries do not enforce tombstones. A separate
+	// host can provision compute before its first fence; cross-host exclusion of compute effects is
+	// not guaranteed. Operators still need runtime-side resource reconciliation.
 	DeleteSession(context.Context, *DeleteSessionRequest) (*Session, error)
 	// Exec runs one execution/turn. The live stream carries committed LogRecords plus
 	// ephemeral Deltas; Replay re-delivers committed records only (read-only).
 	Exec(*ExecRequest, grpc.ServerStreamingServer[ExecUpdate]) error
+	// Raw read-only audit: remains available for tombstoned UIDs, including LIFECYCLE_DELETE records.
+	// Unlike controller replay, this does not reconstruct or run the harness.
 	Replay(*ReplayRequest, grpc.ServerStreamingServer[LogRecord]) error
 	// Implemented durable approval decisions for STATELESS_REPLAY executions.
 	// OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple,

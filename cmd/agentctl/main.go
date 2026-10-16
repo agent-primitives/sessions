@@ -11,6 +11,7 @@
 //	agentctl fork    --session <uid> --at N    # branch into a child session
 //	agentctl suspend --session <uid>
 //	agentctl resume  --session <uid>
+//	agentctl delete  --session <uid>          # permanent intent only; compute/pins retained
 //	agentctl approve <uid>                  # commit approval, then Resume
 //	agentctl deny    <uid> --reason "no"    # commit denial, then Resume
 //	agentctl harness register --server 127.0.0.1:8081 --name mine --spec spec.json
@@ -48,6 +49,7 @@ func main() {
 		"create":  cmdCreate,
 		"list":    cmdList,
 		"get":     cmdGet,
+		"delete":  cmdDelete,
 		"exec":    cmdExec,
 		"replay":  cmdReplay,
 		"fork":    cmdFork,
@@ -70,7 +72,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: agentctl <create|list|get|exec|replay|fork|suspend|resume|approve|deny|harness|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: agentctl <create|list|get|delete|exec|replay|fork|suspend|resume|approve|deny|harness|version> [flags]")
 }
 
 type config struct {
@@ -242,13 +244,14 @@ func cmdGet(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("session %s project=%s name=%s harness=%s last_seq=%d compute=%s\n",
+	fmt.Printf("session %s project=%s name=%s harness=%s last_seq=%d compute=%s %s\n",
 		sess.GetMetadata().GetUid(),
 		sess.GetMetadata().GetProject(),
 		sess.GetMetadata().GetName(),
 		sess.GetHarness(),
 		sess.GetLastSeq(),
 		strings.TrimPrefix(sess.GetComputeState().String(), "COMPUTE_"),
+		deletionFields(sess),
 	)
 	return nil
 }

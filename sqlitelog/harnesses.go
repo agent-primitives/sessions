@@ -261,6 +261,9 @@ func (s *Store) PutSessionOnActiveHarness(m SessionMeta, registered bool) error 
 		return fmt.Errorf("sqlitelog: put session %q: %w", m.UID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := checkWritable(tx, m.UID); err != nil {
+		return err
+	}
 	rec, err := harnessByName(tx, m.Harness)
 	switch {
 	case errors.Is(err, ErrHarnessNotFound):

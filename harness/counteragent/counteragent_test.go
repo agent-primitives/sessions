@@ -39,14 +39,17 @@ func TestCounterIncrementsInRAM(t *testing.T) {
 
 // TestMemoryRestoreDoesNotReinitialize is the harness-side I4 contract: a memory-restored sandbox
 // must continue from its in-RAM count, NOT reset to zero. The restore is modeled by reusing the
-// SAME instance (its fields = the snapshot-preserved RAM) and driving a turn with empty History —
-// the count must continue, not restart. A naive `if len(History)==0 { count=0 }` would fail this.
+// SAME instance (its fields = the snapshot-preserved RAM). The turn uses an empty History, the
+// shape of a fresh STATELESS start: the host sends the full prior log after a restore (covered by
+// TestNonEmptyHistoryIsNotAppliedToState), so this guards a harness that resets on an empty
+// History. A naive `if len(History)==0 { count=0 }` would fail this.
 func TestMemoryRestoreDoesNotReinitialize(t *testing.T) {
 	h := &Harness{}
 	sink := &captureSink{}
 	_ = h.Run(context.Background(), &api.Start{}, sink) // count -> 1
 	_ = h.Run(context.Background(), &api.Start{}, sink) // count -> 2 (state before a suspend)
-	// Memory-restore: same instance (RAM preserved), empty History, one more turn.
+	// Same instance (RAM preserved), one more turn with an empty History (a fresh-start shape,
+	// not what the host sends after a restore). It must not reset the count.
 	if err := h.Run(context.Background(), &api.Start{History: nil}, sink); err != nil {
 		t.Fatal(err)
 	}

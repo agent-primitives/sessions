@@ -353,8 +353,9 @@ no flattened lifecycle enum.
   it fails, the harness MUST NOT run.
 - `EXE-3`: One `EVENT_INPUT` per input message MUST follow `EXECUTION_START`. Each later append in
   the execution is made at the current head under the execution's fence.
-- `EXE-4`: Every event the host appends for an execution MUST carry its `execution_id`. The
-  reference host generates a random 16-hexadecimal-character id.
+- `EXE-4`: Every event the host appends for an execution MUST carry its `execution_id`, except
+  records appended while recovering a legacy execution (§8.7), which carry none. The reference
+  host generates a random 16-hexadecimal-character id.
 - `EXE-5`: A successful execution MUST end with `EVENT_END` (`state = "COMPLETED"`). A failed
   execution ends with a best-effort `EVENT_ERROR` and no `EVENT_END`. An execution that parked at
   an approval gate (§10) ends with neither.
@@ -464,7 +465,8 @@ These are named in the reference controller. The numbering is the code's.
   `TOOL_RESULT`, `USAGE`, `END`, `ERROR`, and interleaved `LIFECYCLE` are allowed in it; any other
   kind is an invalid log.
 - The reference host derives a wire execution id for a legacy execution
-  (`legacy-` + hex SHA-256 over the session uid, `seq`, and canonical event) and never journals it.
+  (`legacy-` + hex SHA-256 over the session uid, `seq`, and canonical event) and never journals it:
+  records appended by legacy recovery have an empty `execution_id`.
   Legacy recovery uses only the last `INPUT` and does not re-drive a cut model call.
 
 ## 9. Tool execution and receipts

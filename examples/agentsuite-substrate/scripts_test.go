@@ -175,11 +175,18 @@ fi
 `)
 	stub(t, bin, "ko", log+`echo "localhost:5001/${3##*/}@`+digest+`"`+"\n")
 	// kubectl keeps what it is given on stdin, reports the agentsessionsd-model Secret's
-	// resourceVersion as STUB_SECRET_VERSION, and one stable worker pod.
+	// resourceVersion as STUB_SECRET_VERSION, the agentsessionsd Deployment's arguments with
+	// STUB_DEPLOYED_URL as its -model-base-url (none when it is "none", and no Deployment when it is
+	// "missing"), and one stable worker pod.
 	stub(t, bin, "kubectl", log+`
 case " $* " in
 *" -f - "*) cat >>"$STUB_DIR/kubectl-stdin" ;;
 *" get secret "*) echo "${STUB_SECRET_VERSION:-}" ;;
+*" get deploy agentsessionsd "*)
+	[ "${STUB_DEPLOYED_URL:-}" != missing ] || exit 1
+	echo -addr=:8080
+	[ "${STUB_DEPLOYED_URL:-}" = none ] || echo "-model-base-url=${STUB_DEPLOYED_URL:-}"
+	;;
 *" get pods "*) echo "worker-0=10.0.0.1" ;;
 esac
 `)
@@ -1280,7 +1287,7 @@ func TestDemoRealProviderJournalChecks(t *testing.T) {
 			s := newStubs(t)
 			demoStubs(t, s)
 			code, out, calls := s.run(t, "demo.sh", "STUB_FULL=1", "STUB_FAULT="+tc.fault,
-				"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com")
+				"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com", "STUB_DEPLOYED_URL=https://res.openai.azure.com")
 			if tc.wantOut == "" {
 				if code != 0 {
 					t.Fatalf("demo.sh exit %d, want 0\noutput:\n%s\ncalls:\n%s", code, out, calls)
@@ -1306,6 +1313,60 @@ func TestDemoRealProviderJournalChecks(t *testing.T) {
 			for _, c := range []string{"svc/fakemodel", "curl "} {
 				if strings.Contains(calls, c) {
 					t.Errorf("real-provider demo called %q:\n%s", c, calls)
+				}
+			}
+		})
+	}
+}
+
+// demo.sh takes its provider mode from the deployed daemon: a run whose AGENTSUITE_MODEL_BASE_URL
+// (unset for the fake model) is not the daemon's -model-base-url fails before it forwards a port or
+// runs a turn, so a fake-backed run is never reported as a real provider's, or the reverse.
+func TestDemoRefusesAProviderModeMismatch(t *testing.T) {
+	const fake = "http://fakemodel.agentsuite-demo.svc:8080/v1"
+	for _, tc := range []struct {
+		name     string
+		deployed string // STUB_DEPLOYED_URL
+		env      []string
+		wantOut  string
+	}{{
+		name:     "fake model deployed, real provider asked for",
+		deployed: fake,
+		env:      []string{"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com"},
+		wantOut:  "DEMO FAILED: agentsessionsd was deployed for model " + fake + ", but this run expects https://res.openai.azure.com",
+	}, {
+		name:     "real provider deployed, fake model asked for",
+		deployed: "https://res.openai.azure.com",
+		wantOut:  "DEMO FAILED: agentsessionsd was deployed for model https://res.openai.azure.com, but this run expects " + fake,
+	}, {
+		name:     "another real provider deployed",
+		deployed: "https://other.openai.azure.com",
+		env:      []string{"AGENTSUITE_MODEL_BASE_URL=https://res.openai.azure.com"},
+		wantOut:  "DEMO FAILED: agentsessionsd was deployed for model https://other.openai.azure.com, but this run expects https://res.openai.azure.com",
+	}, {
+		name:     "the fake model's URL asked for as a real provider",
+		deployed: "https://res.openai.azure.com",
+		env:      []string{"AGENTSUITE_MODEL_BASE_URL=" + fake},
+		wantOut:  "DEMO FAILED: agentsessionsd was deployed for model https://res.openai.azure.com, but this run expects " + fake,
+	}, {
+		name:     "no model base URL deployed",
+		deployed: "none",
+		wantOut:  "DEMO FAILED: deployment agentsuite-demo/agentsessionsd has no -model-base-url; run up.sh first",
+	}, {
+		name:     "no daemon deployed",
+		deployed: "missing",
+		wantOut:  "DEMO FAILED: cannot read deployment agentsuite-demo/agentsessionsd; run up.sh first",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStubs(t)
+			demoStubs(t, s)
+			code, out, calls := s.run(t, "demo.sh", append([]string{"STUB_DEPLOYED_URL=" + tc.deployed}, tc.env...)...)
+			if code != 1 || !strings.Contains(out, tc.wantOut) {
+				t.Fatalf("demo.sh exit %d, want 1 with %q\noutput:\n%s", code, tc.wantOut, out)
+			}
+			for _, c := range []string{"port-forward", "agentctl ", "curl "} {
+				if strings.Contains(calls, c) {
+					t.Errorf("demo.sh called %q before refusing the mismatch:\n%s", c, calls)
 				}
 			}
 		})

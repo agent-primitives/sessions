@@ -5,14 +5,6 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
 SERVER=127.0.0.1:18080 ROUTER=127.0.0.1:18081 MODEL=127.0.0.1:18082
-# With a real provider (up.sh with AGENTSUITE_MODEL_BASE_URL) the replies are not the fake's, so the
-# checks on reply text are skipped, and the fake model is neither port-forwarded nor asked for its
-# call counter; the replay still fails if the controller sees a model call. The checks on the
-# journal (inputs, model calls, the fork's prefix, the turns the replay re-ran) hold in both modes,
-# and in real-provider mode each step claims only what they show.
-REAL="${AGENTSUITE_MODEL_BASE_URL:+1}"
-STATS_URL="http://${MODEL}/stats"
-if [[ -n "${REAL}" ]]; then STATS_URL=""; fi
 PIDS=()
 cleanup() { for p in "${PIDS[@]}"; do kill "${p}" 2>/dev/null || true; done; }
 trap cleanup EXIT
@@ -27,6 +19,26 @@ forward() { # namespace service local:remote
 	"${K[@]}" -n "$1" port-forward "svc/$2" "$3" >/dev/null 2>&1 &
 	PIDS+=($!)
 }
+# With a real provider (up.sh with AGENTSUITE_MODEL_BASE_URL) the replies are not the fake's, so the
+# checks on reply text are skipped, and the fake model is neither port-forwarded nor asked for its
+# call counter; the replay still fails if the controller sees a model call. The checks on the
+# journal (inputs, model calls, the fork's prefix, the turns the replay re-ran) hold in both modes,
+# and in real-provider mode each step claims only what they show. The mode is the one up.sh
+# deployed: the daemon's -model-base-url must be the AGENTSUITE_MODEL_BASE_URL this run was given,
+# or the fake model's when it is unset, so a run never labels a fake-backed demo real (and skips the
+# fake's checks), or the reverse.
+DEPLOYED_URL="$("${K[@]}" -n "${NS}" get deploy agentsessionsd \
+	-o jsonpath='{range .spec.template.spec.containers[?(@.name=="agentsessionsd")].args[*]}{@}{"\n"}{end}' |
+	sed -n 's/^-model-base-url=//p')" || fail "cannot read deployment ${NS}/agentsessionsd; run up.sh first"
+[[ -n "${DEPLOYED_URL}" ]] || fail "deployment ${NS}/agentsessionsd has no -model-base-url; run up.sh first"
+WANT_URL="${AGENTSUITE_MODEL_BASE_URL:-${FAKE_MODEL_URL}}"
+if [[ "${DEPLOYED_URL}" != "${WANT_URL}" ]]; then
+	fail "agentsessionsd was deployed for model ${DEPLOYED_URL}, but this run expects ${WANT_URL}: give demo.sh the AGENTSUITE_MODEL_BASE_URL up.sh was given, unset for the fake model"
+fi
+REAL=
+if [[ "${DEPLOYED_URL}" != "${FAKE_MODEL_URL}" ]]; then REAL=1; fi
+STATS_URL="http://${MODEL}/stats"
+if [[ -n "${REAL}" ]]; then STATS_URL=""; fi
 calls() { curl -fsS "http://${MODEL}/stats" | python3 -c 'import json,sys; print(json.load(sys.stdin)["calls"])'; }
 held_snapshot() { # the newest COMPLETED durable snapshot in status.snapshots, as the adapter reads it
 	"${ATE[@]}" get actor "$1" -a "${ATESPACE}" -o json | python3 -c '

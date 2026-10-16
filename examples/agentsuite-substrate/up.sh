@@ -144,7 +144,7 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 		refuse "the model settings (AGENTSUITE_MODEL_BASE_URL, AGENTSUITE_MODEL '${MODEL_ID}', AGENTSUITE_MODEL_PATH, AGENTSUITE_MODEL_AUTH_HEADER) would not start agentsessionsd: ${reason}"
 	fi
 else
-	MODEL_BASE_URL="http://fakemodel.${NS}.svc:8080/v1"
+	MODEL_BASE_URL="${FAKE_MODEL_URL}"
 	MODEL_ID=triage-model
 	MODEL_PATH=/chat/completions
 	MODEL_AUTH_HEADER=Authorization

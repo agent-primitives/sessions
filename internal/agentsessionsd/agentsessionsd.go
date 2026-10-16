@@ -1,8 +1,9 @@
 // Package agentsessionsd is the agentsessionsd server: it serves the Sessions API over TCP.
-// cmd/agentsessionsd calls Main; a build that hosts more than the stock daemon (tool executors, for
-// one) calls it with Options. With -registry-addr it also serves HarnessRegistry on a separate
-// literal-loopback operator listener. The admin API is never registered on the Sessions port;
-// neither listener provides authentication or TLS.
+// cmd/agentsessionsd calls Main; an in-tree daemon build that hosts more than the stock daemon
+// (tool executors, for one) calls it with Options. The package is internal to this module and is
+// not an API for programs outside it. With -registry-addr it also serves HarnessRegistry on a
+// separate literal-loopback operator listener. The admin API is never registered on the Sessions
+// port; neither listener provides authentication or TLS.
 //
 // This binary serves the reference echo harness by default and adds the conversational chat harness
 // when -model is set, each on its own filesystem-only local backend. -harness name=address registers

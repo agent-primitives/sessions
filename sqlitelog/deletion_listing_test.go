@@ -50,9 +50,9 @@ func TestDeletedListingFiltersBeforePagination(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				// Future COMPLETE rows are hidden by the same ACTIVE-only listing contract.
+				// Rows in an unrecognized state are hidden by the same ACTIVE-only listing contract.
 				if len(tc.hidden) > 0 {
-					if _, err := s.db.Exec(`UPDATE sessions SET deletion_state = 'COMPLETE' WHERE session = ?`, tc.hidden[0]); err != nil {
+					if _, err := s.db.Exec(`UPDATE sessions SET deletion_state = 'UNRECOGNIZED' WHERE session = ?`, tc.hidden[0]); err != nil {
 						t.Fatal(err)
 					}
 				}

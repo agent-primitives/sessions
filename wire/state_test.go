@@ -28,7 +28,7 @@ func TestDeletionStateConversion(t *testing.T) {
 			}
 		})
 	}
-	for _, unknown := range []api.DeletionState{"COMPLETE", "UNKNOWN", "DELETED"} {
+	for _, unknown := range []api.DeletionState{"UNRECOGNIZED", "UNKNOWN", "DELETED"} {
 		if got := wire.DeletionStateToProto(unknown); got != v1.DeletionState_DELETION_STATE_UNSPECIFIED {
 			t.Errorf("unknown domain %q = %v, want UNSPECIFIED", unknown, got)
 		}

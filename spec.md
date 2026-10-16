@@ -398,7 +398,7 @@ These are named in the reference controller. The numbering is the code's.
 - `I0`: On reconstruction replay, each model call the harness re-issues MUST have the same
   `input_hash` as the recorded `MODEL_CALL` at that position, its output text MUST equal the
   recorded `OUTPUT` text, and reported usage MUST equal the recorded `USAGE` (except in the legacy
-  execution, `EXE-30`). Any mismatch is divergence (`ErrReplayDiverged`).
+  execution, `EXE-32`). Any mismatch is divergence (`ErrReplayDiverged`).
 - `I1`: Reconstruction replay MUST NOT invoke the model provider or the tool executor. Recorded
   completions and receipts are served from the log.
 - `I3`: A host-executed tool intent recorded without a receipt is re-driven on recovery under the
@@ -419,7 +419,8 @@ These are named in the reference controller. The numbering is the code's.
   unfinished executions remain visible in later executions' history. The legacy execution (§8.7)
   is the exception: a log that is only a legacy prefix is replayed whole even if unfinished, and a
   legacy prefix followed by modern executions is replayed up to its last `END` (not at all if it
-  has none; an `ERROR` does not count here, unlike `EXE-29`).
+  has none; an `ERROR` does not count here, unlike `EXE-29`). `EXE-32` defines how the legacy
+  execution is replayed.
 - `EXE-18`: Before running any harness, reconstruction MUST check every selected execution's
   recorded harness identity (§8.6) and input completeness (§8.6).
 - `EXE-19`: Inputs, config, and `resume_from_seq` MUST come from the journal, not from the caller.
@@ -465,7 +466,11 @@ These are named in the reference controller. The numbering is the code's.
 ### 8.7 Legacy journals
 
 v0.1.x hosts journaled no `execution_id` and no `EXECUTION_START`. The reference host reads those
-journals with v0.1.2 semantics, which differ from §8.1-§8.6 as stated here.
+journals by the rules below, which differ from §8.1-§8.6. They also differ from v0.1.x recovery:
+v0.1.x `Resume` treated a turn as complete only when an `END` followed its last `INPUT`, so it
+re-ran a turn that had ended in `ERROR`. `EXE-29` treats that `ERROR` as completing the legacy
+execution, so `Resume` is a no-op for it. Recovering or replaying a legacy execution also needs a
+session uid (`EXE-30` and the wire execution id below), which v0.1.x did not.
 
 - `EXE-27`: The records at the start of the log, up to the first `EXECUTION_START` or the first
   non-`LIFECYCLE` record that carries an `execution_id`, MUST be read as one legacy execution if
@@ -476,9 +481,8 @@ journals with v0.1.2 semantics, which differ from §8.1-§8.6 as stated here.
   (an unfinished legacy tail), the record that ends it MUST be an `EXECUTION_START`; any other
   record with an `execution_id` there is an invalid log. Reconstruction, recovery, and `Exec`
   raise it before the harness runs and append nothing; `Exec` and `Resume` fail
-  `FAILED_PRECONDITION`. An
-  `EXECUTION_START` supersedes an unfinished legacy tail: `Exec` on such a log starts a new
-  execution and never recovers the tail.
+  `FAILED_PRECONDITION`. An `EXECUTION_START` supersedes an unfinished legacy tail: `Exec` on such
+  a log starts a new execution and never recovers the tail.
 - `EXE-29`: Recovery selects the legacy execution only when no modern record follows it. For
   recovery, the legacy execution is complete if it has no `INPUT`, or if an `END` or an `ERROR`
   follows its last `INPUT`; recovery of a complete legacy execution is a no-op (`EXE-20`). An
@@ -500,8 +504,8 @@ journals with v0.1.2 semantics, which differ from §8.1-§8.6 as stated here.
   - Records it appends carry no `execution_id` (`EXE-4`).
   - Without a session uid it fails (`ErrMissingSessionUID`) before the harness runs and appends
     nothing.
-- Reconstruction runs the replayed legacy prefix (`EXE-17`) as one invocation, as v0.1.2 did:
-  `Start.inputs` is every legacy `INPUT` in it, `Start.history` is that prefix itself, and
+- `EXE-32`: Reconstruction runs the replayed legacy prefix (`EXE-17`) as one invocation, as v0.1.x
+  did: `Start.inputs` is every legacy `INPUT` in it, `Start.history` is that prefix itself, and
   `config` and `resume_from_seq` are empty. Recorded `USAGE` is neither served nor compared. A
   legacy log with more than one turn can therefore fail reconstruction as divergence.
 - The reference host derives a wire execution id for a legacy execution
@@ -1102,8 +1106,10 @@ The reference implementation protects the integrity of the record, not access to
   - A new field in a hashed event changes `content_hash` only when populated. Older binaries that
     drop the field on read fail verification for records that carry it, so every host sharing a
     journal needs the new binary before any of them writes the field.
-  - v0.1.x journals (no `execution_id`, no `EXECUTION_START`) remain readable, with v0.1.2 replay
-    and recovery semantics (§8.7), and verify unchanged.
+  - v0.1.x journals (no `execution_id`, no `EXECUTION_START`) remain readable under §8.7 and verify
+    unchanged. Recovery differs from v0.1.x: an `ERROR` after the last `INPUT` completes the legacy
+    execution (`EXE-29`), so `Resume` no longer re-runs that turn, and recovering or replaying a
+    legacy execution needs a session uid.
   - The reference SQLite store versions its schema with `PRAGMA user_version` (currently 3),
     migrates forward in one transaction without rewriting events or hashes, and refuses a newer or
     negative version.

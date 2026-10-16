@@ -32,9 +32,10 @@ echo "==> (1) golden self-check (stdlib, no deps)"
 echo "==> (2) full audit of the real chain — must PASS"
 "$PY" hack/verify_chain.py --journal "$WORK/journal.db" --descriptor "$WORK/schema.binpb"
 
-# The checked-in journals were written by released (v0.1.2) and current (schema v4) writers. Auditing
-# them here proves the independent verifier still reproduces chains this build did not write. Copies,
-# so opening a journal never leaves side files in the tree.
+# The checked-in journals were written by the released v0.1.2 writer, the unreleased schema v3
+# approval store and the current schema v4 writer. Auditing them here proves the independent verifier
+# still reproduces chains this build did not write. Copies, so opening a journal never leaves side
+# files in the tree.
 for fixture in sqlitelog/testdata/*.db; do
 	echo "==> (2b) audit checked-in journal ${fixture} — must PASS"
 	cp "$fixture" "$WORK/fixture.db"

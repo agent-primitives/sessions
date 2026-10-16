@@ -6,9 +6,11 @@ before opening, so the files here never change during a test run.
 | File | Written by | Read by |
 | --- | --- | --- |
 | `v0.1.2.db` | The v0.1.2 release binaries: `agentctl exec`, `suspend`, `fork -names child-a`. Schema version 1. | `sqlitelog/harnesses_test.go`, `session/harness_registry_test.go` |
+| `approval-v3.db` | The unreleased schema version 3 approval store, through its public API: empty, parked and decided-without-receipt sessions, a retired registration and a reserved static route. Schema version 3. | `sqlitelog/deletion_v3_migration_test.go` |
 | `schema-v4.db` | This module's `session.Service` and `HarnessRegistry` over `sqlitelog`, wired as `agentsessionsd` wires them. Schema version 4. | `session/persisted_format_test.go`, `sqlitelog/harnesses_test.go` |
 
-`hack/verify_chain.sh` also audits every `*.db` here with the independent Python verifier.
+`hack/verify_chain.sh` also audits every `*.db` here with the independent Python verifier, and
+`internal/fuzzcheck.JournalEvents` seeds the fuzz targets that decode an Event from their records.
 
 ## schema-v4.db
 

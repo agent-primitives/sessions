@@ -41,8 +41,8 @@ func Allocs(t testing.TB, n int, fn func()) {
 }
 
 // JournalEvents returns the stored event blobs of every checked-in journal fixture
-// (sqlitelog/testdata/*.db): real records written by released and current writers, which makes
-// them the seed corpus for every target that decodes an Event.
+// (sqlitelog/testdata/*.db): real records written by released, unreleased and current writers,
+// which makes them the seed corpus for every target that decodes an Event.
 func JournalEvents(tb testing.TB) [][]byte {
 	tb.Helper()
 	root, err := moduleRoot()

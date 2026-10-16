@@ -2652,7 +2652,7 @@ const file_common_proto_rawDesc = "" +
 	"\x12\x0f\n" +
 	"\vEVENT_ERROR\x10\v\x12\x19\n" +
 	"\x15EVENT_EXECUTION_START\x10\f\x12\x10\n" +
-	"\fEVENT_PARKED\x10\rB<Z:github.com/aramase/agentsessions/api/genpb;agentsessionsv1b\x06proto3"
+	"\fEVENT_PARKED\x10\rB@Z>github.com/agent-primitives/sessions/api/genpb;agentsessionsv1b\x06proto3"
 
 var (
 	file_common_proto_rawDescOnce sync.Once

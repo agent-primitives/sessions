@@ -1,6 +1,7 @@
 //go:build ignore
 
-// Run from a checkout of v0.1.2, not from the current module; see README.md.
+// Run from a checkout of v0.1.2, not from the current module; see README.md. The imports use the
+// v0.1.2 module path, github.com/aramase/agentsessions, because that is the module it builds in.
 package main
 
 import (

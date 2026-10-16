@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/eventlog"
-	"github.com/aramase/agentsessions/observability"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/observability"
 )
 
 // ResumeInvocation returns a copy of the start marker for the pending execution Resume would

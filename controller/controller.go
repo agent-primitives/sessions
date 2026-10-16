@@ -20,9 +20,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/eventlog"
-	"github.com/aramase/agentsessions/observability"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/observability"
 )
 
 // ErrReplayInvokedModel is returned when a replay caused a live model call — an I1 violation.

@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/model/openai"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/model/openai"
 )
 
 const redirectSecret = "secret-value-must-not-leak"

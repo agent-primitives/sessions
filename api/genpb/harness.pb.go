@@ -815,7 +815,7 @@ const file_harness_proto_rawDesc = "" +
 	"%RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT\x10\x022\xa8\x01\n" +
 	"\aHarness\x12R\n" +
 	"\bDescribe\x12!.agentsessions.v1.DescribeRequest\x1a#.agentsessions.v1.HarnessDescriptor\x12I\n" +
-	"\aConnect\x12!.agentsessions.v1.ControllerFrame\x1a\x17.agentsessions.v1.Event(\x010\x01B<Z:github.com/aramase/agentsessions/api/genpb;agentsessionsv1b\x06proto3"
+	"\aConnect\x12!.agentsessions.v1.ControllerFrame\x1a\x17.agentsessions.v1.Event(\x010\x01B@Z>github.com/agent-primitives/sessions/api/genpb;agentsessionsv1b\x06proto3"
 
 var (
 	file_harness_proto_rawDescOnce sync.Once

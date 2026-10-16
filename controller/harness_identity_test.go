@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/controller"
-	"github.com/aramase/agentsessions/eventlog"
-	"github.com/aramase/agentsessions/sqlitelog"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
+	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/sqlitelog"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )

@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/controller"
-	"github.com/aramase/agentsessions/runtime/substrate"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
+	"github.com/agent-primitives/sessions/runtime/substrate"
 )
 
 // mockControl records the ordered control-plane calls and returns canned actor state, so tests can

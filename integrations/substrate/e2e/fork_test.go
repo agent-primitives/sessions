@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aramase/agentsessions/harness/echoagent"
-	"github.com/aramase/agentsessions/placement"
+	"github.com/agent-primitives/sessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/placement"
 )
 
 // TestForkFanOutFromMemorySnapshot is the claim "logical branching of a fleet of actors from a base

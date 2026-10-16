@@ -10,10 +10,10 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/canon"
-	"github.com/aramase/agentsessions/eventlog"
-	"github.com/aramase/agentsessions/sqlitelog"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/canon"
+	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 func sampleEvents() []api.Event {

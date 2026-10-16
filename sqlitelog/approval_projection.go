@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/aramase/agentsessions/api"
+	"github.com/agent-primitives/sessions/api"
 )
 
 // v2ToV3 is a frozen reporting-only rung. Reducer state is indexed by execution and call:

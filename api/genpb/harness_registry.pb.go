@@ -951,7 +951,7 @@ const file_harness_registry_proto_rawDesc = "" +
 	"\n" +
 	"GetHarness\x12#.agentsessions.v1.GetHarnessRequest\x1a%.agentsessions.v1.HarnessRegistration\x12`\n" +
 	"\rListHarnesses\x12&.agentsessions.v1.ListHarnessesRequest\x1a'.agentsessions.v1.ListHarnessesResponse\x12^\n" +
-	"\rRetireHarness\x12&.agentsessions.v1.RetireHarnessRequest\x1a%.agentsessions.v1.HarnessRegistrationB<Z:github.com/aramase/agentsessions/api/genpb;agentsessionsv1b\x06proto3"
+	"\rRetireHarness\x12&.agentsessions.v1.RetireHarnessRequest\x1a%.agentsessions.v1.HarnessRegistrationB@Z>github.com/agent-primitives/sessions/api/genpb;agentsessionsv1b\x06proto3"
 
 var (
 	file_harness_registry_proto_rawDescOnce sync.Once

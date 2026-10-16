@@ -24,10 +24,10 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/aramase/agentsessions/api"
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/harnesswire"
-	"github.com/aramase/agentsessions/observability"
+	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/harnesswire"
+	"github.com/agent-primitives/sessions/observability"
 )
 
 // Backend implements api.Runtime by serving a single harness over a unix socket (M0). Later the

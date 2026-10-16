@@ -1,7 +1,7 @@
 package chatagent_test
 
 import (
-	"github.com/aramase/agentsessions/harness/chatagent"
+	"github.com/agent-primitives/sessions/harness/chatagent"
 	"testing"
 )
 

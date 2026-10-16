@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/controller"
-	"github.com/aramase/agentsessions/runtime/local"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
+	"github.com/agent-primitives/sessions/runtime/local"
 )
 
 // stubHarness is a placeholder api.Harness the backend serves.

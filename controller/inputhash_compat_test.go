@@ -3,7 +3,7 @@ package controller
 import (
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
+	"github.com/agent-primitives/sessions/api"
 )
 
 // legacyInputHash is hashModelInput(legacyRequest()) computed at origin/main 4c1cead, before

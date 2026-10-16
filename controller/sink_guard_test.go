@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aramase/agentsessions/api"
+	"github.com/agent-primitives/sessions/api"
 )
 
 func TestSinkQueuedCancellation(t *testing.T) {

@@ -85,6 +85,11 @@ not provide.
 
 ### Added
 
+- `agentsessionsd -tool-executors` routes host-mediated tools to operator-run Unix-socket
+  executors. Only routes declaring `durable_dedup: true` dispatch, with a 30s default timeout
+  and 1 MiB frames. Approved-call executor errors become durable `EXECUTOR_ERROR` receipts.
+  Socket paths are limited to 103 bytes on every platform (macOS's stricter `sun_path` limit,
+  reserving its NUL terminator).
 - Optional `ResumeRequest.expected_last_seq` rejects a moved journal head before re-driving a turn.
 - Go SDK `Client.DeleteSession(ctx, uid)` and `agentctl delete --session <uid>` request permanent
   soft deletion. Get/delete CLI report deletion state and requested time; PENDING output explicitly
@@ -152,10 +157,6 @@ not provide.
 
 ### Compatibility
 
-- `agentsessionsd -tool-executors` rejects socket paths longer than 103 bytes at startup on
-  every platform (macOS's stricter `sun_path` limit, reserving its NUL terminator). Dial
-  errors omit the socket path from harness-visible errors and approval receipts; oversized
-  replies report the 1 MiB frame limit rather than EOF.
 - Breaking for turns journaled from a remote harness that sent an empty bytes source. A remote
   harness model request whose file part sets `bytes`, or whose reasoning part sets `opaque_bytes`,
   to empty bytes now hashes the same as one with no source. A turn such a harness journaled before

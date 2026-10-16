@@ -9,8 +9,8 @@
 //	<!-- doccheck: skip REASON -->      not checked, for the reason given (an excerpt, say)
 //
 // decls and body accept a trailing "with DECLS", Go declarations the block assumes exist, for
-// example "with type myHarness = echoagent.Harness". Unused variables and imports are not errors:
-// a block is a fragment of a program, not the whole of one.
+// example "with type myHarness = echoagent.Harness". Unused variables, imports and labels are not
+// errors, since a block is a fragment of a program; every other type error is.
 //
 // Usage: go run ./hack/doccheck [file.md ...]   (default: every tracked *.md file)
 package main
@@ -85,8 +85,23 @@ func main() {
 		}
 		files = strings.Fields(string(out))
 	}
+	checked, skipped, problems, err := check(files)
+	if err != nil {
+		fail("%v", err)
+	}
+	if len(problems) > 0 {
+		for _, p := range problems {
+			fmt.Fprintln(os.Stderr, p)
+		}
+		fail("%d problem(s) in Go blocks in Markdown", len(problems))
+	}
+	fmt.Printf("doccheck: %d Go block(s) type-checked, %d skipped by marker\n", checked, skipped)
+}
+
+// check extracts and type-checks the Go blocks in files. problems lists what is wrong with the
+// blocks, sorted; err is a failure to run the check at all.
+func check(files []string) (checked, skipped int, problems []string, err error) {
 	var blocks []block
-	var problems []string
 	for _, f := range files {
 		bs, errs := extract(f)
 		blocks = append(blocks, bs...)
@@ -116,7 +131,7 @@ func main() {
 	}
 	exports, err := exportData(paths)
 	if err != nil {
-		fail("%v", err)
+		return 0, 0, nil, err
 	}
 	imp := importer.ForCompiler(fset, "gc", func(path string) (io.ReadCloser, error) {
 		file, ok := exports[path]
@@ -126,29 +141,40 @@ func main() {
 		return os.Open(file)
 	})
 
-	checked := 0
 	for i, f := range parsed {
 		if f == nil {
 			continue
 		}
 		checked++
 		conf := types.Config{Importer: imp, Error: func(err error) {
-			var te types.Error
-			if errors.As(err, &te) && te.Soft {
-				return // unused variables and imports: a block is a fragment
+			if unusedError(err) {
+				return
 			}
 			problems = append(problems, err.Error())
 		}}
 		_, _ = conf.Check(fmt.Sprintf("doccheck%d", i), fset, []*ast.File{f}, nil)
 	}
-	if len(problems) > 0 {
-		sort.Strings(problems)
-		for _, p := range problems {
-			fmt.Fprintln(os.Stderr, p)
-		}
-		fail("%d problem(s) in Go blocks in Markdown", len(problems))
-	}
-	fmt.Printf("doccheck: %d Go block(s) type-checked, %d skipped by marker\n", checked, len(blocks)-checked)
+	sort.Strings(problems)
+	return checked, len(blocks) - checked, problems, nil
+}
+
+// unusedRE matches go/types' messages for an unused variable, import or label (go/types
+// stmt.go, resolver.go and labels.go). go/types marks these soft, but it marks some real compile
+// errors soft too ("no new variables on left side of :=", "cannot range over"), so Soft alone is
+// not the test. If a Go release rewords one of these, the gate gets stricter, not weaker.
+var unusedRE = regexp.MustCompile(`^(` + strings.Join([]string{
+	`declared and not used: \w+`,
+	`\w+ declared and not used`,
+	`label \w+ declared and not used`,
+	`"[^"]+" imported and not used`,
+	`"[^"]+" imported as \w+ and not used`,
+}, "|") + `)$`)
+
+// unusedError reports whether err is an unused variable, import or label, which is not an error in
+// a doc block: a block is a fragment of a program, not the whole of one.
+func unusedError(err error) bool {
+	var te types.Error
+	return errors.As(err, &te) && te.Soft && unusedRE.MatchString(te.Msg)
 }
 
 // extract returns the ```go blocks in a Markdown file with their markers. A block without a marker

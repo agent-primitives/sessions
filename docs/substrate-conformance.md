@@ -463,15 +463,16 @@ RESUME marker. These tests prove orchestration and retention behavior, not real 
 
 ## In progress
 
-- **Fork tag lifecycle.** A fork tags the parent (`fork-<child-uid>`) so `CreateActor` can seed the
-  child from it, and each tag owns a full copy of the parent's snapshot. The tag name is derived from
-  the child session UID, so `Stop` deletes it after the child and a failed fork deletes it on the way
-  out. `DeleteSession` permanently tombstones the UID and returns `PENDING`: durable deletion intent
-  only, without calling `Stop` or reclaiming resources. Suspended actors and fork tags remain retained
-  indefinitely. Ownership and cleanup-target persistence, retryable teardown and completion belong
-  to #88; until that lands, operators must reconcile and reclaim actors and fork tags directly in
-  Substrate. There is no automatic retention deadline. One tag per fan-out instead of per child would
-  save N-1 copies, but a shared tag can only be deleted once every child has suspended at least once.
+- **Fork tag lifecycle.** A fork tags the parent (`fork-<child-uid>`) so `CreateActor` can seed
+  the child from it, and each tag owns a full copy of the parent's snapshot. The tag name is
+  derived from the child session UID, so `Stop` deletes it after the child and a failed fork
+  deletes it on the way out. `DeleteSession` permanently tombstones the UID and returns
+  `PENDING`: durable deletion intent only, without calling `Stop` or reclaiming resources.
+  Suspended actors and fork tags remain retained indefinitely. Ownership and cleanup-target
+  persistence, retryable teardown and completion belong to #88; until that lands, operators must
+  reconcile and reclaim actors and fork tags directly in Substrate. There is no automatic
+  retention deadline. One tag per fan-out instead of per child would save N-1 copies, but a
+  shared tag can only be deleted once every child has suspended at least once.
 - **Controller-side I4.** `controller.Exec` sends the full journal as `Start.History` even on the
   post-restore turn; for the general case the controller should send empty `History` on memory-restore.
   The counter's harness-side I4 carries the stateful tier today.

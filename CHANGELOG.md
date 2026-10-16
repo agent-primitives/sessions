@@ -159,8 +159,11 @@ not provide.
   durable intent: no Runtime.Stop, cleanup or resource reclamation is attempted. Actors, snapshots
   and fork pins remain retained until ownership/cleanup work (#88).
   SQLite schema v4 adds the tombstone state, timestamps and audit anchor after approval v3 in one
-  transaction without rewriting old events or hashes; existing sessions stay ACTIVE. Older builds
-  refuse v4 at open time only. Already-open older writers can still append, mint fences and update
+  transaction without rewriting old events or hashes; existing sessions stay ACTIVE. The internal
+  `DeletionComplete` state and `deletion_completed_at` column are reserved for cleanup; this build
+  never writes them, and the completion timestamp remains zero. They are not exposed on the wire.
+  Older builds refuse v4 at open time only. Already-open older writers can still append, mint fences
+  and update
   metadata after DELETE because they do not enforce tombstones. Before the first v4 open, stop
   every older host and embedded `agentctl` process sharing the journal; upgrade all writers before
   restarting them. Back up before upgrading. The new LIFECYCLE_DELETE hash requires a deletion-aware

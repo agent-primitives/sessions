@@ -90,26 +90,27 @@ The cursor and lifecycle status are derived rather than caller-writable:
 
 ### How exec_state is derived
 
-Every Session reply — Create, Get, List, Fork, Resume, Suspend, Approve, Delete and Exec frames — uses
-the same captured projection. No pre-deletion events reports `PENDING`. A valid owned unanswered host request in
-the latest execution (ordered by first-seen non-lifecycle identity) reports `AWAITING` and exposes
-`pending_approval` on ACTIVE sessions. Deleted sessions retain `AWAITING` for audit but expose no
-actionable reference. Requests and decisions match execution ID, call ID and the request's journal
-sequence. Errors and ordinary lifecycle markers do not resolve it; a decision, END, or newer
-execution removes the pending reference.
+Every Session reply — Create, Get, List, Fork, Resume, Suspend, Approve, Delete and Exec frames
+— uses the same captured projection. No pre-deletion event reports `PENDING`. A valid owned
+unanswered host request in the latest execution (ordered by first-seen non-lifecycle identity)
+reports `AWAITING` and exposes `pending_approval` on ACTIVE sessions. Deleted sessions retain
+`AWAITING` for audit but expose no actionable reference. Requests and decisions match execution
+ID, call ID and the request's journal sequence. Errors and ordinary lifecycle markers do not
+resolve it; a decision, END, or newer execution removes the pending reference.
 
 Calls whose TOOL_CALL precedes a child's latest FORK marker are inherited and excluded from
 reporting. A later call in an inherited execution belongs to the child and can report its own
 request. Controller admission, decisions and recovery validate the same per-call ownership rule
 independently of the reporting projection.
 
-Malformed approval-bearing evidence anywhere in the captured history suppresses actionable references,
-matching strict inspection. Malformed nongated histories do not. A projection lagging the journal
-head also suppresses references. If an already-open older writer skips projection updates, later
-appends and deletion do not restore reporting by skipping the missing evidence. A v2→v3 backfill isolates an
-undecodable session, preserving its cursor/metadata but permanently withholding references while
-healthy neighbors remain readable. SQL faults abort the migration. Queries are not integrity checks:
-raw journal reads/Verify and strict commands still detect undecodable evidence.
+Malformed approval-bearing evidence anywhere in the captured history suppresses actionable
+references, matching strict inspection. Malformed nongated histories do not. A projection
+lagging the journal head also suppresses references. If an already-open older writer skips
+projection updates, later appends and deletion do not restore reporting by skipping the missing
+evidence. A v2→v3 backfill isolates an undecodable session, preserving its cursor/metadata but
+permanently withholding references while healthy neighbors remain readable. SQL faults abort the
+migration. Queries are not integrity checks: raw journal reads/Verify and strict commands still
+detect undecodable evidence.
 
 Other histories retain the compatibility `COMPLETED` fallback, including ordinary/legacy interrupted
 turns and decided calls without receipts. That status does not prove completion or admission: an
@@ -147,8 +148,8 @@ Delete preserves the recorded compute state, not a claim that a running actor ha
 `PENDING` acknowledges durable intent only. Until ownership and cleanup are implemented in #88,
 actors, snapshots and fork-child pins remain retained indefinitely: Delete does not call
 `Runtime.Stop`, reclaim resources or report cleanup completion. Metadata and the immutable journal
-preserve route, lineage and snapshot evidence for audit, not an authoritative cleanup-target inventory;
-#88 owns that schema. Do not infer cleanup from gRPC OK.
+preserve route, lineage and snapshot evidence for audit, not an authoritative cleanup-target
+inventory; #88 owns that schema. Do not infer cleanup from gRPC OK.
 
 List hides tombstones before pagination. Get and raw `Sessions.Replay` remain audit reads, including
 `DELETE`; UID, metadata and journal are retained forever. There is no UID reuse, cascade or erasure.
@@ -156,17 +157,18 @@ Existing children and grandchildren retain independent copied prefixes and can c
 Exec, Fork (even at a historical sequence), Resume, Suspend and Approve (including exact historical
 decision retries) refuse a deleted UID with
 `FAILED_PRECONDITION`; neither a new Exec nor restoring a harness can reactivate it. Retrying Delete
-returns the same PENDING snapshot, timestamps, fence, journal and compute projection. DELETE advances
-`last_seq` while preserving captured approval evidence and the execution axis; an empty deleted
-session remains `PENDING`, and a parked request remains `AWAITING` without an actionable reference.
+returns the same PENDING snapshot, timestamps, fence, journal and compute projection. DELETE
+advances `last_seq` while preserving captured approval evidence and the execution axis; an empty
+deleted session remains `PENDING`, and a parked request remains `AWAITING` without an actionable
+reference.
 
-An empty UID is `INVALID_ARGUMENT`, an unknown UID is `NOT_FOUND` without creation, and local overlap
-is `ABORTED` before mutation. Retry busy calls after the holder finishes; use Get or retry after a
-lost response to learn whether intent committed. One Registry serializes Delete, Exec, Fork, Resume,
-Suspend and Approve across its Placers. This is not cross-host compute exclusion: an independent
-host can provision before its first durable fence. This build's writers reject subsequent durable
-writes to tombstones; already-open older writers do not. Follow the
-[v4 rollout order](../CHANGELOG.md#sqlite-v4-rollout) before the first upgraded open.
+An empty UID is `INVALID_ARGUMENT`, an unknown UID is `NOT_FOUND` without creation, and local
+overlap is `ABORTED` before mutation. Retry busy calls after the holder finishes; use Get or
+retry after a lost response to learn whether intent committed. One Registry serializes Delete,
+Exec, Fork, Resume, Suspend and Approve across its Placers. This is not cross-host compute
+exclusion: an independent host can provision before its first durable fence. This build's
+writers reject subsequent durable writes to tombstones; already-open older writers do not.
+Follow the [v4 rollout order](../CHANGELOG.md#sqlite-v4-rollout) before the first upgraded open.
 Direct durable-log wrappers must forward the optional `CheckWritable` preflight to refuse before
 compute; this build's storage write barriers still enforce the permanent tombstone.
 

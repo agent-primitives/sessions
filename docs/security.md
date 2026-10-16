@@ -156,12 +156,13 @@ and cleanup. Actors, snapshots and fork-child pins remain retained indefinitely;
 call Stop, reclaim resources or stop an actor's independent external activity. The retained metadata
 and journal are audit evidence, not a complete inventory of resources to clean up.
 
-UID, metadata and journal remain forever and are available through Get and raw Replay even when List
-hides them. Deletion is neither data erasure nor access revocation; it does not cascade to children.
-Do not store secrets expecting deletion to remove them. Exec, historical Fork, Resume and Suspend are
-refused for the tombstone, but the same-Registry admission guard does not fence another host's compute
-provisioning before its first durable fence. Keep runtime-side reconciliation separate and scoped to
-provable ownership. See [deletion semantics](concepts.md#permanent-soft-deletion).
+UID, metadata and journal remain forever and are available through Get and raw Replay even when
+List hides them. Deletion is neither data erasure nor access revocation; it does not cascade to
+children. Do not store secrets expecting deletion to remove them. Exec, historical Fork, Resume,
+Suspend and Approve (including exact retries) are refused for the tombstone, but the
+same-Registry admission guard does not fence another host's compute provisioning before its
+first durable fence. Keep runtime-side reconciliation separate and scoped to provable ownership.
+See [deletion semantics](concepts.md#permanent-soft-deletion).
 
 ## Approval is not a security policy
 

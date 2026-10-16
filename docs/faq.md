@@ -59,8 +59,9 @@ fenced by this local guard.
 No. `DeleteSession` permanently tombstones the UID and returns `PENDING`: durable intent only, not
 resource release. Until #88 defines ownership and cleanup, actors, snapshots and fork-child pins
 remain retained indefinitely. Delete does not call Stop or report cleanup completion. Get and raw
-Replay still expose the UID, metadata and journal, retained forever; List hides it. There is no cascade,
-erasure or UID reuse. Existing children and grandchildren remain usable and can fork themselves.
+Replay still expose the UID, metadata and journal, retained forever; List hides it. There is no
+cascade, erasure or UID reuse. Existing children and grandchildren remain usable and can fork
+themselves.
 
 Exec, historical Fork, Resume, Suspend and Approve (including exact retries) on the tombstone
 return `FAILED_PRECONDITION`. Repeated Delete preserves the original request timestamp and audit
@@ -156,9 +157,10 @@ CLI approve and deny do both, and say "decision committed" if recovery fails. Ge
 Exec frames expose the pending tuple at their captured cursor. A decision clears that reference, but
 new input stays blocked until its receipt commits. Identity is not authorization; there is no policy
 hook, timeout or expiry. Snapshots and unresolved requests are retained indefinitely, and Cancel
-remains `UNIMPLEMENTED`. DeleteSession commits permanent intent without reclaiming resources. Tool calls align with the MCP shape (name plus structured
-arguments), but the stock daemon has no executor and the bundled model adapter does not map tools;
-this is not a complete MCP/provider integration. See
+remains `UNIMPLEMENTED`. DeleteSession commits permanent intent without reclaiming resources.
+Tool calls align with the MCP shape (name plus structured arguments), but the stock daemon has no
+executor and the bundled model adapter does not map tools; this is not a complete MCP/provider
+integration. See
 [approval recovery](interaction-model.md#approval-decisions-and-recovery).
 
 ## How do I list sessions, and can I trust the compute state I get back?

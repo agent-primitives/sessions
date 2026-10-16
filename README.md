@@ -84,13 +84,13 @@ determinism guarantees are exercised by a replay-conformance suite (`conformance
   commits. Execution and compute axes remain independent. Retained snapshots and unresolved requests
   have no expiry; `Cancel` returns `UNIMPLEMENTED`. See
   [approval recovery](docs/interaction-model.md#approval-decisions-and-recovery) for SDK/CLI examples.
-- **Permanent soft deletion:** `DeleteSession` / `agentctl delete --session <uid>` hides the UID from
-  List and refuses Exec, Fork (including historical forks), Resume, Suspend and Approve (including
-  exact retries). Get and raw Replay remain audit reads; UID, metadata and journal are retained
-  forever, without cascade or erasure.
-  `PENDING` acknowledges durable intent only: actors, snapshots and fork-child pins remain retained
-  indefinitely. No Stop or cleanup is attempted; ownership and reclamation belong to #88. See
-  [deletion semantics and admission limits](docs/concepts.md#permanent-soft-deletion).
+- **Permanent soft deletion:** `DeleteSession` / `agentctl delete --session <uid>` hides the UID
+  from List and refuses Exec, Fork (including historical forks), Resume, Suspend and Approve
+  (including exact retries). Get and raw Replay remain audit reads; UID, metadata and journal
+  are retained forever, without cascade or erasure. `PENDING` acknowledges durable intent only:
+  actors, snapshots and fork-child pins remain retained indefinitely. No Stop or cleanup is
+  attempted; ownership and reclamation belong to #88. See [deletion semantics and admission
+  limits](docs/concepts.md#permanent-soft-deletion).
 
 ## Documentation
 

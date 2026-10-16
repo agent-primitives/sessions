@@ -81,10 +81,11 @@ The `Sessions` service. You implement none of it.
 | `DeleteSession` | permanently tombstone a UID while retaining metadata and journal audit access | available; returns **PENDING**, durable intent only, without stopping resources |
 | `Cancel` | — | declared, **not implemented** |
 
-Treat `Cancel` as unavailable regardless of what a generated client offers. `DeleteSession` hides the
-session from ordinary listings and refuses further mutation, but does not reclaim actors or pins.
-Ownership and cleanup-target persistence and retryable teardown belong to #88; until then, `PENDING`
-means the irreversible tombstone committed, not that resources were released.
+Treat `Cancel` as unavailable regardless of what a generated client offers. `DeleteSession`
+hides the session from ordinary listings and refuses further mutation, but does not reclaim
+actors or pins. Ownership and cleanup-target persistence and retryable teardown belong to #88;
+until then, `PENDING` means the irreversible tombstone committed, not that resources were
+released.
 
 ### Run a turn
 

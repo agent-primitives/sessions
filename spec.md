@@ -753,11 +753,14 @@ invokes no harness and stays a no-op without one.
 - The reference host accepts `Suspend` on a session that is already cold or has never run, and
   appends another `SUSPEND`. `Resume` without a prior `Suspend` is also accepted. The host does not
   check either case itself; whether the call succeeds is up to the backend (`RT-4b`, `RT-4c`).
-  With `runtime/local` and `runtime/remote` both succeed. With `runtime/substrate`, a session that
-  has no actor yet (no successful `Exec` and not a fork child) fails both: `SuspendActor` and
-  `ResumeActor` return `NOT_FOUND`, the reference session service reports `INTERNAL`, and no
-  marker is appended (§13.4). `agentsessionsd` itself does not build substrate placements
-  (`REG-2a`).
+  With `runtime/local` and `runtime/remote` both succeed. With `runtime/substrate`, both fail when
+  no actor exists for the session uid, for example a fresh session before any `Create` reached
+  `CreateActor` (a fork child gets its actor from `Fork`): `SuspendActor` and `ResumeActor` return
+  `NOT_FOUND`, the reference session service reports `INTERNAL`, and no marker is appended
+  (§13.4). A failed `Exec` does not imply that case: when `Create` succeeded and the dial or turn
+  failed, or `CreateActor` succeeded and `Create`'s `ResumeActor` failed, the actor remains, since
+  the host calls no `Stop` (`RT-7`), and a later `Suspend` or `Resume` reaches it.
+  `agentsessionsd` itself does not build substrate placements (`REG-2a`).
 - TODO(spike): Should a repeated `Suspend`, or `Resume` without a prior `Suspend`, be refused or be
   a no-op? Current behavior appends a marker each time the backend call succeeds, and no test pins
   it.
@@ -932,9 +935,9 @@ sequenceDiagram
   rebuild that state from the log.
 - The host does not read `SnapshotRef.memory` to choose a path. It records it on `SUSPEND`
   (`RT-5`) and decides by the harness tier.
-- Neither tier promises that `Suspend`, `Resume`, or a memory-tier fork succeeds before the session
-  has had an incarnation. The host makes the same `Snapshot` and `Restore` calls, and the backend
-  MAY refuse them (`RT-4b`, `RT-4c`).
+- Neither tier promises that `Suspend`, `Resume`, or a memory-tier fork succeeds while the backend
+  has no incarnation for the session. The host makes the same `Snapshot` and `Restore` calls, and
+  the backend MAY refuse them (`RT-4b`, `RT-4c`).
 
 ### 13.2 Admission
 
@@ -975,22 +978,23 @@ The reference host takes it as `placement.Backend` in
   `Identity` are empty. `Fork` receives the child's as `ForkOpts.ChildSessionUID`, and a
   later `Restore` of the child arrives as `{local: child uid}` until the child writes its own
   `SUSPEND` (`RT-4c`).
-- `RT-4b`: `Snapshot` and `Stop` receive an `Incarnation` carrying only `ID` (the session uid).
-  The runtime MUST resolve everything it needs from that uid. The host does not check that the uid
-  has an incarnation: `Suspend` (`OPS-17`) and the memory-tier fork source step (`OPS-25`) call
-  `Snapshot` for a session that may never have had a successful `Create`. A backend MAY fail
-  `Snapshot` for a uid it has no incarnation for; the host returns the error and appends no
-  `SUSPEND` (`RT-5`). `runtime/local` and `runtime/remote` accept it; `runtime/substrate` fails it
-  (§13.4).
+- `RT-4b`: `Snapshot` and `Stop` receive an `Incarnation` carrying only `ID` (the session uid). The
+  runtime MUST resolve everything it needs from that uid. The host does not check that the uid has
+  an incarnation: `Suspend` (`OPS-17`) and the memory-tier fork source step (`OPS-25`) call
+  `Snapshot` for a uid the backend may hold nothing for, for example a `Suspend` before any `Exec`.
+  Whether one exists is the backend's state, not the journal's: a failed `Exec` can leave one behind
+  (`RT-7`). A backend MAY fail `Snapshot` for a uid it has no incarnation for; the host returns the
+  error and appends no `SUSPEND` (`RT-5`). `runtime/local` and `runtime/remote` accept it;
+  `runtime/substrate` fails it (§13.4).
 - `RT-4c`: `Restore` receives this session's own latest `SUSPEND` ref, or `{local: uid}` when the
   session has none (`OPS-19`). A `STATELESS_REPLAY` `Fork` receives `{local: parent uid}`
-  (`OPS-24`). A `REQUIRES_MEMORY_SNAPSHOT` `Fork` receives the ref the parent's
-  `Snapshot(EXTERNAL)` returned in the same call; the host refuses one without `external_uri`
-  before calling `Fork` (`OPS-25`). `Fork` is not told the tier: `runtime/substrate` chooses clone
-  or replay from the descriptor it was built with. `{local: uid}` can name a uid that has never
-  had an incarnation: `Resume` before any `Exec` (§11.5). A backend MAY fail that `Restore`; the
-  host returns the error before it dials and appends nothing. `runtime/local` and `runtime/remote`
-  accept it; `runtime/substrate` fails it (§13.4).
+  (`OPS-24`). A `REQUIRES_MEMORY_SNAPSHOT` `Fork` receives the ref the parent's `Snapshot(EXTERNAL)`
+  returned in the same call; the host refuses one without `external_uri` before calling `Fork`
+  (`OPS-25`). `Fork` is not told the tier: `runtime/substrate` chooses clone or replay from the
+  descriptor it was built with. `{local: uid}` can name a uid the backend holds no incarnation for,
+  for example on `Resume` before any `Exec` (§11.5). A backend MAY fail that `Restore`; the host
+  returns the error before it dials and appends nothing. `runtime/local` and `runtime/remote` accept
+  it; `runtime/substrate` fails it (§13.4).
 - The returned `Incarnation.ID` is used by the reference host only for diagnostics; every in-repo
   backend sets it to the session uid.
 - `RT-4d`: The `Incarnation` returned by `Create` and `Restore` MUST carry an `Address` at which
@@ -1033,9 +1037,15 @@ The reference host takes it as `placement.Backend` in
 - Cold is the session's `compute_state`, which the host derives from the journal (`OPS-17`), not
   a runtime `Status`. A backend with per-session compute suspends it in `Snapshot`; a backend with
   none releases nothing, and its `Status` can still report `LIVE` (§13.4).
-- `RT-6`: `Fork` MUST tear down a partially created child on failure, and MUST return an error
-  wrapping `api.ErrSnapshotSuperseded` when the parent no longer holds the referenced snapshot. The
-  host maps that error to `ABORTED`.
+- `RT-6`: `Fork` MUST tear down a partially created child on failure. A backend that checks the
+  parent before cloning MUST return an error wrapping `api.ErrSnapshotSuperseded` when it finds
+  the parent present but no longer holding the referenced snapshot (resumed, or suspended again
+  with a different one). The host maps that error to `ABORTED`, and a retry at the parent's new
+  head is meaningful. The rule does not cover a parent that cannot be read: `runtime/substrate`
+  returns the `GetActor` error, including `ErrActorNotFound` for an actor deleted outside the
+  host, and the reference session service reports it as `INTERNAL`. A backend that does not check
+  the parent (`runtime/local`, `runtime/remote`, and `runtime/substrate`'s replay fork) never
+  returns the error.
 - `RT-7`: `Stop` is destructive teardown and is not part of suspension. The reference host calls it
   only to roll back a failed fork fan-out (`OPS-27`). It does not call `Stop` when a later step of
   `Exec` or `Resume` fails after `Create` or `Restore` succeeded (the dial, the `RT-3` check, the
@@ -1060,13 +1070,15 @@ The reference host takes it as `placement.Backend` in
   resumes a suspended one, and creates one only when none exists (`RT-4e`). `Snapshot` suspends the
   actor's per-session compute and returns `memory = true` and the snapshot URI substrate reports,
   whatever the harness tier. `Snapshot` and `Restore` call `SuspendActor` and `ResumeActor`
-  without the existence check `Create` makes, so for a session with no actor (no successful
-  `Create` and not a fork child) both fail with the control API's `NOT_FOUND` (substrate module
-  pinned in `integrations/substrate/go.mod`, `cmd/ateapi/internal/controlapi/actor.go`). In that
-  module a `SuspendActor` on a suspended actor and a `ResumeActor` on a running one succeed
-  without doing anything, so a repeated `Suspend` and a `Resume` after an `Exec` without a
-  `Suspend` both succeed. `Fork` clones the parent's snapshot for a `REQUIRES_MEMORY_SNAPSHOT`
-  descriptor and creates a fresh actor otherwise.
+  without the existence check `Create` makes, so when no actor exists for the session uid (for
+  example a fresh session before any `Create` reached `CreateActor`, and not a fork child, or an
+  actor deleted outside the host) both fail with the control API's `NOT_FOUND` (substrate module
+  pinned in `integrations/substrate/go.mod`, `cmd/ateapi/internal/controlapi/actor.go`). A failed
+  `Create` can still leave an actor: `CreateActor` succeeded and the `ResumeActor` after it
+  failed. In the pinned module a `SuspendActor` on a suspended actor and a `ResumeActor` on a
+  running one succeed without doing anything, so a repeated `Suspend` and a `Resume` after an
+  `Exec` without a `Suspend` both succeed. `Fork` clones the parent's snapshot for a
+  `REQUIRES_MEMORY_SNAPSHOT` descriptor and creates a fresh actor otherwise.
   The adapter that talks to agent-substrate is the separate Go module
   [`integrations/substrate`](integrations/substrate/), an example of the runtime contract. The core
   module does not import it; CI asserts `go list -deps ./...` contains no `agent-substrate`

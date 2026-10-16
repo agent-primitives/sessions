@@ -22,9 +22,12 @@
   max-width: 44ch;
 }
 
-/* Prose measure. Starlight's 45rem column runs body text to about 100 characters a line, and the
-   splash column on the landing page to about 150. Cap the running text only: tables, code, figure
-   panels and card grids keep the full column, so the wide figures still frame it. */
+/* Prose measure. The splash column on the landing page runs body text to about 150 characters a
+   line; 68ch brings it back to a readable measure. Cap the running text only: tables, code, figure
+   panels and card grids keep the full column, so the wide figures still frame it.
+   The 72ch docs cap is a ceiling, not a target. ch is the width of "0" in the body font, so 72ch is
+   about 726px with the macOS system font, wider than Starlight's 720px docs column, and the cap
+   only takes effect with fonts whose "0" is narrower than about 10px. */
 .sl-markdown-content :is(p, li, blockquote) {
   max-width: 72ch;
 }

@@ -8,16 +8,29 @@
 
 const targetOf = (hash: string) => {
   if (hash.length < 2) return null;
-  const id = decodeURIComponent(hash.slice(1));
+  let id: string;
+  try {
+    id = decodeURIComponent(hash.slice(1));
+  } catch {
+    // A malformed escape such as #%E0%A4%A cannot name an element on this page.
+    return null;
+  }
   return document.getElementById(id) ?? document.getElementsByName(id)[0] ?? null;
 };
 
+// Opens every closed <details> around the hash target. Returns the target only when it opened one,
+// so the hashchange and page-load paths re-scroll just the links the browser could not have
+// scrolled to. The click path ignores it: it runs before navigation, so the browser scrolls after.
 const reveal = (hash: string) => {
   const target = targetOf(hash);
+  let opened = false;
   for (let d = target?.closest("details"); d; d = d.parentElement?.closest("details")) {
-    d.open = true;
+    if (!d.open) {
+      d.open = true;
+      opened = true;
+    }
   }
-  return target;
+  return opened ? target : null;
 };
 
 if (document.querySelector(".sl-markdown-content details")) {
@@ -25,7 +38,10 @@ if (document.querySelector(".sl-markdown-content details")) {
     const a = (e.target as Element | null)?.closest<HTMLAnchorElement>('a[href^="#"]');
     if (a) reveal(a.hash);
   });
-  window.addEventListener("hashchange", () => reveal(location.hash));
-  // A deep link: open first, then scroll, since the browser scrolled before this ran.
+  // Back, forward and an edited hash fire hashchange after the browser scrolled, so re-scroll once
+  // the row is visible.
+  window.addEventListener("hashchange", () => reveal(location.hash)?.scrollIntoView());
+  // A deep link into a closed <details>: the browser scrolled before this ran, so scroll again once
+  // the row is visible.
   reveal(location.hash)?.scrollIntoView();
 }

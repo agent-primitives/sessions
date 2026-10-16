@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/harness/echoagent"
-	"github.com/aramase/agentsessions/placement"
-	"github.com/aramase/agentsessions/sqlitelog"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/placement"
+	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 // addedPair runs the checkpoint on a static Placer and the turn on a Placer added later with

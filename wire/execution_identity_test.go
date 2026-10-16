@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/canon"
-	"github.com/aramase/agentsessions/wire"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/canon"
+	"github.com/agent-primitives/sessions/wire"
 )
 
 func TestExecutionStartHarnessIdentityRoundTrip(t *testing.T) {

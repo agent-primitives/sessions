@@ -16,8 +16,8 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/canon"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/canon"
 )
 
 // ErrConflict is returned when Append's expectedLastSeq does not equal the log head

@@ -34,7 +34,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aramase/agentsessions/api"
+	"github.com/agent-primitives/sessions/api"
 )
 
 // DefaultBaseURL is the public OpenAI endpoint. Any compatible service works by overriding it.

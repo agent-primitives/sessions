@@ -10,9 +10,9 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"github.com/aramase/agentsessions/api"
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/wire"
+	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/wire"
 )
 
 // TestHarnessStreamIdlePastRouteTimeout holds one harnesswire Connect stream open and idle through

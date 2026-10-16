@@ -7,9 +7,9 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/controller"
-	"github.com/aramase/agentsessions/eventlog"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
+	"github.com/agent-primitives/sessions/eventlog"
 )
 
 // ErrUnknownHarness is returned for a name unknown to this host. session.Service surfaces it as

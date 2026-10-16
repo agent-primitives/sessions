@@ -24,14 +24,14 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/encoding/protowire"
 
-	"github.com/aramase/agentsessions/api"
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/harness/echoagent"
-	"github.com/aramase/agentsessions/placement"
-	"github.com/aramase/agentsessions/runtime/local"
-	"github.com/aramase/agentsessions/session"
-	"github.com/aramase/agentsessions/sqlitelog"
-	"github.com/aramase/agentsessions/wire"
+	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/placement"
+	"github.com/agent-primitives/sessions/runtime/local"
+	"github.com/agent-primitives/sessions/session"
+	"github.com/agent-primitives/sessions/sqlitelog"
+	"github.com/agent-primitives/sessions/wire"
 )
 
 // registryHost is one host process: a store file, two static echo harnesses ("echo" and "echo2"),

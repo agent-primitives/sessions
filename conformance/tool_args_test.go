@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/controller"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
 )
 
 type toolRequestHarness struct{ call api.ToolCall }

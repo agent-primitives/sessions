@@ -20,9 +20,9 @@ builds:
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
-      - -X github.com/aramase/agentsessions/internal/version.version={{.Version}}
-      - -X github.com/aramase/agentsessions/internal/version.commit={{.FullCommit}}
-      - -X github.com/aramase/agentsessions/internal/version.date={{.Date}}
+      - -X github.com/agent-primitives/sessions/internal/version.version={{.Version}}
+      - -X github.com/agent-primitives/sessions/internal/version.commit={{.FullCommit}}
+      - -X github.com/agent-primitives/sessions/internal/version.date={{.Date}}
 
   - id: agentsessionsd
     main: ./cmd/agentsessionsd
@@ -33,9 +33,9 @@ builds:
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
-      - -X github.com/aramase/agentsessions/internal/version.version={{.Version}}
-      - -X github.com/aramase/agentsessions/internal/version.commit={{.FullCommit}}
-      - -X github.com/aramase/agentsessions/internal/version.date={{.Date}}
+      - -X github.com/agent-primitives/sessions/internal/version.version={{.Version}}
+      - -X github.com/agent-primitives/sessions/internal/version.commit={{.FullCommit}}
+      - -X github.com/agent-primitives/sessions/internal/version.date={{.Date}}
 
   # Built for the image only; it is not a user-facing CLI, so it is not archived below.
   - id: harnessnode
@@ -47,9 +47,9 @@ builds:
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
-      - -X github.com/aramase/agentsessions/internal/version.version={{.Version}}
-      - -X github.com/aramase/agentsessions/internal/version.commit={{.FullCommit}}
-      - -X github.com/aramase/agentsessions/internal/version.date={{.Date}}
+      - -X github.com/agent-primitives/sessions/internal/version.version={{.Version}}
+      - -X github.com/agent-primitives/sessions/internal/version.commit={{.FullCommit}}
+      - -X github.com/agent-primitives/sessions/internal/version.date={{.Date}}
 
 # Container images, so a deployment does not have to build its own.
 #
@@ -67,7 +67,7 @@ kos:
     # routes to port 80 and binding it requires root.
     user: "65532:65532"
     repositories:
-      - ghcr.io/aramase/agentsessions/agentsessionsd
+      - ghcr.io/agent-primitives/sessions/agentsessionsd
     # Without this, ko derives the repository from the Go import path and appends an MD5 hash under
     # KO_DOCKER_REPO, which is how v0.1.1 published agentsessionsd-<hash> and left the documented
     # name a 404.
@@ -84,7 +84,7 @@ kos:
     ko_data_creation_time: "{{ .CommitTimestamp }}"
     sbom: spdx
     labels: &image_labels
-      org.opencontainers.image.source: https://github.com/aramase/agentsessions
+      org.opencontainers.image.source: https://github.com/agent-primitives/sessions
       org.opencontainers.image.revision: "{{ .FullCommit }}"
       org.opencontainers.image.version: "{{ .Version }}"
       org.opencontainers.image.licenses: Apache-2.0
@@ -96,7 +96,7 @@ kos:
     main: ./cmd/harnessnode
     base_image: gcr.io/distroless/static-debian13
     repositories:
-      - ghcr.io/aramase/agentsessions/harnessnode
+      - ghcr.io/agent-primitives/sessions/harnessnode
     bare: true
     platforms: [linux/amd64, linux/arm64]
     tags:
@@ -131,7 +131,7 @@ changelog:
   # not turn into a link in a release body, so the most useful reference in each line is unreachable.
   # Abbreviating keeps the line readable; a short SHA still resolves.
   abbrev: 7
-  format: "[`{{ .SHA }}`](https://github.com/aramase/agentsessions/commit/{{ .SHA }}) {{ .Message }}"
+  format: "[`{{ .SHA }}`](https://github.com/agent-primitives/sessions/commit/{{ .SHA }}) {{ .Message }}"
   # Conventional Commits are enforced by convention in CONTRIBUTING, so the notes group by type
   # rather than dumping a flat list.
   groups:
@@ -188,8 +188,8 @@ release:
     **Container images**
 
     ```
-    ghcr.io/aramase/agentsessions/agentsessionsd:{{ .Tag }}
-    ghcr.io/aramase/agentsessions/harnessnode:{{ .Tag }}
+    ghcr.io/agent-primitives/sessions/agentsessionsd:{{ .Tag }}
+    ghcr.io/agent-primitives/sessions/harnessnode:{{ .Tag }}
     ```
 
     Multi-arch (amd64 and arm64), built with ko from the tagged source, each with an SBOM pushed

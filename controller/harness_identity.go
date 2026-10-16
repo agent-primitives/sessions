@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/aramase/agentsessions/api"
+	"github.com/agent-primitives/sessions/api"
 )
 
 const describeTimeout = 10 * time.Second

@@ -6,9 +6,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/controller"
-	"github.com/aramase/agentsessions/sqlitelog"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
+	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 // historyAwareHarness reconstructs model context from completed prior turns, then appends the

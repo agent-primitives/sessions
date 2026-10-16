@@ -3,7 +3,7 @@ package eventlog
 import (
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
+	"github.com/agent-primitives/sessions/api"
 )
 
 func out(text string) api.Event {

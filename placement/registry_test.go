@@ -6,9 +6,9 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/aramase/agentsessions/harness/echoagent"
-	"github.com/aramase/agentsessions/placement"
-	"github.com/aramase/agentsessions/runtime/local"
+	"github.com/agent-primitives/sessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/placement"
+	"github.com/agent-primitives/sessions/runtime/local"
 )
 
 func newPlacer(t *testing.T) *placement.Placer {

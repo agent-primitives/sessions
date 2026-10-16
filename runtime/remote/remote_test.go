@@ -13,15 +13,15 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/aramase/agentsessions/api"
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/eventlog"
-	"github.com/aramase/agentsessions/harness/counteragent"
-	"github.com/aramase/agentsessions/harness/echoagent"
-	"github.com/aramase/agentsessions/harnesswire"
-	"github.com/aramase/agentsessions/placement"
-	"github.com/aramase/agentsessions/runtime/remote"
-	"github.com/aramase/agentsessions/sqlitelog"
+	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/harness/counteragent"
+	"github.com/agent-primitives/sessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/harnesswire"
+	"github.com/agent-primitives/sessions/placement"
+	"github.com/agent-primitives/sessions/runtime/remote"
+	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 // serveHarness runs a harness on its own listener, the way an operator would run one out of band,

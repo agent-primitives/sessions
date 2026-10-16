@@ -22,8 +22,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/client"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/client"
 )
 
 func registryClient(t *testing.T, addr string) v1.HarnessRegistryClient {

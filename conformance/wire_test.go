@@ -13,11 +13,11 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
-	"github.com/aramase/agentsessions/api"
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/controller"
-	"github.com/aramase/agentsessions/harness/echoagent"
-	"github.com/aramase/agentsessions/harnesswire"
+	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/controller"
+	"github.com/agent-primitives/sessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/harnesswire"
 )
 
 // wireHarness runs the echo harness in a gRPC Harness server (bufconn) and returns an api.Harness

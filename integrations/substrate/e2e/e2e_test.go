@@ -26,13 +26,13 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/eventlog"
+	ateadapter "github.com/agent-primitives/sessions/integrations/substrate"
+	"github.com/agent-primitives/sessions/placement"
+	"github.com/agent-primitives/sessions/runtime/substrate"
+	"github.com/agent-primitives/sessions/sqlitelog"
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/eventlog"
-	ateadapter "github.com/aramase/agentsessions/integrations/substrate"
-	"github.com/aramase/agentsessions/placement"
-	"github.com/aramase/agentsessions/runtime/substrate"
-	"github.com/aramase/agentsessions/sqlitelog"
 )
 
 // Template names the suite creates in the template atespace (see templates_test.go).

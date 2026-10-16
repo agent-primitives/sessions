@@ -27,8 +27,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/observability"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/observability"
 )
 
 // ActorStatus is substrate's actor lifecycle, narrowed to what the backend maps.

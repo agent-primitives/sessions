@@ -5,9 +5,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/wire"
+	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/wire"
 	"google.golang.org/protobuf/proto"
 )
 

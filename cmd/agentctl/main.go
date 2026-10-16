@@ -28,15 +28,15 @@ import (
 
 	"google.golang.org/grpc"
 
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/client"
-	"github.com/aramase/agentsessions/harness/echoagent"
-	"github.com/aramase/agentsessions/internal/version"
-	"github.com/aramase/agentsessions/observability"
-	"github.com/aramase/agentsessions/placement"
-	"github.com/aramase/agentsessions/runtime/local"
-	"github.com/aramase/agentsessions/session"
-	"github.com/aramase/agentsessions/sqlitelog"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/client"
+	"github.com/agent-primitives/sessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/internal/version"
+	"github.com/agent-primitives/sessions/observability"
+	"github.com/agent-primitives/sessions/placement"
+	"github.com/agent-primitives/sessions/runtime/local"
+	"github.com/agent-primitives/sessions/session"
+	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 func main() {

@@ -1,9 +1,9 @@
 # Changelog
 
 Release notes are generated from commits and published on the
-[releases page](https://github.com/aramase/agentsessions/releases). This file records what a reader
-needs to know beyond a commit list: what a release means for compatibility, and what it does not
-provide.
+[releases page](https://github.com/agent-primitives/sessions/releases). This file records what a
+reader needs to know beyond a commit list: what a release means for compatibility, and what it does
+not provide.
 
 ## Unreleased
 
@@ -131,6 +131,10 @@ provide.
 
 ### Compatibility
 
+- The Go module path is now `github.com/agent-primitives/sessions`; v0.1.x remain available at
+  `github.com/aramase/agentsessions`. Container images move to `ghcr.io/agent-primitives/sessions`.
+  One binary cannot link both module paths: both register the same proto files, and protobuf-go
+  panics at init (`file "common.proto" is already registered`). Move every dependency together.
 - `Exec` refuses a stateless harness override when the session's served stored harness requires
   memory snapshots (`FAILED_PRECONDITION`, before any fence or journal write). `Resume` and
   no-input Exec recovery also refuse an older interrupted override before compute changes or

@@ -14,8 +14,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/agent-primitives/sessions/runtime/substrate"
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
-	"github.com/aramase/agentsessions/runtime/substrate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

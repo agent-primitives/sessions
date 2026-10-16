@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/model/openai"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/model/openai"
 )
 
 // newClient points a client at a stub endpoint. Every test here runs against httptest, so the

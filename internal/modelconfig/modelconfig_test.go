@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/internal/modelconfig"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/internal/modelconfig"
 )
 
 func TestNewAppliesExplicitConfig(t *testing.T) {

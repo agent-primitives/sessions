@@ -8,11 +8,11 @@ import (
 	"net/netip"
 	"strconv"
 
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/controller"
-	"github.com/aramase/agentsessions/placement"
-	"github.com/aramase/agentsessions/runtime/remote"
-	"github.com/aramase/agentsessions/session"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/controller"
+	"github.com/agent-primitives/sessions/placement"
+	"github.com/agent-primitives/sessions/runtime/remote"
+	"github.com/agent-primitives/sessions/session"
 )
 
 // checkRegistryAddress deliberately does not resolve names: the admin API is unauthenticated,

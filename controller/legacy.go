@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/canon"
-	"github.com/aramase/agentsessions/eventlog"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/canon"
+	"github.com/agent-primitives/sessions/eventlog"
 )
 
 // legacyPrefix recognizes only the ID-less kinds persisted by v0.1.2. An execution ID or

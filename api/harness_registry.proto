@@ -14,7 +14,7 @@ syntax = "proto3";
 
 package agentsessions.v1;
 
-option go_package = "github.com/aramase/agentsessions/api/genpb;agentsessionsv1";
+option go_package = "github.com/agent-primitives/sessions/api/genpb;agentsessionsv1";
 
 import "common.proto";
 import "harness.proto";

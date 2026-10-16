@@ -1,8 +1,8 @@
 package eventlog
 
 import (
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/wire"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/wire"
 )
 
 // RecordToProto wraps a committed Record as a wire LogRecord: the host-assigned envelope

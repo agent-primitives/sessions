@@ -12,13 +12,13 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/aramase/agentsessions/api"
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/harness/echoagent"
-	"github.com/aramase/agentsessions/placement"
-	"github.com/aramase/agentsessions/runtime/local"
-	"github.com/aramase/agentsessions/sqlitelog"
-	"github.com/aramase/agentsessions/wire"
+	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/placement"
+	"github.com/agent-primitives/sessions/runtime/local"
+	"github.com/agent-primitives/sessions/sqlitelog"
+	"github.com/agent-primitives/sessions/wire"
 )
 
 // Only the first turn waits, allowing a missing guard to reveal itself instead of deadlocking.

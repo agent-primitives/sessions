@@ -6,11 +6,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/harness/echoagent"
-	"github.com/aramase/agentsessions/placement"
-	"github.com/aramase/agentsessions/runtime/local"
-	"github.com/aramase/agentsessions/sqlitelog"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/placement"
+	"github.com/agent-primitives/sessions/runtime/local"
+	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 // impostor is a STATELESS_REPLAY harness that reports a descriptor id other than echo's, so only

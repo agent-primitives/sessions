@@ -1,6 +1,6 @@
 package eventlog
 
-import "github.com/aramase/agentsessions/api"
+import "github.com/agent-primitives/sessions/api"
 
 // Store is the error-returning event-log contract the controller depends on, so it can run
 // against either the in-memory Log (via AsStore) or the persistent sqlitelog.Log interchangeably.

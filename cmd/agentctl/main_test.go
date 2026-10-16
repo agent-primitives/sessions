@@ -10,9 +10,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/sqlitelog"
-	"github.com/aramase/agentsessions/wire"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/sqlitelog"
+	"github.com/agent-primitives/sessions/wire"
 )
 
 func TestExecHarnessFlag(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
+	"github.com/agent-primitives/sessions/api"
 )
 
 // captureSink records Output deltas; the counter only ever calls Output.

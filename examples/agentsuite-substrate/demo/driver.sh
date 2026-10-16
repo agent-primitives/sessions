@@ -543,7 +543,9 @@ diagram() {
 show() {
 	[[ -x "${WORK}/bin/agentctl" && -x "${WORK}/bin/replay" && -x "${WORK}/bin/emit" && -x "${WORK}/bin/harness" && -s "${EXPIRY_FILE}" ]] || fail "run driver.sh setup first"
 	rm -f "${LOGS}"/ch-*.log "${LOGS}/timeline.tsv"
-	rm -rf "${LOGS}/trace" /tmp/render /tmp/render-memory /tmp/render-arm64 /tmp/tampered "${TRACE_DIR}" /tmp/turn*.txt /tmp/mem*.txt /tmp/child*.txt /tmp/parent.txt /tmp/replayed.txt
+	# Exactly the paths the on-screen commands below write, never a glob: on a host /tmp is shared.
+	rm -rf "${LOGS}/trace" /tmp/render /tmp/render-memory /tmp/render-arm64 /tmp/tampered "${TRACE_DIR}"
+	rm -f /tmp/turn1.txt /tmp/turn2.txt /tmp/mem1.txt /tmp/mem2.txt /tmp/replayed.txt /tmp/child.txt /tmp/parent.txt
 	forwards
 	wait_apis >/dev/null || fail "the Sessions APIs did not answer"
 	STEP_LOG="${LOGS}/show.log"

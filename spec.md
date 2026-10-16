@@ -4,7 +4,7 @@
 
 **Version:** `0.2.0-draft`
 
-**Last updated:** October 15, 2026
+**Last updated:** October 16, 2026
 
 ## Abstract
 
@@ -50,7 +50,8 @@ Unless stated otherwise:
 - **Harness**: an agent implementation that serves the `Harness` service, or the in-process Go
   `api.Harness` interface. It runs one execution per invocation.
 - **Producer**: a client of the Sessions API (an issue tracker, chat platform, or application).
-- **Runtime**: a compute backend implementing the `api.Runtime` Go interface.
+- **Runtime**: a compute backend implementing the `api.Runtime` Go interface plus `Describe`
+  (§13.3).
 - **Session**: a durable resource identified by a `uid`, with an event log and session metadata.
 - **Execution** (turn): one invocation of a harness against a session, identified by an
   `execution_id`.
@@ -105,7 +106,7 @@ This draft does not specify:
 | Sessions host | `Sessions` service, controller semantics, harness driving | §5, §6.3 to §6.5, §8 to §12, §13.1 to §13.3, §15 |
 | Event-log store | the append, head, fence, read and verify contract | §6, §7 |
 | Harness | `Harness` service (`Describe`, `Connect`) or `api.Harness` | §8.4, §9, §10.3, §12 |
-| Runtime backend | `api.Runtime` | §13 |
+| Runtime backend | `api.Runtime` plus `Describe` (§13.3) | §13 |
 | Chain verifier | independent recomputation of `content_hash` | §7 |
 
 An implementation MAY claim several classes. Passing one class does not imply another.
@@ -116,7 +117,7 @@ flowchart LR
   O[Operator] -->|HarnessRegistry gRPC, separate listener| H
   H -->|append / read / fence| L[(Event-log store)]
   H -->|Describe, Connect| N[Harness]
-  H -->|Create, Snapshot, Restore, Fork, Stop| R[Runtime backend]
+  H -->|Describe, Create, Snapshot, Restore, Fork, Stop| R[Runtime backend]
   V[Chain verifier] -->|reads| L
 ```
 
@@ -147,7 +148,9 @@ flowchart LR
 A session reports an execution axis (`exec_state`) and a compute axis (`compute_state`). There is
 no flattened lifecycle enum.
 
-- `SES-7`: `exec_state` MUST be derived from the log at `last_seq`:
+- `SES-7`: `exec_state` MUST be derived from the log at `last_seq`, by reading it or from a
+  projection updated in the same transaction as the append (`LOG-8`), which is what the reference
+  host reads. The value is:
   - `EXEC_AWAITING` when a valid, owned, unanswered host approval request exists in the latest
     execution (§10);
   - otherwise `EXEC_PENDING` when `last_seq = 0`;
@@ -333,8 +336,9 @@ no flattened lifecycle enum.
   implementation. `hack/verify_chain.sh` runs it against a recorded journal and against a tampered
   copy, which must fail.
 - TODO(spike): The independent verifier is exercised on golden vectors and echo-harness journals.
-  It is not verified to match the Go encoder for floating-point `Struct` numbers or timestamps with
-  fractional seconds.
+  The tool-call vector pins one exactly representable float (`1.5`). Parity with the Go encoder is
+  not verified for floats that are not exactly representable or that serialize in exponent form
+  (for example `0.1`, `1e21`, `-0`), or for timestamps with fractional seconds.
 
 ### 7.5 Related digests
 
@@ -834,7 +838,11 @@ invokes no harness and stays a no-op without one.
   in the reference host, never extending an earlier caller deadline); a failure appends nothing.
 - `WIRE-2`: `version` is owned by the harness author and MUST change when deterministic execution
   or config interpretation changes. It round-trips verbatim, including empty.
-- `WIRE-3`: On the wire, `RESUMABILITY_UNSPECIFIED` is read as `STATELESS_REPLAY`.
+- `WIRE-3`: On the wire, the host reads `RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT` as that tier and
+  every other value as `STATELESS_REPLAY`: `RESUMABILITY_UNSPECIFIED`, a number this host does not
+  know, and an absent `capabilities` message.
+- TODO(spike): Should an unknown `Resumability` number be refused instead of read as
+  `STATELESS_REPLAY`? A harness declaring a tier added later is placed as the weakest one.
 
 ### 12.2 Connect
 
@@ -901,22 +909,35 @@ sequenceDiagram
 
 | Tier | Requires from the runtime | Suspend | Resume | Fork |
 |---|---|---|---|---|
-| `STATELESS_REPLAY` | nothing | snapshot reference only; no memory | recreate and reconstruct from the log | no snapshot; copy the log prefix; any `at_seq` |
-| `REQUIRES_MEMORY_SNAPSHOT` | `memory_snapshot` | memory snapshot | restore memory; continue | snapshot parent once at head; clone children |
+| `STATELESS_REPLAY` | nothing | `Snapshot(EXTERNAL)`; memory capture not required | `Restore`; reconstruct from the log | no snapshot; copy the log prefix; any `at_seq` |
+| `REQUIRES_MEMORY_SNAPSHOT` | `memory_snapshot` | `Snapshot(EXTERNAL)` capturing memory | `Restore` memory; continue | snapshot parent once at head; clone children |
+
+- The tier states what the host relies on, not what a backend captures. `CanPlace` admits a
+  `STATELESS_REPLAY` harness on any runtime (`RT-2`), and `Suspend` and `Resume` make the same
+  runtime calls for both tiers (`OPS-17`, `OPS-19`).
+- For `STATELESS_REPLAY` the host relies only on the log: it sends the full prior log on every
+  start (`EXE-7`) and reconstructs from it (§8.6). A backend MAY capture memory anyway and report
+  `memory = true` (`RT-5`); `runtime/substrate` does, `runtime/local` and `runtime/remote` do not
+  (§13.4). Its `Restore` MAY recreate the incarnation or bring back what it captured.
+- For `REQUIRES_MEMORY_SNAPSHOT` the host relies on the backend: `Restore`, and `Create` on a
+  suspended session (`RT-4e`), MUST bring back the captured memory, because the harness does not
+  rebuild that state from the log.
+- The host does not read `SnapshotRef.memory` to choose a path. It records it on `SUSPEND`
+  (`RT-5`) and decides by the harness tier.
 
 ### 13.2 Admission
 
 - `RT-1`: Before `Create` (Exec), `Restore` (Resume), and the fork source step, the host MUST run,
-  in order: `Describe` (bounded, `WIRE-1`); the expected descriptor id check if the harness was
-  configured with one (`ErrDescriptorMismatch`); then `CanPlace` (`ErrUnplaceable`). Both refusals
-  are `FAILED_PRECONDITION`.
+  in order: the backend's `Describe` (`RT-4f`, bounded as in `WIRE-1`); the expected descriptor
+  id check if the harness was configured with one (`ErrDescriptorMismatch`); then `CanPlace`
+  (`ErrUnplaceable`). Both refusals are `FAILED_PRECONDITION`.
 - `RT-2`: `CanPlace` MUST refuse a `REQUIRES_MEMORY_SNAPSHOT` harness on a runtime without
   `memory_snapshot`. It checks nothing else: `requires_gpu`, `fork_safe`, `streaming`, `cow_fork`,
   `attest`, and `gpu_state` are not compared.
-- `RT-3`: For a backend whose harness is live behind an address (it describes the live harness),
-  `Exec` and `Resume` MUST repeat the admission check on the execution's own connection after the
-  host opens the execution's harness client, before it opens the `Harness.Connect` stream and
-  mints the turn's regular writer fence, because a second dial can reach a different replica.
+- `RT-3`: For a backend that reports a live harness (`RT-4g`), `Exec` and `Resume` MUST repeat the
+  admission check on the execution's own connection after the host opens the execution's harness
+  client, before it opens the `Harness.Connect` stream and mints the turn's regular writer fence,
+  because a second dial can reach a different replica.
 - `RT-3` does not cover fences minted before the execution has a connection:
   - the approval repair fence (`APR-13`), minted before admission; that call parks and returns
     without admission or a connection;
@@ -929,21 +950,28 @@ sequenceDiagram
 
 ### 13.3 Runtime SPI
 
-The runtime contract is the Go interface `api.Runtime` in [`api/runtime.go`](api/runtime.go). It
-is not a wire protocol in this draft.
+The runtime contract is Go, not a wire protocol in this draft. A backend is the interface
+`api.Runtime` in [`api/runtime.go`](api/runtime.go) plus `Describe(ctx) (api.Descriptor, error)`.
+The reference host takes it as `placement.Backend` in
+[`placement/placement.go`](placement/placement.go) (`placement.New`); a type that implements only
+`api.Runtime` cannot be attached to it.
 
-- `RT-4`: Methods: `Create`, `Snapshot(kind)`, `Restore(ref)`, `Fork(ref)`, `Stop`, `Status`,
-  `Capabilities`. The host identifies an incarnation only by the session uid and keeps no runtime
-  handle between calls.
+- `RT-4`: Methods: `Describe`, `Create`, `Snapshot(kind)`, `Restore(ref)`, `Fork(ref)`, `Stop`,
+  `Status`, `Capabilities`. The host identifies an incarnation only by the session uid and keeps no
+  runtime handle between calls.
 - `RT-4a`: A runtime MUST key each incarnation by its session uid. `Create` receives it as
-  `SessionSpec.SessionUID`; `Fork` receives the child's as `ForkOpts.ChildSessionUID`, and a
+  `SessionSpec.SessionUID`, the only field the reference host sets; `Image`, `Harness`, and
+  `Identity` are empty. `Fork` receives the child's as `ForkOpts.ChildSessionUID`, and a
   later `Restore` of the child arrives as `{local: child uid}` until the child writes its own
   `SUSPEND` (`RT-4c`).
 - `RT-4b`: `Snapshot` and `Stop` receive an `Incarnation` carrying only `ID` (the session uid).
   The runtime MUST resolve everything it needs from that uid.
 - `RT-4c`: `Restore` receives this session's own latest `SUSPEND` ref, or `{local: uid}` when the
   session has none (`OPS-19`). A `STATELESS_REPLAY` `Fork` receives `{local: parent uid}`
-  (`OPS-24`).
+  (`OPS-24`). A `REQUIRES_MEMORY_SNAPSHOT` `Fork` receives the ref the parent's
+  `Snapshot(EXTERNAL)` returned in the same call; the host refuses one without `external_uri`
+  before calling `Fork` (`OPS-25`). `Fork` is not told the tier: `runtime/substrate` chooses clone
+  or replay from the descriptor it was built with.
 - The returned `Incarnation.ID` is used by the reference host only for diagnostics; every in-repo
   backend sets it to the session uid.
 - `RT-4d`: The `Incarnation` returned by `Create` and `Restore` MUST carry an `Address` at which
@@ -952,13 +980,35 @@ is not a wire protocol in this draft.
   harness, replacing any value set for the same keys. `CallMetadata` is routing (for example,
   naming a sandbox behind a shared ingress), not authentication. The reference host discards the
   `Incarnation` returned by `Fork`; a child is reached through its own later `Create` or `Restore`.
+- `RT-4e`: The host calls `Create` at the start of every `Exec`, not only the first. It passes no
+  snapshot ref, and the uid can already have an incarnation: a live one from an earlier turn, a
+  forked child's from `Fork`, or a suspended one, since `Exec` on a cold session goes through
+  `Create`, not `Restore`. `Create` MUST NOT fail because the incarnation exists. For a
+  `REQUIRES_MEMORY_SNAPSHOT` harness it MUST attach to a live incarnation and bring back a
+  suspended one's captured memory rather than start a fresh one; `runtime/substrate` does both. A
+  `STATELESS_REPLAY` backend MAY start fresh, since the host sends the full log (`EXE-7`).
+- `RT-4f`: `Describe` returns the harness descriptor the host admits on. It MUST NOT provision
+  compute: the host calls it before `Create`, `Restore`, and the fork source step (`RT-1`), in the
+  memory-tier override check (`OPS-7`), and when the registry reports a harness's observed
+  descriptor. A backend returns either a declaration fixed when it was built (`runtime/substrate`)
+  or the descriptor of a harness it asks (`runtime/local` in process, `runtime/remote` over the
+  network).
+- `RT-4g`: A backend whose `Describe` asks whichever harness answers at an address, so the answer
+  can differ from the harness a turn's own connection reaches, MUST say so with a
+  `DescribesLiveHarness() bool` method that returns true (`placement.LiveDescriber`;
+  `runtime/remote` does). That is the only trigger for the repeated check of `RT-3`. Such a
+  backend MUST provision nothing in `Create` and `Restore`: a refusal at the repeated check closes
+  the dial and returns, and the host never calls `Stop` for it (`RT-7`), so anything provisioned
+  would leak.
 - `RT-5`: `Snapshot(EXTERNAL)` is the suspend step. It MUST return a `SnapshotRef` that a later
   `Restore` can use, and its `local` MUST equal the session uid. Resume ignores a `SUSPEND` ref
   whose `local` names another session (it treats it as inherited from a fork parent, `OPS-19`)
   and falls back to an earlier `SUSPEND` of its own, or `{local: uid}`, so a runtime that puts its
   own handle in `local` loses the captured state. `memory = true` only if process memory was
-  captured. The host stores the ref on the `LIFECYCLE_SUSPEND` record (`snapshot_local`,
-  `snapshot_external_uri`, `snapshot_memory`, `snapshot_sealed`); there is no side table.
+  captured; either tier may report it (§13.1). The reference host calls only `Snapshot(EXTERNAL)`,
+  and every in-repo backend refuses `LOCAL`. The host stores the ref on the `LIFECYCLE_SUSPEND`
+  record (`snapshot_local`, `snapshot_external_uri`, `snapshot_memory`, `snapshot_sealed`); there
+  is no side table.
 - Cold is the session's `compute_state`, which the host derives from the journal (`OPS-17`), not
   a runtime `Status`. A backend with per-session compute suspends it in `Snapshot`; a backend with
   none releases nothing, and its `Status` can still report `LIVE` (§13.4).
@@ -966,20 +1016,30 @@ is not a wire protocol in this draft.
   wrapping `api.ErrSnapshotSuperseded` when the parent no longer holds the referenced snapshot. The
   host maps that error to `ABORTED`.
 - `RT-7`: `Stop` is destructive teardown and is not part of suspension. The reference host calls it
-  only to roll back a failed fork fan-out (`OPS-27`).
+  only to roll back a failed fork fan-out (`OPS-27`). It does not call `Stop` when a later step of
+  `Exec` or `Resume` fails after `Create` or `Restore` succeeded (the dial, the `RT-3` check, the
+  fence, or the run). The host keeps no handle to that incarnation; a later `Exec` reaches it
+  through `Create` (`RT-4e`) and a `Suspend` through `Snapshot`.
 - `RT-8`: `Capabilities` reports `memory_snapshot`, `cow_fork`, `attest`, and `gpu_state`. Only
-  `memory_snapshot` affects placement (`RT-2`).
+  `memory_snapshot` affects placement (`RT-2`, `OPS-7`).
 - The reference host does not call `Status`.
 
 ### 13.4 Reference backends (informative)
 
-- `runtime/local`: serves the harness in the host process over a unix socket. All capabilities
-  false. `Snapshot(EXTERNAL)` returns `{local: id, memory: false}`; `Restore` and `Fork` recreate.
-  It has no per-session compute, so `Snapshot` releases nothing and its `Status` still reports
-  `LIVE` after a suspend.
-- `runtime/remote`: dials an operator-configured harness address. Same capabilities as local.
+- `runtime/local`: serves the harness in the host process over a unix socket shared by all
+  sessions. `Describe` asks that in-process harness. All capabilities false.
+  `Snapshot(EXTERNAL)` returns `{local: id, memory: false}`; `Create`, `Restore`, and `Fork`
+  return an incarnation at the shared socket. It has no per-session compute, so `Snapshot`
+  releases nothing and its `Status` still reports `LIVE` after a suspend.
+- `runtime/remote`: points every incarnation at an operator-configured harness address. `Describe`
+  dials it, and the backend is a `LiveDescriber` (`RT-4g`). Same capabilities and snapshot refs as
+  local. `Create`, `Restore`, and `Fork` provision nothing, and `Stop` leaves the harness running.
 - `runtime/substrate`: `memory_snapshot = true`, driven through its own `ControlClient` interface.
-  It suspends its per-session compute in `Snapshot`.
+  `Describe` returns the descriptor it was built with. `Create` attaches to a running actor,
+  resumes a suspended one, and creates one only when none exists (`RT-4e`). `Snapshot` suspends the
+  actor's per-session compute and returns `memory = true` and the snapshot URI substrate reports,
+  whatever the harness tier. `Fork` clones the parent's snapshot for a `REQUIRES_MEMORY_SNAPSHOT`
+  descriptor and creates a fresh actor otherwise.
   The adapter that talks to agent-substrate is the separate Go module
   [`integrations/substrate`](integrations/substrate/), an example of the runtime contract. The core
   module does not import it; CI asserts `go list -deps ./...` contains no `agent-substrate`
@@ -997,6 +1057,9 @@ address, never on the Sessions listener.
 - `REG-2`: A spec MUST have exactly one placement, a resumability other than unspecified, no unknown
   fields or enum values, and canonical bytes (`CHAIN-1`) of at most 4096 bytes; else
   `INVALID_ARGUMENT`.
+- `REG-2a`: Which placements a host can instantiate is host-defined. A valid spec whose placement
+  this host cannot build is `FAILED_PRECONDITION`, with nothing stored. The reference
+  `agentsessionsd` builds `remote` placements and refuses `substrate` this way.
 - `REG-3`: `RegisterHarness` is idempotent on `spec_digest` (§7.5): the same spec returns unchanged
   (or reactivated if retired, keeping the uid); a different spec under a taken name is
   `ALREADY_EXISTS`.
@@ -1080,7 +1143,9 @@ The reference implementation protects the integrity of the record, not access to
   answers there. A forged harness or a forged host can inject content that the chain then records
   faithfully. A verified chain proves the log was not altered after writing, not that its content
   was honest.
-- `Describe` admission is not bound to the `Connect` stream except where `RT-3` applies.
+- `Describe` admission is not bound to the `Connect` stream. `RT-3` repeats it on the turn's own
+  connection, which narrows the window but does not close it: a reconnect or a proxy between the
+  two calls can route `Connect` to a different harness than the one that answered `Describe`.
 - The chain does not detect tail truncation or whole-log replacement (§7.3).
 - `ExecRequest.config` and every journaled payload are durable and readable through `Replay`.
   Credentials MUST NOT be placed in them.
@@ -1124,13 +1189,15 @@ Each item is also marked inline where it applies.
 
 - TODO(spike): Should a store reject a `fence` greater than the last minted value (§6.4)?
 - TODO(spike): External head anchor for tail truncation (§7.3).
-- TODO(spike): Python verifier parity for float `Struct` numbers and fractional timestamps (§7.4).
+- TODO(spike): Python verifier parity for inexact or exponent-form float `Struct` numbers and
+  fractional timestamps (§7.4).
 - TODO(spike): Language-neutral `input_hash` (§8.3).
 - TODO(spike): Authoritative invariant numbering, `I4` and `I5` (§8.6).
 - TODO(spike): Compare re-reported `IN_HARNESS_REPORTED` results on reconstruction (§9.3).
 - TODO(spike): Approval repair during a checkpoint (§11.1).
 - TODO(spike): Repeated `Suspend` and `Resume` without `Suspend` (§11.5).
 - TODO(spike): Fork journal atomicity and `at_seq > head` (§11.7).
+- TODO(spike): Unknown `Resumability` numbers read as `STATELESS_REPLAY` (§12.1).
 - TODO(spike): Stream close without `EVENT_END` and ignored harness event kinds (§12.2).
 - TODO(spike): Session check and stickiness for model reply correlation failures (§12.2).
 - TODO(spike): Black-box conformance packaging (§16.2).

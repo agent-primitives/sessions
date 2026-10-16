@@ -34,7 +34,7 @@ spec:
             - name: E2E_RUN
               value: "E2E_RUN_PLACEHOLDER"
             - name: E2E_TIMEOUT
-              value: "20m"
+              value: "40m" # stateful selector includes running/suspended deletion hierarchies
             - name: ATEAPI_ADDR
               value: "api.ate-system.svc:443"
             - name: ATEAPI_SERVER_NAME

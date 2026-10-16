@@ -261,6 +261,30 @@ func (r *Registry) For(harness string) (*Placer, error) {
 	return p, nil
 }
 
+// WithSessionGuard runs operation synchronously under the same reclaimable guard as every
+// Placer in this Registry. Contention returns ErrSessionBusy without calling operation.
+// The callback must not call guarded Registry or Placer methods: the guard is not reentrant.
+func (r *Registry) WithSessionGuard(sessionUID string, operation func() error) error {
+	release, err := r.guard.tryDeleteLock(sessionUID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return operation()
+}
+
+// WithSessionRead protects a routing read phase from deletion without serializing it with
+// running turns or Fork rollback. Contention refuses the callback before it can wait for SQL.
+// The callback must not call WithSessionGuard: shared admission cannot upgrade to exclusive.
+func (r *Registry) WithSessionRead(sessionUID string, operation func() error) error {
+	release, err := r.guard.tryReadLock(sessionUID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return operation()
+}
+
 // RegistryResumeOption configures one Registry.Resume call.
 type RegistryResumeOption func(*registryResumeConfig)
 
@@ -311,6 +335,9 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 	}
 	defer release()
 
+	if err := eventlog.CheckWritable(log); err != nil {
+		return err
+	}
 	if err := checkResumeHead(log, cfg.expectedLastSeq); err != nil {
 		return err
 	}
@@ -395,6 +422,9 @@ func (r *Registry) Suspend(ctx context.Context, log eventlog.Store, sessionUID, 
 		return api.SnapshotRef{}, err
 	}
 	defer release()
+	if err := eventlog.CheckWritable(log); err != nil {
+		return api.SnapshotRef{}, err
+	}
 	state, err := controller.InspectApproval(log, 0)
 	if err != nil {
 		return api.SnapshotRef{}, err

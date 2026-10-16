@@ -106,16 +106,20 @@ func sessionProto(info sqlitelog.SessionInfo) (*v1.Session, error) {
 		md.UpdateTime = timestamppb.New(info.UpdatedAt)
 	}
 	out := &v1.Session{
-		Metadata:     md,
-		Harness:      info.Harness,
-		Model:        info.Model,
-		ExecState:    execStateOf(info),
-		ComputeState: wire.ComputeStateToProto(info.ComputeState),
-		LastSeq:      info.LastSeq,
-		ParentUid:    info.ParentUID,
-		ForkSeq:      info.ForkSeq,
+		Metadata:      md,
+		Harness:       info.Harness,
+		Model:         info.Model,
+		ExecState:     execStateOf(info),
+		ComputeState:  wire.ComputeStateToProto(info.ComputeState),
+		LastSeq:       info.LastSeq,
+		ParentUid:     info.ParentUID,
+		ForkSeq:       info.ForkSeq,
+		DeletionState: wire.DeletionStateToProto(info.DeletionState),
 	}
-	if ref := info.PendingApproval; ref.RequestSeq > 0 {
+	if !info.DeletionRequestedAt.IsZero() {
+		out.DeletionRequestedTime = timestamppb.New(info.DeletionRequestedAt)
+	}
+	if ref := info.PendingApproval; ref.RequestSeq > 0 && info.DeletionState == api.DeletionActive {
 		out.PendingApproval = &v1.ApprovalRef{ExecutionId: ref.ExecutionID, ToolCallId: ref.ToolCallID, RequestSeq: ref.RequestSeq}
 	}
 	if err := applyMetadata(out, info); err != nil {
@@ -126,8 +130,9 @@ func sessionProto(info sqlitelog.SessionInfo) (*v1.Session, error) {
 
 // execStateOf reports the execution axis from the metadata row.
 //
-// A session with no events is PENDING; otherwise this metadata-only fallback is COMPLETED.
-// A valid owned unresolved host approval request reports AWAITING from the same row snapshot.
+// A session with no pre-deletion events is PENDING; otherwise the fallback is COMPLETED.
+// A valid owned unresolved host approval request reports AWAITING from the same row snapshot,
+// including after deletion, when its actionable wire reference is withheld.
 // This helper is not a general journal reducer: ordinary/legacy interrupted turns, and decided
 // approval calls without receipts, retain the fallback. Recovery and admission therefore key off
 // the journal, not this enum; COMPLETED here is not proof of a receipt or a terminal END.
@@ -135,7 +140,11 @@ func execStateOf(info sqlitelog.SessionInfo) v1.ExecState {
 	if info.PendingApproval.RequestSeq > 0 {
 		return v1.ExecState_EXEC_AWAITING
 	}
-	if info.LastSeq == 0 {
+	head := info.LastSeq
+	if info.DeletionSeq > 0 {
+		head = info.DeletionSeq - 1
+	}
+	if head == 0 {
 		return v1.ExecState_EXEC_PENDING
 	}
 	return v1.ExecState_EXEC_COMPLETED
@@ -278,10 +287,33 @@ func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest)
 // let any session run turns on it, retired or not, and a session created on a registration keeps
 // its turns on that registration. Between harnesses that are not registered, the documented
 // per-turn override is unchanged except that a memory-tier session cannot use a stateless override.
-func (s *Service) placerFor(ctx context.Context, uid, override string) (*placement.Placer, string, error) {
+func (s *Service) placerFor(ctx context.Context, uid, override string, read func() error) (placer *placement.Placer, harness string, err error) {
 	if uid == "" {
 		return nil, "", status.Error(codes.InvalidArgument, "session is required")
 	}
+	// Keep lookup, routing validation and request preparation reads in one SQL phase.
+	// Otherwise Delete can take the sole Store connection between reads and make this
+	// call queue instead of refusing overlap. Runtime methods acquire their own guard
+	// after this phase and recheck writable status.
+	err = s.registry.WithSessionRead(uid, func() error {
+		var resolveErr error
+		placer, harness, resolveErr = s.resolvePlacer(ctx, uid, override)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		if read != nil {
+			return read()
+		}
+		return nil
+	})
+	if errors.Is(err, placement.ErrSessionBusy) {
+		err = withStatusCause(codes.Aborted, err)
+	}
+	return placer, harness, err
+}
+
+// resolvePlacer runs only inside placerFor's guarded SQL phase.
+func (s *Service) resolvePlacer(ctx context.Context, uid, override string) (*placement.Placer, string, error) {
 	info, err := s.store.SessionInfo(uid)
 	if err != nil {
 		if override != "" && errors.Is(err, sqlitelog.ErrSessionNotFound) {
@@ -292,6 +324,9 @@ func (s *Service) placerFor(ctx context.Context, uid, override string) (*placeme
 			}
 		}
 		return nil, "", sessionStoreError(err, uid)
+	}
+	if err := deletedSessionError(info); err != nil {
+		return nil, "", err
 	}
 	harness := info.Harness
 	if harness == "" {
@@ -474,6 +509,28 @@ func harnessError(err error) error {
 	return status.Errorf(codes.Internal, "resolve harness: %v", err)
 }
 
+// mutationRead protects an entire SQL read phase before it can wait for the Store's
+// sole connection. It does not lease the whole RPC: subsequent guarded runtime methods
+// remain authoritative if Delete starts between phases. Audit response reads after a
+// successful operation do not use this admission step.
+func (s *Service) mutationRead(uid string, read func() error) error {
+	err := s.registry.WithSessionRead(uid, read)
+	if errors.Is(err, placement.ErrSessionBusy) {
+		return withStatusCause(codes.Aborted, err)
+	}
+	return err
+}
+
+// Resume's later routing SQL already runs under Registry.Resume's guard.
+func (s *Service) mutationSessionInfo(uid string) (info sqlitelog.SessionInfo, err error) {
+	err = s.mutationRead(uid, func() error {
+		var lookupErr error
+		info, lookupErr = s.store.SessionInfo(uid)
+		return lookupErr
+	})
+	return info, err
+}
+
 // sessionStoreError maps a store lookup failure to a gRPC code. An unknown UID is NotFound rather
 // than Internal so a caller can tell a bad reference from a broken host.
 func sessionStoreError(err error, uid string) error {
@@ -513,39 +570,62 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 
 	log := s.store.Session(uid)
 	var recoveryInfo *sqlitelog.SessionInfo
-	// Inspect before route selection: an owned unreceipted gate blocks new input even
-	// when the caller names an unavailable harness. Only approval-bearing no-input
-	// calls take this recovery path; ordinary inputless Exec keeps its existing behavior.
-	if uid != "" && sess == nil {
-		info, lookupErr := s.store.SessionInfo(uid)
-		if lookupErr == nil {
-			state, inspectErr := controller.InspectApproval(log, 0)
-			if inspectErr != nil {
-				return execError(inspectErr)
-			}
-			if state != nil && !state.Completed {
-				if len(req.GetInputs()) == 0 {
-					recoveryInfo = &info
-				} else if !state.Inherited && state.Receipt == nil {
-					return execError(controller.ErrApprovalBlocked)
-				}
-			}
-		} else if !errors.Is(lookupErr, sqlitelog.ErrSessionNotFound) {
-			return sessionStoreError(lookupErr, uid)
-		}
-	}
 	var placer *placement.Placer
 	var harness string
-	if recoveryInfo == nil {
+	var headBefore int64
+	// Keep approval inspection, routing and response capture in one deletion-admission
+	// phase. Runtime entry points acquire their own guard and recheck durable authority.
+	err = s.registry.WithSessionRead(uid, func() error {
+		// Owned unreceipted gates block input before route selection. No-input approval
+		// recovery uses recorded invocation semantics; ordinary inputless Exec is unchanged.
+		if sess == nil {
+			info, lookupErr := s.store.SessionInfo(uid)
+			if lookupErr == nil {
+				if err := deletedSessionError(info); err != nil {
+					return err
+				}
+				state, inspectErr := controller.InspectApproval(log, 0)
+				if inspectErr != nil {
+					return execError(inspectErr)
+				}
+				if state != nil && !state.Completed {
+					if len(req.GetInputs()) == 0 {
+						recoveryInfo = &info
+					} else if !state.Inherited && state.Receipt == nil {
+						return execError(controller.ErrApprovalBlocked)
+					}
+				}
+			} else if !errors.Is(lookupErr, sqlitelog.ErrSessionNotFound) {
+				return sessionStoreError(lookupErr, uid)
+			}
+		}
+		if recoveryInfo == nil {
+			var err error
+			placer, harness, err = s.resolvePlacer(ctx, uid, req.GetHarness())
+			if err != nil {
+				return err
+			}
+		}
 		var err error
-		placer, harness, err = s.placerFor(ctx, uid, req.GetHarness())
+		headBefore, err = log.Head()
 		if err != nil {
+			return status.Errorf(codes.Internal, "head: %v", err)
+		}
+		if sess == nil {
+			info, err := s.store.SessionInfo(uid)
+			if err != nil {
+				return sessionStoreError(err, uid)
+			}
+			sess, err = sessionProto(info)
 			return err
 		}
-	}
-	headBefore, err := log.Head()
+		return nil
+	})
 	if err != nil {
-		return status.Errorf(codes.Internal, "head: %v", err)
+		if errors.Is(err, placement.ErrSessionBusy) {
+			return withStatusCause(codes.Aborted, err)
+		}
+		return err
 	}
 
 	// Unset expected_last_seq means "append at the current head": the single-writer check is opt-in,
@@ -556,16 +636,6 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		expected = req.GetExpectedLastSeq()
 	}
 
-	if sess == nil {
-		info, err := s.store.SessionInfo(uid)
-		if err != nil {
-			return sessionStoreError(err, uid)
-		}
-		sess, err = sessionProto(info)
-		if err != nil {
-			return err
-		}
-	}
 	// The session goes out before the turn runs, so a caller learns the uid of a session created
 	// for it even if the execution then fails.
 	if err := stream.Send(&v1.ExecUpdate{Update: &v1.ExecUpdate_Session{Session: sess}}); err != nil {
@@ -755,18 +825,20 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		return nil, status.Error(codes.InvalidArgument, "ForkRequest.identity is unsupported: per-child principals are not enforced")
 	}
 
-	placer, _, err := s.placerFor(ctx, req.GetSession(), "")
-	if err != nil {
-		return nil, err
-	}
 	parent := s.store.Session(req.GetSession())
 	atSeq := req.GetAtSeq()
-	if atSeq <= 0 {
-		h, err := parent.Head()
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "head: %v", err)
+	placer, _, err := s.placerFor(ctx, req.GetSession(), "", func() error {
+		if atSeq <= 0 {
+			h, err := parent.Head()
+			if err != nil {
+				return status.Errorf(codes.Internal, "head: %v", err)
+			}
+			atSeq = h
 		}
-		atSeq = h
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	count := int(req.GetCount())
 	if count <= 0 {
@@ -852,6 +924,10 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 // that is checkpointing the parent is Aborted, so the caller knows a retry is meaningful.
 func forkError(err error) error {
 	switch {
+	case errors.Is(err, eventlog.ErrDeleted):
+		return withStatusCause(codes.FailedPrecondition, err)
+	case errors.Is(err, placement.ErrSessionBusy):
+		return status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
@@ -877,9 +953,15 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 	if uid == "" {
 		return nil, status.Error(codes.InvalidArgument, "session is required")
 	}
-	info, err := s.store.SessionInfo(uid)
+	info, err := s.mutationSessionInfo(uid)
 	if err != nil {
+		if errors.Is(err, placement.ErrSessionBusy) {
+			return nil, withStatusCause(codes.Aborted, err)
+		}
 		return nil, sessionStoreError(err, uid)
+	}
+	if err := deletedSessionError(info); err != nil {
+		return nil, err
 	}
 	stored := info.Harness
 	if stored == "" {
@@ -918,9 +1000,15 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	if uid == "" {
 		return nil, status.Error(codes.InvalidArgument, "session is required")
 	}
-	info, err := s.store.SessionInfo(uid)
+	info, err := s.mutationSessionInfo(uid)
 	if err != nil {
+		if errors.Is(err, placement.ErrSessionBusy) {
+			return nil, withStatusCause(codes.Aborted, err)
+		}
 		return nil, sessionStoreError(err, uid)
+	}
+	if err := deletedSessionError(info); err != nil {
+		return nil, err
 	}
 	log := s.store.Session(uid)
 	stored := info.Harness
@@ -959,6 +1047,8 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 
 func suspendError(err error) error {
 	switch {
+	case errors.Is(err, eventlog.ErrDeleted):
+		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, placement.ErrCheckpointing), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
 		return status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, controller.ErrReplayDiverged):
@@ -972,6 +1062,8 @@ func suspendError(err error) error {
 
 func resumeError(err error) error {
 	switch {
+	case errors.Is(err, eventlog.ErrDeleted):
+		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
 		return status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport):
@@ -1010,6 +1102,8 @@ func admissionInterruptedCode(err error) codes.Code {
 
 func execError(err error) error {
 	switch {
+	case errors.Is(err, eventlog.ErrDeleted):
+		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, placement.ErrSessionBusy):
 		return status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport), errors.Is(err, placement.ErrUnplaceable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch):

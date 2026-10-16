@@ -28,6 +28,9 @@ var ErrConflict = errors.New("eventlog: seq conflict (single-writer compare-and-
 // current one — a superseded (zombie) incarnation trying to write.
 var ErrFenced = errors.New("eventlog: stale fencing token (incarnation superseded)")
 
+// ErrDeleted refuses writes to a permanently tombstoned session, independent of its fence or head.
+var ErrDeleted = errors.New("eventlog: session is permanently deleted")
+
 // Record is one committed log entry: the payload plus ordering, integrity, and fencing
 // metadata. Hash = SHA-256(prevHash || canonical(payload)); a fork sets a child's first
 // prevHash to the parent record's Hash, turning the chain into a tree.

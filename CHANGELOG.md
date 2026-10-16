@@ -69,6 +69,9 @@ not provide.
 ### Added
 
 - Optional `ResumeRequest.expected_last_seq` rejects a moved journal head before re-driving a turn.
+- Go SDK `Client.DeleteSession(ctx, uid)` and `agentctl delete --session <uid>` request permanent
+  soft deletion. Get/delete CLI report deletion state and requested time; PENDING output explicitly
+  says durable intent only, with compute and fork pins retained.
 - Controller `InspectApproval` and decision-only `Approve` validate durable request/decision/receipt
   evidence, including exact retries and session-owned versus inherited effects. The internal
   approval engine supports captured-head repair and correlated denial/executor-error receipts.
@@ -81,8 +84,8 @@ not provide.
   A transport park alone is not a successful public Session pause.
 - `Sessions.Approve` and `client.Client.Approve` commit only a decision; call Resume separately.
   CLI `approve` and `deny` commit then Resume, explicitly preserving the committed decision on
-  recovery failure. Identity is recorded provenance, not authorization. Cancel/DeleteSession
-  remain `UNIMPLEMENTED`; unresolved requests and retained snapshots have no expiry.
+  recovery failure. Identity is recorded provenance, not authorization. Cancel remains
+  `UNIMPLEMENTED`; unresolved requests and retained snapshots have no expiry.
 - Every Session reply and initial/final approval Exec frame uses captured metadata/cursor and
   the storage projection. Pending owned requests report AWAITING with `pending_approval`;
   clearing a reference after a decision does not prove a receipt or completion. SDK Exec retains
@@ -149,6 +152,21 @@ not provide.
   `github.com/aramase/agentsessions`. Container images move to `ghcr.io/agent-primitives/sessions`.
   One binary cannot link both module paths: both register the same proto files, and protobuf-go
   panics at init (`file "common.proto" is already registered`). Move every dependency together.
+- <a name="sqlite-v4-rollout"></a>
+  `DeleteSession` permanently retains the UID, metadata and hash-chained journal for audit, hides
+  the session from List and fences further mutations, including historical approval retries and
+  forks. Get and raw Replay remain available; children are independent. PENDING acknowledges only
+  durable intent: no Runtime.Stop, cleanup or resource reclamation is attempted. Actors, snapshots
+  and fork pins remain retained until ownership/cleanup work (#88).
+  SQLite schema v4 adds the tombstone state, timestamps and audit anchor after approval v3 in one
+  transaction without rewriting old events or hashes; existing sessions stay ACTIVE. The internal
+  `DeletionComplete` state and `deletion_completed_at` column are reserved for cleanup; this build
+  never writes them, and the completion timestamp remains zero. They are not exposed on the wire.
+  Older builds refuse v4 at open time only. Already-open older writers can still append, mint
+  fences and update metadata after DELETE because they do not enforce tombstones. Before the
+  first v4 open, stop every older host and embedded `agentctl` process sharing the journal;
+  upgrade all writers before restarting them. Back up before upgrading. The new LIFECYCLE_DELETE
+  hash requires a deletion-aware reader. Cancel remains unimplemented.
 - `Exec` refuses a stateless harness override when the session's served stored harness requires
   memory snapshots (`FAILED_PRECONDITION`, before any fence or journal write). `Resume` and
   no-input Exec recovery also refuse an older interrupted override before compute changes or
@@ -272,8 +290,9 @@ not provide.
 - `Runtime.Snapshot(..., SnapshotExternal)` owns the cold transition: capture state, release dedicated
   compute where applicable, and retain any handle needed by `Restore`. Out-of-tree runtimes that only
   capture state must implement that transition themselves; the Placer no longer calls `Stop` afterward.
-  Suspended actors and fork-child snapshot pins are retained indefinitely: `DeleteSession` is
-  unimplemented and no session teardown calls `Stop`. Operators must reclaim them directly in Substrate.
+  Suspended actors and fork-child snapshot pins are retained indefinitely: `DeleteSession` records
+  durable intent only and no session teardown calls `Stop`. Operators must reclaim them directly
+  in Substrate.
   No signatures or wire formats change, and restoring a snapshot after destructive `Stop` is not
   guaranteed.
 

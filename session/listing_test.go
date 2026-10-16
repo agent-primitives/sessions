@@ -291,7 +291,7 @@ func TestForkChildrenCarryLineageAndProject(t *testing.T) {
 
 // Placer.forkSource refuses an unplaceable fork with no side effects at all. Registering children
 // before the fan-out would turn that into a listing full of phantom sessions the caller was never
-// given UIDs for and, with DeleteSession unimplemented, cannot remove.
+// given UIDs for and cannot address with DeleteSession.
 func TestRefusedForkLeavesNoPhantomSessions(t *testing.T) {
 	store := openStore(t, ":memory:")
 	client := serveWith(t, store, local.New(memHarness{}))

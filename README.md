@@ -106,6 +106,9 @@ The sources live in [`docs/`](docs/README.md):
 - [**API reference**](docs/api-reference.md): every message, field, enum, and RPC in
   `agentsessions.v1`, generated from the `.proto` comments.
 
+The normative rules of the protocol (session lifecycle, event log, provenance chain, harness wire
+protocol, runtime contract, conformance classes) are in the draft [**specification**](spec.md).
+
 ## Repo layout
 
 | Path | What |

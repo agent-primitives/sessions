@@ -3,7 +3,6 @@ package sqlitelog
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"testing"
 
 	"github.com/agent-primitives/sessions/api"
@@ -21,7 +20,9 @@ func FuzzJournalRecords(f *testing.F) {
 	for i, blob := range seeds {
 		f.Add(blob, seeds[(i+1)%len(seeds)])
 	}
-	store, err := Open(filepath.Join(f.TempDir(), "fuzz.db"))
+	// In memory: the read, verify and append paths are the same as for a file, and a file-backed
+	// store fsyncs every commit (synchronous=FULL), which held a 30s run to a few dozen execs.
+	store, err := Open(":memory:")
 	if err != nil {
 		f.Fatal(err)
 	}

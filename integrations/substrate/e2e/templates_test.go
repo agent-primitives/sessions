@@ -77,8 +77,8 @@ func sandboxFor(prefix, tier string) (tierSandbox, error) {
 }
 
 // templateSpec builds a tier's ActorTemplate on the sandbox sandboxFor resolves. Every template
-// captures FULL on commit, which is what lets the template build the golden snapshot new actors
-// start from.
+// prefers MEMORY fidelity, so a suspend captures the guest's RAM and the golden snapshot new actors
+// start from is a running harness rather than a cold boot.
 func templateSpec(t *testing.T, atespace, name, prefix, tier, harnessKind string) *atepb.ActorTemplate {
 	t.Helper()
 	sb, err := sandboxFor(prefix, tier)
@@ -90,8 +90,8 @@ func templateSpec(t *testing.T, atespace, name, prefix, tier, harnessKind string
 		WorkerSelector: &atepb.Selector{MatchLabels: map[string]string{"workload": sb.pool}},
 		Containers:     []*atepb.Container{harnessContainer(harnessKind)},
 		SnapshotConfig: &atepb.SnapshotConfig{
-			OnCommit:        atepb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
-			StorageLocation: env("SNAPSHOT_LOCATION", "gs://ate-snapshots/agentsessions/") + name + "/",
+			PreferredFidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+			StorageLocation:   env("SNAPSHOT_LOCATION", "gs://ate-snapshots/agentsessions/") + name + "/",
 		},
 		SandboxConfig: &atepb.SandboxConfig{SandboxClass: sb.class, ConfigName: sb.config},
 	}
@@ -104,9 +104,9 @@ func echoTemplateSpec(t *testing.T, atespace string) *atepb.ActorTemplate {
 	return templateSpec(t, atespace, echoTemplate, "ECHO", "echo", "")
 }
 
-// counterTemplateSpec is the stateful tier: the in-RAM counter. FULL capture is load-bearing here:
+// counterTemplateSpec is the stateful tier: the in-RAM counter. MEMORY fidelity is load-bearing here:
 // the count exists only in guest RAM, so only a memory snapshot carries it across suspend and fork.
-// It runs on a micro-VM unless COUNTER_SANDBOX_CLASS=gvisor, whose FULL checkpoint also captures
+// It runs on a micro-VM unless COUNTER_SANDBOX_CLASS=gvisor, whose checkpoint also captures
 // memory.
 func counterTemplateSpec(t *testing.T, atespace string) *atepb.ActorTemplate {
 	return templateSpec(t, atespace, counterTemplate, "COUNTER", "counter", "counter")

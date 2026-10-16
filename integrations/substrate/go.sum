@@ -1,5 +1,5 @@
-github.com/agent-substrate/substrate v0.4.1-0.20261008013617-fc0e3586a6de h1:CwmEUAa+oUcrGN/vljEgBMX0EBcp1UYz3EYwkS489EM=
-github.com/agent-substrate/substrate v0.4.1-0.20261008013617-fc0e3586a6de/go.mod h1:IuJNQ+2si6Sxkg9b3+kfhaXQiaxSwHtsiQrpNFWbjZY=
+github.com/agent-substrate/substrate v0.4.1-0.20261013053953-96dffb287919 h1:RP19jHZ/bv7AcknDgut2SW9btWbYnpOeT41M5bjOVAY=
+github.com/agent-substrate/substrate v0.4.1-0.20261013053953-96dffb287919/go.mod h1:XVQwhYEmOlb+ILs9BvSCHXYhgo2F6/N2qN4DmRwogQI=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/golang/protobuf v1.5.4 h1:i7eJL8qZTpSEXOPTxNKhASYpMn+8e5Q6AdndVa1dWek=

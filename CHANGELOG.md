@@ -16,6 +16,14 @@ provide.
 
 ### Fixed
 
+- The substrate adapter (`integrations/substrate`) builds against agent-substrate `96dffb28`, which
+  replaced `ActorStatus.external_snapshot` with a `snapshots` list (substrate `f03327bd`) and
+  `SnapshotConfig.on_commit` with `preferred_fidelity`. The held snapshot is now the
+  highest-generation entry whose durable copy is `COMPLETED`, the one substrate restores and tags,
+  so a stateful fork keeps cloning the snapshot its suspend produced. Against an ate-api older than
+  `f03327bd` the adapter reads no snapshot, so a stateful fork refuses as unplaceable (no external
+  snapshot handle); see Compatibility. The CI cluster moves to the same commit, and the
+  `deploy/substrate` WorkerPools use its `sandboxClasses` list in place of `sandboxClass`.
 - Session-level suspend no longer destroys the Substrate actor needed by resume. Both replay-based
   and memory-snapshot sessions retain their restore handle after `Placer.Suspend`; explicit `Stop`
   remains destructive teardown.
@@ -327,6 +335,12 @@ provide.
   dials an actor's mesh DNS name any more. A stateful fork now checks on both sides of the tag that
   the parent still holds the checkpoint the fork took, and otherwise fails with
   `ErrSnapshotSuperseded`, which wraps `api.ErrSnapshotSuperseded`.
+- `integrations/substrate` now reads the held snapshot from `ActorStatus.snapshots` (substrate
+  `f03327bd`) and no longer reads `ActorStatus.external_snapshot`, so upgrade substrate and the
+  adapter together. Against an older ate-api the adapter reports no held snapshot: a stateful
+  `Placer.Fork` checkpoints the parent, records the `SUSPEND`, and then refuses as unplaceable (no
+  external snapshot handle), which `Fork` reports as `FAILED_PRECONDITION`; a direct
+  `runtime/substrate.Backend.Fork` returns `ErrNoSnapshotToClone`.
 
 ## v0.1.2
 

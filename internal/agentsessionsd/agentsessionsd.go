@@ -79,7 +79,8 @@ type options struct {
 
 // ToolExecutorFunc returns the host tool executor for the named -harness, or nil for none. sessions
 // is a client of this daemon's own Sessions listener, for an executor that drives other sessions (a
-// tool that runs a turn in a child session, say); it connects on first use.
+// tool that runs a turn in a child session, say); it connects on first use. sessions is not usable
+// until Run serves; do not call it while building the executor.
 //
 // Run asks for every -harness once, at startup, before it opens the journal. An error stops Run
 // with that error, so an executor that cannot be built (bad configuration, say) fails the start

@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Please report vulnerabilities privately through
-[GitHub Security Advisories](https://github.com/aramase/agentsessions/security/advisories/new)
+[GitHub Security Advisories](https://github.com/agent-primitives/sessions/security/advisories/new)
 rather than opening a public issue.
 
 Include what you were running, what you observed, and how to reproduce it. You should get an initial

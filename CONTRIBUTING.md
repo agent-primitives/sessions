@@ -56,9 +56,8 @@ currently skips. It arms itself at the first release.
 
 ## Governance
 
-Decisions rest with the maintainer, [@aramase](https://github.com/aramase). There is no wider
-governance structure yet because there is not yet a wider group of contributors; that will change if
-and when it needs to.
+Decisions rest with the maintainers, `@agent-primitives/sessions-maintainers`. There is no wider
+governance structure yet; that will change if and when it needs to.
 
 ## Releasing
 

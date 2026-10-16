@@ -359,8 +359,9 @@ no flattened lifecycle enum.
 - `EXE-5`: A successful execution MUST end with `EVENT_END` (`state = "COMPLETED"`). A failed
   execution ends with a best-effort `EVENT_ERROR` and no `EVENT_END`. An execution that parked at
   an approval gate (§10) ends with neither.
-- `EXE-6`: An execution is complete if and only if it has an `EVENT_END`. `EVENT_ERROR` does not
-  complete an execution; a later recovery may still finish it.
+- `EXE-6`: Outside the legacy execution (§8.7), an execution is complete if and only if it has an
+  `EVENT_END`. `EVENT_ERROR` does not complete such an execution; a later recovery may still
+  finish it. The legacy execution's completion rule is `EXE-29`.
 - `EXE-7`: `Start.history` for a new execution MUST be every event before its `EXECUTION_START`.
   The reference host always sends the full prior log, including after a memory restore.
 
@@ -396,8 +397,8 @@ These are named in the reference controller. The numbering is the code's.
 
 - `I0`: On reconstruction replay, each model call the harness re-issues MUST have the same
   `input_hash` as the recorded `MODEL_CALL` at that position, its output text MUST equal the
-  recorded `OUTPUT` text, and reported usage MUST equal the recorded `USAGE`. Any mismatch is
-  divergence (`ErrReplayDiverged`).
+  recorded `OUTPUT` text, and reported usage MUST equal the recorded `USAGE` (except in the legacy
+  execution, `EXE-30`). Any mismatch is divergence (`ErrReplayDiverged`).
 - `I1`: Reconstruction replay MUST NOT invoke the model provider or the tool executor. Recorded
   completions and receipts are served from the log.
 - `I3`: A host-executed tool intent recorded without a receipt is re-driven on recovery under the
@@ -418,35 +419,38 @@ These are named in the reference controller. The numbering is the code's.
   unfinished executions remain visible in later executions' history. The legacy execution (§8.7)
   is the exception: a log that is only a legacy prefix is replayed whole even if unfinished, and a
   legacy prefix followed by modern executions is replayed up to its last `END` (not at all if it
-  has none).
+  has none; an `ERROR` does not count here, unlike `EXE-29`).
 - `EXE-18`: Before running any harness, reconstruction MUST check every selected execution's
   recorded harness identity (§8.6) and input completeness (§8.6).
 - `EXE-19`: Inputs, config, and `resume_from_seq` MUST come from the journal, not from the caller.
 
 ### 8.6 Recovery (Resume)
 
-- `EXE-20`: Recovery MUST select the latest execution. If the log is empty or that execution is
-  complete, recovery is a no-op: it performs no harness identity check and no `Describe` of its
-  own. `Resume`'s admission (`RT-1`) still runs before recovery.
+- `EXE-20`: Recovery MUST select the latest execution. If the log has no execution (it is empty or
+  holds only `LIFECYCLE` records) or that execution is complete (`EXE-6`; for the legacy
+  execution, `EXE-29`), recovery is a no-op: it performs no harness identity check and no
+  `Describe` of its own. `Resume`'s admission (`RT-1`) still runs before recovery.
 - `EXE-21`: Recovery serves recorded effects as in §8.5 until they are exhausted, then switches to
   the live path for new effects only.
-- `EXE-22`: Model cut rule: if the trailing effect is a `MODEL_CALL` with no `OUTPUT` and the
-  re-issued `input_hash` matches, recovery MUST invoke the provider once and append the `OUTPUT`
-  after the existing `MODEL_CALL`. A hash mismatch is divergence: the provider is not called and
-  no `OUTPUT` is appended (the failed run's `EVENT_ERROR`, `EXE-23`, still applies). A
-  non-trailing `MODEL_CALL` without `OUTPUT` MUST NOT reach the provider: the re-issued call
-  returns an error to the harness, which is not divergence. The execution fails only if the
-  harness does not handle that error.
+- `EXE-22`: Model cut rule, outside legacy recovery (`EXE-30`): if the trailing effect is a
+  `MODEL_CALL` with no `OUTPUT` and the re-issued `input_hash` matches, recovery MUST invoke the
+  provider once and append the `OUTPUT` after the existing `MODEL_CALL`. A hash mismatch is
+  divergence: the provider is not called and no `OUTPUT` is appended (the failed run's
+  `EVENT_ERROR`, `EXE-23`, still applies). A non-trailing `MODEL_CALL` without `OUTPUT` MUST NOT
+  reach the provider: the re-issued call returns an error to the harness, which is not
+  divergence. The execution fails only if the harness does not handle that error.
 - `EXE-23`: Recovery that fails after the harness has started running appends a best-effort
   `EVENT_ERROR`; recovery that succeeds appends `EVENT_END`. Failures raised before the harness
   runs (invalid log, incomplete invocation `EXE-24`, harness identity `EXE-25`, inherited intent
-  `EXE-26`) append nothing. A run stopped after an approval intent is recorded (a park, or a
-  failure recording the approval request or receipt, §10) appends neither `ERROR` nor `END`.
-- `EXE-24`: Input completeness: a recorded `input_count` that is missing or negative, an
-  `EVENT_INPUT` with no message, or a count different from the committed `EVENT_INPUT` records is
-  an invalid log for a completed or selected execution. A trailing execution with fewer inputs than
-  `input_count` is incomplete (`ErrIncompleteInvocation`). Both MUST be raised before the harness
-  runs.
+  `EXE-26`, a legacy execution without a session uid `EXE-30`) append nothing. A run stopped after
+  an approval intent is recorded (a park, or a failure recording the approval request or receipt,
+  §10) appends neither `ERROR` nor `END`.
+- `EXE-24`: Input completeness, for an execution that has an `EXECUTION_START`: a missing or
+  negative `input_count`, an `EVENT_INPUT` with no message, or a count different from the
+  committed `EVENT_INPUT` records is an invalid log for a completed or selected execution. A
+  trailing execution with fewer inputs than `input_count` is incomplete
+  (`ErrIncompleteInvocation`). Both MUST be raised before the harness runs. An execution without
+  an `EXECUTION_START` (§8.7) has no completeness check.
 - `EXE-25`: Harness identity: a non-empty recorded `ExecutionStart.harness` MUST equal the name the
   host resolved for this run. A non-empty recorded `harness_version` MUST equal the served
   `HarnessDescriptor.version` exactly, and an empty served version is a mismatch. An empty recorded
@@ -460,14 +464,58 @@ These are named in the reference controller. The numbering is the code's.
 
 ### 8.7 Legacy journals
 
-- `EXE-27`: Records without an `execution_id` that precede the first `EXECUTION_START` (the v0.1.x
-  shape) MUST be read as one legacy execution. Only `INPUT`, `MODEL_CALL`, `OUTPUT`, `TOOL_CALL`,
+v0.1.x hosts journaled no `execution_id` and no `EXECUTION_START`. The reference host reads those
+journals with v0.1.2 semantics, which differ from §8.1-§8.6 as stated here.
+
+- `EXE-27`: The records at the start of the log, up to the first `EXECUTION_START` or the first
+  non-`LIFECYCLE` record that carries an `execution_id`, MUST be read as one legacy execution if
+  any of them is not `LIFECYCLE`. Only `INPUT`, `MODEL_CALL`, `OUTPUT`, `TOOL_CALL`,
   `TOOL_RESULT`, `USAGE`, `END`, `ERROR`, and interleaved `LIFECYCLE` are allowed in it; any other
-  kind is an invalid log.
+  kind is an invalid log. A log that holds only `LIFECYCLE` records has no execution.
+- `EXE-28`: If the legacy execution's last non-`LIFECYCLE` record is neither `END` nor `ERROR`
+  (an unfinished legacy tail), the record that ends it MUST be an `EXECUTION_START`; any other
+  record with an `execution_id` there is an invalid log. Reconstruction, recovery, and `Exec`
+  raise it before the harness runs and append nothing; `Exec` and `Resume` fail
+  `FAILED_PRECONDITION`. An
+  `EXECUTION_START` supersedes an unfinished legacy tail: `Exec` on such a log starts a new
+  execution and never recovers the tail.
+- `EXE-29`: Recovery selects the legacy execution only when no modern record follows it. For
+  recovery, the legacy execution is complete if it has no `INPUT`, or if an `END` or an `ERROR`
+  follows its last `INPUT`; recovery of a complete legacy execution is a no-op (`EXE-20`). An
+  `ERROR`, including one appended by a failed legacy recovery, therefore ends the legacy
+  execution, and a later `Resume` does not retry it.
+- `EXE-30`: Recovery of an unfinished legacy execution MUST use only its last `INPUT` as
+  `Start.inputs` and every record before that `INPUT` as `Start.history`, with empty `config` and
+  `resume_from_seq` 0. It serves the `MODEL_CALL`, `OUTPUT`, `TOOL_CALL`, and `TOOL_RESULT`
+  records after that `INPUT` as in §8.5 and re-drives a trailing tool intent (`TOOL-10`). It
+  differs from modern recovery as follows:
+  - Recorded `USAGE` is not an effect. Served completions carry no usage, and a harness `Usage`
+    call is accepted without comparison while recorded effects remain and journaled after they
+    are exhausted.
+  - A trailing `MODEL_CALL` without `OUTPUT` is not re-driven (`EXE-22` does not apply): the
+    re-issued call returns an error to the harness and the provider is not called. If the run
+    then fails, its `ERROR` completes the legacy execution (`EXE-29`).
+  - A `REQUIRES_APPROVAL` tool call that passes `APR-1` is refused (`ErrInvalidApprovalCall`)
+    before any append; `APR-2` does not apply.
+  - Records it appends carry no `execution_id` (`EXE-4`).
+  - Without a session uid it fails (`ErrMissingSessionUID`) before the harness runs and appends
+    nothing.
+- Reconstruction runs the replayed legacy prefix (`EXE-17`) as one invocation, as v0.1.2 did:
+  `Start.inputs` is every legacy `INPUT` in it, `Start.history` is that prefix itself, and
+  `config` and `resume_from_seq` are empty. Recorded `USAGE` is neither served nor compared. A
+  legacy log with more than one turn can therefore fail reconstruction as divergence.
 - The reference host derives a wire execution id for a legacy execution
-  (`legacy-` + hex SHA-256 over the session uid, `seq`, and canonical event) and never journals it:
-  records appended by legacy recovery have an empty `execution_id`.
-  Legacy recovery uses only the last `INPUT` and does not re-drive a cut model call.
+  (`legacy-` + hex SHA-256 over the session uid, `seq`, and canonical event) and never journals it.
+  Reconstruction derives it from the first legacy `INPUT` (or the first non-`LIFECYCLE` record
+  when there is none); recovery derives it from the last `INPUT`, so retries keep the same id.
+  Without a session uid, reconstruction fails like recovery.
+- `EXE-31`: An execution whose records carry an `execution_id` but that has no `EXECUTION_START`
+  (written by unreleased hosts between v0.1.2 and the start marker) is otherwise a modern
+  execution: `EXE-6` decides completion and §8.6 applies. It is read with defaults: empty
+  `config`, `resume_from_seq` 0, no recorded harness identity (`EXE-25` imposes no check;
+  recovery routes as in `OPS-8`), and no input-completeness check (`EXE-24`). An
+  `EXECUTION_START` that is not the first record of its execution, or that has no payload, is an
+  invalid log.
 
 ## 9. Tool execution and receipts
 
@@ -635,7 +683,9 @@ These are named in the reference controller. The numbering is the code's.
   memory-snapshot runtime MUST be `FAILED_PRECONDITION` before any fence or journal write.
 - `OPS-8`: Recovery (`Resume`, input-less `Exec` recovery) MUST route by the recorded
   `EXECUTION_START.harness`. A recorded name the host does not serve is `FAILED_PRECONDITION`, with
-  no fallback.
+  no fallback. With no recorded name (a legacy or markerless execution, §8.7; an empty `harness`;
+  or a journal with nothing to recover), `Resume` routes to the session's stored harness, or to the
+  host's default when the session has none.
 
 ### 11.4 Exec
 
@@ -1049,8 +1099,8 @@ The reference implementation protects the integrity of the record, not access to
   - A new field in a hashed event changes `content_hash` only when populated. Older binaries that
     drop the field on read fail verification for records that carry it, so every host sharing a
     journal needs the new binary before any of them writes the field.
-  - v0.1.x journals (no `execution_id`, no `EXECUTION_START`) remain readable (§8.7) and verify
-    unchanged.
+  - v0.1.x journals (no `execution_id`, no `EXECUTION_START`) remain readable, with v0.1.2 replay
+    and recovery semantics (§8.7), and verify unchanged.
   - The reference SQLite store versions its schema with `PRAGMA user_version` (currently 3),
     migrates forward in one transaction without rewriting events or hashes, and refuses a newer or
     negative version.

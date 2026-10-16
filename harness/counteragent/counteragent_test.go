@@ -37,30 +37,28 @@ func TestCounterIncrementsInRAM(t *testing.T) {
 	}
 }
 
-// TestMemoryRestoreDoesNotReinitialize is the harness-side I4 contract: a memory-restored sandbox
-// must continue from its in-RAM count, NOT reset to zero. The restore is modeled by reusing the
-// SAME instance (its fields = the snapshot-preserved RAM). The turn uses an empty History, the
-// shape of a fresh STATELESS start: the host sends the full prior log after a restore (covered by
-// TestNonEmptyHistoryIsNotAppliedToState), so this guards a harness that resets on an empty
-// History. A naive `if len(History)==0 { count=0 }` would fail this.
-func TestMemoryRestoreDoesNotReinitialize(t *testing.T) {
+// TestEmptyHistoryDoesNotResetCount is a harness-only guard for the I4 rule that the count is never
+// initialized from History: on the same instance (RAM preserved), a turn whose History is empty
+// must continue the in-RAM count, not reset it. It does not model a memory restore or what the
+// host sends; it only catches a harness that keys a reset off History, e.g.
+// `if len(History)==0 { count=0 }`.
+func TestEmptyHistoryDoesNotResetCount(t *testing.T) {
 	h := &Harness{}
 	sink := &captureSink{}
 	_ = h.Run(context.Background(), &api.Start{}, sink) // count -> 1
-	_ = h.Run(context.Background(), &api.Start{}, sink) // count -> 2 (state before a suspend)
-	// Same instance (RAM preserved), one more turn with an empty History (a fresh-start shape,
-	// not what the host sends after a restore). It must not reset the count.
+	_ = h.Run(context.Background(), &api.Start{}, sink) // count -> 2
 	if err := h.Run(context.Background(), &api.Start{History: nil}, sink); err != nil {
 		t.Fatal(err)
 	}
 	if got := sink.outputs[len(sink.outputs)-1]; got != "3" {
-		t.Fatalf("post-restore output=%q want %q (empty History must NOT reset the in-RAM count)", got, "3")
+		t.Fatalf("output=%q want %q (empty History must NOT reset the in-RAM count)", got, "3")
 	}
 }
 
-// TestNonEmptyHistoryIsNotAppliedToState guards the other failure: the full prior log the host
-// sends after a restore must not be replayed into the count — the count comes from RAM, not from
-// History. A naive `count += len(History)` would double-apply and fail this.
+// TestNonEmptyHistoryIsNotAppliedToState is a harness-only guard for the same rule: a non-empty
+// History must not be replayed into the count. The History is five zero-value events, not a
+// host-built log; this test checks only that the counter ignores History, not what the host
+// delivers. It catches a harness that does `count += len(History)`.
 func TestNonEmptyHistoryIsNotAppliedToState(t *testing.T) {
 	h := &Harness{}
 	sink := &captureSink{}

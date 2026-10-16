@@ -29,6 +29,7 @@ Run these before pushing; they are the same gates the `ci` workflow enforces.
 | Vendor neutrality | `go list -deps ./... \| grep -c agent-substrate` must be `0` |
 | Provenance self-check | `python3 hack/verify_chain.py --golden` |
 | Cross-language chain audit | `./hack/verify_chain.sh` (also audits every journal in `sqlitelog/testdata`) |
+| Daemon smoke test (local runtime, no substrate) | `go test ./cmd/agentsessionsd -run TestSessionLifecycleRealBinaries` (part of Tests) |
 | Persisted-format compatibility | `go test ./session ./sqlitelog -run 'SchemaV4Fixture\|MigratedAndFresh'` (part of Tests) |
 | Proto lint | `buf lint` |
 | Release build (`release-check`, on changes to Go, `Dockerfile`, `.goreleaser.yaml`, `.ko.yaml`) | `goreleaser check`, then `goreleaser release --snapshot --clean --skip=sbom` (needs `ko`; publishes nothing); `docker build` of `Dockerfile` after `CGO_ENABLED=0 GOOS=linux go build -o agentnode ./cmd/agentnode` |

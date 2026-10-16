@@ -595,12 +595,15 @@ These are named in the reference controller. The numbering is the code's.
 - `OPS-2`: A per-session checkpoint mark MUST be held by `Suspend`, `Approve`, an approval park
   handoff, a cursor-checked `Resume` while it mints each fence and re-reads the head (`OPS-29`),
   and a `REQUIRES_MEMORY_SNAPSHOT` fork from checkpoint until its last child is cloned.
-  `Exec` and `Resume` during a checkpoint, and a second checkpoint holder, MUST fail with
-  `ABORTED`. The reference host checks the mark after the approval gate: a `Resume` or
-  input-less `Exec` on an owned gate (`APR-13`) is answered before the check, so it does not fail
-  with `ABORTED`. Its call-only repair takes the mark only for a `Resume` with
-  `expected_last_seq` set (`OPS-29`); otherwise it can append `APPROVAL_REQUEST` under a new
-  fence during a checkpoint.
+  A second checkpoint holder MUST fail with `ABORTED`. `Exec` and `Resume` during a checkpoint
+  MUST fail with `ABORTED` unless a check the host runs before the mark check fails or answers
+  the call. The reference host checks the mark only after the session guard (`OPS-1`), the request
+  and harness checks (§11.3), the approval-state checks (`APR-13`, `APR-15`, and an owned gate
+  with no receipt refusing an `Exec` with inputs), admission (`RT-1`) and, on `Resume`, the head
+  check (`OPS-29`) and the snapshot lookup; an error from those is returned instead of `ABORTED`.
+  A `Resume` or input-less `Exec` on an owned gate with no decision (`APR-13`) is answered before
+  the check. Its call-only repair takes the mark only for a `Resume` with `expected_last_seq` set
+  (`OPS-29`); otherwise it can append `APPROVAL_REQUEST` under a new fence during a checkpoint.
   TODO(spike): Should the call-only approval repair refuse with `ABORTED` during a checkpoint?
 - `OPS-3`: A `REQUIRES_MEMORY_SNAPSHOT` fork MUST end any in-flight execution on the parent; that
   execution fails with `ABORTED`.

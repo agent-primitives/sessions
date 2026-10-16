@@ -833,8 +833,17 @@ sequenceDiagram
   `memory_snapshot`. It checks nothing else: `requires_gpu`, `fork_safe`, `streaming`, `cow_fork`,
   `attest`, and `gpu_state` are not compared.
 - `RT-3`: For a backend whose harness is live behind an address (it describes the live harness),
-  the host MUST repeat the admission check on the execution's own connection before minting a
-  fence, because a second dial can reach a different replica.
+  `Exec` and `Resume` MUST repeat the admission check on the execution's own connection after the
+  harness connects and before minting the turn's regular writer fence, because a second dial can
+  reach a different replica.
+- `RT-3` does not cover fences minted before the execution has a connection:
+  - the approval repair fence (`APR-13`), minted before admission; that call parks and returns
+    without admission or a connection;
+  - the early fence of a cursor-checked `Resume` (`OPS-29`), minted after the first admission and
+    before restore.
+- A refusal at the repeated check of a cursor-checked `Resume` leaves its early fence minted, so
+  older writers are superseded (`LOG-12`) even though `Resume` refused.
+- `Fork` opens no execution connection and does not repeat admission.
 - `Suspend` applies no admission check.
 
 ### 13.3 Runtime SPI

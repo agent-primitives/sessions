@@ -1,8 +1,13 @@
-# Release build for the two user-facing binaries.
+# Release build. Archives carry the two user-facing binaries (agentctl, agentsessionsd).
 #
-# agentnode and harnessnode are deliberately absent: they are demo and conformance scaffolding, and
-# shipping them as release artifacts would present them as products people should run.
+# harnessnode is built only for its image, never archived; agentnode is not built. Both are demo and
+# conformance scaffolding, and shipping them as archives would present them as products to run.
 version: 2
+
+# Pinned so the archive names stay agentsessions_<version>_<os>_<arch>.tar.gz, as v0.1.x published
+# them and the install docs download them. Unset, goreleaser derives the name from the repository,
+# which became `sessions` with the move to agent-primitives/sessions.
+project_name: agentsessions
 
 before:
   hooks:

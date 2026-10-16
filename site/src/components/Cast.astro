@@ -73,34 +73,44 @@ const id = `cast-${src.replace(/\W+/g, "-")}`;
     // when the query flips after that (a tablet rotating, the page zoomed) it is rebuilt.
     const narrowQuery = window.matchMedia("(max-width: 60rem)");
     let fitted = false;
+    // Whether any player here has played. Until then the reader has only seen the poster, and a
+    // rebuild shows the poster again rather than seeking to the poster's frame, so play still starts
+    // from the beginning.
+    let started = false;
 
-    // `at` is where a rebuilt player picks up: playing from there, or held on that frame. The
-    // player draws no frame for a paused startAt, so a held one uses it as the poster instead.
+    // `at` is where a rebuilt player picks up, in the player's own time (idle pauses already capped,
+    // the timeline getCurrentTime reports). startAt cannot carry it: that option counts on the raw
+    // recording, before the idle cap, so it would land seconds early. A rebuilt player is created
+    // idle, seeks to `at` (which draws that frame and moves the play position there) and then plays
+    // only if the old one was playing, so either way play continues from the same moment.
     const mount = (at?: number) => {
       const narrow = narrowQuery.matches;
       fitted = narrow;
       el.classList.toggle("cast__player--fit", narrow);
-      const position =
-        at === undefined
-          ? { poster: el.dataset.poster }
-          : paused
-            ? { poster: `npt:${at}` }
-            : { startAt: at };
       const p = AsciinemaPlayer.create(src, el, {
-        autoPlay: !paused,
+        autoPlay: at === undefined && !paused,
         loop: true,
         // Long pauses are real (a rollout takes time) but boring to watch, so cap them.
         idleTimeLimit: Number(el.dataset.idle),
-        ...position,
+        ...(at === undefined && { poster: el.dataset.poster }),
         fit: narrow ? "width" : false,
         terminalFontSize: "13px",
         theme: "asciinema",
       });
       // Disposing a player stops it, which must not read as the user pausing it.
-      p.addEventListener("playing", () => p === player && reflect(false));
+      p.addEventListener("playing", () => {
+        if (p !== player) return;
+        started = true;
+        reflect(false);
+      });
       p.addEventListener("pause", () => p === player && reflect(true));
       p.addEventListener("ended", () => p === player && reflect(true));
       player = p;
+      if (at !== undefined) {
+        // Commands queue in order, so play waits for the seek to finish.
+        void p.seek(at);
+        if (!paused) void p.play();
+      }
     };
 
     const refit = () => {
@@ -112,11 +122,10 @@ const id = `cast-${src.replace(/\W+/g, "-")}`;
         (document as Document & { webkitFullscreenElement?: Element }).webkitFullscreenElement;
       if (full && el.contains(full)) return;
       const old = player;
-      // Before the recording has loaded there is no position to keep; show the poster again.
-      const at = old.getCurrentTime();
+      const at = started ? old.getCurrentTime() : undefined;
       player = undefined;
       old.dispose();
-      mount(Number.isFinite(at) && at > 0 ? at : undefined);
+      mount(at !== undefined && Number.isFinite(at) && at > 0 ? at : undefined);
     };
     narrowQuery.addEventListener("change", refit);
     document.addEventListener("fullscreenchange", refit);

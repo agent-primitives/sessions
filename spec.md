@@ -377,6 +377,15 @@ wire as §12 frames: model call, output, tool call, reported tool result, and us
 
 - `EXE-8`: The host MUST serialize the sink operations of one execution. After the harness's run
   returns, further sink calls MUST fail.
+- `EXE-33`: A failed sink operation reaches the harness as an error it can handle only in the Go
+  SPI. An in-process `api.Harness` can handle that error and continue, within `EXE-14` (sticky
+  divergence), `APR-2` (a park answers every later call), and `LOG-13` (a fenced writer appends
+  nothing more). `ControllerFrame` has no error reply, so over `Harness.Connect` the reference
+  host ends the invocation on any sink error: it returns that error as the run's result and
+  cancels the stream. The harness's pending call fails with the stream, nothing it does afterwards
+  is journaled, and the execution fails (`EXE-5`, `EXE-23`). The rules below that return an error
+  to the harness, including `EXE-22`, `EXE-30`, `TOOL-6`, and `TOOL-10`, therefore fail the
+  execution of a wire harness.
 - `EXE-9`: There is no mediated clock or randomness operation. A harness that uses wall-clock time
   or randomness to decide its actions is not reconstructible; this is a harness obligation
   (§8.4), not something the host enforces.
@@ -444,7 +453,8 @@ These are named in the reference controller. The numbering is the code's.
   divergence: the provider is not called and no `OUTPUT` is appended (the failed run's
   `EVENT_ERROR`, `EXE-23`, still applies). A non-trailing `MODEL_CALL` without `OUTPUT` MUST NOT
   reach the provider: the re-issued call returns an error to the harness, which is not
-  divergence. The execution fails only if the harness does not handle that error.
+  divergence. The execution fails only if the harness does not handle that error; over
+  `Harness.Connect` it always fails (`EXE-33`).
 - `EXE-23`: Recovery that fails after the harness has started running appends a best-effort
   `EVENT_ERROR`; recovery that succeeds appends `EVENT_END`. Failures raised before the harness
   runs (invalid log, incomplete invocation `EXE-24`, harness identity `EXE-25`, inherited intent
@@ -505,7 +515,8 @@ invokes no harness and stays a no-op without one.
     are exhausted.
   - A trailing `MODEL_CALL` without `OUTPUT` is not re-driven (`EXE-22` does not apply): the
     re-issued call returns an error to the harness and the provider is not called. If the run
-    then fails, its `ERROR` completes the legacy execution (`EXE-29`).
+    then fails (over `Harness.Connect` it always does, `EXE-33`), its `ERROR` completes the
+    legacy execution (`EXE-29`).
   - A `REQUIRES_APPROVAL` tool call that passes `APR-1` is refused (`ErrInvalidApprovalCall`)
     before any append; `APR-2` does not apply.
   - Records it appends carry no `execution_id` (`EXE-4`).
@@ -556,9 +567,10 @@ invokes no harness and stays a no-op without one.
   then append `TOOL_RESULT` with `id` set to the call id. A host MUST NOT run a tool executor
   without a non-empty session uid.
 - `TOOL-6`: For an ordinary host-executed call, an executor that returns a transport error leaves
-  the intent without a receipt; the error is returned to the harness and no `TOOL_RESULT` is
-  written. An approved `REQUIRES_APPROVAL` call is different: an executor error becomes a durable
-  receipt with `code = EXECUTOR_ERROR` and `is_error` set (§10).
+  the intent without a receipt; the error is returned to the harness (over `Harness.Connect` it
+  ends the invocation, `EXE-33`) and no `TOOL_RESULT` is written. An approved
+  `REQUIRES_APPROVAL` call is different: an executor error becomes a durable receipt with
+  `code = EXECUTOR_ERROR` and `is_error` set (§10).
 - A reference host with no tool executor configured records `TOOL_CALL`, then fails the call ("no
   tool executor configured") and the execution ends with `EVENT_ERROR`. The intent stays without a
   receipt, as in `TOOL-6`.
@@ -575,8 +587,9 @@ invokes no harness and stays a no-op without one.
 - `TOOL-10`: A trailing `TOOL_CALL` without a receipt MUST be re-driven on recovery with the
   recorded call (same `idempotency_key`) and the same session uid. A non-trailing `TOOL_CALL`
   without a receipt MUST NOT be re-executed: the re-issued call returns an error to the harness,
-  which is not divergence. The execution fails only if the harness does not handle that error; a
-  harness that handled it originally can continue and complete.
+  which is not divergence. The execution fails only if the harness does not handle that error; an
+  in-process harness that handled it originally can continue and complete. Over
+  `Harness.Connect` the execution fails (`EXE-33`).
 - `TOOL-11`: The executor MUST deduplicate on (session uid, `idempotency_key`) and MUST NOT repeat
   the external effect for a key it has already applied. The host re-drives on every recovery that
   finds the intent unresolved, so at-most-once holds only if the executor deduplicates.
@@ -892,6 +905,8 @@ sequenceDiagram
 - `WIRE-9`: An unknown `ToolChoice.mode` MUST be rejected in both directions; it is never treated
   as the provider default.
 - `WIRE-10`: The harness MUST issue one model or tool request at a time and wait for its reply.
+- There is no error reply frame. When the host's sink operation for a request fails, the reference
+  host sends no reply and ends the invocation (`EXE-33`).
 - `WIRE-11`: A park, and a protocol or correlation failure on a tool reply, MUST be sticky for the
   rest of the execution. In the reference harness server a failed model reply (wrong
   `execution_id` or `model_call_id`) fails that call only and is not sticky.
@@ -1147,6 +1162,7 @@ involved, and `TestApprovalRawProtocol` uses neither controller nor journal.
 | `TestWireDescribeRoundTrip` | Descriptor survives the gRPC round trip | `WIRE-1` |
 | `TestWirePropagatesExecutionID` | Remote `Start` execution id equals the journal's | `WIRE-4` |
 | `TestWireFailedHarnessSurfacesError` | Remote failure journaled as `ERROR`, not `END` | `EXE-5`, `WIRE-12` |
+| `TestWireSinkErrorEndsInvocation` | A harness that handles a provider error completes in process but fails over the wire | `EXE-33` |
 | `TestWireNondeterministicReplay` | Remote reconstruction is byte-identical with 0 model calls | `I1` |
 | `TestWireControllerMediatedTool` | Host executes once; replay does not re-execute | `TOOL-5`, `TOOL-9` |
 | `TestWireToolRequestChangesFailReplayAndRecovery` | Changed id, name, args, mediation, or key diverges with 0 executor calls | `TOOL-8` |

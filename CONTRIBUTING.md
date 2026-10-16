@@ -32,6 +32,7 @@ Run these before pushing; they are the same gates the `ci` workflow enforces.
 | Daemon smoke test (local runtime, no substrate) | `go test ./cmd/agentsessionsd -run TestSessionLifecycleRealBinaries` (part of Tests) |
 | Persisted-format compatibility | `go test ./session ./sqlitelog -run 'SchemaV4Fixture\|MigratedAndFresh'` (part of Tests) |
 | Proto lint | `buf lint` |
+| Go blocks in docs (`docs` workflow, every pull request) | `go run ./hack/doccheck` |
 | Release build (`release-check`, on changes to Go, `Dockerfile`, `.goreleaser.yaml`, `.ko.yaml`) | `goreleaser check`, then `goreleaser release --snapshot --clean --skip=sbom` (needs `ko`; publishes nothing); `docker build` of `Dockerfile` after `CGO_ENABLED=0 GOOS=linux go build -o agentnode ./cmd/agentnode` |
 | Fuzzing (30s per target; nightly longer) | `./hack/fuzz.sh <dir> 30s` for each `<dir>` in `./hack/fuzz.sh --packages` |
 
@@ -55,7 +56,10 @@ currently skips. It arms itself at the first release.
   root module. Concrete backends live in their own modules or repositories, which is what the vendor
   neutrality gate enforces.
 - **Go examples in docs get compile-checked** before merging. A snippet that does not build is worse
-  than no snippet, and several already sit directly on top of SPIs that are still changing.
+  than no snippet, and several already sit directly on top of SPIs that are still changing. Every
+  fenced block tagged `go` needs a `<!-- doccheck: ... -->` marker on the line before it that says
+  how `hack/doccheck` checks it (`decls`, `file`, `body(PARAMS)`, or `skip REASON` for an excerpt);
+  see the comment at the top of `hack/doccheck/main.go`.
 - **Docs land with the code they describe**, not ahead of it. If a change alters an interface that a
   document shows, update the document in the same pull request.
 

@@ -24,3 +24,18 @@ jobs:
       - uses: actions/checkout@v7
       - name: relative links and heading anchors resolve
         run: python3 hack/check-doc-links.py
+
+  # Go blocks in the docs are type-checked against the current module. It runs here rather than in ci
+  # because ci skips markdown-only pull requests, which are the ones most likely to change a block;
+  # this workflow runs on every pull request, so an API change that breaks a block fails here too.
+  go-blocks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Go blocks in Markdown type-check
+        run: go run ./hack/doccheck

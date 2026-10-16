@@ -11,6 +11,7 @@ three reference harnesses. Read [`concepts.md`](concepts.md) first for the nouns
 
 ## The contract
 
+<!-- doccheck: skip excerpt of api.Harness; the real definition is in api/harness.go -->
 ```go
 type Harness interface {
     // Describe returns the static contract, used to match the harness to a Runtime.
@@ -27,6 +28,7 @@ gives you the inputs and (on the stateless path) the history, and records everyt
 
 ## Describe: declare your contract
 
+<!-- doccheck: skip excerpt of api.Descriptor; the real definition is in api/harness.go -->
 ```go
 type Descriptor struct {
     ID           string
@@ -58,6 +60,7 @@ is not served.
 `Capabilities` is the important part, because the host uses it to place your harness on a compatible
 runtime (see [Capability matching](#capability-matching)):
 
+<!-- doccheck: skip excerpt of api.Capabilities; the real definition is in api/harness.go -->
 ```go
 type Capabilities struct {
     Resumability    Resumability // STATELESS_REPLAY (default) or REQUIRES_MEMORY_SNAPSHOT
@@ -72,6 +75,7 @@ type Capabilities struct {
 
 The host hands you a `Start` and an `EventSink`.
 
+<!-- doccheck: skip excerpt of api.Start; the real definition is in api/harness.go -->
 ```go
 type Start struct {
     Config        []byte    // opaque per-execution config
@@ -135,6 +139,7 @@ Do not put credentials in config: it is durable journal content, not a secret ch
 Everything your harness does that the world should see, it does through the sink (`api.EventSink`). The
 SDK hides the gRPC stream, sequence numbers, and the emit-then-wait-for-host round trip.
 
+<!-- doccheck: skip excerpt of api.EventSink; the real definition is in api/harness.go -->
 ```go
 type EventSink interface {
     Model(ctx context.Context, req ModelRequest) (ModelResponse, error) // mediated model call
@@ -266,6 +271,7 @@ The Placer binds the session UID for both paths. Given a backend serving your ha
 and your host executor (these APIs are not in v0.1.x; the `github.com/agent-primitives/sessions`
 import path applies from v0.2.0):
 
+<!-- doccheck: file -->
 ```go
 import (
     "github.com/agent-primitives/sessions/controller"
@@ -401,6 +407,7 @@ model adapter and durably deduplicating host executor still supply those parts.
 The whole harness. It sends the last input to the model through the sink and lets the recorded
 completion be the output. Nothing else.
 
+<!-- doccheck: decls -->
 ```go
 type Harness struct{}
 
@@ -495,6 +502,7 @@ The Go SDK accepts these bytes through `client.ExecOptions.Config` (`client` is
 `github.com/agent-primitives/sessions` import path applies from v0.2.0). `agentctl` has no config
 flag yet.
 
+<!-- doccheck: body() -->
 ```go
 opts := client.ExecOptions{
     Session: "<session-uid>", // omit to create a session for this turn
@@ -596,6 +604,7 @@ fallback. This shared construction helper adds no provider routing or dynamic re
 The counterpart. Its state is an in-RAM integer that the log cannot reconstruct, so it needs a memory
 snapshot and demonstrates Rule 3 and I4.
 
+<!-- doccheck: decls -->
 ```go
 type Harness struct {
     mu    sync.Mutex
@@ -640,6 +649,7 @@ Serve it the way `cmd/harnessnode` does, registering your harness on a listener 
 loopback unless the host is on another machine: whatever answers at this address is trusted by the
 host, over cleartext (see [security](security.md)).
 
+<!-- doccheck: body() with type myHarness = echoagent.Harness -->
 ```go
 lis, err := net.Listen("tcp", "127.0.0.1:8090")
 if err != nil {

@@ -72,7 +72,9 @@ binding listeners. Restart to change it. Invalid config fails startup even with 
 `-harness` entries. Unknown fields, case-mismatched field names, duplicate JSON members,
 trailing JSON, invalid UTF-8, wrong types, unsupported versions/types, empty required
 strings, duplicate executor names/routes, unknown references and nonabsolute/NUL socket
-paths are refused. JSON nesting is limited to 100. No commands or credentials belong here.
+paths are refused. Socket paths are limited to 103 bytes on every platform, leaving room
+for the NUL terminator in macOS's stricter 104-byte `sun_path` (Linux has 108 bytes).
+JSON nesting is limited to 100. No commands or credentials belong here.
 `version` must be integer 1. `executors` and `tools` may be omitted/empty. Each executor
 requires `name`, `type: "unix"`, and `socket`. Each tool requires `harness`, `tool`, and
 `executor`. `timeout_ms` defaults to 30,000; explicit values must be integers from 1 through

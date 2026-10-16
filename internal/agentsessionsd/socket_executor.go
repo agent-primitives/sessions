@@ -63,6 +63,11 @@ func (e socketExecutorConfig) execute(parent context.Context, harness string, sc
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", e.Socket)
 	if err != nil {
+		// Dial's net.OpError includes the local address; receipts are visible to the harness.
+		var op *net.OpError
+		if errors.As(err, &op) {
+			err = op.Err
+		}
 		return fail("dial", err)
 	}
 	defer conn.Close()
@@ -77,11 +82,11 @@ func (e socketExecutorConfig) execute(parent context.Context, harness string, sc
 		return fail("write", err)
 	}
 	reply, err := bufio.NewReader(io.LimitReader(conn, toolMessageLimit+1)).ReadBytes('\n')
-	if err != nil {
-		return fail("read", err)
-	}
 	if len(reply) > toolMessageLimit {
 		return fail("read", errors.New("frame exceeds 1 MiB"))
+	}
+	if err != nil {
+		return fail("read", err)
 	}
 	var response socketToolResponse
 	if err := strictJSON(reply, &response); err != nil {

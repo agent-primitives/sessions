@@ -75,7 +75,7 @@ func configuredSocketJSON(socket, declaration, tool string) string {
 
 func TestRunSocketApprovalAndReceiptRecovery(t *testing.T) {
 	harness := serveHarness(t, gatedHarness{})
-	for _, scenario := range []string{"approve", "deny", "false", "unknown", "response lost", "unconfigured tool", "no config"} {
+	for _, scenario := range []string{"approve", "deny", "false", "unknown", "response lost", "socket down", "unconfigured tool", "no config"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
@@ -109,6 +109,9 @@ func TestRunSocketApprovalAndReceiptRecovery(t *testing.T) {
 			tool := "publish"
 			if scenario == "unconfigured tool" {
 				tool = "Publish"
+			}
+			if scenario == "socket down" {
+				socket = filepath.Join(filepath.Dir(socket), "absent.sock")
 			}
 			config := configuredSocketJSON(socket, declaration, tool)
 			if scenario == "no config" {
@@ -167,6 +170,9 @@ func TestRunSocketApprovalAndReceiptRecovery(t *testing.T) {
 			}
 			if calls.Load() != wantCalls || receipt.GetCode() != wantCode {
 				t.Fatalf("calls=%d receipt=%v; want calls=%d code=%v", calls.Load(), receipt, wantCalls, wantCode)
+			}
+			if scenario == "socket down" && (!receipt.GetIsError() || !strings.Contains(receipt.GetError(), "dial:") || strings.Contains(receipt.GetError(), socket) || strings.Contains(receipt.GetError(), filepath.Dir(socket))) {
+				t.Fatalf("dial failure receipt must omit local paths: %v", receipt)
 			}
 			mu.Lock()
 			committed := effects

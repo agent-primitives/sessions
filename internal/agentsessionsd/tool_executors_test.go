@@ -47,6 +47,7 @@ func TestRunRejectsToolConfigBeforeSideEffects(t *testing.T) {
 		"type":               strings.Replace(validToolConfig, `"type":"unix"`, `"type":"tcp"`, 1),
 		"relative socket":    strings.Replace(validToolConfig, `/run/tool.sock`, `tool.sock`, 1),
 		"nul socket":         strings.Replace(validToolConfig, `/run/tool.sock`, `/run/\u0000.sock`, 1),
+		"long socket":        strings.Replace(validToolConfig, `/run/tool.sock`, "/"+strings.Repeat("x", 103), 1),
 		"empty name":         strings.Replace(validToolConfig, `"name":"e"`, `"name":""`, 1),
 		"empty tool":         strings.Replace(validToolConfig, `"tool":"publish"`, `"tool":""`, 1),
 		"duplicate executor": `{"version":1,"executors":[{"name":"e","type":"unix","socket":"/x"},{"name":"e","type":"unix","socket":"/y"}]}`,
@@ -68,6 +69,27 @@ func TestRunRejectsToolConfigBeforeSideEffects(t *testing.T) {
 			}
 			if _, err := os.Stat(journal); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("invalid config created journal: %v", err)
+			}
+		})
+	}
+}
+
+func TestToolConfigSocketPathLength(t *testing.T) {
+	for _, socket := range []string{
+		"/" + strings.Repeat("x", 102),
+		"/" + strings.Repeat("x", 103),
+		"/" + strings.Repeat("é", 51),
+		"/" + strings.Repeat("é", 52),
+	} {
+		t.Run(socket, func(t *testing.T) {
+			data := strings.Replace(validToolConfig, "/run/tool.sock", socket, 1)
+			_, err := loadToolExecutorConfig(writeToolConfig(t, data), remoteHarnesses{"h": "127.0.0.1:9000"})
+			if len(socket) <= 103 {
+				if err != nil {
+					t.Fatalf("valid %d-byte path rejected: %v", len(socket), err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "Unix socket path must be at most 103 bytes") {
+				t.Fatalf("oversized %d-byte path: %v", len(socket), err)
 			}
 		})
 	}

@@ -69,6 +69,10 @@ func loadToolExecutorConfig(path string, remotes remoteHarnesses) (*toolExecutor
 		if !filepath.IsAbs(e.Socket) || strings.ContainsRune(e.Socket, 0) {
 			return nil, fmt.Errorf("executor %q requires an absolute Unix socket path without NUL", e.Name)
 		}
+		// Use macOS's stricter 104-byte sun_path capacity, leaving room for the NUL terminator.
+		if len(e.Socket) > 103 {
+			return nil, fmt.Errorf("executor %q Unix socket path must be at most 103 bytes", e.Name)
+		}
 		if e.TimeoutMS != nil && (*e.TimeoutMS < 1 || *e.TimeoutMS > 300000) {
 			return nil, fmt.Errorf("executor %q timeout_ms must be 1..300000", e.Name)
 		}

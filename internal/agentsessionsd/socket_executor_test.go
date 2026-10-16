@@ -167,6 +167,9 @@ func TestSocketExecutorValidatesReplies(t *testing.T) {
 			if valid && err != nil || !valid && err == nil {
 				t.Fatalf("result=%#v err=%v", result, err)
 			}
+			if name == "oversize" && !strings.Contains(err.Error(), "read: frame exceeds 1 MiB") {
+				t.Fatalf("oversized reply: %v", err)
+			}
 			if name == "domain error" && (!result.IsError || result.Error != "declined") {
 				t.Fatalf("domain error = %#v", result)
 			}
@@ -196,6 +199,10 @@ func TestSocketExecutorDeadlinesAndCancellation(t *testing.T) {
 				// Keep the write larger than the Unix send buffer so a non-reading peer really stalls.
 				e := socketExecutorConfig{Socket: socket}
 				timeout := 100
+				if mode == "cancel" {
+					// Cancellation must win even when race-instrumented marshaling is slow.
+					timeout = 10000
+				}
 				e.TimeoutMS = &timeout
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
@@ -261,9 +268,15 @@ func TestSocketExecutorProtocolErrorsDoNotExposePayload(t *testing.T) {
 }
 
 func TestSocketExecutorDownAndAlreadyCanceled(t *testing.T) {
-	e := socketExecutorConfig{Socket: filepath.Join(t.TempDir(), "absent.sock")}
-	if _, err := e.execute(t.Context(), "h", controller.ToolCallContext{SessionUID: "s"}, socketCall()); err == nil {
-		t.Fatal("down socket succeeded")
+	// t.TempDir includes the test name and can exceed macOS's Unix socket path limit.
+	dir, err := os.MkdirTemp("", "sessions-tool-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	e := socketExecutorConfig{Socket: filepath.Join(dir, "absent.sock")}
+	if _, err := e.execute(t.Context(), "h", controller.ToolCallContext{SessionUID: "s"}, socketCall()); !errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), e.Socket) {
+		t.Fatalf("down socket must preserve cause without path: %v", err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

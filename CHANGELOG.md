@@ -140,6 +140,10 @@ not provide.
 
 ### Compatibility
 
+- `agentsessionsd -tool-executors` rejects socket paths longer than 103 bytes at startup on
+  every platform (macOS's stricter `sun_path` limit, reserving its NUL terminator). Dial
+  errors omit the socket path from harness-visible errors and approval receipts; oversized
+  replies report the 1 MiB frame limit rather than EOF.
 - Optional `ResumeRequest.expected_last_seq` checks the journal head under the session guard
   before inspection, after an early fence before restore/approval repair, and after a restored
   turn's regular writer fence before Run. A mismatch is `ABORTED` with expected/head values;

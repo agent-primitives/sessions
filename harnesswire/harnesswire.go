@@ -21,10 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/internal/ctxlock"
 	"github.com/aramase/agentsessions/wire"
 )
 
@@ -75,7 +75,7 @@ func (s *Server) Connect(stream v1.Harness_ConnectServer) error {
 	// Interrupt an in-flight await before taking the effect lock. Never wait for
 	// Recv: gRPC cancels the stream context after this handler returns.
 	close(done)
-	sink.mu.Lock()
+	_ = sink.mu.Lock(context.Background()) // done interrupts the active await before drainage.
 	defer sink.mu.Unlock()
 	sink.closed = true
 	if sink.parked != nil {
@@ -123,7 +123,7 @@ type streamSink struct {
 	done        <-chan struct{}
 	// Serialize sends and request/reply pairs. Park and protocol failures stay
 	// sticky even when a harness handles (or ignores) a sink error.
-	mu      sync.Mutex
+	mu      ctxlock.Mutex
 	closed  bool
 	parked  *api.ApprovalParkedError
 	failure error
@@ -223,7 +223,9 @@ func (s *streamSink) awaitResult(ctx context.Context) (*v1.ControllerFrame, erro
 }
 
 func (s *streamSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
-	s.mu.Lock()
+	if err := s.mu.Lock(ctx); err != nil {
+		return api.ModelResponse{}, err
+	}
 	defer s.mu.Unlock()
 	if err := s.check(ctx); err != nil {
 		return api.ModelResponse{}, err
@@ -278,7 +280,9 @@ func (s *streamSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 }
 
 func (s *streamSink) Output(ctx context.Context, delta string) error {
-	s.mu.Lock()
+	if err := s.mu.Lock(ctx); err != nil {
+		return err
+	}
 	defer s.mu.Unlock()
 	if err := s.check(ctx); err != nil {
 		return err
@@ -295,7 +299,9 @@ func (s *streamSink) Output(ctx context.Context, delta string) error {
 // host — not the harness — executes and records the tool (record-before-effect, §3), exactly as it
 // mediates a model call, so the load-bearing rule holds across the process boundary.
 func (s *streamSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
-	s.mu.Lock()
+	if err := s.mu.Lock(ctx); err != nil {
+		return api.ToolResult{}, err
+	}
 	defer s.mu.Unlock()
 	if err := s.check(ctx); err != nil {
 		return api.ToolResult{}, err
@@ -362,7 +368,9 @@ func (s *streamSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolRes
 // Report records the result of a tool the harness executed in-sandbox (IN_HARNESS_REPORTED): it
 // emits an EVENT_TOOL_RESULT the host records, mirroring the in-process liveSink.Report.
 func (s *streamSink) Report(ctx context.Context, tr api.ToolResult) error {
-	s.mu.Lock()
+	if err := s.mu.Lock(ctx); err != nil {
+		return err
+	}
 	defer s.mu.Unlock()
 	if err := s.check(ctx); err != nil {
 		return err
@@ -378,7 +386,9 @@ func (s *streamSink) Report(ctx context.Context, tr api.ToolResult) error {
 	})
 }
 func (s *streamSink) Usage(ctx context.Context, u api.Usage) error {
-	s.mu.Lock()
+	if err := s.mu.Lock(ctx); err != nil {
+		return err
+	}
 	defer s.mu.Unlock()
 	if err := s.check(ctx); err != nil {
 		return err

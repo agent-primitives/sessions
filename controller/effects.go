@@ -29,9 +29,14 @@ var _ api.EventSink = (*liveSink)(nil)
 // Footgun: the completion is ALREADY recorded as the output here. A harness that also calls
 // Output() with the same content double-records it; use Output() only for additional/streamed text.
 func (s *liveSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
-	s.guard.mu.Lock()
+	if err := s.guard.mu.Lock(ctx); err != nil {
+		return api.ModelResponse{}, err
+	}
 	defer s.guard.mu.Unlock()
 	if err := s.guard.err(); err != nil {
+		return api.ModelResponse{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return api.ModelResponse{}, err
 	}
 	return s.model(ctx, req)
@@ -65,9 +70,14 @@ func (s *liveSink) completeModel(ctx context.Context, req api.ModelRequest) (api
 }
 
 func (s *liveSink) Output(ctx context.Context, delta string) error {
-	s.guard.mu.Lock()
+	if err := s.guard.mu.Lock(ctx); err != nil {
+		return err
+	}
 	defer s.guard.mu.Unlock()
 	if err := s.guard.err(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return s.output(ctx, delta)
@@ -79,9 +89,14 @@ func (s *liveSink) output(_ context.Context, delta string) error {
 }
 
 func (s *liveSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
-	s.guard.mu.Lock()
+	if err := s.guard.mu.Lock(ctx); err != nil {
+		return api.ToolResult{}, err
+	}
 	defer s.guard.mu.Unlock()
 	if err := s.guard.err(); err != nil {
+		return api.ToolResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return api.ToolResult{}, err
 	}
 	return s.toolCall(ctx, tc)
@@ -151,9 +166,14 @@ func (s *liveSink) execTool(ctx context.Context, call api.ToolCall) (api.ToolRes
 }
 
 func (s *liveSink) Report(ctx context.Context, tr api.ToolResult) error {
-	s.guard.mu.Lock()
+	if err := s.guard.mu.Lock(ctx); err != nil {
+		return err
+	}
 	defer s.guard.mu.Unlock()
 	if err := s.guard.err(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return s.report(ctx, tr)
@@ -173,9 +193,14 @@ func (s *liveSink) report(_ context.Context, tr api.ToolResult) error {
 }
 
 func (s *liveSink) Usage(ctx context.Context, u api.Usage) error {
-	s.guard.mu.Lock()
+	if err := s.guard.mu.Lock(ctx); err != nil {
+		return err
+	}
 	defer s.guard.mu.Unlock()
 	if err := s.guard.err(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return s.usage(ctx, u)
@@ -217,14 +242,19 @@ func (s *replaySink) nextOf(kind api.EventKind) (api.Event, bool) {
 	return ev, true
 }
 
-func (s *replaySink) Model(_ context.Context, req api.ModelRequest) (api.ModelResponse, error) {
-	s.guard.mu.Lock()
+func (s *replaySink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+	if err := s.guard.mu.Lock(ctx); err != nil {
+		return api.ModelResponse{}, err
+	}
 	defer s.guard.mu.Unlock()
 	if err := s.guard.err(); err != nil {
 		return api.ModelResponse{}, err
 	}
 	if s.failure != nil {
 		return api.ModelResponse{}, s.failure
+	}
+	if err := ctx.Err(); err != nil {
+		return api.ModelResponse{}, err
 	}
 	mc, ok := s.nextOf(api.EventModelCall)
 	if !ok {
@@ -267,14 +297,19 @@ func usageAt(stream []api.Event, i int) api.Usage {
 	return api.Usage{}
 }
 
-func (s *replaySink) Output(_ context.Context, delta string) error {
-	s.guard.mu.Lock()
+func (s *replaySink) Output(ctx context.Context, delta string) error {
+	if err := s.guard.mu.Lock(ctx); err != nil {
+		return err
+	}
 	defer s.guard.mu.Unlock()
 	if err := s.guard.err(); err != nil {
 		return err
 	}
 	if s.failure != nil {
 		return s.failure
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	ev, ok := s.nextOf(api.EventOutput)
 	if !ok {
@@ -294,14 +329,19 @@ func (s *replaySink) Output(_ context.Context, delta string) error {
 	return nil
 }
 
-func (s *replaySink) ToolCall(_ context.Context, tc api.ToolCall) (api.ToolResult, error) {
-	s.guard.mu.Lock()
+func (s *replaySink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
+	if err := s.guard.mu.Lock(ctx); err != nil {
+		return api.ToolResult{}, err
+	}
 	defer s.guard.mu.Unlock()
 	if err := s.guard.err(); err != nil {
 		return api.ToolResult{}, err
 	}
 	if s.failure != nil {
 		return api.ToolResult{}, s.failure
+	}
+	if err := ctx.Err(); err != nil {
+		return api.ToolResult{}, err
 	}
 	// Historical keyless ordinary rejections have no intent. A same-ID gated intent instead
 	// requires identity validation, so changing mediation and dropping its key cannot hide it.
@@ -357,14 +397,19 @@ func (s *replaySink) ToolCall(_ context.Context, tc api.ToolCall) (api.ToolResul
 	return result, err
 }
 
-func (s *replaySink) Report(_ context.Context, tr api.ToolResult) error {
-	s.guard.mu.Lock()
+func (s *replaySink) Report(ctx context.Context, tr api.ToolResult) error {
+	if err := s.guard.mu.Lock(ctx); err != nil {
+		return err
+	}
 	defer s.guard.mu.Unlock()
 	if err := s.guard.err(); err != nil {
 		return err
 	}
 	if s.failure != nil {
 		return s.failure
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if s.calls[tr.ID] {
 		return s.diverged(ErrApprovalReceiptReport)
@@ -382,14 +427,19 @@ func (s *replaySink) Report(_ context.Context, tr api.ToolResult) error {
 	return nil
 }
 
-func (s *replaySink) Usage(_ context.Context, usage api.Usage) error {
-	s.guard.mu.Lock()
+func (s *replaySink) Usage(ctx context.Context, usage api.Usage) error {
+	if err := s.guard.mu.Lock(ctx); err != nil {
+		return err
+	}
 	defer s.guard.mu.Unlock()
 	if err := s.guard.err(); err != nil {
 		return err
 	}
 	if s.failure != nil {
 		return s.failure
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if s.legacy {
 		return nil // auxiliary accounting was excluded from v0.1.2's effect stream

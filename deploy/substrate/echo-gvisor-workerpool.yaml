@@ -22,7 +22,8 @@ metadata:
 spec:
   # One worker for the template's golden-snapshot build and one per concurrently running actor.
   replicas: 3
-  sandboxClass: gvisor
+  sandboxClasses:
+    - name: gvisor
   workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
   template:
     # The ate-api scheduler books an ActorTemplate's spec.resources against the capacity a worker

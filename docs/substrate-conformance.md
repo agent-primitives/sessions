@@ -59,17 +59,19 @@ source itself: the actor's own snapshot, else the template's golden snapshot, el
 template spec. That is enough for `STATELESS_REPLAY`: a new actor has no snapshot of its own, and the
 golden snapshot is the harness captured right after it became ready, before any session touched it,
 so it carries no session state. A template that must cold-boot on every resume would set
-`snapshotConfig.onCommit: DATA` instead; nothing here needs that.
+`snapshotConfig.preferredFidelity: SNAPSHOT_FIDELITY_VOLUMES` instead; nothing here needs that.
 
 `Capabilities.MemorySnapshot = true` is the tier that lets substrate host a `REQUIRES_MEMORY_SNAPSHOT`
 harness a filesystem-only backend (`runtime/local`, a plain pod) refuses via `CanPlace`.
 
 ## Fork: cloning an actor from a durable snapshot
 
-Every successful `SuspendActor` leaves the actor holding a new external snapshot
-(`Actor.status.external_snapshot`). `CreateTag{source_actor}` copies the snapshot a SUSPENDED actor
-holds into tag-owned storage, and `CreateActor{source_tag}` seeds a new actor from that copy. That is
-the compute half of a session fork.
+Every successful `SuspendActor` leaves the actor holding a new external snapshot: a new generation in
+`Actor.status.snapshots` whose durable copy is `COMPLETED`. The adapter reports the highest such
+generation's URI as the held snapshot, the same one `ResumeActor` restores and `CreateTag` copies.
+`CreateTag{source_actor}` copies the snapshot a SUSPENDED actor holds into tag-owned storage, and
+`CreateActor{source_tag}` seeds a new actor from that copy. That is the compute half of a session
+fork.
 
 There is no `Fork` RPC to wait for. The Control service exposes no method that forks or clones an
 actor directly; tags are the primitive it provides. That is the right half of the split: the compute layer copies a sandbox,
@@ -434,8 +436,8 @@ HARNESS_IMAGE="${HARNESS_IMAGE}" ECHO_SANDBOX_CLASS=gvisor COUNTER_SANDBOX_CLASS
 `kind delete cluster --name "${KIND_CLUSTER_NAME}"` removes the cluster afterwards. The
 `kind-registry` container is shared by every cluster `create-kind-cluster.sh` makes, so it stays.
 
-A gVisor FULL checkpoint also captures memory, so the stateful and fork tests exercise the same code
-paths on gVisor; the micro-VM run in CI remains the reference for both tiers.
+A gVisor MEMORY-fidelity checkpoint also captures memory, so the stateful and fork tests exercise
+the same code paths on gVisor; the micro-VM run in CI remains the reference for both tiers.
 
 ### Verification boundary
 

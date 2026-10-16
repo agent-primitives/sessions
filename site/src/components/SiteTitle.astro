@@ -13,12 +13,21 @@ import { Icon } from "@astrojs/starlight/components";
 
 const links = [
   { label: "Quickstart", href: "/quickstart/" },
-  { label: "Docs", href: "/concepts/" },
+  { label: "Docs", href: "/concepts/", docs: true },
   { label: "API", href: "/api-reference/" },
 ];
 
 const path = Astro.url.pathname;
 const { hasSidebar } = Astro.locals.starlightRoute;
+
+// Each link owns the routes under it, and "Docs" also stands for every other page with a sidebar
+// (/architecture/, /faq/ and the rest). The link is "page" on its own route and "true" elsewhere in
+// its section, which is what aria-current means for a section rather than a page.
+const section =
+  links.find((l) => path.startsWith(l.href)) ??
+  (hasSidebar ? links.find((l) => l.docs) : undefined);
+const current = (href: string) =>
+  href !== section?.href ? undefined : path === href ? "page" : "true";
 ---
 
 <Default {...Astro.props}><slot /></Default>
@@ -26,7 +35,7 @@ const { hasSidebar } = Astro.locals.starlightRoute;
 <nav class="topnav" aria-label="Site">
   {
     links.map(({ label, href }) => (
-      <a href={href} aria-current={path.startsWith(href) ? "page" : undefined}>
+      <a href={href} aria-current={current(href)}>
         {label}
       </a>
     ))
@@ -46,7 +55,7 @@ const { hasSidebar } = Astro.locals.starlightRoute;
           <ul>
             {links.map(({ label, href }) => (
               <li>
-                <a href={href} aria-current={path.startsWith(href) ? "page" : undefined}>
+                <a href={href} aria-current={current(href)}>
                   {label === "API" ? "API reference" : label}
                 </a>
               </li>
@@ -62,6 +71,7 @@ const { hasSidebar } = Astro.locals.starlightRoute;
 <script>
   // Rendered in every page's header, so this is where site-wide behaviour hooks in.
   import "../scripts/scroll-regions";
+  import "../scripts/details-targets";
 
   // The menu is only reachable below 50rem; close it if the window grows past that while open.
   const menu = document.getElementById("site-menu");
@@ -95,7 +105,7 @@ const { hasSidebar } = Astro.locals.starlightRoute;
     color: var(--sl-color-white);
   }
 
-  .topnav a[aria-current="page"] {
+  .topnav a[aria-current] {
     color: var(--sl-color-white);
     border-bottom-color: var(--sl-color-accent);
   }
@@ -189,7 +199,7 @@ const { hasSidebar } = Astro.locals.starlightRoute;
     text-decoration: none;
   }
 
-  .site-menu a[aria-current="page"] {
+  .site-menu a[aria-current] {
     color: var(--sl-color-text-accent);
   }
 

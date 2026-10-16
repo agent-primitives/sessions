@@ -8,111 +8,6 @@ Source of truth: api/*.proto. Edit the proto comments, not this file.
 # Protocol Documentation
 <a name="top"></a>
 
-## Table of Contents
-
-- [common.proto](#common-proto)
-    - [ApprovalRef](#agentsessions-v1-ApprovalRef)
-    - [ApprovalRequest](#agentsessions-v1-ApprovalRequest)
-    - [ApprovalResult](#agentsessions-v1-ApprovalResult)
-    - [DataPart](#agentsessions-v1-DataPart)
-    - [Error](#agentsessions-v1-Error)
-    - [Event](#agentsessions-v1-Event)
-    - [ExecutionStart](#agentsessions-v1-ExecutionStart)
-    - [FilePart](#agentsessions-v1-FilePart)
-    - [HarnessEnd](#agentsessions-v1-HarnessEnd)
-    - [IdentityRef](#agentsessions-v1-IdentityRef)
-    - [Lifecycle](#agentsessions-v1-Lifecycle)
-    - [LogRecord](#agentsessions-v1-LogRecord)
-    - [Message](#agentsessions-v1-Message)
-    - [ModelCall](#agentsessions-v1-ModelCall)
-    - [ModelCall.ParamsEntry](#agentsessions-v1-ModelCall-ParamsEntry)
-    - [Origin](#agentsessions-v1-Origin)
-    - [Origin.AttributesEntry](#agentsessions-v1-Origin-AttributesEntry)
-    - [Part](#agentsessions-v1-Part)
-    - [ReasoningPart](#agentsessions-v1-ReasoningPart)
-    - [ResourceMetadata](#agentsessions-v1-ResourceMetadata)
-    - [TextPart](#agentsessions-v1-TextPart)
-    - [ToolCall](#agentsessions-v1-ToolCall)
-    - [ToolChoice](#agentsessions-v1-ToolChoice)
-    - [ToolDefinition](#agentsessions-v1-ToolDefinition)
-    - [ToolResult](#agentsessions-v1-ToolResult)
-    - [Usage](#agentsessions-v1-Usage)
-  
-    - [EventKind](#agentsessions-v1-EventKind)
-    - [Lifecycle.Kind](#agentsessions-v1-Lifecycle-Kind)
-    - [Mediation](#agentsessions-v1-Mediation)
-    - [ToolChoice.Mode](#agentsessions-v1-ToolChoice-Mode)
-    - [ToolResult.Code](#agentsessions-v1-ToolResult-Code)
-  
-- [harness.proto](#harness-proto)
-    - [Cancel](#agentsessions-v1-Cancel)
-    - [Capabilities](#agentsessions-v1-Capabilities)
-    - [ControllerFrame](#agentsessions-v1-ControllerFrame)
-    - [DescribeRequest](#agentsessions-v1-DescribeRequest)
-    - [HarnessDescriptor](#agentsessions-v1-HarnessDescriptor)
-    - [IdentityContext](#agentsessions-v1-IdentityContext)
-    - [ModelResult](#agentsessions-v1-ModelResult)
-    - [Start](#agentsessions-v1-Start)
-    - [ToolSpec](#agentsessions-v1-ToolSpec)
-  
-    - [Resumability](#agentsessions-v1-Resumability)
-  
-    - [Harness](#agentsessions-v1-Harness)
-  
-- [harness_registry.proto](#harness_registry-proto)
-    - [GetHarnessRequest](#agentsessions-v1-GetHarnessRequest)
-    - [HarnessRegistration](#agentsessions-v1-HarnessRegistration)
-    - [HarnessSpec](#agentsessions-v1-HarnessSpec)
-    - [ListHarnessesRequest](#agentsessions-v1-ListHarnessesRequest)
-    - [ListHarnessesResponse](#agentsessions-v1-ListHarnessesResponse)
-    - [RegisterHarnessRequest](#agentsessions-v1-RegisterHarnessRequest)
-    - [RegisterHarnessResponse](#agentsessions-v1-RegisterHarnessResponse)
-    - [RemotePlacement](#agentsessions-v1-RemotePlacement)
-    - [RetireHarnessRequest](#agentsessions-v1-RetireHarnessRequest)
-    - [SubstratePlacement](#agentsessions-v1-SubstratePlacement)
-  
-    - [HarnessSource](#agentsessions-v1-HarnessSource)
-    - [HarnessState](#agentsessions-v1-HarnessState)
-    - [RegisterOutcome](#agentsessions-v1-RegisterOutcome)
-  
-    - [HarnessRegistry](#agentsessions-v1-HarnessRegistry)
-  
-- [session.proto](#session-proto)
-    - [ApproveRequest](#agentsessions-v1-ApproveRequest)
-    - [ApproveResponse](#agentsessions-v1-ApproveResponse)
-    - [CancelRequest](#agentsessions-v1-CancelRequest)
-    - [ComputeRef](#agentsessions-v1-ComputeRef)
-    - [ComputeRef.AttributesEntry](#agentsessions-v1-ComputeRef-AttributesEntry)
-    - [CreateSessionRequest](#agentsessions-v1-CreateSessionRequest)
-    - [DeleteSessionRequest](#agentsessions-v1-DeleteSessionRequest)
-    - [Delta](#agentsessions-v1-Delta)
-    - [ExecRequest](#agentsessions-v1-ExecRequest)
-    - [ExecUpdate](#agentsessions-v1-ExecUpdate)
-    - [ForkRequest](#agentsessions-v1-ForkRequest)
-    - [ForkRequest.LabelsEntry](#agentsessions-v1-ForkRequest-LabelsEntry)
-    - [ForkResponse](#agentsessions-v1-ForkResponse)
-    - [GetSessionRequest](#agentsessions-v1-GetSessionRequest)
-    - [ListSessionsRequest](#agentsessions-v1-ListSessionsRequest)
-    - [ListSessionsResponse](#agentsessions-v1-ListSessionsResponse)
-    - [ReplayRequest](#agentsessions-v1-ReplayRequest)
-    - [ResumeRequest](#agentsessions-v1-ResumeRequest)
-    - [RuntimeCapabilities](#agentsessions-v1-RuntimeCapabilities)
-    - [Session](#agentsessions-v1-Session)
-    - [Session.AnnotationsEntry](#agentsessions-v1-Session-AnnotationsEntry)
-    - [Session.LabelsEntry](#agentsessions-v1-Session-LabelsEntry)
-    - [SnapshotRef](#agentsessions-v1-SnapshotRef)
-    - [SuspendRequest](#agentsessions-v1-SuspendRequest)
-  
-    - [ComputeState](#agentsessions-v1-ComputeState)
-    - [DeletionState](#agentsessions-v1-DeletionState)
-    - [ExecState](#agentsessions-v1-ExecState)
-  
-    - [Sessions](#agentsessions-v1-Sessions)
-  
-- [Scalar Value Types](#scalar-value-types)
-
-
-
 <a name="common-proto"></a>
 <p align="right"><a href="#top">Top</a></p>
 
@@ -1758,6 +1653,9 @@ flattened lifecycle enum, because collapsing them loses which axis actually move
 
 ## Scalar Value Types
 
+<details>
+<summary>How each scalar type maps to C++, Java, Python, Go, C#, PHP and Ruby</summary>
+
 | .proto Type | Notes | C++ | Java | Python | Go | C# | PHP | Ruby |
 | ----------- | ----- | --- | ---- | ------ | -- | -- | --- | ---- |
 | <a name="double" /> double |  | double | double | float | float64 | double | float | Float |
@@ -1775,4 +1673,6 @@ flattened lifecycle enum, because collapsing them loses which axis actually move
 | <a name="bool" /> bool |  | bool | boolean | boolean | bool | bool | boolean | TrueClass/FalseClass |
 | <a name="string" /> string | A string must always contain UTF-8 encoded or 7-bit ASCII text. | string | String | str/unicode | string | string | string | String (UTF-8) |
 | <a name="bytes" /> bytes | May contain any arbitrary sequence of bytes. | string | ByteString | str | []byte | ByteString | string | String (ASCII-8BIT) |
+
+</details>
 

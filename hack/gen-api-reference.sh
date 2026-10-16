@@ -57,6 +57,39 @@ text = re.sub(
 open(path, "w").write(text)
 PYWKT
 
+# protoc-gen-doc's template opens with a ~90-entry table of contents and closes with a 9-column
+# table mapping each scalar type to seven languages. The contents list repeats the outline that
+# Starlight ("On this page") and GitHub both build from the headings, and on a phone it fills the
+# first screens. Drop it. The scalar table is reference boilerplate, so fold it into a <details>
+# that is closed by default; field types still link into it.
+python3 - "${out}" <<'PYTRIM'
+import re
+import sys
+
+path = sys.argv[1]
+text = open(path).read()
+
+toc = re.compile(r"^## Table of Contents\n.*?(?=^<a name=)", re.M | re.S)
+text, n = toc.subn("", text, count=1)
+if n != 1:
+    sys.exit("gen-api-reference: generated table of contents not found; update this step")
+
+scalar = re.compile(r"^(## Scalar Value Types\n\n)((?:\|.*\n?)+)", re.M)
+text, n = scalar.subn(
+    lambda m: m.group(1)
+    + "<details>\n<summary>"
+    + "How each scalar type maps to C++, Java, Python, Go, C#, PHP and Ruby"
+    + "</summary>\n\n"
+    + m.group(2).rstrip("\n")
+    + "\n\n</details>\n",
+    text,
+    count=1,
+)
+if n != 1:
+    sys.exit("gen-api-reference: Scalar Value Types table not found; update this step")
+open(path, "w").write(text)
+PYTRIM
+
 # protoc-gen-doc emits no provenance header. A 1300-line file with no banner invites
 # hand-edits that the next regeneration silently reverts, so prepend one.
 tmp="$(mktemp)"

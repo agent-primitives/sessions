@@ -1,0 +1,100 @@
+/* Diagram styles, passed to Mermaid as themeCSS (see astro.config.mjs) rather than loaded as a page
+   stylesheet. Mermaid prefixes every rule with the diagram's id and appends it after its own theme,
+   so these win without !important. Every colour is a Starlight token, so the light and dark themes
+   both follow the site palette: accent-low boxes, text-accent borders and edges, and text in the
+   theme's foreground. Borders and edges use text-accent (accent-high in dark, accent in light)
+   rather than plain accent, which is only about 3.5:1 on the dark diagram surface; text-accent
+   keeps them above 4.5:1 in both themes, as the diagrams were before this palette. Grouping
+   strokes (subgraph outlines, lifelines, note borders) use gray-3, the theme's secondary
+   foreground: about 5:1 in dark and 6.7:1 in light, so they also clear 4.5:1 while staying
+   neutral and at or below the accent strokes on the boxes. */
+
+/* Boxes: flowchart nodes, state boxes, sequence actors. */
+.node rect,
+.node polygon,
+.node path,
+.node circle,
+.node ellipse,
+rect.actor {
+  fill: var(--sl-color-accent-low);
+  stroke: var(--sl-color-text-accent);
+}
+
+.nodeLabel,
+.node .label,
+.node text,
+text.actor,
+text.actor > tspan {
+  color: var(--sl-color-white);
+  fill: var(--sl-color-white);
+  stroke: none;
+}
+
+/* Edges, transitions, messages, and their arrowheads. */
+.flowchart-link,
+.transition,
+.messageLine0,
+.messageLine1 {
+  stroke: var(--sl-color-text-accent);
+}
+
+/* marker[id] outranks Mermaid's own [id$="-arrowhead"] path rule for sequence arrowheads. */
+marker[id] :is(path, polygon, circle) {
+  fill: var(--sl-color-text-accent);
+  stroke: var(--sl-color-text-accent);
+}
+
+/* The state diagram's start dot reads as a terminal, not a box. */
+.node circle.state-start {
+  fill: var(--sl-color-white);
+  stroke: var(--sl-color-white);
+}
+
+/* Edge labels sit on the diagram's own surface instead of Mermaid's grey chip. astro-mermaid tints
+   that surface 2% towards the foreground, so the label background matches it and still hides the
+   edge running underneath. */
+.edgeLabel,
+.edgeLabel p,
+.edgeLabel span,
+.labelBkg {
+  background-color: color-mix(in srgb, var(--sl-color-white) 2%, var(--sl-color-bg));
+  color: var(--sl-color-white);
+}
+
+.edgeLabel rect {
+  fill: color-mix(in srgb, var(--sl-color-white) 2%, var(--sl-color-bg));
+  opacity: 1;
+}
+
+.messageText {
+  fill: var(--sl-color-white);
+  stroke: none;
+}
+
+/* Grouping: subgraphs, lifelines, notes. Neutral fills and strokes, so the accent boxes they hold
+   lead. gray-4 and gray-5 strokes fall below 3:1 on the dark surface; gray-3 does not. */
+.cluster rect {
+  fill: var(--sl-color-gray-6);
+  stroke: var(--sl-color-gray-3);
+}
+
+.cluster-label,
+.cluster-label span,
+.cluster text {
+  color: var(--sl-color-white);
+  fill: var(--sl-color-white);
+}
+
+.actor-line {
+  stroke: var(--sl-color-gray-3);
+}
+
+.note {
+  fill: var(--sl-color-gray-6);
+  stroke: var(--sl-color-gray-3);
+}
+
+.noteText,
+.noteText > tspan {
+  fill: var(--sl-color-white);
+}

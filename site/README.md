@@ -10,9 +10,10 @@ gitignored; do not edit it. The root `../spec.md` is synced the same way from th
 with its `TODO(spike):` markers rendered as "Open question:"; any other internal marker still fails
 the sync.
 
-Edit `../docs/*.md` for documentation. Edit `src/landing/index.mdx` for the landing page. A new doc
-needs an entry in the `meta` map in `hack/sync-docs.mjs` and a sidebar entry in `astro.config.mjs`;
-the sync fails loudly if the first is missing.
+Edit `../docs/*.md` for documentation. Edit `src/landing/index.mdx` for the landing page and
+`src/pages/404.astro` for the not-found page. A new doc needs an entry in the `meta` map in
+`hack/sync-docs.mjs` and a sidebar entry in `astro.config.mjs`; the sync fails loudly if the first
+is missing.
 
 ```bash
 npm ci

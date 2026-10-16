@@ -346,8 +346,9 @@ against an in-process router with both turns held inside their model calls, and
 in any letter case or number, never reaches the harness call.
 
 The counter's I4 contract is harness-side and unit-tested: it is increment-only and never reads
-`Start.History` (empty on a memory-restored sandbox). The neutrality contrast (`CanPlace` refuses the same
-capability on `runtime/local`, accepts on substrate) is `placement`'s `TestNeutralityThroughPlacer`.
+`Start.History` (the full prior log, also on a memory-restored sandbox). The neutrality contrast
+(`CanPlace` refuses the same capability on `runtime/local`, accepts on substrate) is `placement`'s
+`TestNeutralityThroughPlacer`.
 
 ## CI
 
@@ -461,6 +462,6 @@ RESUME marker. These tests prove orchestration and retention behavior, not real 
   and fork tags directly in Substrate; there is no automatic retention deadline. One tag per fan-out
   instead of per child would save N-1 copies, but a shared tag can only be deleted once every child
   has suspended at least once.
-- **Controller-side I4.** `controller.Exec` sends the full journal as `Start.History` even on the
-  post-restore turn; for the general case the controller should send empty `History` on memory-restore.
-  The counter's harness-side I4 carries the stateful tier today.
+- **I4 is harness-side.** `controller.Exec` sends the full journal as `Start.History` on every turn,
+  including the post-restore turn ([spec](../spec.md) `EXE-7`). A `REQUIRES_MEMORY_SNAPSHOT` harness
+  must not rebuild state from it; the counter's increment-only `Run` carries this.

@@ -39,12 +39,13 @@ func (h *Harness) Describe(ctx context.Context) (api.Descriptor, error) {
 // Run performs one turn: increment the in-RAM counter and emit its value.
 //
 // I4 contract (the load-bearing rule for this tier): the counter is NEVER re-initialized from
-// s.History. History is empty on a memory-restored sandbox; reconstructing
-// the count from an empty History, or resetting it to zero because History is empty, would DESTROY
-// the continuity the snapshot preserved (reset to 0 / double-apply). The count is pure process RAM:
-// the Go zero value (0) on a fresh boot, the snapshot-restored value after a memory-restore. So we
-// only ever increment — we do not read s.History for state. That a fresh boot starts at 0 (state
-// lost, not replayed) is the honest reason this harness needs a memory snapshot at all.
+// s.History. The host sends the full prior log as History on every turn, also after a memory
+// restore; replaying it into the count, or resetting the count to zero because History is empty,
+// would DESTROY the continuity the snapshot preserved (double-apply / reset to 0). The count is
+// pure process RAM: the Go zero value (0) on a fresh boot, the snapshot-restored value after a
+// memory-restore. So we only ever increment — we do not read s.History for state. That a fresh
+// boot starts at 0 (state lost, not replayed) is the honest reason this harness needs a memory
+// snapshot at all.
 func (h *Harness) Run(ctx context.Context, s *api.Start, sink api.EventSink) error {
 	h.mu.Lock()
 	h.count++

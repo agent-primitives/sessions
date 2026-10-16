@@ -65,6 +65,11 @@ not provide.
   execution IDs that are in this state recover on the next `Resume`; their earlier `ERROR` events
   remain as audit records. A v0.1.2 journal without execution IDs is not re-driven and still fails
   with "recorded completion missing". No journal or wire schema change.
+- The `Start` comment in `harness.proto`, `api.Start.History`, the API reference, and the harness
+  authoring guide said `Start.history` is empty after a memory restore. The host sends every event
+  before the execution's start on every turn, including after a restore; `Exec` has done so since
+  v0.1.0. A harness must not treat an empty history as a sign that it was restored. Documentation
+  only.
 
 ### Added
 

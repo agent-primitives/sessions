@@ -10,6 +10,8 @@
 // Because the published copy is generated and gitignored, Starlight cannot see where a page came
 // from: its edit link would point at the copy (a 404 on GitHub) and git has no history for it. So
 // the frontmatter also carries the edit URL of the source under docs/ and its last commit date.
+// A doc that is itself generated (api-reference.md, from the proto comments) has no single file to
+// edit, so it gets no edit link rather than one to a file whose banner says not to edit it.
 import { execFileSync } from "node:child_process";
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -107,6 +109,11 @@ function stripBanner(markdown) {
   return markdown.replace(/^<!--[\s\S]*?-->\n+/, "");
 }
 
+/** True if the doc opens with the generated-file banner (see hack/gen-api-reference.sh). */
+function isGenerated(markdown) {
+  return /^<!--\s*GENERATED FILE\. DO NOT EDIT\./.test(markdown);
+}
+
 /** Runs git in the repository root; null if git or the repository is unavailable. */
 function git(...args) {
   try {
@@ -177,7 +184,7 @@ for (const file of files) {
     "---",
     `title: ${yamlQuote(info.title)}`,
     `description: ${yamlQuote(info.description)}`,
-    `editUrl: ${yamlQuote(`${repo}/edit/main/docs/${file}`)}`,
+    `editUrl: ${isGenerated(source) ? "false" : yamlQuote(`${repo}/edit/main/docs/${file}`)}`,
     // Unquoted, so YAML reads it as a timestamp, which is what Starlight's schema expects.
     ...(updated ? [`lastUpdated: ${updated}`] : []),
     "---",

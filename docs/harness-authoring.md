@@ -309,8 +309,9 @@ restarts; an in-memory cache is insufficient. Direct controller users must confi
 `controller.WithSessionUID(uid)` with a nonempty UID; `controller.New` returns
 `controller.ErrMissingSessionUID` for an unscoped non-nil executor without advancing the log's fence.
 Journaling alone does not provide exactly-once external delivery. `REQUIRES_APPROVAL` uses the same
-executor after a durable decision, for `STATELESS_REPLAY` only. The stock daemon does not configure a
-tool executor; approval does not supply one or complete general tool/provider integration.
+executor after a durable decision, for `STATELESS_REPLAY` only. The stock daemon can optionally
+configure [Unix-socket tool executors](tool-executors.md) for CLI `-harness` entries; without that
+configuration approval does not supply an executor or complete general tool/provider integration.
 
 For the same recorded call, re-emit the same `ToolCall.ID`, tool name, arguments, mediation and key.
 Replay and recorded-prefix recovery compare that identity before serving a result or re-driving an

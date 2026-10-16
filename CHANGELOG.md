@@ -152,6 +152,10 @@ not provide.
 
 ### Compatibility
 
+- `agentsessionsd -tool-executors` rejects socket paths longer than 103 bytes at startup on
+  every platform (macOS's stricter `sun_path` limit, reserving its NUL terminator). Dial
+  errors omit the socket path from harness-visible errors and approval receipts; oversized
+  replies report the 1 MiB frame limit rather than EOF.
 - Breaking for turns journaled from a remote harness that sent an empty bytes source. A remote
   harness model request whose file part sets `bytes`, or whose reasoning part sets `opaque_bytes`,
   to empty bytes now hashes the same as one with no source. A turn such a harness journaled before

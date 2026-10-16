@@ -176,10 +176,15 @@ resources outside these APIs.
 A custom host executor must authorize tools/resources itself and durably deduplicate by **session UID
 plus idempotency key**, storing the original receipt across host restarts. A hash-chained request or
 decision alone does not make delivery exactly once. Two sessions using the same harness-chosen key
-are distinct namespaces. The stock daemon does not configure an executor. An approved gate without
-one stays recoverable and fails Resume with `FAILED_PRECONDITION`; denial requires no executor and
-records a denied receipt. Neither path prevents a trusted harness from doing unmediated work outside
-the sink.
+are distinct namespaces. The stock daemon can optionally configure
+[Unix-socket executors](tool-executors.md) for CLI `-harness` entries, dispatching only tools that
+declare safe durable dedup. Keep sockets in private directories with restricted permissions, and
+credentials in the executor, not config. Read-only or naturally idempotent tools may declare true
+when repeating them is harmless. An approved gate without an executor stays recoverable and fails
+Resume with `FAILED_PRECONDITION`; denial requires no executor and records a denied receipt.
+Configured executor errors instead become durable `EXECUTOR_ERROR` receipts: the effect may have
+committed before the response was lost, and recovery does not retry a receipted failure. Neither path
+prevents a trusted harness from doing unmediated work outside the sink.
 
 ## Operator access
 

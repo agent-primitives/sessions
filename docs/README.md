@@ -44,6 +44,7 @@ Start here. Each document is small and problem-scoped; this page is the index.
 | Understand the internals | [architecture.md](architecture.md) |
 | Run it on agent-substrate | [substrate-conformance.md](substrate-conformance.md) |
 | Operate and debug it | [observability.md](observability.md) |
+| Configure daemon tool execution | [tool-executors.md](tool-executors.md) |
 | Know what is safe to expose | [security.md](security.md) |
 | Look up a message, field, or RPC | [api-reference.md](api-reference.md) |
 | Know the exact rules an implementation must follow | [spec.md](../spec.md) |

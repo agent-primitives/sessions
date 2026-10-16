@@ -1,11 +1,15 @@
-package main
+package agentsessionsd
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"flag"
+	"io"
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -773,5 +777,50 @@ func TestSessionServiceRefusesRegistrationCollision(t *testing.T) {
 			t.Errorf("registration %q (retired %v): got %v, want error %v", tc.name, tc.retire, err, tc.wantErr)
 		}
 		_ = store.Close()
+	}
+}
+
+// withOutput sends Run's command-line errors and usage to w.
+func withOutput(w io.Writer) Option { return func(o *options) { o.output = w } }
+
+// Run reports -h and a flag that does not parse the way flag.ExitOnError did before Run took args,
+// so Main keeps the exit statuses 0 and 2; neither opens the journal. A configuration error in
+// flags that parsed is a plain error, which Main reports with status 1.
+func TestRunCommandLineErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		wantHelp  bool
+		wantUsage bool
+		wantOut   string
+	}{
+		{name: "help", args: []string{"-h"}, wantHelp: true, wantOut: "Usage of agentsessionsd:"},
+		{name: "unknown flag", args: []string{"-no-such-flag"}, wantUsage: true, wantOut: "flag provided but not defined: -no-such-flag"},
+		{name: "malformed harness", args: []string{"-harness", "noaddress"}, wantUsage: true, wantOut: "want name=address"},
+		{name: "harness without model", args: []string{"-harness", "mine=127.0.0.1:9000"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			journal := filepath.Join(t.TempDir(), "journal.db")
+			var out bytes.Buffer
+			err := Run(append([]string{"-journal", journal, "-addr", "127.0.0.1:0"}, tc.args...), withOutput(&out))
+			if err == nil {
+				t.Fatal("Run returned nil, want an error")
+			}
+			if got := errors.Is(err, flag.ErrHelp); got != tc.wantHelp {
+				t.Errorf("Run error = %v, is flag.ErrHelp %v, want %v", err, got, tc.wantHelp)
+			}
+			if got := errors.Is(err, ErrUsage); got != tc.wantUsage {
+				t.Errorf("Run error = %v, is ErrUsage %v, want %v", err, got, tc.wantUsage)
+			}
+			if tc.wantOut != "" && !strings.Contains(out.String(), tc.wantOut) {
+				t.Errorf("output = %q, want it to contain %q", out.String(), tc.wantOut)
+			}
+			if tc.wantOut == "" && out.Len() != 0 {
+				t.Errorf("output = %q, want none for an error Main prints", out.String())
+			}
+			if _, statErr := os.Stat(journal); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("a refused start left a journal behind: %v", statErr)
+			}
+		})
 	}
 }

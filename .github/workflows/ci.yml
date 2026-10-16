@@ -3,29 +3,101 @@ name: ci
 on:
   push:
     branches: [main]
+  # No paths filter: ci, integrations and integrity are required checks, and a workflow a paths
+  # filter skips never reports them, so the pull request could not merge. The changes job decides
+  # instead (hack/ci-path-filter.sh): when a pull request changes only markdown (other than the
+  # generated API reference) or the license, each job skips its steps and reports success.
   pull_request:
-    # A change to prose cannot break a build. substrate-e2e already gates this way; the reason to
-    # match here is that a docs pull request should not wait on a full matrix to say so.
-    paths-ignore:
-      - "**/*.md"
-      - LICENSE
 
 permissions:
   contents: read
 
 jobs:
+  changes:
+    # Decides whether this pull request changes anything the jobs below check, from the merge
+    # commit's diff against the base branch. A push to main always runs them in full.
+    name: ci path filter
+    runs-on: ubuntu-latest
+    outputs:
+      decision: ${{ steps.filter.outputs.decision }}
+    steps:
+      - name: Checkout
+        if: github.event_name == 'pull_request'
+        # A failed checkout must not fail this job: the next step then decides `run`.
+        continue-on-error: true
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2 # the merge commit and both its parents
+          persist-credentials: false
+
+      - name: Decide whether the jobs run
+        id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          # This step never fails: any doubt decides `run`, so the jobs below run in full.
+          decision=run
+          if [[ "${EVENT}" != pull_request ]]; then
+            echo "${EVENT}: every job runs."
+          elif ! git rev-parse --verify --quiet 'HEAD^2' >/dev/null; then
+            # A pull_request checkout is the merge commit; its first parent is the base branch head.
+            echo "::error::HEAD is not the pull request's merge commit; every job runs."
+          elif ! hack/ci-path-filter-test.sh; then
+            echo "::error::hack/ci-path-filter-test.sh failed; every job runs."
+          else
+            # Decide with the base branch's copy of the filter, so a pull request that edits the
+            # filter never decides its own run: the filter's own path is relevant in every profile.
+            # The pull request's copy decides only while the base branch has none.
+            filter="${RUNNER_TEMP}/ci-path-filter.sh"
+            git show 'HEAD^1:hack/ci-path-filter.sh' >"${filter}" 2>/dev/null ||
+              filter=hack/ci-path-filter.sh
+            echo "Deciding with ${filter}."
+            answer="$(bash "${filter}" ci 'HEAD^1' HEAD)" || answer=error
+            if [[ "${answer}" == run || "${answer}" == skip ]]; then
+              decision="${answer}"
+            else
+              echo "::error::the path filter answered '${answer}'; every job runs."
+            fi
+          fi
+          echo "decision=${decision}" | tee -a "${GITHUB_OUTPUT}"
+
   ci:
+    needs: changes
+    # Runs even when the changes job fails, so this required check fails instead of being
+    # skipped: a skipped required check would count as passing.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      - name: Fail when the path filter failed
+        # The changes job never fails on its own (any doubt decides `run`). If it still does (a
+        # runner fault), its decision is empty: fail ci rather than trust it.
+        if: ${{ !cancelled() && needs.changes.result != 'success' }}
+        env:
+          RESULT: ${{ needs.changes.result }}
+        run: |
+          echo "::error::the path filter job ended '${RESULT}'; rerun the workflow."
+          exit 1
+
+      - name: Skip (no ci-relevant changes)
+        # The changes job found only markdown or the license, so every step below is skipped and
+        # this job reports success; the changes job's log lists each changed path and its verdict.
+        if: needs.changes.outputs.decision == 'skip'
+        run: |
+          echo "Only markdown or the license changed; ci passes without running." |
+            tee -a "${GITHUB_STEP_SUMMARY}"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.decision != 'skip'
         with:
           fetch-depth: 0 # buf breaking compares the change against the main branch
 
       - uses: actions/setup-go@v7
+        if: needs.changes.outputs.decision != 'skip'
         with:
           go-version-file: go.mod
 
       - uses: bufbuild/buf-setup-action@v1
+        if: needs.changes.outputs.decision != 'skip'
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -33,6 +105,7 @@ jobs:
       # generated code. `git add -N` marks any newly-generated-but-untracked file as
       # intent-to-add so it shows up in `git diff` (otherwise untracked files pass trivially).
       - name: codegen is reproducible
+        if: needs.changes.outputs.decision != 'skip'
         run: |
           buf generate
           git add -N api/genpb
@@ -42,6 +115,7 @@ jobs:
       # change that skips regeneration would ship a reference contradicting the contract.
       # Same intent-to-add trick as the gate above.
       - name: api reference is current
+        if: needs.changes.outputs.decision != 'skip'
         run: |
           ./hack/gen-api-reference.sh
           git add -N docs/api-reference.md
@@ -49,6 +123,7 @@ jobs:
 
       # Proto contract gates for the neutral schema: style + backward compatibility.
       - name: buf lint
+        if: needs.changes.outputs.decision != 'skip'
         run: buf lint
 
       # Backward compatibility is a promise to RELEASED consumers, so the baseline is the last
@@ -59,6 +134,7 @@ jobs:
       # The gate arms itself at the first v* tag, which is exactly when the promise begins. It needs
       # the tags, which the fetch-depth: 0 checkout above already provides.
       - name: buf breaking
+        if: needs.changes.outputs.decision != 'skip'
         run: |
           latest="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
           if [ -z "$latest" ]; then
@@ -69,6 +145,7 @@ jobs:
           buf breaking --against ".git#ref=${latest}"
 
       - name: gofmt
+        if: needs.changes.outputs.decision != 'skip'
         run: |
           unformatted="$(gofmt -l .)"
           if [ -n "$unformatted" ]; then
@@ -80,24 +157,30 @@ jobs:
       # most for the nested module: it consumes this one through a replace directive, so a bump
       # here leaves its manifest stale and dependabot cannot see the coupling.
       - name: go.mod is tidy
+        if: needs.changes.outputs.decision != 'skip'
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
 
       - run: go build ./...
+        if: needs.changes.outputs.decision != 'skip'
       - run: go vet ./...
+        if: needs.changes.outputs.decision != 'skip'
       # -race guards the single-writer log and the streaming sinks.
       - run: go test -race ./...
+        if: needs.changes.outputs.decision != 'skip'
 
       # An unparseable workflow is not reported as a syntax error: GitHub cannot evaluate the `on:`
       # trigger either, so it records a failed run for every push on every branch and the real
       # trigger never applies. That failure mode went unnoticed across several changes because
       # nothing here read the workflow files. actionlint parses them and checks expressions.
       - name: actionlint
+        if: needs.changes.outputs.decision != 'skip'
         run: |
           go run github.com/rhysd/actionlint/cmd/actionlint@latest
 
       - name: golangci-lint
+        if: needs.changes.outputs.decision != 'skip'
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
@@ -106,67 +189,136 @@ jobs:
       # rather than dependency versions, so an advisory in a package nothing calls does not fail the
       # build and a reachable one does.
       - name: govulncheck
+        if: needs.changes.outputs.decision != 'skip'
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       # Vendor-neutrality gate: the core module must not link any backend vendor. This is the
       # architectural invariant the whole design rests on, so it is enforced per-PR and not only
       # nightly — a stray import from core into the substrate adapter has to fail here.
       - name: core links no backend vendor
+        if: needs.changes.outputs.decision != 'skip'
         run: test "$(go list -deps ./... | grep -c agent-substrate)" = "0"
 
       # Cheap always-on integrity gate: the zero-dep golden self-check (stdlib only, no venv).
       - name: integrity golden self-check
+        if: needs.changes.outputs.decision != 'skip'
         run: python3 hack/verify_chain.py --golden
+
+      # The path filter decides whether this workflow and substrate-conformance run on a pull
+      # request, and a wrong `skip` would merge a change no check ran on. Both changes jobs run
+      # this test too and decide `run` when it fails; this step turns the failure into a failed ci.
+      - name: ci path filter self-test
+        if: needs.changes.outputs.decision != 'skip'
+        run: hack/ci-path-filter-test.sh
 
   integrations:
     # `integrations/substrate` is a SEPARATE Go module, so the root job's ./... never reaches it and a
     # break there would otherwise surface only in the nightly substrate-e2e run. Compiling and testing
     # it needs no cluster, so it belongs on the per-PR gate. (gofmt is covered by the root job, which
     # walks the tree, not the module graph.)
+    needs: changes
+    # Runs even when the changes job fails, so this required check fails instead of being
+    # skipped: a skipped required check would count as passing.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: integrations/substrate
     steps:
+      - name: Fail when the path filter failed
+        # The changes job never fails on its own (any doubt decides `run`). If it still does (a
+        # runner fault), its decision is empty: fail integrations rather than trust it.
+        if: ${{ !cancelled() && needs.changes.result != 'success' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          RESULT: ${{ needs.changes.result }}
+        run: |
+          echo "::error::the path filter job ended '${RESULT}'; rerun the workflow."
+          exit 1
+
+      - name: Skip (no ci-relevant changes)
+        # The changes job found only markdown or the license, so every step below is skipped and
+        # this job reports success; the changes job's log lists each changed path and its verdict.
+        # Runs in the workspace: the default directory exists only after the checkout it skips.
+        if: needs.changes.outputs.decision == 'skip'
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo "Only markdown or the license changed; integrations passes without running." |
+            tee -a "${GITHUB_STEP_SUMMARY}"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.decision != 'skip'
 
       - uses: actions/setup-go@v7
+        if: needs.changes.outputs.decision != 'skip'
         with:
           go-version-file: integrations/substrate/go.mod
 
       - name: go.mod is tidy
+        if: needs.changes.outputs.decision != 'skip'
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
 
       - run: go build ./...
+        if: needs.changes.outputs.decision != 'skip'
       - run: go vet ./...
+        if: needs.changes.outputs.decision != 'skip'
       - run: go test -race ./...
+        if: needs.changes.outputs.decision != 'skip'
 
       - name: golangci-lint
+        if: needs.changes.outputs.decision != 'skip'
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
           working-directory: integrations/substrate
 
       - name: govulncheck
+        if: needs.changes.outputs.decision != 'skip'
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   integrity:
     # Full cross-language provenance audit: record a real journal, have an INDEPENDENT Python
     # implementation (protobuf + RFC 8785 JCS) reproduce and verify the whole chain, then prove it
     # FAILS CLOSED on a tampered record. Kept a separate job so its Python venv setup is isolated.
+    needs: changes
+    # Runs even when the changes job fails, so this required check fails instead of being
+    # skipped: a skipped required check would count as passing.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      - name: Fail when the path filter failed
+        # The changes job never fails on its own (any doubt decides `run`). If it still does (a
+        # runner fault), its decision is empty: fail integrity rather than trust it.
+        if: ${{ !cancelled() && needs.changes.result != 'success' }}
+        env:
+          RESULT: ${{ needs.changes.result }}
+        run: |
+          echo "::error::the path filter job ended '${RESULT}'; rerun the workflow."
+          exit 1
+
+      - name: Skip (no ci-relevant changes)
+        # The changes job found only markdown or the license, so every step below is skipped and
+        # this job reports success; the changes job's log lists each changed path and its verdict.
+        if: needs.changes.outputs.decision == 'skip'
+        run: |
+          echo "Only markdown or the license changed; integrity passes without running." |
+            tee -a "${GITHUB_STEP_SUMMARY}"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.decision != 'skip'
 
       - uses: actions/setup-go@v7
+        if: needs.changes.outputs.decision != 'skip'
         with:
           go-version-file: go.mod
 
       - uses: bufbuild/buf-setup-action@v1
+        if: needs.changes.outputs.decision != 'skip'
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: cross-language chain verifier (audit + tamper)
+        if: needs.changes.outputs.decision != 'skip'
         run: ./hack/verify_chain.sh

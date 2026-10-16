@@ -174,7 +174,7 @@ For a narrated end-to-end walkthrough (exec, replay with zero model calls, fork,
 independent chain verification), follow [`docs/quickstart.md`](docs/quickstart.md).
 
 The real-substrate conformance (both tiers) runs in the `substrate-conformance` workflow
-(`.github/workflows/substrate-e2e.yml`), on every pull request and nightly. See
+(`.github/workflows/substrate-e2e.yml`), on every pull request that can affect it and nightly. See
 [`docs/substrate-conformance.md`](docs/substrate-conformance.md) to reproduce it.
 
 ## Ecosystem

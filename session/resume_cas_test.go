@@ -2,7 +2,9 @@ package session_test
 
 import (
 	"context"
+	"fmt"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -65,6 +67,10 @@ func TestResumeExpectedLastSeq(t *testing.T) {
 			if tc.cursor == "inspected" {
 				if status.Code(err) != codes.Aborted {
 					t.Fatalf("Resume after journal movement = %v, want Aborted", err)
+				}
+				values := fmt.Sprintf("expected_last_seq %d, head %d", *req.ExpectedLastSeq, current.GetLastSeq())
+				if !strings.Contains(status.Convert(err).Message(), values) {
+					t.Fatalf("conflict %v lacks %q", err, values)
 				}
 				assertRefusedResumeCAS(t, c, uid, log, before, current, b)
 				if h.runs.Load() != 0 || effects.Load() != 0 {

@@ -271,8 +271,9 @@ type registryResumeConfig struct {
 }
 
 // WithResumeExpectedLastSeq makes Registry.Resume refuse a different journal head with
-// eventlog.ErrConflict. The check runs under the shared session guard before recovery inspection,
-// repair, compute changes or fencing. Without this option Resume keeps its existing behavior.
+// eventlog.ErrConflict, including both values. Resume checks under the shared session guard
+// before inspection and again after acquiring a writer fence, before repair or compute changes.
+// A pending approval query needs no new fence. Without this option behavior is unchanged.
 func WithResumeExpectedLastSeq(seq int64) RegistryResumeOption {
 	return func(c *registryResumeConfig) { c.expectedLastSeq = &seq }
 }
@@ -308,14 +309,8 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 	}
 	defer release()
 
-	if cfg.expectedLastSeq != nil {
-		head, err := log.Head()
-		if err != nil {
-			return err
-		}
-		if head != *cfg.expectedLastSeq {
-			return eventlog.ErrConflict
-		}
+	if err := checkResumeHead(log, cfg.expectedLastSeq); err != nil {
+		return err
 	}
 	state, err := controller.InspectApproval(log, 0)
 	if err != nil {
@@ -348,10 +343,25 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 			return err
 		}
 	}
-	if handled, err := p.resumeApproval(log, state, cfg.observer); handled {
+	resume := resumeConfig{harness: name, observer: cfg.observer, expectedLastSeq: cfg.expectedLastSeq}
+	if handled, err := p.resumeApproval(log, sessionUID, state, resume); handled {
 		return err
 	}
-	return p.resume(ctx, log, sessionUID, resumeConfig{harness: name, observer: cfg.observer})
+	return p.resume(ctx, log, sessionUID, resume)
+}
+
+func checkResumeHead(log eventlog.Store, expected *int64) error {
+	if expected == nil {
+		return nil
+	}
+	head, err := log.Head()
+	if err != nil {
+		return err
+	}
+	if head != *expected {
+		return fmt.Errorf("%w: expected_last_seq %d, head %d", eventlog.ErrConflict, *expected, head)
+	}
+	return nil
 }
 
 // Approve journals only a decision under the shared session guard. The decision does not need

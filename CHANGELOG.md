@@ -68,6 +68,7 @@ provide.
 
 ### Added
 
+- Optional `ResumeRequest.expected_last_seq` rejects a moved journal head before recovery.
 - Controller `InspectApproval` and decision-only `Approve` validate durable request/decision/receipt
   evidence, including exact retries and session-owned versus inherited effects. The internal
   approval engine supports captured-head repair and correlated denial/executor-error receipts.
@@ -131,10 +132,13 @@ provide.
 
 ### Compatibility
 
-- Optional `ResumeRequest.expected_last_seq` checks the journal head under the shared session
-  guard before recovery inspection, approval repair, compute changes or fencing. A mismatch is
-  `ABORTED`; explicit zero requires an empty journal. Omission preserves existing behavior.
-  This coordinates one Registry/host, not a cross-host transaction or exactly-once tool execution.
+- Optional `ResumeRequest.expected_last_seq` checks the journal head under the session guard
+  before inspection and again after acquiring a writer fence, before restore, approval repair or
+  harness effects. A mismatch is `ABORTED` with expected/head values; explicit zero requires an
+  empty journal. This also catches other hosts' writes committed before that fence; refusal can
+  advance fencing metadata but writes no journal records or runtime effects. A later writer can
+  still supersede this operation; fencing cannot cancel effects already in flight and does not
+  provide an execution lease or exactly-once tool execution. Omission preserves existing behavior.
 - Older servers silently ignore `ResumeRequest.expected_last_seq`; clients must not assume the
   check ran without operator-confirmed deployment of a supporting server version/build. Sessions
   exposes no server-version/capability query, so clients need out-of-band deployment provenance;

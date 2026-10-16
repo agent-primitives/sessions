@@ -1181,10 +1181,13 @@ type ResumeRequest struct {
 	//
 	// Deprecated: Marked as deprecated in session.proto.
 	Boot bool `protobuf:"varint,2,opt,name=boot,proto3" json:"boot,omitempty"`
-	// Optional recovery precondition: ABORTED if the journal head differs, before recovery,
-	// approval repair, compute changes or fencing. Explicit zero requires an empty journal;
-	// absent skips this precondition. Checked under this host's shared session guard,
-	// not a cross-host transaction or an exactly-once tool-execution guarantee.
+	// Optional recovery precondition: ABORTED with expected/head values on a mismatch.
+	// Checked under the session guard before inspection, and after acquiring a writer fence
+	// before restore, approval repair or harness effects. The latter also catches other hosts'
+	// writes committed before that fence; refusal can advance fencing metadata but writes no
+	// journal records or runtime effects. A later writer can still supersede this operation:
+	// this is not an execution lease or an exactly-once tool guarantee. Explicit zero requires
+	// an empty journal; absent skips this precondition.
 	ExpectedLastSeq *int64 `protobuf:"varint,3,opt,name=expected_last_seq,json=expectedLastSeq,proto3,oneof" json:"expected_last_seq,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache

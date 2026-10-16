@@ -5,6 +5,22 @@ Release notes are generated from commits and published on the
 reader needs to know beyond a commit list: what a release means for compatibility, and what it does
 not provide.
 
+## Unreleased
+
+### Added
+
+- `model/openai` maps Chat Completions function tools and tool choices, assistant tool-call parts
+  and text `ToolResult.Content`. Streaming assembles indexed argument deltas into finalized tool
+  parts without emitting tool JSON through the text callback. Replay and completed-effect recovery
+  preserve full parts/usage through the existing neutral request hash and completion journal.
+
+### Compatibility
+
+- `model/openai` now refuses nonempty `ModelRequest.Params`, previously silently ignored. Unmapped
+  parts/choices and malformed or incomplete tool calls fail closed. Tool results require explicit
+  text Content when receipt data is populated; the adapter does not guess text from Output/error
+  metadata or fetch external URIs. It does not register/execute tools or add executor deduplication.
+
 ## v0.2.0 - 2026-10-16
 
 ### Compatibility

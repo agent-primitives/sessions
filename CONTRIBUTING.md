@@ -28,6 +28,8 @@ Run these before pushing; they are the same gates the `ci` workflow enforces.
 | Tests | `go test -race ./...` |
 | Vendor neutrality | `go list -deps ./... \| grep -c agent-substrate` must be `0` |
 | Provenance self-check | `python3 hack/verify_chain.py --golden` |
+| Cross-language chain audit | `./hack/verify_chain.sh` (also audits every journal in `sqlitelog/testdata`) |
+| Persisted-format compatibility | `go test ./session ./sqlitelog -run 'SchemaV4Fixture\|MigratedAndFresh'` (part of Tests) |
 | Proto lint | `buf lint` |
 
 Two gates catch stale generated files, and both fail the build rather than regenerating for you:

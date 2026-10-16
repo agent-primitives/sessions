@@ -10,28 +10,33 @@ Build half (build.mmd, end of chapter 2):
   (examples/agentsuite-substrate/cmd/emit/main.go:109).
 - -> emit bundle -> harness image: `bundle` loads the composition (cmd/emit/main.go:77) and writes
   agent.json and instructions.md (cmd/emit/main.go:84,87); up.sh stages them as the image's /agent
-  layer and takes the pushed image's digest (examples/agentsuite-substrate/up.sh:298,300,302;
+  layer and takes the pushed image's digest (examples/agentsuite-substrate/up.sh:301,303,305;
   Dockerfile.harness).
 - -> emit render, and image digest -> emit render: `renderCmd` loads the composition
   (cmd/emit/main.go:166); `Render` requires a digest-pinned image (render/render.go:280).
 - binding-microvm.json -> emit render: `LoadBinding` (render/render.go:179), used by `Render`
   (render/render.go:275).
 - emit render -> actortemplate.json and agentsessionsd.args: cmd/emit/main.go:191,201, the flag from
-  `Output.DaemonFlag` (render/render.go:351).
+  `Output.DaemonFlag` (render/render.go:354).
 - actortemplate.json -> ActorTemplate in substrate, created by hand: driver.sh chapter 3.
 - agentsessionsd.args -> agentsessionsd flag, set by hand: up.sh substitutes it into the Deployment
-  (up.sh:377).
+  (up.sh:378,380). The daemon is the substrate build, integrations/substrate/cmd/agentsessionsd,
+  which registers `-substrate-harness` (integrations/substrate/cmd/agentsessionsd/substrate.go:132).
 
 Run half (run.mmd, start of chapter 4), each also a row of the traced turn:
 
-- agentctl -> agentsessionsd, Sessions.Exec: cmd/agentctl/main.go:265.
+- agentctl -> agentsessionsd, Sessions.Exec: cmd/agentctl/main.go:275.
 - agentsessionsd (its substrate adapter, in process) -> ate-api, CreateActor and ResumeActor:
-  integrations/substrate/adapter.go:58,80.
+  integrations/substrate/adapter.go:58,80. The substrate build passes its flags to the server's
+  `WithHarnessBackends` hook (integrations/substrate/cmd/agentsessionsd/main.go:22), and the server
+  calls the hook's `Backends` at startup (internal/agentsessionsd/agentsessionsd.go:273), which dials
+  the ate-api and wraps the connection in the adapter
+  (integrations/substrate/cmd/agentsessionsd/substrate.go:246,250).
 - ate-api -> worker, resume the actor: ate-api calls the node's atelet (AteomHerder),
   substrate cmd/ateapi/internal/controlapi/workflow_resume.go:676, which sends RestoreWorkload to the
   worker pod's ateom (cmd/atelet/main.go:1259, the client from cmd/atelet/main.go:1557).
 - agentsessionsd -> atenet-router, harnesswire stream: the actor is named in the ate-target-actor
-  header (runtime/substrate/substrate.go:826,853).
+  header (runtime/substrate/substrate.go:919,946).
 - atenet-router -> worker :443: substrate cmd/atenet/internal/router/ingress/ingress.go:140-142
   ("Route ok", targetAddr workerIP:443).
 - worker -> harness, "starts it": ateom-microvm's RestoreWorkload (substrate
@@ -43,8 +48,8 @@ Run half (run.mmd, start of chapter 4), each also a row of the traced turn:
   the WorkerPool passes `--atunnel-listen-address=:443`,
   cmd/atecontroller/internal/controllers/workerpool_apply.go:117) and reverse-proxies each request to
   the actor's port, 80 unless the X-Ate-Target-Port header names another
-  (internal/atunnel/ingress.go:175-188). The harness listens on HARNESS_ADDR :80 (render/render.go:297,
-  cmd/harness/main.go:44).
-- harness -> agentsessionsd, sink.Model on the same stream: harnesswire/harnesswire.go:126.
-- agentsessionsd -> gpt-5.4-mini, chat completions: internal/modelconfig/modelconfig.go:46 builds
+  (internal/atunnel/ingress.go:175-188). The harness listens on HARNESS_ADDR :80
+  (render/render.go:302, cmd/harness/main.go:44).
+- harness -> agentsessionsd, sink.Model on the same stream: harnesswire/harnesswire.go:225,250.
+- agentsessionsd -> gpt-5.4-mini, chat completions: internal/modelconfig/modelconfig.go:47 builds
   the OpenAI-compatible client from -model and -model-base-url.

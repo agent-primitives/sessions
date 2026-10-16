@@ -1182,12 +1182,15 @@ type ResumeRequest struct {
 	// Deprecated: Marked as deprecated in session.proto.
 	Boot bool `protobuf:"varint,2,opt,name=boot,proto3" json:"boot,omitempty"`
 	// Optional recovery precondition: ABORTED with expected/head values on a mismatch.
-	// Checked under the session guard before inspection, and after acquiring a writer fence
-	// before restore, approval repair or harness effects. The latter also catches other hosts'
-	// writes committed before that fence; refusal can advance fencing metadata but writes no
-	// journal records or runtime effects. A later writer can still supersede this operation:
-	// this is not an execution lease or an exactly-once tool guarantee. Explicit zero requires
-	// an empty journal; absent skips this precondition.
+	// Checked under the session guard before inspection, after an early fence before restore
+	// or approval repair, and after a restored turn's regular writer fence before Run. A late
+	// mismatch may already have restored compute, but does not run the harness or append records.
+	// These checks catch other hosts' writes committed before each acquired fence. Taking a fence
+	// supersedes older writers even on refusal: their remaining writes fail with ErrFenced, leaving any
+	// unanswered tool intent eligible for retry on a later Resume. Fencing cannot cancel effects
+	// already in flight, and a later writer can still supersede this operation: this is not an
+	// execution lease or exactly-once tool guarantee. Explicit zero requires an empty journal;
+	// absent skips this precondition.
 	ExpectedLastSeq *int64 `protobuf:"varint,3,opt,name=expected_last_seq,json=expectedLastSeq,proto3,oneof" json:"expected_last_seq,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache

@@ -86,8 +86,8 @@ type Backend interface {
 // a Kubernetes Service, or a harness restarted in between. When DescribesLiveHarness reports true,
 // the Placer therefore asks again on the connection that will run the turn and applies the same
 // CanPlace gate before writing records. Exec and unchecked Resume do this before minting a fence;
-// cursor-checked Resume already owns its fence. This narrows the window but does not close it;
-// see recheck for the limit.
+// cursor-checked Resume has minted an early fence and retakes its writer fence after this gate.
+// This narrows the window but does not close it; see recheck for the limit.
 //
 // A backend that reports true must provision nothing in Create and Restore: a refusal by the second
 // check only closes the dial and never calls Stop, so anything provisioned would leak.
@@ -417,7 +417,8 @@ func (p *Placer) admit(ctx context.Context, sessionUID string) (api.Descriptor, 
 // recheck repeats the gate on the connection that will run the turn, for a backend whose descriptor
 // comes from a live harness (see LiveDescriber). It runs after Create and the dial and before the
 // Exec fence is minted, so a refusal still leaves nothing on the log. A cursor-checked Resume
-// already owns its fence but has not written records. The backend's Create and Restore
+// has already minted an early fence; it retakes/checks its writer fence after this gate.
+// The backend's Create and Restore
 // provision nothing for such a backend, so there is no compute to release either.
 //
 // The check has a known limit. Capabilities are checked with a Describe call before the turn's
@@ -1017,11 +1018,10 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	if err := p.refuseDuringCheckpoint(sessionUID); err != nil {
 		return err
 	}
-	var fence int64
 	if cfg.expectedLastSeq != nil {
-		// Refuse cross-host movement before even waking compute, then reuse this token below.
-		fence, err = p.resumeFence(log, sessionUID, cfg.expectedLastSeq)
-		if err != nil {
+		// Refuse known movement before waking compute. This is not yet the turn's writer fence:
+		// a Fork can finish during Restore, before openHarness registers this turn.
+		if _, err := p.resumeFence(log, sessionUID, cfg.expectedLastSeq); err != nil {
 			return err
 		}
 	}
@@ -1041,9 +1041,6 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		dialFinished(err, "error_kind", "harness_dial_failed")
 		return err
 	}
-	if fence != 0 {
-		live.fenceMinted() // the checked path minted before Restore; it will not mint again
-	}
 	dialFinished(nil)
 	defer func() {
 		// Ordinary cleanup logs close failures without replacing the turn outcome.
@@ -1059,16 +1056,16 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	if err := p.recheck(ctx, sessionUID, har); err != nil {
 		return err
 	}
-	if fence == 0 {
-		fenceFinished := observability.StartDebug(ctx, p.logger, "placement", "mint_fence", "session_uid", sessionUID)
-		fence, err = p.resumeFence(log, sessionUID, nil)
-		live.fenceMinted()
-		if err != nil {
-			fenceFinished(err, "error_kind", "new_fence_failed")
-			return err
-		}
-		fenceFinished(nil)
+	// Retake the writer fence now that checkpoints can see this connection. Rechecking also
+	// catches a completed Fork during Restore, before any harness/model/tool redrive.
+	fenceFinished := observability.StartDebug(ctx, p.logger, "placement", "mint_fence", "session_uid", sessionUID)
+	fence, err := p.resumeFence(log, sessionUID, cfg.expectedLastSeq)
+	live.fenceMinted()
+	if err != nil {
+		fenceFinished(err, "error_kind", "new_fence_failed")
+		return err
 	}
+	fenceFinished(nil)
 	inc.FenceToken = fence
 	if err := live.checkSuperseded(ctx); err != nil {
 		return err

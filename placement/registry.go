@@ -271,9 +271,11 @@ type registryResumeConfig struct {
 }
 
 // WithResumeExpectedLastSeq makes Registry.Resume refuse a different journal head with
-// eventlog.ErrConflict, including both values. Resume checks under the shared session guard
-// before inspection and again after acquiring a writer fence, before repair or compute changes.
-// A pending approval query needs no new fence. Without this option behavior is unchanged.
+// eventlog.ErrConflict, including both values. Checks run under the shared session guard before
+// inspection, after an early fence before Restore/repair, and after a restored turn's regular
+// writer fence before Run. A late refusal may already have restored compute. Either fence can
+// supersede another writer even on refusal; pending approval queries need no fence. Without this
+// option behavior is unchanged.
 func WithResumeExpectedLastSeq(seq int64) RegistryResumeOption {
 	return func(c *registryResumeConfig) { c.expectedLastSeq = &seq }
 }

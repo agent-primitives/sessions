@@ -68,7 +68,7 @@ not provide.
 
 ### Added
 
-- Optional `ResumeRequest.expected_last_seq` rejects a moved journal head before recovery.
+- Optional `ResumeRequest.expected_last_seq` rejects a moved journal head before re-driving a turn.
 - Controller `InspectApproval` and decision-only `Approve` validate durable request/decision/receipt
   evidence, including exact retries and session-owned versus inherited effects. The internal
   approval engine supports captured-head repair and correlated denial/executor-error receipts.
@@ -133,12 +133,14 @@ not provide.
 ### Compatibility
 
 - Optional `ResumeRequest.expected_last_seq` checks the journal head under the session guard
-  before inspection and again after acquiring a writer fence, before restore, approval repair or
-  harness effects. A mismatch is `ABORTED` with expected/head values; explicit zero requires an
-  empty journal. This also catches other hosts' writes committed before that fence; refusal can
-  advance fencing metadata but writes no journal records or runtime effects. A later writer can
-  still supersede this operation; fencing cannot cancel effects already in flight and does not
-  provide an execution lease or exactly-once tool execution. Omission preserves existing behavior.
+  before inspection, after an early fence before restore/approval repair, and after a restored
+  turn's regular writer fence before Run. A mismatch is `ABORTED` with expected/head values;
+  explicit zero requires an empty journal. A late mismatch may already have restored compute,
+  but does not run the harness or append records. This catches other hosts' commits before each
+  acquired fence. Acquiring a fence supersedes older writers even if Resume then refuses: their
+  remaining writes fail with `ErrFenced`, leaving any unanswered tool intent eligible for retry.
+  Fencing cannot cancel effects already in flight or exclude a later writer; this is not an
+  execution lease or exactly-once tool execution. Omission preserves existing behavior.
 - Older servers silently ignore `ResumeRequest.expected_last_seq`; clients must not assume the
   check ran without operator-confirmed deployment of a supporting server version/build. Sessions
   exposes no server-version/capability query, so clients need out-of-band deployment provenance;

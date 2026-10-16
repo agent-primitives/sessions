@@ -7,11 +7,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
 
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
 	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/runtime/local"
@@ -129,6 +131,9 @@ func TestCheckedResumeFenceExcludesStatefulFork(t *testing.T) {
 	}
 	checked := false
 	wrapped := &checkpointApprovalLog{Store: log, beforeFence: func() {
+		if checked {
+			return // the regular post-Restore mint is covered by the Restore/Fork regression
+		}
 		if b.restores != 0 {
 			t.Error("Restore preceded the checked fence")
 			return // avoid a nested checkpoint waiting on this old-style late mint
@@ -144,8 +149,8 @@ func TestCheckedResumeFenceExcludesStatefulFork(t *testing.T) {
 	if err := r.Resume(t.Context(), wrapped, "s", "gate", placement.WithResumeExpectedLastSeq(1)); err != nil {
 		t.Fatal(err)
 	}
-	if !checked || wrapped.fences != 1 {
-		t.Fatalf("checked=%v fences=%d, want one checked fence", checked, wrapped.fences)
+	if !checked || wrapped.fences != 2 {
+		t.Fatalf("checked=%v fences=%d, want early and regular checked fences", checked, wrapped.fences)
 	}
 	head, err := log.Head()
 	if err != nil {
@@ -153,5 +158,81 @@ func TestCheckedResumeFenceExcludesStatefulFork(t *testing.T) {
 	}
 	if err := fork(head); err != nil {
 		t.Fatalf("checked Resume leaked its checkpoint mark: %v", err)
+	}
+}
+
+type resumeRestoreProbe struct {
+	placement.Backend
+	beforeRestore func()
+	restores      int
+}
+
+func (b *resumeRestoreProbe) Restore(ctx context.Context, ref api.SnapshotRef) (api.Incarnation, error) {
+	b.restores++
+	if b.beforeRestore != nil {
+		b.beforeRestore()
+	}
+	return b.Backend.Restore(ctx, ref)
+}
+
+func TestCheckedResumeRefusesForkCommittedDuringRestore(t *testing.T) {
+	store := newSuspendStore(t)
+	log := store.Session("s")
+	seedPlacementApproval(t, log, "mem", api.EventExecutionStart)
+	call := placementGateCall()
+	call.Mediation = api.MediationControllerMediated
+	fence := suspendRecords(t, log)[0].Fence
+	if _, err := log.Append(1, fence, api.Event{Kind: api.EventToolCall, ExecutionID: "e1", ToolCall: &call}); err != nil {
+		t.Fatal(err)
+	}
+	expected := int64(2)
+	desc := memDescriptor
+	desc.Version = "v1"
+	var runs, effects atomic.Int32
+	h := describeBoundaryHarness{Harness: placementGateHarness{run: func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+		runs.Add(1)
+		_, err := sink.ToolCall(ctx, call)
+		return err
+	}}, describe: func(context.Context) (api.Descriptor, error) { return desc, nil }}
+	hs := startHarnessServer(t, h)
+	backend := &routedBackend{address: hs.addr, desc: desc}
+	b := &resumeRestoreProbe{Backend: backend}
+	p := placement.New(b, nil, placement.WithToolExecutor(func(_ context.Context, _ controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+		effects.Add(1)
+		return api.ToolResult{ID: call.ID}, nil
+	}))
+	r, err := placement.NewRegistry("mem", map[string]*placement.Placer{"mem": p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var afterFork []eventlog.Record
+	b.beforeRestore = func() {
+		// Fork cannot see the turn until Restore returns and openHarness registers it.
+		if err := p.Fork(t.Context(), log, "s", []placement.ForkChild{{UID: "child", Log: store.Session("child")}}, expected); err != nil {
+			t.Fatal(err)
+		}
+		afterFork = suspendRecords(t, log)
+	}
+	wrapped := &checkpointApprovalLog{Store: log}
+	err = r.Resume(t.Context(), wrapped, "s", "mem", placement.WithResumeExpectedLastSeq(expected))
+	values := fmt.Sprintf("expected_last_seq %d, head %d", expected, len(afterFork))
+	if !errors.Is(err, eventlog.ErrConflict) || !strings.Contains(err.Error(), values) {
+		t.Fatalf("Resume=%v runs=%d tools=%d, want conflict with %q before effects", err, runs.Load(), effects.Load(), values)
+	}
+	if wrapped.fences != 2 || b.restores != 1 || runs.Load() != 0 || effects.Load() != 0 || backend.snapshots != 1 {
+		t.Fatalf("fences=%d restores=%d runs=%d tools=%d snapshots=%d", wrapped.fences, b.restores, runs.Load(), effects.Load(), backend.snapshots)
+	}
+	if !reflect.DeepEqual(afterFork, suspendRecords(t, log)) {
+		t.Fatal("refused Resume changed the fork's committed prefix")
+	}
+	b.beforeRestore = nil
+	if err := r.Resume(t.Context(), log, "s", "mem", placement.WithResumeExpectedLastSeq(int64(len(afterFork)))); err != nil {
+		t.Fatalf("retry from the new cursor: %v", err)
+	}
+	if effects.Load() != 1 || runs.Load() != 1 {
+		t.Fatalf("retry duplicated effects: runs=%d tools=%d", runs.Load(), effects.Load())
+	}
+	if err := log.Verify(); err != nil {
+		t.Fatal(err)
 	}
 }

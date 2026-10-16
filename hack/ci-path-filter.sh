@@ -12,7 +12,8 @@
 # Prints `run` or `skip` on stdout, and each changed path with its verdict on stderr. Exits non-zero
 # on a usage or git error, which the calling job reads as `run`. The workflows run the base branch's
 # copy of this script, so an edit to it takes effect from the next pull request on; the edit itself
-# always runs every check, since no profile ignores this path.
+# always runs every check, since no profile ignores this path. The exception is a base branch with
+# no copy (the pull request that adds this script): the pull request's own copy decides then.
 #
 # Each file changed between <base> and <head> is matched against the profile's patterns in order,
 # and the last match wins: a plain pattern marks the path ignored, a `!pattern` marks it relevant

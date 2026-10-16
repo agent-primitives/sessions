@@ -443,9 +443,9 @@ These are named in the reference controller. The numbering is the code's.
 - `EXE-23`: Recovery that fails after the harness has started running appends a best-effort
   `EVENT_ERROR`; recovery that succeeds appends `EVENT_END`. Failures raised before the harness
   runs (invalid log, incomplete invocation `EXE-24`, harness identity `EXE-25`, inherited intent
-  `EXE-26`, a legacy execution without a session uid `EXE-30`) append nothing. A run stopped after
-  an approval intent is recorded (a park, or a failure recording the approval request or receipt,
-  §10) appends neither `ERROR` nor `END`.
+  `EXE-26`, an unfinished legacy execution without a session uid `EXE-30`) append nothing. A run
+  stopped after an approval intent is recorded (a park, or a failure recording the approval
+  request or receipt, §10) appends neither `ERROR` nor `END`.
 - `EXE-24`: Input completeness, for an execution that has an `EXECUTION_START`: a missing or
   negative `input_count`, an `EVENT_INPUT` with no message, or a count different from the
   committed `EVENT_INPUT` records is an invalid log for a completed or selected execution. A
@@ -469,8 +469,10 @@ v0.1.x hosts journaled no `execution_id` and no `EXECUTION_START`. The reference
 journals by the rules below, which differ from §8.1-§8.6. They also differ from v0.1.x recovery:
 v0.1.x `Resume` treated a turn as complete only when an `END` followed its last `INPUT`, so it
 re-ran a turn that had ended in `ERROR`. `EXE-29` treats that `ERROR` as completing the legacy
-execution, so `Resume` is a no-op for it. Recovering or replaying a legacy execution also needs a
-session uid (`EXE-30` and the wire execution id below), which v0.1.x did not.
+execution, so `Resume` is a no-op for it. A harness invocation for a legacy execution
+(reconstruction, or recovery of an unfinished one) also needs a session uid (`EXE-30`, `EXE-32`
+and the wire execution id below), which v0.1.x did not. `Resume` of a complete legacy execution
+invokes no harness and stays a no-op without one.
 
 - `EXE-27`: The records at the start of the log, up to the first `EXECUTION_START` or the first
   non-`LIFECYCLE` record that carries an `execution_id`, MUST be read as one legacy execution if
@@ -512,7 +514,8 @@ session uid (`EXE-30` and the wire execution id below), which v0.1.x did not.
   (`legacy-` + hex SHA-256 over the session uid, `seq`, and canonical event) and never journals it.
   Reconstruction derives it from the first legacy `INPUT` (or the first non-`LIFECYCLE` record
   when there is none); recovery derives it from the last `INPUT`, so retries keep the same id.
-  Without a session uid, reconstruction fails like recovery.
+  Without a session uid, reconstruction fails like recovery of an unfinished legacy execution
+  (`EXE-30`).
 - `EXE-31`: An execution whose records carry an `execution_id` but that has no `EXECUTION_START`
   (written by unreleased hosts between v0.1.2 and the start marker) is otherwise a modern
   execution: `EXE-6` decides completion and §8.6 applies. It is read with defaults: empty
@@ -1108,8 +1111,9 @@ The reference implementation protects the integrity of the record, not access to
     journal needs the new binary before any of them writes the field.
   - v0.1.x journals (no `execution_id`, no `EXECUTION_START`) remain readable under §8.7 and verify
     unchanged. Recovery differs from v0.1.x: an `ERROR` after the last `INPUT` completes the legacy
-    execution (`EXE-29`), so `Resume` no longer re-runs that turn, and recovering or replaying a
-    legacy execution needs a session uid.
+    execution (`EXE-29`), so `Resume` no longer re-runs that turn. A legacy harness invocation
+    (reconstruction, or recovery of an unfinished legacy execution) needs a session uid; `Resume`
+    of a complete legacy execution is a no-op without one.
   - The reference SQLite store versions its schema with `PRAGMA user_version` (currently 3),
     migrates forward in one transaction without rewriting events or hashes, and refuses a newer or
     negative version.

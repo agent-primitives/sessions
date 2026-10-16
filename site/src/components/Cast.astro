@@ -67,30 +67,68 @@ const id = `cast-${src.replace(/\W+/g, "-")}`;
       });
     }
 
+    // At its natural 13px the terminal is about 800px wide, wider than the panel below 60rem, where
+    // it was cut off on both sides. There it scales to the panel instead; the player's fullscreen
+    // control gives a readable size on a phone. The player takes its fit mode only at creation, so
+    // when the query flips after that (a tablet rotating, the page zoomed) it is rebuilt.
+    const narrowQuery = window.matchMedia("(max-width: 60rem)");
+    let fitted = false;
+
+    // `at` is where a rebuilt player picks up: playing from there, or held on that frame. The
+    // player draws no frame for a paused startAt, so a held one uses it as the poster instead.
+    const mount = (at?: number) => {
+      const narrow = narrowQuery.matches;
+      fitted = narrow;
+      el.classList.toggle("cast__player--fit", narrow);
+      const position =
+        at === undefined
+          ? { poster: el.dataset.poster }
+          : paused
+            ? { poster: `npt:${at}` }
+            : { startAt: at };
+      const p = AsciinemaPlayer.create(src, el, {
+        autoPlay: !paused,
+        loop: true,
+        // Long pauses are real (a rollout takes time) but boring to watch, so cap them.
+        idleTimeLimit: Number(el.dataset.idle),
+        ...position,
+        fit: narrow ? "width" : false,
+        terminalFontSize: "13px",
+        theme: "asciinema",
+      });
+      // Disposing a player stops it, which must not read as the user pausing it.
+      p.addEventListener("playing", () => p === player && reflect(false));
+      p.addEventListener("pause", () => p === player && reflect(true));
+      p.addEventListener("ended", () => p === player && reflect(true));
+      player = p;
+    };
+
+    const refit = () => {
+      if (!player || narrowQuery.matches === fitted) return;
+      // Entering fullscreen from a narrow window widens it past 60rem; rebuilding then would remove
+      // the fullscreen element and throw the reader out. Wait until they leave fullscreen.
+      const full =
+        document.fullscreenElement ??
+        (document as Document & { webkitFullscreenElement?: Element }).webkitFullscreenElement;
+      if (full && el.contains(full)) return;
+      const old = player;
+      // Before the recording has loaded there is no position to keep; show the poster again.
+      const at = old.getCurrentTime();
+      player = undefined;
+      old.dispose();
+      mount(Number.isFinite(at) && at > 0 ? at : undefined);
+    };
+    narrowQuery.addEventListener("change", refit);
+    document.addEventListener("fullscreenchange", refit);
+    document.addEventListener("webkitfullscreenchange", refit);
+
     // Autoplay only once the recording scrolls into view, and only then create the player, so a
     // page with several recordings does not start them all at load.
     const observer = new IntersectionObserver(
       (entries, obs) => {
         for (const entry of entries) {
           if (!entry.isIntersecting) continue;
-          // At its natural 13px the terminal is about 800px wide, wider than the panel below
-          // 60rem, where it was cut off on both sides. There it scales to the panel instead; the
-          // player's fullscreen control gives a readable size on a phone.
-          const narrow = window.matchMedia("(max-width: 60rem)").matches;
-          el.classList.toggle("cast__player--fit", narrow);
-          player = AsciinemaPlayer.create(src, el, {
-            autoPlay: !paused,
-            loop: true,
-            // Long pauses are real (a rollout takes time) but boring to watch, so cap them.
-            idleTimeLimit: Number(el.dataset.idle),
-            poster: el.dataset.poster,
-            fit: narrow ? "width" : false,
-            terminalFontSize: "13px",
-            theme: "asciinema",
-          });
-          player.addEventListener("playing", () => reflect(false));
-          player.addEventListener("pause", () => reflect(true));
-          player.addEventListener("ended", () => reflect(true));
+          mount();
           obs.unobserve(entry.target);
         }
       },

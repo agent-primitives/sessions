@@ -19,17 +19,16 @@ Pick one. `agentctl` is the client CLI; `agentsessionsd` is the standalone serve
 
 ```bash
 # Go toolchain
-go install github.com/aramase/agentsessions/cmd/agentctl@v0.1.2
-go install github.com/aramase/agentsessions/cmd/agentsessionsd@v0.1.2
+go install github.com/agent-primitives/sessions/cmd/agentctl@v0.2.0
+go install github.com/agent-primitives/sessions/cmd/agentsessionsd@v0.2.0
 ```
 
-v0.1.x is published under the module path `github.com/aramase/agentsessions`; the
-`github.com/agent-primitives/sessions` path applies from v0.2.0.
+v0.1.x stays at the module path `github.com/aramase/agentsessions`.
 
 ```bash
 # Release archive: both binaries, for linux/darwin on amd64/arm64.
 # Checksums and SBOMs are published alongside it.
-VERSION=v0.1.2
+VERSION=v0.2.0
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 curl -sSL "https://github.com/agent-primitives/sessions/releases/download/${VERSION}/agentsessions_${VERSION#v}_${OS}_${ARCH}.tar.gz" \
@@ -39,11 +38,10 @@ curl -sSL "https://github.com/agent-primitives/sessions/releases/download/${VERS
 Container images are published for the server and the harness node:
 
 ```bash
-docker run --rm ghcr.io/aramase/agentsessions/agentsessionsd:v0.1.2 --help
+docker run --rm ghcr.io/agent-primitives/sessions/agentsessionsd:v0.2.0 --help
 ```
 
-v0.1.x images stay at `ghcr.io/aramase/agentsessions`; releases from v0.2.0 publish to
-`ghcr.io/agent-primitives/sessions`.
+v0.1.x images stay at `ghcr.io/aramase/agentsessions`.
 
 To build from a checkout instead:
 
@@ -370,10 +368,10 @@ returns the generated stub for anything the SDK does not model.
 
 ## 10. Permanently tombstone a session (no cleanup)
 
-Use a source build containing DeleteSession; the v0.1.2 archive above predates it.
+DeleteSession needs v0.2.0 or later; v0.1.x binaries do not have it.
 Use a fresh journal here, leaving `/tmp/qs.db` from the earlier examples untouched.
-Any open with the new binary, including `get`, migrates an older journal; the older
-binary cannot reopen it afterward. Deletion is irreversible for the UID.
+Deletion is irreversible for the UID. To upgrade a journal written by v0.1.x, see the
+[schema v4 rollout note](../CHANGELOG.md#sqlite-v4-rollout) first.
 
 ```bash
 DELETE_JOURNAL=$(mktemp /tmp/qs-delete.XXXXXX)

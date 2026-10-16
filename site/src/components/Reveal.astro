@@ -2,7 +2,8 @@
 // Fades a section in as it scrolls into view. One observer serves every instance on the page.
 //
 // Content is visible by default and only hidden once the script marks the document as capable, so
-// nothing disappears without JS, and nothing animates under prefers-reduced-motion.
+// nothing disappears without JS, and nothing animates under prefers-reduced-motion. A section that
+// holds keyboard focus, or is being printed, is shown at once whether or not it has scrolled in.
 interface Props {
   delay?: number;
 }
@@ -44,5 +45,20 @@ const { delay = 0 } = Astro.props;
     transition:
       opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1) var(--reveal-delay, 0ms),
       transform 0.5s cubic-bezier(0.22, 1, 0.36, 1) var(--reveal-delay, 0ms);
+  }
+
+  /* Tabbing can land in a section before it crosses the observer's threshold. */
+  :root.reveal-ready .reveal:focus-within {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  @media print {
+    :root.reveal-ready .reveal {
+      opacity: 1;
+      transform: none;
+      transition: none;
+    }
   }
 </style>

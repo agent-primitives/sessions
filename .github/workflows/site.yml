@@ -24,6 +24,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # sync-docs.mjs dates each page from its last commit, which a shallow clone does not have.
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: "22"

@@ -150,6 +150,12 @@ cancelled turn stops an in-flight completion instead of orphaning it.
 
 ```mermaid
 sequenceDiagram
+  accTitle: Model calls on a live turn and on replay
+  accDescr {
+    On a live turn the harness calls sink.Model, and the host invokes the provider, records
+    MODEL_CALL and OUTPUT, and returns the completion. On replay the same call is answered from
+    the record and the model provider is not called.
+  }
   participant H as Your harness (Run)
   participant Host as Host / controller
   participant M as Model provider

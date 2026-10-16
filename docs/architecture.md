@@ -6,6 +6,14 @@ the core knows about none of them specifically.
 
 ```mermaid
 flowchart TB
+  accTitle: agentsessions architecture
+  accDescr {
+    A producer adapter calls the controller over Sessions gRPC. In the neutral core the
+    controller writes the event log and uses the Placer. The controller drives an
+    out-of-process harness over the Harness.Connect stream, and the Placer provisions compute
+    through the Runtime SPI: runtime/local without memory snapshots, or runtime/substrate with
+    them.
+  }
   prod[Producer adapter<br/>issue tracker / chat / app] -->|Sessions gRPC| ctrl
   subgraph core[Neutral core]
     ctrl[Controller<br/>single-writer, event-sourced] --> log[(Event log<br/>CAS + fence + hash chain)]
@@ -152,6 +160,12 @@ form of the spec's proto3-JSON, the same canonical form the journal hashes.
 
 ```mermaid
 stateDiagram-v2
+  accTitle: Harness registration lifecycle
+  accDescr {
+    Register creates an ACTIVE registration, and registering the same spec again leaves it
+    unchanged. Retire moves it to RETIRED; retiring again keeps the first time and reason.
+    Registering the same spec on a RETIRED registration reactivates it.
+  }
   [*] --> ACTIVE: Register (CREATED)
   ACTIVE --> ACTIVE: Register same spec (UNCHANGED)
   ACTIVE --> RETIRED: Retire

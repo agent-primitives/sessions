@@ -10,11 +10,10 @@
 
 AgentSessions defines a durable agent session: an append-only, hash-chained event log plus zero or
 one live compute incarnation. A client creates a session, runs executions (turns) against it,
-suspends and resumes its compute, forks it into children, reads its log back, and can
-permanently tombstone it. An agent
-implementation (a harness) connects through a streaming protocol in which the host records every
-model call and host-executed tool call before the harness observes its result, so a session can be
-reconstructed from its log without calling the model again.
+suspends and resumes its compute, forks it into children, reads its log back, and can permanently
+tombstone it. An agent implementation (a harness) connects through a streaming protocol in which
+the host records every model call and host-executed tool call before the harness observes its
+result, so a session can be reconstructed from its log without calling the model again.
 
 This specification defines the session model, the event log and its append rules, the canonical
 encoding and provenance chain, execution, replay and recovery semantics, tool execution and approval
@@ -288,9 +287,9 @@ no flattened lifecycle enum.
   cursor, and MUST NOT rewrite a deleted session's metadata. A session with no metadata row is
   writable. The reference SQLite store enforces this and checks deletion first, so a deleted
   session reports the deleted error, not a conflict or fenced error. The in-memory store has no
-  deletion. A store MAY also expose a read-only
-  writable check (`CheckWritable`), which the reference host runs before any runtime call
-  (`OPS-34`); a wrapper around such a store has to forward it to keep that ordering.
+  deletion. A store MAY also expose a read-only writable check (`CheckWritable`), which the
+  reference host runs before any runtime call (`OPS-34`); a wrapper around such a store has to
+  forward it to keep that ordering.
 
 ### 6.5 Idempotency
 
@@ -718,8 +717,11 @@ invokes no harness and stays a no-op without one.
   `Resume`, `Suspend`, and `Approve` it covers two phases: the session lookup and routing, and
   the guarded operation (`OPS-1`). A deletion can commit between the two; `OPS-34` covers that
   case. For `Fork` it covers the lookup, and separately the fan-out until it ends, including
-  any rollback (`OPS-27`). Lookup phases and `Fork` do not exclude each other or the operations
-  in `OPS-1`. `DeleteSession` neither waits for nor cancels the holder; the caller retries.
+  any rollback (`OPS-27`). A deletion can commit after the fan-out ends, while the host records
+  the children's metadata; the fork's children and its response still stand, because the fork
+  completed before the deletion. Lookup phases and `Fork` do not exclude each other or the
+  operations in `OPS-1`. `DeleteSession` neither waits for nor cancels the holder; the caller
+  retries.
 - `OPS-2`: A per-session checkpoint mark MUST be held by `Suspend`, `Approve`, an approval park
   handoff, a cursor-checked `Resume` while it mints each fence and re-reads the head (`OPS-29`),
   and a `REQUIRES_MEMORY_SNAPSHOT` fork from checkpoint until its last child is cloned.

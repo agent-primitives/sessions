@@ -70,6 +70,18 @@ not provide.
   before the execution's start on every turn, including after a restore; `Exec` has done so since
   v0.1.0. A harness must not treat an empty history as a sign that it was restored. Documentation
   only.
+- `wire` decodes a file part's `bytes` source or a reasoning part's `opaque_bytes` that is set to
+  empty bytes as no bytes (nil), the same as the encoders, which never send an empty source.
+  Previously it decoded to a non-nil empty slice, while the journal stores the encoded form without
+  it, so an `Exec` input carrying such a part (an empty file) gave the live turn a different model
+  input hash (I0) from the one recomputed on the journal's copy. For a harness running in the host
+  that sends its inputs to the model (`chatagent`), the turn ran, but `Replay` of it once completed,
+  or a `Resume` of it cut after its model call was recorded, failed with "model input hash
+  mismatch". New turns replay; a turn journaled before this change still fails those checks, because
+  its recorded hash covers the empty value. No journal or wire schema change. The hash algorithms
+  and the hashes of existing records are unchanged; a new turn with such a part records a different
+  model input hash than it would have before, and so a different `content_hash` on that record and
+  every later one in the chain.
 
 ### Added
 
@@ -140,6 +152,15 @@ not provide.
 
 ### Compatibility
 
+- Breaking for turns journaled from a remote harness that sent an empty bytes source. A remote
+  harness model request whose file part sets `bytes`, or whose reasoning part sets `opaque_bytes`,
+  to empty bytes now hashes the same as one with no source. A turn such a harness journaled before
+  this change recorded its model input hash (I0) over the empty value. `Replay` of that turn once
+  completed now fails with "model input hash mismatch", as does a `Resume` of such a turn cut after
+  its model call was recorded; `Resume` of a completed turn is a no-op and does not check. The
+  reverse also holds: such a turn journaled after this change fails the same checks on a host
+  without it. No known harness sends an empty source: `harnesswire` omits it, so only a harness that
+  builds the request proto itself could. There is no migration for such a turn.
 - Optional `ResumeRequest.expected_last_seq` checks the journal head under the session guard
   before inspection, after an early fence before restore/approval repair, and after a restored
   turn's regular writer fence before Run. A mismatch is `ABORTED` with expected/head values;

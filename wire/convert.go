@@ -260,11 +260,24 @@ func fileFromProto(f *v1.FilePart) *api.FilePart {
 	out := &api.FilePart{MIME: f.GetMime(), Name: f.GetName(), Digest: f.GetDigest()}
 	switch s := f.GetSource().(type) {
 	case *v1.FilePart_Bytes:
-		out.Bytes = s.Bytes
+		out.Bytes = nonEmpty(s.Bytes)
 	case *v1.FilePart_Uri:
 		out.URI = s.Uri
 	}
 	return out
+}
+
+// nonEmpty decodes a bytes source the way the encoders write it: empty bytes are no bytes. The
+// encoders (fileToProto, reasoningToProto) send a bytes source only when it is non-empty, and the
+// journal stores and hashes the encoded form, so a wire value that sets the source to empty bytes
+// must decode to nil, not to a non-nil empty slice. Otherwise the decoded message differs from the
+// one read back from the journal: the controller's model input hash (I0) encodes nil and empty
+// slices differently, and replay or resume of the turn fails as a divergence.
+func nonEmpty(b []byte) []byte {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
 }
 
 func reasoningToProto(r *api.ReasoningPart) *v1.ReasoningPart {
@@ -308,7 +321,7 @@ func reasoningFromProto(r *v1.ReasoningPart) *api.ReasoningPart {
 	}
 	switch o := r.GetOpaque().(type) {
 	case *v1.ReasoningPart_OpaqueBytes:
-		out.Opaque = o.OpaqueBytes
+		out.Opaque = nonEmpty(o.OpaqueBytes)
 	case *v1.ReasoningPart_OpaqueUri:
 		out.OpaqueURI = o.OpaqueUri
 	}

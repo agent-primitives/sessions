@@ -10,7 +10,8 @@
 
 AgentSessions defines a durable agent session: an append-only, hash-chained event log plus zero or
 one live compute incarnation. A client creates a session, runs executions (turns) against it,
-suspends and resumes its compute, forks it into children, and reads its log back. An agent
+suspends and resumes its compute, forks it into children, reads its log back, and can
+permanently tombstone it. An agent
 implementation (a harness) connects through a streaming protocol in which the host records every
 model call and host-executed tool call before the harness observes its result, so a session can be
 reconstructed from its log without calling the model again.
@@ -69,14 +70,15 @@ Unless stated otherwise:
 
 This draft specifies:
 
-- the session resource, its two-axis state, and its metadata (§5);
+- the session resource, its two-axis state, its deletion state, and its metadata (§5);
 - the event log: record shape, event kinds, sequence assignment, compare-and-swap append, fencing
   (§6);
 - the canonical encoding and the provenance hash chain, including fork lineage (§7);
 - executions, the determinism invariants, reconstruction replay, and crash recovery (§8);
 - tool execution modes, receipts, and at-most-once re-drive (§9);
 - the durable approval gate for `STATELESS_REPLAY` harnesses (§10);
-- the Sessions lifecycle operations and their status codes (§11);
+- the Sessions lifecycle operations, including permanent soft deletion, and their status codes
+  (§11);
 - the `Harness.Connect` wire protocol (§12);
 - placement, resumability tiers, and the runtime contract (§13);
 - the operator-facing harness registry (§14);
@@ -89,8 +91,9 @@ This draft does not specify:
 - authentication, authorization, transport security, or tenancy isolation (see §17);
 - a storage schema for the event log; the SQLite layout in [`sqlitelog/`](sqlitelog/) is an
   implementation detail;
-- session or journal deletion, or in-flight cancellation (both RPCs are declared and return
-  `UNIMPLEMENTED`);
+- erasure of a session's journal or metadata, or reclamation of its compute on deletion:
+  `DeleteSession` records durable intent only (§11.8);
+- in-flight cancellation (`Cancel` is declared and returns `UNIMPLEMENTED`);
 - an HTTP/JSON mapping of the API; the only transport is gRPC;
 - a warm (resident) pause; `COMPUTE_WARM` is declared but never reported;
 - approval policy, expiry, automatic decisions, or approval for memory-snapshot harnesses;
@@ -130,8 +133,8 @@ flowchart LR
   `uid` as opaque.
 - `SES-2`: `CreateSession` stores only `project`, `name`, `harness`, `model`, `labels`,
   `annotations`, `origin`, and `identity`. Output-only fields in the request (`exec_state`,
-  `compute_state`, `pending_approval`, `last_seq`, `parent_uid`, `fork_seq`, `compute`) MUST be
-  ignored.
+  `compute_state`, `pending_approval`, `deletion_state`, `deletion_requested_time`, `last_seq`,
+  `parent_uid`, `fork_seq`, `compute`) MUST be ignored.
 - `SES-3`: An empty `project` MUST be replaced by the host's default project. An empty `harness`
   MUST be replaced by the host's default harness.
 - `SES-4`: `CreateSession` appends no event. A new session reports `last_seq = 0`.
@@ -153,8 +156,12 @@ no flattened lifecycle enum.
   host reads. The value is:
   - `EXEC_AWAITING` when a valid, owned, unanswered host approval request exists in the latest
     execution (§10);
-  - otherwise `EXEC_PENDING` when `last_seq = 0`;
+  - otherwise `EXEC_PENDING` when the log has no record before its `LIFECYCLE_DELETE` (§11.8),
+    which for a session that is not deleted means `last_seq = 0`;
   - otherwise `EXEC_COMPLETED`.
+
+  Deletion leaves this value as it was: a deleted session with a valid unanswered request still
+  reports `EXEC_AWAITING`, but without `pending_approval` (`SES-12`).
 - `EXEC_COMPLETED` is a compatibility fallback. It does not prove that an `EVENT_END` or a receipt
   exists. The reference host never reports `EXEC_RUNNING`, `EXEC_FAILED`, or `EXEC_CANCELED`.
 - `SES-8`: `compute_state` MUST be updated in the same transaction as the append that changes it:
@@ -162,18 +169,36 @@ no flattened lifecycle enum.
   - `LIFECYCLE_RESUME` sets `COMPUTE_LIVE`;
   - any non-lifecycle event other than `EVENT_APPROVAL_REQUEST` and `EVENT_APPROVAL_RESULT` sets
     `COMPUTE_LIVE`;
-  - `LIFECYCLE_BASELINE`, `LIFECYCLE_CANCEL`, and approval events leave it unchanged;
+  - `LIFECYCLE_BASELINE`, `LIFECYCLE_CANCEL`, `LIFECYCLE_DELETE`, and approval events leave it
+    unchanged;
   - a session with no events reports `COMPUTE_NONE`.
 - The reference host never reports `COMPUTE_WARM` or `COMPUTE_TERMINATED`.
 
 ### 5.3 Listing
 
 - `SES-9`: `ListSessions` MUST enumerate sessions from durable metadata, including sessions with no
-  events. `project` is an exact-match filter; empty selects the default project.
+  events. `project` is an exact-match filter; empty selects the default project. A deleted session
+  (§5.4) MUST be omitted, and omitted before paging, so it takes no slot of a page.
 - `SES-10`: Paging MUST be keyset over `(create_time DESC, uid ASC)`. A `page_token` the host
   cannot parse MUST be `INVALID_ARGUMENT`. `next_page_token` is empty on the last page.
 - `SES-11`: A `page_size` of 0 or less selects the server default (50 in the reference host). A
   value above the server maximum (500) is clamped, not rejected.
+
+### 5.4 Deletion state
+
+`deletion_state` is a third axis, independent of `exec_state` and `compute_state`.
+
+- `SES-12`: A session MUST report `DELETION_ACTIVE` until `DeleteSession` commits (§11.8), and
+  `DELETION_PENDING` from then on. `deletion_requested_time` is unset while `ACTIVE` and, while
+  `PENDING`, is the time the host recorded in the deletion transaction (`OPS-31`). A `PENDING`
+  session MUST NOT report `pending_approval`.
+- `SES-13`: `PENDING` is a permanent tombstone and durable intent, not a report that compute or
+  snapshots were reclaimed (`OPS-35`). No transition leaves it. The reference host never reports
+  `DELETION_STATE_UNSPECIFIED`; the internal completion state reserved for cleanup has no wire
+  value and is never written.
+- `SES-14`: `GetSession` MUST keep returning a deleted session, with its metadata, lineage,
+  `last_seq` (which counts the `LIFECYCLE_DELETE` record), and `update_time` (equal to
+  `deletion_requested_time` in the reference host).
 
 ## 6. Event log
 
@@ -188,7 +213,9 @@ no flattened lifecycle enum.
   `content_hash` (§7.1).
 - `LOG-4`: An event carries `execution_id`, `ts`, `schema_version`, `kind`, `actor`, and at most one
   body. The reference host leaves `schema_version` unset and sets `ts` only on
-  `EVENT_APPROVAL_RESULT`; other events carry whatever their producer supplied.
+  `EVENT_APPROVAL_RESULT`, except on `LIFECYCLE_DELETE`, which carries `schema_version = 1` and a
+  `ts` equal to `deletion_requested_time` (`OPS-31`); other events carry whatever their producer
+  supplied.
 
 ### 6.2 Event kinds
 
@@ -203,7 +230,7 @@ no flattened lifecycle enum.
 | `EVENT_APPROVAL_REQUEST` | `ApprovalRequest` | host only | §10. |
 | `EVENT_APPROVAL_RESULT` | `ApprovalResult` | host only | §10. |
 | `EVENT_USAGE` | `Usage` | host | Per-call usage reported by the harness. |
-| `EVENT_LIFECYCLE` | `Lifecycle` | host only | `SUSPEND`, `RESUME`, `FORK`; `BASELINE`, `CANCEL` declared, unused. |
+| `EVENT_LIFECYCLE` | `Lifecycle` | host only | `SUSPEND`, `RESUME`, `FORK`; `DELETE`, written only by `DeleteSession` with an empty `execution_id` (§11.8); `BASELINE`, `CANCEL` declared, unused. |
 | `EVENT_END` | `HarnessEnd` | host | Written with `state = "COMPLETED"` on success. |
 | `EVENT_ERROR` | `Error` | host | Best-effort record of a failed execution or recovery. |
 | `EVENT_PARKED` | `ApprovalRef` | harness | Transport only; never journaled (§10.3). |
@@ -215,6 +242,9 @@ no flattened lifecycle enum.
   (`eventlog.Log`) does not check the kind and appends it.
 - `LOG-6`: The reference host writes `EVENT_ERROR`, not `EVENT_END`, when an execution fails. It
   never writes `HarnessEnd.state` values other than `COMPLETED`.
+- `LOG-18`: `LIFECYCLE_DELETE` MUST be written only by the deletion transaction (`OPS-31`), never
+  through `Append`. The reference SQLite store refuses an `Append` of it. The in-memory reference
+  store does not check the kind, and has no deletion.
 
 ### 6.3 Append and compare-and-swap
 
@@ -251,7 +281,16 @@ no flattened lifecycle enum.
   store accepts it and no test pins either behavior.
 - `LOG-14`: Every operation that starts writing to a session (Exec, Resume, Suspend, Approve, the
   approval repair in §10.4, Fork children) MUST mint a fresh fence before its first append, so that
-  any earlier writer is superseded.
+  any earlier writer is superseded. `DeleteSession` advances the fence in the same transaction as
+  its append (`OPS-31`).
+- `LOG-19`: A store that supports deletion MUST refuse `Append` and `NewFence` for a deleted
+  session with a deleted error (`eventlog.ErrDeleted`) and commit nothing, whatever the fence and
+  cursor, and MUST NOT rewrite a deleted session's metadata. A session with no metadata row is
+  writable. The reference SQLite store enforces this and checks deletion first, so a deleted
+  session reports the deleted error, not a conflict or fenced error. The in-memory store has no
+  deletion. A store MAY also expose a read-only
+  writable check (`CheckWritable`), which the reference host runs before any runtime call
+  (`OPS-34`); a wrapper around such a store has to forward it to keep that ordering.
 
 ### 6.5 Idempotency
 
@@ -269,6 +308,7 @@ no flattened lifecycle enum.
   `to_seq = 0` reads to the head. It never emits deltas and never runs a harness.
 - The reference host returns an empty, successful stream for an unknown or empty session on
   `Replay`; it does not return `NOT_FOUND`.
+- `Replay` of a deleted session MUST keep returning its records, including `LIFECYCLE_DELETE`.
 
 ## 7. Provenance chain and canonical encoding
 
@@ -626,8 +666,8 @@ invokes no harness and stays a no-op without one.
   execution, owned by this session (not copied before a `LIFECYCLE_FORK`), not completed, and
   without a receipt. Otherwise `FAILED_PRECONDITION`.
 - `APR-7`: An exact retry (same tuple, `approved`, `reason`, and identity) MUST return the existing
-  `APPROVAL_RESULT` record and append nothing, even after resolution. A changed decision MUST be
-  `FAILED_PRECONDITION` and never overwrites.
+  `APPROVAL_RESULT` record and append nothing, even after resolution, unless the session is
+  deleted (`OPS-34`). A changed decision MUST be `FAILED_PRECONDITION` and never overwrites.
 - `APR-8`: A new decision MUST mint a fence and append `APPROVAL_RESULT{tool_call_id, approved,
   reason, request_seq}` with `Event.actor` set from the request's identity, at the head observed
   when the request was selected.
@@ -672,27 +712,37 @@ invokes no harness and stays a no-op without one.
 - `OPS-1`: A host MUST serialize, per session, `Exec`, `Resume`, `Suspend`, and `Approve`. An
   overlapping call MUST fail with `ABORTED` without changing compute or the journal. The reference
   guard is non-blocking.
+- `OPS-30`: A host MUST also exclude `DeleteSession` from each of those operations and from a
+  `Fork` of the same session, both ways: the call that arrives second fails `ABORTED` without
+  writing. In the reference host the exclusion is per `Registry` (one host). For `Exec`,
+  `Resume`, `Suspend`, and `Approve` it covers two phases: the session lookup and routing, and
+  the guarded operation (`OPS-1`). A deletion can commit between the two; `OPS-34` covers that
+  case. For `Fork` it covers the lookup, and separately the fan-out until it ends, including
+  any rollback (`OPS-27`). Lookup phases and `Fork` do not exclude each other or the operations
+  in `OPS-1`. `DeleteSession` neither waits for nor cancels the holder; the caller retries.
 - `OPS-2`: A per-session checkpoint mark MUST be held by `Suspend`, `Approve`, an approval park
   handoff, a cursor-checked `Resume` while it mints each fence and re-reads the head (`OPS-29`),
   and a `REQUIRES_MEMORY_SNAPSHOT` fork from checkpoint until its last child is cloned.
   A second checkpoint holder MUST fail with `ABORTED`. `Exec` and `Resume` during a checkpoint
   MUST fail with `ABORTED` unless a check the host runs before the mark check fails or answers
-  the call. The reference host checks the mark only after the session guard (`OPS-1`), the request
-  and harness checks (§11.3), the approval-state checks (`APR-13`, `APR-15`, `OPS-14`), admission
-  (`RT-1`) and, on `Resume`, the head check (`OPS-29`) and the snapshot lookup; an error from
-  those is returned instead of `ABORTED`.
+  the call. The reference host checks the mark only after the session guard (`OPS-1`), the
+  deletion check (`OPS-34`), the request and harness checks (§11.3), the approval-state checks
+  (`APR-13`, `APR-15`, `OPS-14`), admission (`RT-1`) and, on `Resume`, the head check (`OPS-29`)
+  and the snapshot lookup; an error from those is returned instead of `ABORTED`.
   A `Resume` or input-less `Exec` on an owned gate with no decision (`APR-13`) is answered before
   the check. Its call-only repair takes the mark only for a `Resume` with `expected_last_seq` set
   (`OPS-29`); otherwise it can append `APPROVAL_REQUEST` under a new fence during a checkpoint.
   TODO(spike): Should the call-only approval repair refuse with `ABORTED` during a checkpoint?
 - `OPS-3`: A `REQUIRES_MEMORY_SNAPSHOT` fork MUST end any in-flight execution on the parent; that
   execution fails with `ABORTED`.
-- `CreateSession`, `GetSession`, `ListSessions`, `Replay`, and `Fork` (either tier) do not take the
-  session guard. A `REQUIRES_MEMORY_SNAPSHOT` fork holds the checkpoint mark instead (`OPS-2`).
+- `CreateSession`, `GetSession`, `ListSessions`, and `Replay` take no guard. `Fork` (either tier)
+  does not take the `OPS-1` session guard, only the deletion exclusion (`OPS-30`). A
+  `REQUIRES_MEMORY_SNAPSHOT` fork holds the checkpoint mark instead (`OPS-2`).
 
 ### 11.2 Create, Get, List
 
 - See §5. `GetSession` with an empty `uid` is `INVALID_ARGUMENT`; an unknown `uid` is `NOT_FOUND`.
+  A deleted session is returned (`SES-14`) and is not listed (`SES-9`).
 - `OPS-4`: `CreateSession` with a harness the host does not know is `INVALID_ARGUMENT`. A known but
   unservable registered harness is `FAILED_PRECONDITION`, refused when the name is resolved, before
   the insert. A retired registered harness, or a static harness name that also has a registration
@@ -724,6 +774,9 @@ invokes no harness and stays a no-op without one.
 - `OPS-11`: The first frame of a stream that sends any frame MUST be `ExecUpdate.session` with the
   session as it was before the turn. Committed records and deltas follow. A caller MUST read the
   stream to completion. Whether an error arrives before or after that frame depends on the path:
+  - Both paths: an overlap with `DeleteSession` (`OPS-30`, `ABORTED`) and a session deleted
+    before the lookup (`OPS-34`, `FAILED_PRECONDITION`) end the stream with no frame. A deletion
+    that commits after the lookup fails the call after the frame (`OPS-34`).
   - Ordinary execution: the host resolves the session and routes the harness before the frame.
     Auto-create failure, an approval-inspection failure, the approval block (`OPS-14`), every
     session lookup or routing error, a journal head read failure, and a failure to materialize
@@ -834,25 +887,66 @@ invokes no harness and stays a no-op without one.
   stateless fork with `at_seq` above the head records the requested `fork_seq` while copying only
   to the head. Should fork be all-or-nothing in the journal, and should `at_seq > head` be refused?
 
-### 11.8 Unimplemented
+### 11.8 Delete and Cancel
 
-- `OPS-28`: `DeleteSession` and `Cancel` MUST return `UNIMPLEMENTED`. There is no delete path for
-  sessions or journals. The `ControllerFrame.cancel` frame is declared but never sent; the host
-  cancels an execution by ending the stream's context.
+`DeleteSession` is permanent soft deletion: it tombstones the `uid` and records durable intent. It
+does not erase data or reclaim compute.
+
+- `OPS-31`: `DeleteSession` with an empty `uid` MUST be `INVALID_ARGUMENT`. An unknown `uid` MUST
+  be `NOT_FOUND` and MUST NOT create a session or journal. On a `DELETION_ACTIVE` session the host
+  MUST, in one transaction: append a host-owned `LIFECYCLE_DELETE` record with an empty
+  `execution_id` at the current head (`seq = head + 1`, chained per `CHAIN-3`), advance the
+  session's fence, set `deletion_state = DELETION_PENDING` and `deletion_requested_time`, and move
+  `last_seq` and `update_time`. It takes no caller cursor. It returns the session as committed.
+  The record's `ts` and `deletion_requested_time` are the same instant (`LOG-4`).
+- `OPS-32`: `DeleteSession` on a session that is already deleted MUST return the stored session
+  and write nothing: no record, and no change to the fence, timestamps, `update_time`, or the
+  compute projection. A caller whose reply was lost after the commit learns the outcome this way
+  or from `GetSession`; the commit cannot be undone.
+- `OPS-33`: Deletion is permanent. The `uid`, its metadata, and its journal are retained, no
+  operation returns the session to `DELETION_ACTIVE`, and the `uid` is not reused (`SES-1`).
+  `GetSession` (`SES-14`) and `Replay` (§6.6) keep working; `ListSessions` omits the session
+  (`SES-9`). Children are unaffected: a fork child keeps its own copied prefix (`CHAIN-8`), stays
+  `DELETION_ACTIVE`, and can run and fork.
+- `OPS-34`: `Exec`, `Fork` at any `at_seq`, `Resume`, `Suspend`, and `Approve`, including an exact
+  retry of a committed decision (`APR-7`), on a deleted session MUST fail `FAILED_PRECONDITION`
+  before routing, `Describe`, a fence, a journal write, or a runtime call. In the reference host the
+  check follows only the request's own field checks (`APR-5`, `OPS-21`, an empty session), the
+  deletion exclusion (`OPS-30`), and the session lookup (`NOT_FOUND`); it precedes `Fork`'s `count`
+  and `child_names` checks (`OPS-22`), `Resume`'s cursor check (`OPS-29`), and on `Exec` the first
+  frame (`OPS-11`). The host repeats the check under the session guard (`OPS-1`) before `Describe`
+  or runtime IO, and `Fork` repeats it for the parent and every child before its checkpoint, so a
+  deletion that commits after the lookup also fails `FAILED_PRECONDITION` (on `Exec`, after the
+  first frame; on `Approve`, after its checkpoint mark, `OPS-2`). The store's refusal (`LOG-19`)
+  backs both checks.
+- `OPS-35`: `DELETION_PENDING` acknowledges intent only. The host MUST NOT report deletion as
+  reclamation. The reference host calls no runtime method for it (no `Stop`, `RT-7`), releases
+  no actor, snapshot, or fork-child pin, and never reports `COMPUTE_TERMINATED` or a completed
+  deletion. Retained compute has to be reclaimed in the backend by the operator. Ownership and
+  cleanup are future work (#88).
+- `OPS-36`: The exclusion in `OPS-30` and the checks in `OPS-34` are per host. Durable refusal
+  (`LOG-19`) stops later writes from any host that enforces it, but a host that does not (an
+  older binary that already has the journal open, §18) keeps writing, and another host can
+  provision compute for the session before its first fence or append fails. Cross-host
+  exclusion of compute effects is not guaranteed.
+- Other `DeleteSession` failures: a storage fault is `INTERNAL`; the caller's cancellation or
+  deadline is `CANCELLED` or `DEADLINE_EXCEEDED`.
+- `OPS-28`: `Cancel` MUST return `UNIMPLEMENTED`. The `ControllerFrame.cancel` frame is declared
+  but never sent; the host cancels an execution by ending the stream's context.
 
 ### 11.9 Status codes
 
 | Condition | Code |
 |---|---|
 | Missing required field, bad page token, unknown harness name, fork `count > 128`, `child_names` length mismatch, fork `identity` set | `INVALID_ARGUMENT` |
-| Unknown session (Get, Exec, Suspend, Resume, Fork, Approve) | `NOT_FOUND` |
-| Compare-and-swap conflict, stale fence, session busy, checkpoint in progress, snapshot superseded | `ABORTED` |
-| Unplaceable harness, descriptor mismatch, pin violation, retired or unservable harness, static harness name with a registration row, approval state violation, inherited intent, memory fork at a historical `seq` | `FAILED_PRECONDITION` |
+| Unknown session (Get, Exec, Suspend, Resume, Fork, Approve, Delete) | `NOT_FOUND` |
+| Compare-and-swap conflict, stale fence, session busy (including an overlap with `DeleteSession`, `OPS-30`), checkpoint in progress, snapshot superseded | `ABORTED` |
+| Unplaceable harness, descriptor mismatch, pin violation, retired or unservable harness, static harness name with a registration row, approval state violation, inherited intent, memory fork at a historical `seq`, deleted session (`OPS-34`) | `FAILED_PRECONDITION` |
 | Harness `Describe` (admission `RT-1`, the `RT-3` recheck, or a `Describe` during the turn) could not reach the harness while the caller's context is live: the peer returned `UNAVAILABLE` or `DEADLINE_EXCEEDED`; or, on admission and the recheck, the host's own bound expired; or, during the turn, the error wraps `context.DeadlineExceeded` | `UNAVAILABLE` |
 | Any other `Describe` error on those paths, for example a peer `UNIMPLEMENTED` or `INTERNAL`, or a plain error from an in-process harness (during the turn, even one returned after the host's bound expired) | `INTERNAL` |
 | Any `Describe` error in the memory-tier override check (`OPS-7`) while the caller's context is live | `UNAVAILABLE` |
-| Caller deadline or cancellation during admission or any `Describe` above | `DEADLINE_EXCEEDED` or `CANCELLED` |
-| `DeleteSession`, `Cancel` | `UNIMPLEMENTED` |
+| Caller deadline or cancellation during admission, any `Describe` above, or `DeleteSession` | `DEADLINE_EXCEEDED` or `CANCELLED` |
+| `Cancel` | `UNIMPLEMENTED` |
 | Any other failure | `INTERNAL` |
 
 ## 12. Harness wire protocol
@@ -1064,10 +1158,11 @@ The reference host takes it as `placement.Backend` in
   the parent (`runtime/local`, `runtime/remote`, and `runtime/substrate`'s replay fork) never
   returns the error.
 - `RT-7`: `Stop` is destructive teardown and is not part of suspension. The reference host calls it
-  only to roll back a failed fork fan-out (`OPS-27`). It does not call `Stop` when a later step of
-  `Exec` or `Resume` fails after `Create` or `Restore` succeeded (the dial, the `RT-3` check, the
-  fence, or the run). The host keeps no handle to that incarnation; a later `Exec` reaches it
-  through `Create` (`RT-4e`) and a `Suspend` through `Snapshot`.
+  only to roll back a failed fork fan-out (`OPS-27`), never for `DeleteSession` (`OPS-35`). It does
+  not call `Stop` when a later step of `Exec` or `Resume` fails after `Create` or `Restore`
+  succeeded (the dial, the `RT-3` check, the fence, or the run). The host keeps no handle to that
+  incarnation; a later `Exec` reaches it through `Create` (`RT-4e`) and a `Suspend` through
+  `Snapshot`.
 - `RT-8`: `Capabilities` reports `memory_snapshot`, `cow_fork`, `attest`, and `gpu_state`. Only
   `memory_snapshot` affects placement (`RT-2`, `OPS-7`).
 - The reference host does not call `Status`.
@@ -1194,6 +1289,10 @@ The reference implementation protects the integrity of the record, not access to
 - `IdentityRef` (session identity, `Event.actor`, `ApproveRequest.identity`) is caller-supplied
   provenance. It MUST NOT be read as authenticated identity.
 - `project` is a listing filter, not a tenancy boundary.
+- Any caller can delete any session it can name, irreversibly. Deletion is neither erasure nor
+  access revocation: the journal, `config`, and metadata stay readable through `GetSession` and
+  `Replay` (`OPS-33`), and compute and snapshots are retained until an operator reclaims them
+  (`OPS-35`).
 - The harness is trusted code. Host mediation is a determinism mechanism, not containment; isolation
   comes from the runtime backend, and `runtime/local` has none.
 - The harness does not authenticate the host, and a harness registered by address is whatever
@@ -1236,9 +1335,16 @@ The reference implementation protects the integrity of the record, not access to
     execution (`EXE-29`), so `Resume` no longer re-runs that turn. A legacy harness invocation
     (reconstruction, or recovery of an unfinished legacy execution) needs a session uid; `Resume`
     of a complete legacy execution is a no-op without one.
-  - The reference SQLite store versions its schema with `PRAGMA user_version` (currently 3),
+  - The reference SQLite store versions its schema with `PRAGMA user_version` (currently 4),
     migrates forward in one transaction without rewriting events or hashes, and refuses a newer or
-    negative version.
+    negative version. Version 4 adds the deletion state; migrated sessions are
+    `DELETION_ACTIVE`.
+  - An older binary refuses a version 4 journal when it opens it, but one that already had the
+    journal open does not enforce deletion (`OPS-36`): it can still append, mint fences, and
+    update metadata after a `LIFECYCLE_DELETE`. Every older host and embedded `agentctl` sharing
+    a journal has to be stopped before the first version 4 open.
+  - A verifier whose schema lacks `LIFECYCLE_DELETE` cannot reproduce that record's hash:
+    `CHAIN-1` hashes enum names, and proto3-JSON writes an unknown enum value as a number.
 
 ## 19. Open questions
 

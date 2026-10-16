@@ -83,6 +83,8 @@ type ToolExecutorFunc func(harness string, sessions *client.Client) controller.T
 
 // WithToolExecutors installs host tool executors for CONTROLLER_MEDIATED and approved
 // REQUIRES_APPROVAL tool calls. Without it no harness has one, and such a call fails the turn.
+// Only -harness entries are asked: the built-in harnesses and those registered through
+// HarnessRegistry get no executor.
 //
 // The executor runs only after the controller's own gate: a REQUIRES_APPROVAL call still parks the
 // turn until an Approve decision, and a denied call never reaches it.

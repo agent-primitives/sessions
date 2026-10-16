@@ -5,8 +5,6 @@ Release notes are generated from commits and published on the
 reader needs to know beyond a commit list: what a release means for compatibility, and what it does
 not provide.
 
-## Unreleased
-
 ## v0.2.0 - 2026-10-16
 
 ### Compatibility

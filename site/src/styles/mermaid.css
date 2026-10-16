@@ -1,0 +1,95 @@
+/* Diagram styles, passed to Mermaid as themeCSS (see astro.config.mjs) rather than loaded as a page
+   stylesheet. Mermaid prefixes every rule with the diagram's id and appends it after its own theme,
+   so these win without !important. Every colour is a Starlight token, so the light and dark themes
+   both follow the site palette: accent-low boxes with accent edges, text in the theme's
+   foreground. */
+
+/* Boxes: flowchart nodes, state boxes, sequence actors. */
+.node rect,
+.node polygon,
+.node path,
+.node circle,
+.node ellipse,
+rect.actor {
+  fill: var(--sl-color-accent-low);
+  stroke: var(--sl-color-accent);
+}
+
+.nodeLabel,
+.node .label,
+.node text,
+text.actor,
+text.actor > tspan {
+  color: var(--sl-color-white);
+  fill: var(--sl-color-white);
+  stroke: none;
+}
+
+/* Edges, transitions, messages, and their arrowheads. */
+.flowchart-link,
+.transition,
+.messageLine0,
+.messageLine1 {
+  stroke: var(--sl-color-accent);
+}
+
+/* marker[id] outranks Mermaid's own [id$="-arrowhead"] path rule for sequence arrowheads. */
+marker[id] :is(path, polygon, circle) {
+  fill: var(--sl-color-accent);
+  stroke: var(--sl-color-accent);
+}
+
+/* The state diagram's start dot reads as a terminal, not a box. */
+.node circle.state-start {
+  fill: var(--sl-color-white);
+  stroke: var(--sl-color-white);
+}
+
+/* Edge labels sit on the diagram's own surface instead of Mermaid's grey chip. astro-mermaid tints
+   that surface 2% towards the foreground, so the label background matches it and still hides the
+   edge running underneath. */
+.edgeLabel,
+.edgeLabel p,
+.edgeLabel span,
+.labelBkg {
+  --label-bg: color-mix(in srgb, var(--sl-color-white) 2%, var(--sl-color-bg));
+  background-color: var(--label-bg);
+  color: var(--sl-color-white);
+}
+
+.edgeLabel rect {
+  fill: color-mix(in srgb, var(--sl-color-white) 2%, var(--sl-color-bg));
+  opacity: 1;
+}
+
+.messageText {
+  fill: var(--sl-color-white);
+  stroke: none;
+}
+
+/* Grouping: subgraphs, lifelines, notes. Quieter than the boxes they hold. */
+.cluster rect {
+  fill: var(--sl-color-gray-6);
+  stroke: var(--sl-color-gray-5);
+}
+
+.cluster-label,
+.cluster-label span,
+.cluster text {
+  color: var(--sl-color-white);
+  fill: var(--sl-color-white);
+}
+
+.actor-line {
+  stroke: var(--sl-color-gray-4);
+}
+
+.note {
+  fill: var(--sl-color-gray-6);
+  stroke: var(--sl-color-gray-5);
+}
+
+.noteText,
+.noteText > tspan {
+  fill: var(--sl-color-white);
+}

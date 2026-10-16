@@ -22,6 +22,18 @@
   max-width: 44ch;
 }
 
+/* Prose measure. Starlight's 45rem column runs body text to about 100 characters a line, and the
+   splash column on the landing page to about 150. Cap the running text only: tables, code, figure
+   panels and card grids keep the full column, so the wide figures still frame it. */
+.sl-markdown-content :is(p, li, blockquote) {
+  max-width: 72ch;
+}
+
+[data-has-hero] .sl-markdown-content > p,
+[data-has-hero] .reveal > p {
+  max-width: 68ch;
+}
+
 /* Tables on this site are comparisons (capability tiers, surface status), not data dumps.
    Left-aligned with generous padding reads better than the default density. Starlight's own
    display (a block that scrolls sideways) is kept, so a wide table such as the API reference's
@@ -310,12 +322,4 @@
   line-height: 1.08;
   letter-spacing: -0.02em;
   text-wrap: balance;
-}
-
-/* ---- mermaid --------------------------------------------------------------------------- */
-
-/* Mermaid's dark theme sets edge labels to #ccc on #585858 (4.4:1). Its rules are scoped to the
-   diagram's generated id, so only !important can reach them from here. */
-:root[data-theme="dark"] pre.mermaid .edgeLabel {
-  color: var(--sl-color-white) !important;
 }

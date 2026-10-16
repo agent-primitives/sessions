@@ -102,9 +102,12 @@ func TestRunToolExecutorErrorFailsStartup(t *testing.T) {
 	}
 	journal := filepath.Join(t.TempDir(), "journal.db")
 	listened := false
+	// A cancelled context makes a regression that serves return nil at once instead of hanging.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	err := Run([]string{"-journal", journal, "-addr", "127.0.0.1:0", "-model", "m",
 		"-harness", "alpha=127.0.0.1:9000", "-harness", "broken=127.0.0.1:9001", "-harness", "zulu=127.0.0.1:9002"},
-		WithToolExecutors(executors), withListening(func(string) { listened = true }))
+		WithToolExecutors(executors), withContext(ctx), withListening(func(string) { listened = true }))
 	if !errors.Is(err, errConfig) {
 		t.Fatalf("Run error = %v, want the executor's error", err)
 	}

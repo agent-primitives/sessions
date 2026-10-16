@@ -78,6 +78,7 @@ expect substrate run "workflow change" edit .github/workflows/ci.yml
 expect substrate run "new workflow" edit .github/workflows/new.yml
 expect substrate run "other .github file" edit .github/pull_request_template.yaml
 expect substrate run "filter script change" edit hack/ci-path-filter.sh
+expect substrate run "filter test change" edit hack/ci-path-filter-test.sh
 expect substrate run "deploy manifest" edit deploy/substrate/namespace.yaml
 expect substrate run "go deleted" git rm -q controller/controller.go
 expect substrate run "go renamed into docs" git mv controller/controller.go docs/controller.md
@@ -96,6 +97,8 @@ expect ci run "non-markdown docs" edit docs/diagram.svg
 expect ci run "go change" edit controller/controller.go
 expect ci run "agentui" edit cmd/agentui/main.go
 expect ci run "workflow change" edit .github/workflows/ci.yml
+expect ci run "filter script change" edit hack/ci-path-filter.sh
+expect ci run "filter test change" edit hack/ci-path-filter-test.sh
 expect ci run "dependabot config" edit .github/dependabot.yml
 expect ci run "go renamed to markdown" git mv controller/controller.go controller/notes.md
 

@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Checkout
         if: github.event_name == 'pull_request'
+        # A failed checkout must not fail this job: the next step then decides `run`.
+        continue-on-error: true
         uses: actions/checkout@v7
         with:
           fetch-depth: 2 # the merge commit and both its parents
@@ -33,26 +35,49 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
         run: |
+          # This step never fails: any doubt decides `run`, so the jobs below run in full.
+          decision=run
           if [[ "${EVENT}" != pull_request ]]; then
             echo "${EVENT}: every job runs."
-            echo "decision=run" >> "$GITHUB_OUTPUT"
-            exit 0
+          elif ! git rev-parse --verify --quiet 'HEAD^2' >/dev/null; then
+            # A pull_request checkout is the merge commit; its first parent is the base branch head.
+            echo "::error::HEAD is not the pull request's merge commit; every job runs."
+          elif ! hack/ci-path-filter-test.sh; then
+            echo "::error::hack/ci-path-filter-test.sh failed; every job runs."
+          else
+            # Decide with the base branch's copy of the filter, so a pull request that edits the
+            # filter never decides its own run: the filter's own path is relevant in every profile.
+            # The pull request's copy decides only while the base branch has none.
+            filter="${RUNNER_TEMP}/ci-path-filter.sh"
+            git show 'HEAD^1:hack/ci-path-filter.sh' >"${filter}" 2>/dev/null ||
+              filter=hack/ci-path-filter.sh
+            echo "Deciding with ${filter}."
+            answer="$(bash "${filter}" ci 'HEAD^1' HEAD)" || answer=error
+            if [[ "${answer}" == run || "${answer}" == skip ]]; then
+              decision="${answer}"
+            else
+              echo "::error::the path filter answered '${answer}'; every job runs."
+            fi
           fi
-          # A pull_request checkout is the merge commit; its first parent is the base branch head.
-          git rev-parse --verify --quiet 'HEAD^2' >/dev/null || {
-            echo "::error::HEAD is not the pull request's merge commit"
-            exit 1
-          }
-          decision="$(hack/ci-path-filter.sh ci 'HEAD^1' HEAD)"
-          echo "decision=${decision}" >> "$GITHUB_OUTPUT"
+          echo "decision=${decision}" | tee -a "${GITHUB_OUTPUT}"
 
   ci:
     needs: changes
-    # Not skipped when the changes job fails: its decision is then empty, which is not `skip`,
-    # so every step runs. A skipped required check would count as passing.
+    # Runs even when the changes job fails, so this required check fails instead of being
+    # skipped: a skipped required check would count as passing.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      - name: Fail when the path filter failed
+        # The changes job never fails on its own (any doubt decides `run`). If it still does (a
+        # runner fault), its decision is empty: fail ci rather than trust it.
+        if: ${{ !cancelled() && needs.changes.result != 'success' }}
+        env:
+          RESULT: ${{ needs.changes.result }}
+        run: |
+          echo "::error::the path filter job ended '${RESULT}'; rerun the workflow."
+          exit 1
+
       - name: Skip (no ci-relevant changes)
         # The changes job found only markdown or the license, so every step below is skipped and
         # this job reports success; the changes job's log lists each changed path and its verdict.
@@ -180,7 +205,8 @@ jobs:
         run: python3 hack/verify_chain.py --golden
 
       # The path filter decides whether this workflow and substrate-conformance run on a pull
-      # request, and a wrong `skip` would merge a change no check ran on.
+      # request, and a wrong `skip` would merge a change no check ran on. Both changes jobs run
+      # this test too and decide `run` when it fails; this step turns the failure into a failed ci.
       - name: ci path filter self-test
         if: needs.changes.outputs.decision != 'skip'
         run: hack/ci-path-filter-test.sh
@@ -191,14 +217,25 @@ jobs:
     # it needs no cluster, so it belongs on the per-PR gate. (gofmt is covered by the root job, which
     # walks the tree, not the module graph.)
     needs: changes
-    # Not skipped when the changes job fails: its decision is then empty, which is not `skip`,
-    # so every step runs. A skipped required check would count as passing.
+    # Runs even when the changes job fails, so this required check fails instead of being
+    # skipped: a skipped required check would count as passing.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: integrations/substrate
     steps:
+      - name: Fail when the path filter failed
+        # The changes job never fails on its own (any doubt decides `run`). If it still does (a
+        # runner fault), its decision is empty: fail integrations rather than trust it.
+        if: ${{ !cancelled() && needs.changes.result != 'success' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          RESULT: ${{ needs.changes.result }}
+        run: |
+          echo "::error::the path filter job ended '${RESULT}'; rerun the workflow."
+          exit 1
+
       - name: Skip (no ci-relevant changes)
         # The changes job found only markdown or the license, so every step below is skipped and
         # this job reports success; the changes job's log lists each changed path and its verdict.
@@ -246,11 +283,21 @@ jobs:
     # implementation (protobuf + RFC 8785 JCS) reproduce and verify the whole chain, then prove it
     # FAILS CLOSED on a tampered record. Kept a separate job so its Python venv setup is isolated.
     needs: changes
-    # Not skipped when the changes job fails: its decision is then empty, which is not `skip`,
-    # so every step runs. A skipped required check would count as passing.
+    # Runs even when the changes job fails, so this required check fails instead of being
+    # skipped: a skipped required check would count as passing.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      - name: Fail when the path filter failed
+        # The changes job never fails on its own (any doubt decides `run`). If it still does (a
+        # runner fault), its decision is empty: fail integrity rather than trust it.
+        if: ${{ !cancelled() && needs.changes.result != 'success' }}
+        env:
+          RESULT: ${{ needs.changes.result }}
+        run: |
+          echo "::error::the path filter job ended '${RESULT}'; rerun the workflow."
+          exit 1
+
       - name: Skip (no ci-relevant changes)
         # The changes job found only markdown or the license, so every step below is skipped and
         # this job reports success; the changes job's log lists each changed path and its verdict.

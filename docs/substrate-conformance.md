@@ -364,12 +364,15 @@ runs.
 `substrate-conformance` is a required check, so the workflow has no trigger path filter: a workflow
 a filter skips never reports, and the pull request could not merge. Its first job,
 `substrate-e2e path filter`, diffs the pull request's merge commit against the base branch with
-`hack/ci-path-filter.sh`. When every changed path is one the suite does not read (`docs/`, any
-`*.md`, `site/`, `cmd/agentui/`, `demos/`, `LICENSE`, `.github/CODEOWNERS`,
-`.github/dependabot.yml`, `.github/copilot-instructions.md`), `substrate-conformance` skips every
-step and reports success in seconds. Any other path, including any workflow file, runs the suite.
-Push to main, the nightly schedule and manual runs always run it. `ci.yml` gates its required jobs
-the same way, skipping only markdown (other than `docs/api-reference.md`) and `LICENSE`.
+`hack/ci-path-filter.sh`; the `substrate` profile there is the ignore list (prose, the site, the
+agent UI, demos and a few repository metadata files). When every changed path is on it,
+`substrate-conformance` skips every step and reports success in seconds. Any other path, including
+any workflow file and the filter itself, runs the suite. The job decides with the base branch's copy
+of the filter, so a pull request that edits it cannot decide its own run, and it runs the suite
+whenever it is unsure: the filter's self-test fails, the filter errors, or the checkout is not a
+merge commit. Push to main, the nightly schedule and manual runs always run it. `ci.yml` gates its
+required jobs the same way with the `ci` profile, skipping only markdown (other than
+`docs/api-reference.md`) and `LICENSE`.
 
 Scheduled and manual runs add a canary job, `substrate-conformance (substrate main)`, that runs the
 same suite against agent-substrate's `main` head, with the adapter's client moved to that commit in

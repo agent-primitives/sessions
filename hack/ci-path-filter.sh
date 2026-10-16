@@ -10,7 +10,9 @@
 # Usage: hack/ci-path-filter.sh <ci|substrate> <base> <head>
 #
 # Prints `run` or `skip` on stdout, and each changed path with its verdict on stderr. Exits non-zero
-# on a usage or git error; the gated jobs run in full when the filter job fails.
+# on a usage or git error, which the calling job reads as `run`. The workflows run the base branch's
+# copy of this script, so an edit to it takes effect from the next pull request on; the edit itself
+# always runs every check, since no profile ignores this path.
 #
 # Each file changed between <base> and <head> is matched against the profile's patterns in order,
 # and the last match wins: a plain pattern marks the path ignored, a `!pattern` marks it relevant
@@ -41,7 +43,8 @@ ci)
 	;;
 substrate)
 	# Nothing here is read by the conformance suite, the images it builds, or the workflow. Any
-	# other path, including every workflow file and this script, runs the suite.
+	# other path, including every workflow file and this script, runs the suite. The CI section of
+	# docs/substrate-conformance.md summarizes this list; update it when the list changes shape.
 	patterns=(
 		'docs/*'
 		'*.md'

@@ -77,6 +77,8 @@ jobs:
     steps:
       - name: Checkout agentsessions
         if: github.event_name == 'pull_request'
+        # A failed checkout must not fail this job: the next step then decides `run`.
+        continue-on-error: true
         uses: actions/checkout@v7
         with:
           fetch-depth: 2 # the merge commit and both its parents
@@ -87,18 +89,31 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
         run: |
+          # This step never fails: any doubt decides `run`, so the jobs below run in full.
+          decision=run
           if [[ "${EVENT}" != pull_request ]]; then
             echo "${EVENT}: the full suite runs."
-            echo "decision=run" >> "$GITHUB_OUTPUT"
-            exit 0
+          elif ! git rev-parse --verify --quiet 'HEAD^2' >/dev/null; then
+            # A pull_request checkout is the merge commit; its first parent is the base branch head.
+            echo "::error::HEAD is not the pull request's merge commit; the full suite runs."
+          elif ! hack/ci-path-filter-test.sh; then
+            echo "::error::hack/ci-path-filter-test.sh failed; the full suite runs."
+          else
+            # Decide with the base branch's copy of the filter, so a pull request that edits the
+            # filter never decides its own run: the filter's own path is relevant in every profile.
+            # The pull request's copy decides only while the base branch has none.
+            filter="${RUNNER_TEMP}/ci-path-filter.sh"
+            git show 'HEAD^1:hack/ci-path-filter.sh' >"${filter}" 2>/dev/null ||
+              filter=hack/ci-path-filter.sh
+            echo "Deciding with ${filter}."
+            answer="$(bash "${filter}" substrate 'HEAD^1' HEAD)" || answer=error
+            if [[ "${answer}" == run || "${answer}" == skip ]]; then
+              decision="${answer}"
+            else
+              echo "::error::the path filter answered '${answer}'; the full suite runs."
+            fi
           fi
-          # A pull_request checkout is the merge commit; its first parent is the base branch head.
-          git rev-parse --verify --quiet 'HEAD^2' >/dev/null || {
-            echo "::error::HEAD is not the pull request's merge commit"
-            exit 1
-          }
-          decision="$(hack/ci-path-filter.sh substrate 'HEAD^1' HEAD)"
-          echo "decision=${decision}" >> "$GITHUB_OUTPUT"
+          echo "decision=${decision}" | tee -a "${GITHUB_OUTPUT}"
 
   substrate-conformance:
     # The pinned entry keeps the bare job name: it is the required status check. The canary entry
@@ -113,8 +128,8 @@ jobs:
     # turns the nightly run red (it still never runs on a pull request).
     name: ${{ matrix.substrate == 'main' && 'substrate-conformance (substrate main)' || 'substrate-conformance' }}
     needs: changes
-    # Not skipped when the changes job fails: its decision is then empty, which is not `skip`, so
-    # every step runs. A skipped required check would count as passing.
+    # Runs even when the changes job fails, so this required check fails instead of being
+    # skipped: a skipped required check would count as passing.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.substrate == 'main' }}
@@ -127,6 +142,16 @@ jobs:
             && '["pinned", "main"]' || '["pinned"]'
           ) }}
     steps:
+      - name: Fail when the path filter failed
+        # The changes job never fails on its own (any doubt decides `run`). If it still does (a
+        # runner fault), its decision is empty: fail substrate-conformance rather than trust it.
+        if: ${{ !cancelled() && needs.changes.result != 'success' }}
+        env:
+          RESULT: ${{ needs.changes.result }}
+        run: |
+          echo "::error::the path filter job ended '${RESULT}'; rerun the workflow."
+          exit 1
+
       - name: Skip the suite (no substrate-relevant changes)
         # The changes job found only paths the suite does not read, so every step below is skipped
         # and this job reports success; the changes job's log lists each path and its verdict.

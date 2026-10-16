@@ -747,9 +747,9 @@ journals with v0.1.2 semantics, which differ from §8.1-§8.6 as stated here.
 
 - `OPS-19`: `Resume` MUST, in order: admit the harness (§13.2), restore from this session's own
   latest `SUSPEND` snapshot reference (one inherited from a parent is skipped; with none, it uses
-  `{local: uid}`), connect, mint a fence, run recovery (§8.6), and append `LIFECYCLE_RESUME` at the
-  current head. A cursor-checked `Resume` (`OPS-29`) also mints an early fence after admission and
-  before restore.
+  `{local: uid}`), open the harness client, mint a fence, run recovery (§8.6), and append
+  `LIFECYCLE_RESUME` at the current head. A cursor-checked `Resume` (`OPS-29`) also mints an
+  early fence after admission and before restore.
 - `OPS-20`: `ResumeRequest.boot` is deprecated and ignored.
 - `OPS-29`: `ResumeRequest.expected_last_seq` has explicit presence. When unset, `Resume` performs
   no cursor check. When set (0 asserts an empty journal), the host MUST compare it with the journal
@@ -761,7 +761,8 @@ journals with v0.1.2 semantics, which differ from §8.1-§8.6 as stated here.
     `APPROVAL_REQUEST` is appended; an undecided approval whose request is committed needs no
     fence and gets only the first check;
   - after an early fence minted after admission and before restore;
-  - after the turn's regular fence, minted once the harness is connected, before the harness runs.
+  - after the turn's regular fence, minted once the harness client is open, before the harness
+    runs.
 - A refusal at the first check mints no fence and performs no runtime IO. A refusal after a fence
   leaves that fence minted, so older writers are superseded (`LOG-12`) even though `Resume` refused.
   A refusal at the last check may already have restored compute, but the harness does not run and
@@ -907,8 +908,8 @@ sequenceDiagram
   `attest`, and `gpu_state` are not compared.
 - `RT-3`: For a backend whose harness is live behind an address (it describes the live harness),
   `Exec` and `Resume` MUST repeat the admission check on the execution's own connection after the
-  harness connects and before minting the turn's regular writer fence, because a second dial can
-  reach a different replica.
+  host opens the execution's harness client, before it opens the `Harness.Connect` stream and
+  mints the turn's regular writer fence, because a second dial can reach a different replica.
 - `RT-3` does not cover fences minted before the execution has a connection:
   - the approval repair fence (`APR-13`), minted before admission; that call parks and returns
     without admission or a connection;
@@ -952,9 +953,8 @@ is not a wire protocol in this draft.
   captured. The host stores the ref on the `LIFECYCLE_SUSPEND` record (`snapshot_local`,
   `snapshot_external_uri`, `snapshot_memory`, `snapshot_sealed`); there is no side table.
 - Cold is the session's `compute_state`, which the host derives from the journal (`OPS-17`), not
-  a runtime `Status`. A backend with per-session compute (`runtime/substrate`) suspends it in
-  `Snapshot`; a backend with none (`runtime/local`) releases nothing, and its `Status` still
-  reports `LIVE`.
+  a runtime `Status`. A backend with per-session compute suspends it in `Snapshot`; a backend with
+  none releases nothing, and its `Status` can still report `LIVE` (§13.4).
 - `RT-6`: `Fork` MUST tear down a partially created child on failure, and MUST return an error
   wrapping `api.ErrSnapshotSuperseded` when the parent no longer holds the referenced snapshot. The
   host maps that error to `ABORTED`.
@@ -968,8 +968,11 @@ is not a wire protocol in this draft.
 
 - `runtime/local`: serves the harness in the host process over a unix socket. All capabilities
   false. `Snapshot(EXTERNAL)` returns `{local: id, memory: false}`; `Restore` and `Fork` recreate.
+  It has no per-session compute, so `Snapshot` releases nothing and its `Status` still reports
+  `LIVE` after a suspend.
 - `runtime/remote`: dials an operator-configured harness address. Same capabilities as local.
 - `runtime/substrate`: `memory_snapshot = true`, driven through its own `ControlClient` interface.
+  It suspends its per-session compute in `Snapshot`.
   The adapter that talks to agent-substrate is the separate Go module
   [`integrations/substrate`](integrations/substrate/), an example of the runtime contract. The core
   module does not import it; CI asserts `go list -deps ./...` contains no `agent-substrate`

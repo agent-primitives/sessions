@@ -553,6 +553,21 @@ func refuseStatefulOverride(desc api.Descriptor, override bool) error {
 		ErrStatefulOverride, desc.ID, desc.Capabilities.Resumability)
 }
 
+// refuseOverrideRepair applies the override half of ErrStatefulOverride before an approval request
+// is repaired onto a pending override turn, so a turn the rule refuses gets no new record. A
+// runtime without memory snapshots cannot place a REQUIRES_MEMORY_SNAPSHOT harness, so its harness
+// is not described and the repair proceeds without runtime IO, as before.
+func (p *Placer) refuseOverrideRepair(ctx context.Context, sessionUID string, override bool) error {
+	if !override || !p.backend.Capabilities().MemorySnapshot {
+		return nil
+	}
+	desc, err := p.admit(ctx, sessionUID)
+	if err != nil {
+		return err
+	}
+	return refuseStatefulOverride(desc, override)
+}
+
 // controllerError maps only the controller's Describe boundary. Run, model and runtime errors
 // with identical transport codes must keep their existing classification.
 func controllerError(ctx context.Context, err error) error {
@@ -1011,7 +1026,8 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 
 // resumeApproval answers an unresolved gate without allocating an actor. Inspection/route checks
 // precede this helper under the shared guard; only a missing request needs a new writer fence.
-func (p *Placer) resumeApproval(log eventlog.Store, state *controller.ApprovalState, observer controller.Observer) (bool, error) {
+// beforeRepair, when set, runs before that request is written, and its error refuses the repair.
+func (p *Placer) resumeApproval(log eventlog.Store, state *controller.ApprovalState, observer controller.Observer, beforeRepair func() error) (bool, error) {
 	if state == nil || state.Receipt != nil {
 		return false, nil
 	}
@@ -1023,6 +1039,11 @@ func (p *Placer) resumeApproval(log eventlog.Store, state *controller.ApprovalSt
 	}
 	if state.Request != nil {
 		return true, &api.ApprovalParkedError{Ref: api.ApprovalRef{ExecutionID: state.ExecutionID, ToolCallID: state.Call.ID, RequestSeq: state.Request.Seq}}
+	}
+	if beforeRepair != nil {
+		if err := beforeRepair(); err != nil {
+			return true, err
+		}
 	}
 	fence, err := log.NewFence()
 	if err != nil {
@@ -1051,7 +1072,9 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	if err != nil {
 		return err
 	}
-	if handled, err := p.resumeApproval(log, state, cfg.observer); handled {
+	if handled, err := p.resumeApproval(log, state, cfg.observer, func() error {
+		return p.refuseOverrideRepair(ctx, sessionUID, cfg.override)
+	}); handled {
 		return err
 	}
 	// Gate before Restore, exactly as Exec does before Create: Resume re-drives an interrupted turn,

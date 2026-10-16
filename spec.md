@@ -596,7 +596,12 @@ These are named in the reference controller. The numbering is the code's.
   handoff, a cursor-checked `Resume` while it mints each fence and re-reads the head (`OPS-29`),
   and a `REQUIRES_MEMORY_SNAPSHOT` fork from checkpoint until its last child is cloned.
   `Exec` and `Resume` during a checkpoint, and a second checkpoint holder, MUST fail with
-  `ABORTED`.
+  `ABORTED`. The reference host checks the mark after the approval gate: a `Resume` or
+  input-less `Exec` on an owned gate (`APR-13`) is answered before the check, so it does not fail
+  with `ABORTED`. Its call-only repair takes the mark only for a `Resume` with
+  `expected_last_seq` set (`OPS-29`); otherwise it can append `APPROVAL_REQUEST` under a new
+  fence during a checkpoint.
+  TODO(spike): Should the call-only approval repair refuse with `ABORTED` during a checkpoint?
 - `OPS-3`: A `REQUIRES_MEMORY_SNAPSHOT` fork MUST end any in-flight execution on the parent; that
   execution fails with `ABORTED`.
 - `CreateSession`, `GetSession`, `ListSessions`, `Replay`, and `Fork` (either tier) do not take the
@@ -1052,6 +1057,7 @@ Each item is also marked inline where it applies.
 - TODO(spike): Language-neutral `input_hash` (§8.3).
 - TODO(spike): Authoritative invariant numbering, `I4` and `I5` (§8.6).
 - TODO(spike): Compare re-reported `IN_HARNESS_REPORTED` results on reconstruction (§9.3).
+- TODO(spike): Approval repair during a checkpoint (§11.1).
 - TODO(spike): Repeated `Suspend` and `Resume` without `Suspend` (§11.5).
 - TODO(spike): Fork journal atomicity and `at_seq > head` (§11.7).
 - TODO(spike): Stream close without `EVENT_END` and ignored harness event kinds (§12.2).

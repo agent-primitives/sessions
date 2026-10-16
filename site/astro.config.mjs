@@ -9,11 +9,11 @@ export default defineConfig({
   // The dev toolbar never ships in a build, but it sits over the bottom of every page while
   // previewing, which gets in the way of judging the layout.
   devToolbar: { enabled: false },
-  // aramase.github.io carries a user-level custom domain, so project pages are served from
-  // anishram.com and the github.io address only 301s there. Canonical links, og:url, and the
-  // sitemap have to name the address people actually land on.
-  site: "https://anishram.com",
-  base: "/agentsessions",
+  // Served from the root of a custom domain on the agent-primitives org's Pages, configured in the
+  // repository's Pages settings with a DNS CNAME to agent-primitives.github.io. There is no base
+  // path, so site routes and public/ assets are root-relative (/quickstart/, /casts/...).
+  // Canonical links, og:url, and the sitemap are built from this address.
+  site: "https://sessions.agent-primitives.dev",
   integrations: [
     // Must come before starlight so mermaid code fences are transformed before rendering.
     mermaid({
@@ -25,10 +25,10 @@ export default defineConfig({
       description:
         "A neutral contract for durable agent sessions: replay a run byte-for-byte without calling a model, fork it, and verify the record with a tool you wrote yourself.",
       social: [
-        { icon: "github", label: "GitHub", href: "https://github.com/aramase/agentsessions" },
+        { icon: "github", label: "GitHub", href: "https://github.com/agent-primitives/sessions" },
       ],
       editLink: {
-        baseUrl: "https://github.com/aramase/agentsessions/edit/main/",
+        baseUrl: "https://github.com/agent-primitives/sessions/edit/main/",
       },
       sidebar: [
         {

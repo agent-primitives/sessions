@@ -12,14 +12,14 @@ hero:
   tagline: Your agent does not call the model. The host does, and records the answer. That one inversion is why a run here can be replayed byte-for-byte, forked for nothing, and checked by someone who does not trust you.
   actions:
     - text: Quickstart
-      link: /agentsessions/quickstart/
+      link: /quickstart/
       icon: right-arrow
     - text: Read the docs
-      link: /agentsessions/concepts/
+      link: /concepts/
       icon: open-book
       variant: minimal
     - text: GitHub
-      link: https://github.com/aramase/agentsessions
+      link: https://github.com/agent-primitives/sessions
       icon: external
       variant: minimal
 ---
@@ -77,7 +77,7 @@ a free replay, a two-way fork, suspend and resume, then the pod is deleted and a
 the session up mid-conversation.
 
 <Cast
-  src="/agentsessions/casts/kubernetes-tour.cast"
+  src="/casts/kubernetes-tour.cast"
   title="kind cluster — the full lifecycle, then pod death"
   caption="Recorded by <code>hack/demos/kubernetes-tour.sh</code> against <code>deploy/kubernetes/agentsessionsd.yaml</code>. Nothing is staged: the replay after the pod dies is served from the journal, so the model is called zero times."
 />
@@ -121,36 +121,36 @@ Kata, Cloud Hypervisor, and plain pods fit the same SPI. No provider SDK appears
 asserts the core links no backend vendor.
 
 ```bash
-go install github.com/aramase/agentsessions/cmd/agentctl@latest
+go install github.com/aramase/cmd/agentctl@latest
 ```
 
 Signed archives and container images are on the
-[latest release](https://github.com/aramase/agentsessions/releases/latest).
+[latest release](https://github.com/aramase/releases/latest).
 </Reveal>
 
 <Reveal>
 ## Keep reading
 
 <CardGrid>
-  <LinkCard title="Quickstart" href="/agentsessions/quickstart/"
+  <LinkCard title="Quickstart" href="/quickstart/"
     description="Run the loop yourself in a few minutes." />
-  <LinkCard title="Concepts" href="/agentsessions/concepts/"
+  <LinkCard title="Concepts" href="/concepts/"
     description="Sessions, typed events, incarnations, fences, resumability, capabilities." />
-  <LinkCard title="How you use it" href="/agentsessions/interaction-model/"
+  <LinkCard title="How you use it" href="/interaction-model/"
     description="Which seam to build against, and what each seam is for." />
-  <LinkCard title="Writing a harness" href="/agentsessions/harness-authoring/"
+  <LinkCard title="Writing a harness" href="/harness-authoring/"
     description="Implement Describe and Run; durability is not yours to build." />
-  <LinkCard title="Architecture" href="/agentsessions/architecture/"
+  <LinkCard title="Architecture" href="/architecture/"
     description="The host, the log, placement, and how the pieces fit." />
-  <LinkCard title="Running on agent-substrate" href="/agentsessions/substrate-conformance/"
+  <LinkCard title="Running on agent-substrate" href="/substrate-conformance/"
     description="Both tiers on a real cluster, on a micro-VM." />
-  <LinkCard title="Observability" href="/agentsessions/observability/"
+  <LinkCard title="Observability" href="/observability/"
     description="Structured logs, request correlation, and what to watch." />
-  <LinkCard title="Security posture" href="/agentsessions/security/"
+  <LinkCard title="Security posture" href="/security/"
     description="What is and is not protected today. Read before exposing a host." />
-  <LinkCard title="API reference" href="/agentsessions/api-reference/"
+  <LinkCard title="API reference" href="/api-reference/"
     description="Generated from the proto: every message, field, and RPC." />
-  <LinkCard title="FAQ" href="/agentsessions/faq/"
+  <LinkCard title="FAQ" href="/faq/"
     description="Why not just a transcript, why fencing, and other recurring questions." />
 </CardGrid>
 

@@ -80,7 +80,11 @@ type options struct {
 // ToolExecutorFunc returns the host tool executor for the named -harness, or nil for none. sessions
 // is a client of this daemon's own Sessions listener, for an executor that drives other sessions (a
 // tool that runs a turn in a child session, say); it connects on first use.
-type ToolExecutorFunc func(harness string, sessions *client.Client) controller.ToolFunc
+//
+// Run asks for every -harness once, at startup, before it opens the journal. An error stops Run
+// with that error, so an executor that cannot be built (bad configuration, say) fails the start
+// instead of failing later on a call that may already have been approved.
+type ToolExecutorFunc func(harness string, sessions *client.Client) (controller.ToolFunc, error)
 
 // WithToolExecutors installs host tool executors for CONTROLLER_MEDIATED and approved
 // REQUIRES_APPROVAL tool calls. Without it no harness has one, and such a call fails the turn.
@@ -147,21 +151,11 @@ func Run(args []string, opts ...Option) error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
-	store, err := sqlitelog.Open(*journal, sqlitelog.WithDefaultProject(*project))
-	if err != nil {
-		return fmt.Errorf("open journal %s: %w", *journal, err)
-	}
-	defer func() { _ = store.Close() }()
-
-	modelFn, streamFn, modelDesc, err := modelFunc(*model, *modelBaseURL, *modelPath, *modelAuthHeader)
-	if err != nil {
-		return err
-	}
-
 	// The executors' client of this daemon's own Sessions API. client.Dial does not connect, and the
-	// dialer reads the listener's address, bound below before the server accepts a request.
+	// dialer reads the listener's address, bound below before the server accepts a request. The
+	// executors are built before the journal opens, so one that fails leaves no journal behind.
 	var selfAddr atomic.Pointer[string]
-	var executors func(name string) controller.ToolFunc
+	var executors map[string]controller.ToolFunc
 	if o.executors != nil {
 		self, err := client.Dial("passthrough:///agentsessionsd", client.WithDialOptions(
 			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
@@ -176,7 +170,20 @@ func Run(args []string, opts ...Option) error {
 			return fmt.Errorf("sessions client for tool executors: %w", err)
 		}
 		defer func() { _ = self.Close() }()
-		executors = func(name string) controller.ToolFunc { return o.executors(name, self) }
+		if executors, err = toolExecutors(remotes, o.executors, self); err != nil {
+			return err
+		}
+	}
+
+	store, err := sqlitelog.Open(*journal, sqlitelog.WithDefaultProject(*project))
+	if err != nil {
+		return fmt.Errorf("open journal %s: %w", *journal, err)
+	}
+	defer func() { _ = store.Close() }()
+
+	modelFn, streamFn, modelDesc, err := modelFunc(*model, *modelBaseURL, *modelPath, *modelAuthHeader)
+	if err != nil {
+		return err
 	}
 
 	registry, closeBackends, err := harnessRegistry(*model, remotes, modelFn, streamFn, logger, executors)
@@ -534,12 +541,28 @@ func errNameTaken(name string) error {
 	return fmt.Errorf("harness %q is already served by this binary; pick another name", name)
 }
 
+// toolExecutors asks f for each -harness name's executor, in sorted order so a start with two
+// failing names reports the same one every time. It keeps only the names that have one.
+func toolExecutors(remotes remoteHarnesses, f ToolExecutorFunc, sessions *client.Client) (map[string]controller.ToolFunc, error) {
+	executors := map[string]controller.ToolFunc{}
+	for _, name := range remotes.names() {
+		tool, err := f(name, sessions)
+		if err != nil {
+			return nil, fmt.Errorf("tool executor for harness %q: %w", name, err)
+		}
+		if tool != nil {
+			executors[name] = tool
+		}
+	}
+	return executors, nil
+}
+
 // harnessRegistry owns the local backends as a group so every startup error and shutdown closes
 // all of them. Echo remains the default; chat requires an explicitly configured model.
 //
-// executors, when not nil, returns the host tool executor for a -harness name (nil for none); the
-// built-in harnesses call no host-mediated tools and get none.
-func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.ModelFunc, streamFn controller.StreamFunc, logger *slog.Logger, executors func(name string) controller.ToolFunc) (*placement.Registry, func(), error) {
+// executors holds the host tool executor for each -harness name that has one; the built-in
+// harnesses call no host-mediated tools and get none.
+func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.ModelFunc, streamFn controller.StreamFunc, logger *slog.Logger, executors map[string]controller.ToolFunc) (*placement.Registry, func(), error) {
 	echo := local.New(echoagent.Harness{}, local.WithLogger(logger))
 	backends := []*local.Backend{echo}
 	var remoteBackends []*remote.Backend
@@ -560,10 +583,7 @@ func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.M
 	}
 	// optsFor adds the named harness's host tool executor, if the caller configured one.
 	optsFor := func(name string) []placement.Option {
-		if executors == nil {
-			return opts
-		}
-		if tool := executors(name); tool != nil {
+		if tool := executors[name]; tool != nil {
 			return append(slices.Clone(opts), placement.WithToolExecutor(tool))
 		}
 		return opts

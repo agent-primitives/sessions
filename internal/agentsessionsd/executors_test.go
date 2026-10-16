@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -42,24 +44,31 @@ func (toolHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink
 func TestHarnessRegistryInstallsExecutorsByName(t *testing.T) {
 	with := serveHarness(t, toolHarness{})
 	without := serveHarness(t, toolHarness{})
+	remotes := remoteHarnesses{"with": with, "without": without}
 	var asked []string
-	executors := func(name string) controller.ToolFunc {
+	executors, err := toolExecutors(remotes, func(name string, _ *client.Client) (controller.ToolFunc, error) {
 		asked = append(asked, name)
 		if name != "with" {
-			return nil
+			return nil, nil
 		}
 		return func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
 			return api.ToolResult{ID: call.ID, Output: map[string]any{"text": call.Tool + "@" + scope.SessionUID[:4]}}, nil
-		}
+		}, nil
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	registry, closeBackends, err := harnessRegistry("test-model", remoteHarnesses{"with": with, "without": without}, echoagent.Model, nil, nil, executors)
+	if len(asked) != 2 || asked[0] != "with" || asked[1] != "without" {
+		t.Fatalf("executors asked for %v, want the two -harness names in order", asked)
+	}
+	if _, ok := executors["without"]; ok || len(executors) != 1 {
+		t.Fatalf("executors = %v, want only the harness that has one", executors)
+	}
+	registry, closeBackends, err := harnessRegistry("test-model", remotes, echoagent.Model, nil, nil, executors)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(closeBackends)
-	if len(asked) != 2 || asked[0] != "with" || asked[1] != "without" {
-		t.Fatalf("executors asked for %v, want the two -harness names in order", asked)
-	}
 	c := newTestClient(t, registry)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -74,6 +83,45 @@ func TestHarnessRegistryInstallsExecutorsByName(t *testing.T) {
 		t.Fatal("a harness without an executor must fail its host-mediated call")
 	} else if errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("exec without an executor hung: %v", err)
+	}
+}
+
+// An executor that cannot be built fails the start: Run returns its error, naming the harness, as a
+// plain error (Main's status 1) before it opens the journal or serves, and asks no later name.
+func TestRunToolExecutorErrorFailsStartup(t *testing.T) {
+	errConfig := errors.New("probe: no endpoint configured")
+	var asked []string
+	executors := func(name string, _ *client.Client) (controller.ToolFunc, error) {
+		asked = append(asked, name)
+		if name == "broken" {
+			return nil, errConfig
+		}
+		return func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+			return api.ToolResult{}, nil
+		}, nil
+	}
+	journal := filepath.Join(t.TempDir(), "journal.db")
+	listened := false
+	err := Run([]string{"-journal", journal, "-addr", "127.0.0.1:0", "-model", "m",
+		"-harness", "alpha=127.0.0.1:9000", "-harness", "broken=127.0.0.1:9001", "-harness", "zulu=127.0.0.1:9002"},
+		WithToolExecutors(executors), withListening(func(string) { listened = true }))
+	if !errors.Is(err, errConfig) {
+		t.Fatalf("Run error = %v, want the executor's error", err)
+	}
+	if errors.Is(err, ErrUsage) {
+		t.Errorf("Run error = %v is ErrUsage; an executor error is a configuration error (status 1)", err)
+	}
+	if !strings.Contains(err.Error(), `harness "broken"`) {
+		t.Errorf("Run error = %v, want it to name the harness", err)
+	}
+	if listened {
+		t.Error("Run served the Sessions API before reporting the executor error")
+	}
+	if !slices.Equal(asked, []string{"alpha", "broken"}) {
+		t.Errorf("executors asked for %v, want alpha then broken and nothing after the error", asked)
+	}
+	if _, statErr := os.Stat(journal); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("a refused start left a journal behind: %v", statErr)
 	}
 }
 
@@ -103,10 +151,10 @@ func TestRunToolExecutorsReachTheDaemonOverLoopback(t *testing.T) {
 	defer cancel()
 	addrs := make(chan string, 1)
 	var asked []string
-	executors := func(name string, sessions *client.Client) controller.ToolFunc {
+	executors := func(name string, sessions *client.Client) (controller.ToolFunc, error) {
 		asked = append(asked, name)
 		if name != "tooler" {
-			return nil
+			return nil, nil
 		}
 		return func(ctx context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
 			child, err := sessions.Exec(ctx, client.ExecOptions{Harness: "reply", Inputs: []string{"from " + scope.SessionUID[:4]}})
@@ -114,7 +162,7 @@ func TestRunToolExecutorsReachTheDaemonOverLoopback(t *testing.T) {
 				return api.ToolResult{}, err
 			}
 			return api.ToolResult{ID: call.ID, Output: map[string]any{"text": child.Output + "@" + child.Session.GetMetadata().GetUid()}}, nil
-		}
+		}, nil
 	}
 	done := make(chan error, 1)
 	go func() {
@@ -209,14 +257,14 @@ func TestRunToolExecutorsKeepTheApprovalGate(t *testing.T) {
 	defer cancel()
 	addrs := make(chan string, 1)
 	var runs atomic.Int32
-	executors := func(name string, _ *client.Client) controller.ToolFunc {
+	executors := func(name string, _ *client.Client) (controller.ToolFunc, error) {
 		if name != "gated" {
-			return nil
+			return nil, nil
 		}
 		return func(_ context.Context, _ controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
 			runs.Add(1)
 			return api.ToolResult{ID: call.ID, Output: map[string]any{"text": "published"}}, nil
-		}
+		}, nil
 	}
 	done := make(chan error, 1)
 	go func() {

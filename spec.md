@@ -381,11 +381,13 @@ wire as §12 frames: model call, output, tool call, reported tool result, and us
   SPI. An in-process `api.Harness` can handle that error and continue, within `EXE-14` (sticky
   divergence), `APR-2` (a park answers every later call), and `LOG-13` (a fenced writer appends
   nothing more). `ControllerFrame` has no error reply, so over `Harness.Connect` the reference
-  host ends the invocation on any sink error: it returns that error as the run's result and
-  cancels the stream. The harness's pending call fails with the stream, nothing it does afterwards
-  is journaled, and the execution fails (`EXE-5`, `EXE-23`). The rules below that return an error
-  to the harness, including `EXE-22`, `EXE-30`, `TOOL-6`, and `TOOL-10`, therefore fail the
-  execution of a wire harness.
+  host ends the invocation on any sink error other than an approval park: it returns that error
+  as the run's result and cancels the stream. The harness's pending call fails with the stream,
+  nothing it does afterwards is journaled, and the execution fails (`EXE-5`, `EXE-23`). The rules
+  below that return an error to the harness, including `EXE-22`, `EXE-30`, `TOOL-6`, and
+  `TOOL-10`, therefore fail the execution of a wire harness. An approval park is the exception:
+  the host sends `ControllerFrame.park`, waits for `EVENT_PARKED` and the stream's close, and the
+  execution ends parked, not failed (`APR-3`, `APR-10`).
 - `EXE-9`: There is no mediated clock or randomness operation. A harness that uses wall-clock time
   or randomness to decide its actions is not reconstructible; this is a harness obligation
   (§8.4), not something the host enforces.
@@ -905,8 +907,8 @@ sequenceDiagram
 - `WIRE-9`: An unknown `ToolChoice.mode` MUST be rejected in both directions; it is never treated
   as the provider default.
 - `WIRE-10`: The harness MUST issue one model or tool request at a time and wait for its reply.
-- There is no error reply frame. When the host's sink operation for a request fails, the reference
-  host sends no reply and ends the invocation (`EXE-33`).
+- There is no error reply frame. When the host's sink operation for a request fails, other than an
+  approval park (`APR-10`), the reference host sends no reply and ends the invocation (`EXE-33`).
 - `WIRE-11`: A park, and a protocol or correlation failure on a tool reply, MUST be sticky for the
   rest of the execution. In the reference harness server a failed model reply (wrong
   `execution_id` or `model_call_id`) fails that call only and is not sticky.

@@ -299,7 +299,8 @@ func (handlesModelErrorHarness) Run(ctx context.Context, start *api.Start, sink 
 
 // TestWireSinkErrorEndsInvocation pins EXE-33: an in-process harness can handle a sink error and
 // complete the turn, but over Harness.Connect the host has no error reply frame, so the same
-// harness's turn fails with the sink error and is journaled as EVENT_ERROR.
+// harness's turn fails with the sink error and is journaled as EVENT_ERROR. An approval park is
+// the exception (APR-10); TestApprovalRawProtocol covers it.
 func TestWireSinkErrorEndsInvocation(t *testing.T) {
 	errProvider := errors.New("provider unavailable")
 	failing := func(context.Context, api.ModelRequest) (api.ModelResponse, error) {

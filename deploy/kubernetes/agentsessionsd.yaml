@@ -2,9 +2,12 @@
 # PersistentVolume. No substrate, no memory snapshots. Sessions survive pod death because the
 # journal does, and the host replays it.
 #
-# This pins the v0.1.2 image: it serves echo (and chat when a model is configured). Newer
-# registry-capable builds can attach remote harnesses using --harness name=address at startup or
-# through the optional loopback operator listener. This pinned image does not support those flags.
+# This pins the v0.2.0 image: it serves echo (and chat when a model is configured), and can attach
+# remote harnesses using --harness name=address at startup or through the optional loopback
+# operator listener (-registry-addr, off by default). Upgrading from a v0.1.x image migrates the
+# journal to SQLite schema v4 on first open, and v0.1.x cannot open it afterward: back up the
+# PersistentVolume first. The Recreate strategy below stops the old pod before the new one opens
+# the journal; stop any other process using it as well. See CHANGELOG.md.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -68,9 +71,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agentsessionsd
-          # v0.1.x images stay at ghcr.io/aramase/agentsessions; releases from v0.2.0 publish to
-          # ghcr.io/agent-primitives/sessions.
-          image: ghcr.io/aramase/agentsessions/agentsessionsd:v0.1.2
+          # v0.1.x images stay at ghcr.io/aramase/agentsessions.
+          image: ghcr.io/agent-primitives/sessions/agentsessionsd:v0.2.0
           args:
             # Must bind 0.0.0.0: the default is 127.0.0.1, which accepts nothing from outside
             # the pod's network namespace and makes the Service look broken.

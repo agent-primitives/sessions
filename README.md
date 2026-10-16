@@ -142,12 +142,11 @@ protocol, runtime contract, conformance classes) are in the draft [**specificati
 ## Container images
 
 ```
-ghcr.io/aramase/agentsessions/agentsessionsd:v0.1.2
-ghcr.io/aramase/agentsessions/harnessnode:v0.1.2
+ghcr.io/agent-primitives/sessions/agentsessionsd:v0.2.0
+ghcr.io/agent-primitives/sessions/harnessnode:v0.2.0
 ```
 
-v0.1.x images stay at `ghcr.io/aramase/agentsessions`; releases from v0.2.0 publish to
-`ghcr.io/agent-primitives/sessions`.
+v0.1.x images stay at `ghcr.io/aramase/agentsessions`.
 
 Multi-arch, built from the tagged source with no Dockerfile. `agentsessionsd` is the Sessions
 server; `harnessnode` is the in-sandbox harness the substrate manifests in `deploy/substrate/`
@@ -156,12 +155,11 @@ reference. The server runs as uid 65532, so mount its journal path writable.
 ## Install
 
 ```bash
-go install github.com/aramase/agentsessions/cmd/agentctl@v0.1.2
-go install github.com/aramase/agentsessions/cmd/agentsessionsd@v0.1.2
+go install github.com/agent-primitives/sessions/cmd/agentctl@v0.2.0
+go install github.com/agent-primitives/sessions/cmd/agentsessionsd@v0.2.0
 ```
 
-v0.1.x is published under the module path `github.com/aramase/agentsessions`; the
-`github.com/agent-primitives/sessions` path applies from v0.2.0.
+v0.1.x stays at the module path `github.com/aramase/agentsessions`.
 
 Signed archives for linux/darwin on amd64/arm64, with checksums and SBOMs, are on the
 [latest release](https://github.com/agent-primitives/sessions/releases/latest).

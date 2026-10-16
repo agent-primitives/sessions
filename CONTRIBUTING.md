@@ -39,8 +39,7 @@ buf generate                 # api/genpb must not change afterwards
 
 Run both after any change to `api/*.proto`.
 
-`buf breaking` compares the schema against the most recent release tag. There is no tag yet, so it
-currently skips. It arms itself at the first release.
+`buf breaking` compares the schema against the most recent `v*` release tag.
 
 ## Conventions
 
@@ -71,14 +70,12 @@ git push origin v0.1.0
 
 The `release` workflow re-runs the full suite against the tagged commit before publishing anything,
 then builds `agentctl` and `agentsessionsd` for linux and darwin on amd64 and arm64, attaches an
-SBOM per archive, and signs a build-provenance attestation. Release notes are generated from the
-commits since the previous tag, which is what conventional commit messages buy.
+SBOM per archive, publishes the `agentsessionsd` and `harnessnode` images to
+`ghcr.io/agent-primitives/sessions`, and signs a build-provenance attestation. Release notes are
+generated from the commits since the previous tag, which is what conventional commit messages buy.
 
 Add anything a commit list cannot convey, especially compatibility notes, to `CHANGELOG.md` before
 tagging.
-
-Note that the first tag also arms `buf breaking`, which compares the schema against the most recent
-release and is inactive until one exists.
 
 ## Reporting security issues
 

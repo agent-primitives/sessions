@@ -1314,10 +1314,10 @@ The reference implementation protects the integrity of the record, not access to
 
 ## 18. Versioning and compatibility
 
-- This document's version tracks the Go module. The module is pre-1.0; the latest release is
-  v0.1.2 and the next is v0.2.0 (the first under `github.com/agent-primitives/sessions`). Until
-  1.0, a minor release MAY break the wire contract, the Go SPI, or this specification. Breaking
-  changes are recorded in [CHANGELOG.md](CHANGELOG.md).
+- This document's version tracks the Go module. The module is pre-1.0; v0.2.0 is the first release
+  under `github.com/agent-primitives/sessions`, and v0.1.x stays at
+  `github.com/aramase/agentsessions`. Until 1.0, a minor release MAY break the wire contract, the
+  Go SPI, or this specification. Breaking changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 - `agentsessions.v1` is a proto package name, not a stability promise.
 - CI runs `buf lint` on every change and `buf breaking` (`FILE` rules) against the most recent `v*`
   release tag. The gate armed at the first tag (v0.1.0) and is active now. `FILE_SAME_GO_PACKAGE`

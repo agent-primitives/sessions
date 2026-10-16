@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/wire"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/wire"
 )
 
 // matchToolCall compares only the observable request, not raw Go numeric types or map ordering.

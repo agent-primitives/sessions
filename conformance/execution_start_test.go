@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/controller"
-	"github.com/aramase/agentsessions/sqlitelog"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
+	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 // startSensitiveHarness runs remotely, making byte-exact config/cursor and the full history

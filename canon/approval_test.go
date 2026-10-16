@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/canon"
+	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/canon"
 	"google.golang.org/protobuf/proto"
 )
 

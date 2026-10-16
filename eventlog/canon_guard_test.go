@@ -3,9 +3,9 @@ package eventlog_test
 import (
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/canon"
-	"github.com/aramase/agentsessions/eventlog"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/canon"
+	"github.com/agent-primitives/sessions/eventlog"
 )
 
 // TestHashMatchesCanon is the guard that keeps the log's content_hash and the canonical spec

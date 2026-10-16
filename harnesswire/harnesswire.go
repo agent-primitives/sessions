@@ -22,10 +22,10 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/aramase/agentsessions/api"
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/internal/ctxlock"
-	"github.com/aramase/agentsessions/wire"
+	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/internal/ctxlock"
+	"github.com/agent-primitives/sessions/wire"
 )
 
 // ---- Server: api.Harness -> v1.HarnessServer ----

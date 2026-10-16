@@ -19,9 +19,12 @@ Pick one. `agentctl` is the client CLI; `agentsessionsd` is the standalone serve
 
 ```bash
 # Go toolchain
-go install github.com/aramase/agentsessions/cmd/agentctl@latest
-go install github.com/aramase/agentsessions/cmd/agentsessionsd@latest
+go install github.com/aramase/agentsessions/cmd/agentctl@v0.1.2
+go install github.com/aramase/agentsessions/cmd/agentsessionsd@v0.1.2
 ```
+
+v0.1.x is published under the module path `github.com/aramase/agentsessions`; the
+`github.com/agent-primitives/sessions` path applies from v0.2.0.
 
 ```bash
 # Release archive: both binaries, for linux/darwin on amd64/arm64.
@@ -29,7 +32,7 @@ go install github.com/aramase/agentsessions/cmd/agentsessionsd@latest
 VERSION=v0.1.2
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-curl -sSL "https://github.com/aramase/agentsessions/releases/download/${VERSION}/agentsessions_${VERSION#v}_${OS}_${ARCH}.tar.gz" \
+curl -sSL "https://github.com/agent-primitives/sessions/releases/download/${VERSION}/agentsessions_${VERSION#v}_${OS}_${ARCH}.tar.gz" \
   | tar xz agentctl agentsessionsd
 ```
 
@@ -39,11 +42,14 @@ Container images are published for the server and the harness node:
 docker run --rm ghcr.io/aramase/agentsessions/agentsessionsd:v0.1.2 --help
 ```
 
+v0.1.x images stay at `ghcr.io/aramase/agentsessions`; releases from v0.2.0 publish to
+`ghcr.io/agent-primitives/sessions`.
+
 To build from a checkout instead:
 
 ```bash
-git clone https://github.com/aramase/agentsessions
-cd agentsessions
+git clone https://github.com/agent-primitives/sessions
+cd sessions
 go build -o agentctl ./cmd/agentctl
 go build -o agentsessionsd ./cmd/agentsessionsd
 ```
@@ -236,8 +242,8 @@ closed.
 This one is a script in the repository rather than a shipped binary, so it needs a checkout:
 
 ```bash
-git clone https://github.com/aramase/agentsessions
-cd agentsessions
+git clone https://github.com/agent-primitives/sessions
+cd sessions
 ./hack/verify_chain.sh
 ```
 

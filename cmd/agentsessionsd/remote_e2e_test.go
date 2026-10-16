@@ -23,9 +23,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/client"
-	"github.com/aramase/agentsessions/runtime/remote"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/client"
+	"github.com/agent-primitives/sessions/runtime/remote"
 )
 
 // harnessnodeServesUnix lists the platforms where cmd/harnessnode serves a unix socket; it mirrors

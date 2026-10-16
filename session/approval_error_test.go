@@ -7,8 +7,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/aramase/agentsessions/eventlog"
-	"github.com/aramase/agentsessions/placement"
+	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/placement"
 )
 
 func TestApprovalCheckpointRefusalIsAborted(t *testing.T) {

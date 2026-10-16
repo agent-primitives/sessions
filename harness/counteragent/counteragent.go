@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/aramase/agentsessions/api"
+	"github.com/agent-primitives/sessions/api"
 )
 
 // Harness is the in-RAM counter BYOH. Its state lives ONLY in process memory, so it survives

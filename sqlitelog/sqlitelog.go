@@ -18,11 +18,11 @@ import (
 	"google.golang.org/protobuf/proto"
 	sqlite "modernc.org/sqlite"
 
-	"github.com/aramase/agentsessions/api"
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/canon"
-	"github.com/aramase/agentsessions/eventlog"
-	"github.com/aramase/agentsessions/wire"
+	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/canon"
+	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/wire"
 )
 
 // ErrTampered indicates the stored hash-chain failed verification: a prev_hash link or a

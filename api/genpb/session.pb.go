@@ -1788,7 +1788,7 @@ const file_session_proto_rawDesc = "" +
 	"\x06Cancel\x12\x1f.agentsessions.v1.CancelRequest\x1a\x19.agentsessions.v1.Session\x12F\n" +
 	"\aSuspend\x12 .agentsessions.v1.SuspendRequest\x1a\x19.agentsessions.v1.Session\x12D\n" +
 	"\x06Resume\x12\x1f.agentsessions.v1.ResumeRequest\x1a\x19.agentsessions.v1.Session\x12E\n" +
-	"\x04Fork\x12\x1d.agentsessions.v1.ForkRequest\x1a\x1e.agentsessions.v1.ForkResponseB<Z:github.com/aramase/agentsessions/api/genpb;agentsessionsv1b\x06proto3"
+	"\x04Fork\x12\x1d.agentsessions.v1.ForkRequest\x1a\x1e.agentsessions.v1.ForkResponseB@Z>github.com/agent-primitives/sessions/api/genpb;agentsessionsv1b\x06proto3"
 
 var (
 	file_session_proto_rawDescOnce sync.Once

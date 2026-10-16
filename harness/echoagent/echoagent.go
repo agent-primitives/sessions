@@ -7,7 +7,7 @@ package echoagent
 import (
 	"context"
 
-	"github.com/aramase/agentsessions/api"
+	"github.com/agent-primitives/sessions/api"
 )
 
 // Harness is the echo BYOH. It holds no durable in-memory state beyond the event log, so it runs

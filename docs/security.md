@@ -204,7 +204,7 @@ Explicitly bind kubectl's local endpoint to `127.0.0.1` with `--address`, not `0
 `pods/portforward` and `pods/exec` narrowly: exec access also reaches the pod's loopback. Port-forward
 RBAC controls who can open a tunnel, **not** authorization for processes already inside the pod.
 Do not expose the registry through a Kubernetes Service or Ingress. The daemon's operator port has
-no independent token or TLS. [#127](https://github.com/aramase/agentsessions/issues/127) tracks
+no independent token or TLS. [#127](https://github.com/agent-primitives/sessions/issues/127) tracks
 covering it with the same verifier and authorizer as Sessions, using a separate operator role.
 Until then it stays loopback-only and off by default. Anyone who can reach this port can change
 destinations for session history and spend the host's model budget.

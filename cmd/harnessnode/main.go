@@ -22,14 +22,14 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/aramase/agentsessions/api"
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/harness/chatagent"
-	"github.com/aramase/agentsessions/harness/counteragent"
-	"github.com/aramase/agentsessions/harness/echoagent"
-	"github.com/aramase/agentsessions/harnesswire"
-	"github.com/aramase/agentsessions/observability"
-	"github.com/aramase/agentsessions/runtime/substrate"
+	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/harness/chatagent"
+	"github.com/agent-primitives/sessions/harness/counteragent"
+	"github.com/agent-primitives/sessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/harnesswire"
+	"github.com/agent-primitives/sessions/observability"
+	"github.com/agent-primitives/sessions/runtime/substrate"
 )
 
 func env(key, def string) string {

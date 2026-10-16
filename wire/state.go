@@ -1,8 +1,8 @@
 package wire
 
 import (
-	"github.com/aramase/agentsessions/api"
-	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
 )
 
 // The domain types are strings and the wire types are enums, so an unknown value has to land

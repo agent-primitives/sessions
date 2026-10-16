@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/aramase/agentsessions/internal/ctxlock"
+	"github.com/agent-primitives/sessions/internal/ctxlock"
 )
 
 // ErrSinkClosed rejects effects from a retained sink after its Run has returned.

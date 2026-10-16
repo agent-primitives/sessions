@@ -7,10 +7,10 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/controller"
-	"github.com/aramase/agentsessions/harness/chatagent"
-	"github.com/aramase/agentsessions/sqlitelog"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
+	"github.com/agent-primitives/sessions/harness/chatagent"
+	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 func TestControllerReplay(t *testing.T) {

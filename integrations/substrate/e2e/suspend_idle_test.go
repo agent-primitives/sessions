@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/eventlog"
-	"github.com/aramase/agentsessions/placement"
-	"github.com/aramase/agentsessions/runtime/substrate"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/placement"
+	"github.com/agent-primitives/sessions/runtime/substrate"
 )
 
 // suspendBound is the longest a Placer.Suspend in this test may take before the test calls it a

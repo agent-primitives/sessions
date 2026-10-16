@@ -10,8 +10,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/sqlitelog"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 func mustOpen(t *testing.T, path string, opts ...sqlitelog.Option) *sqlitelog.Store {

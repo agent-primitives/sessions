@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/aramase/agentsessions/model/openai"
+	"github.com/agent-primitives/sessions/model/openai"
 )
 
 // Config supplies explicit host-side model settings. Empty BaseURL and Path use openai's defaults.

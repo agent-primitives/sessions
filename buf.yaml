@@ -12,3 +12,9 @@ lint:
 breaking:
   use:
     - FILE
+  except:
+    # The Go module moved from github.com/aramase/agentsessions to
+    # github.com/agent-primitives/sessions, so go_package changed with it. The proto package,
+    # names and field numbers did not; every wire rule in FILE still applies. Remove this once
+    # v0.2.0 is tagged and the baseline carries the new go_package.
+    - FILE_SAME_GO_PACKAGE

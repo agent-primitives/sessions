@@ -1,7 +1,7 @@
 package echoagent_test
 
 import (
-	"github.com/aramase/agentsessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/harness/echoagent"
 	"testing"
 )
 

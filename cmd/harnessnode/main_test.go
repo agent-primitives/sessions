@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/harness/chatagent"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/harness/chatagent"
 )
 
 func TestSelectHarness(t *testing.T) {

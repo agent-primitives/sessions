@@ -17,12 +17,12 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/controller"
-	"github.com/aramase/agentsessions/eventlog"
-	"github.com/aramase/agentsessions/harness/echoagent"
-	"github.com/aramase/agentsessions/model/openai"
-	"github.com/aramase/agentsessions/sqlitelog"
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
+	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/model/openai"
+	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 // countModel is a genuinely NONDETERMINISTIC model: every invocation returns a different answer

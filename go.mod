@@ -1,4 +1,4 @@
-module github.com/aramase/agentsessions
+module github.com/agent-primitives/sessions
 
 go 1.26.0
 

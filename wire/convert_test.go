@@ -74,6 +74,37 @@ func toolResultMessage() *api.Message {
 	}
 }
 
+// Dropping the DELETE converter case must not turn a host tombstone into an unknown lifecycle.
+// Literal wire/domain values pin DELETE's identity independently of the generated enum symbols.
+func TestLifecycleDeleteRoundTrip(t *testing.T) {
+	want := api.Event{
+		Kind: api.EventLifecycle, Timestamp: ts, SchemaVersion: 1,
+		Lifecycle: &api.Lifecycle{Kind: api.LifecycleKind("DELETE")},
+	}
+	fromWire := &v1.Event{
+		Kind: v1.EventKind_EVENT_LIFECYCLE,
+		Body: &v1.Event_Lifecycle{Lifecycle: &v1.Lifecycle{Kind: v1.Lifecycle_Kind(6)}},
+	}
+	if got := wire.EventFromProto(fromWire).Lifecycle.Kind; got != api.LifecycleKind("DELETE") {
+		t.Errorf("wire DELETE kind = %q, want DELETE", got)
+	}
+	encoded := wire.EventToProto(want)
+	if got := encoded.GetLifecycle().GetKind(); got != v1.Lifecycle_Kind(6) {
+		t.Errorf("domain DELETE wire kind = %d, want 6", got)
+	}
+	blob, err := proto.Marshal(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded v1.Event
+	if err := proto.Unmarshal(blob, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if got := wire.EventFromProto(&decoded); !reflect.DeepEqual(got, want) {
+		t.Fatalf("DELETE round-trip = %#v (lifecycle %#v), want %#v", got, got.Lifecycle, want)
+	}
+}
+
 func TestEventRoundTrip(t *testing.T) {
 	actor := api.IdentityRef{Principal: "agent://a", Issuer: "entra", Subject: "sub-1"}
 	cases := map[string]api.Event{

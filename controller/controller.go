@@ -239,6 +239,11 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		)
 	}()
 
+	// A retained controller or supplied fence must not bypass durable admission.
+	if err := eventlog.CheckWritable(c.log); err != nil {
+		return err
+	}
+
 	// The harness receives the committed conversation so far as History (a stateless harness
 	// reconstructs its context from it); the echo harness ignores it, but a real one needs it.
 	prior, err := c.log.Read(1)
@@ -530,6 +535,12 @@ func (c *Controller) invokeModel(ctx context.Context, executionID string, req ap
 // LIFECYCLE_FORK marker as the child's first new event, whose prev_hash links to parent@atSeq —
 // turning the hash-chain into a hash-tree. child must be an empty log.
 func Fork(parent, child eventlog.Store, atSeq int64) error {
+	if err := eventlog.CheckWritable(parent); err != nil {
+		return err
+	}
+	if err := eventlog.CheckWritable(child); err != nil {
+		return err
+	}
 	recs, err := parent.Read(1)
 	if err != nil {
 		return err

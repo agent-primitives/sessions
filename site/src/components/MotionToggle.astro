@@ -1,0 +1,21 @@
+---
+// The pause button in a looping figure's chrome bar (WCAG 2.2.2). It is hidden until the figure's
+// script unhides it, so it never shows without JS. The animated diagrams stay static under reduced
+// motion and keep it hidden; a recording (Cast) still shows it, pressed, as the way to start playback.
+// The name stays fixed and aria-pressed carries the state, so a screen reader hears
+// "Pause the ..., toggle button, pressed" while the figure is held.
+interface Props {
+  label: string;
+}
+const { label } = Astro.props;
+---
+
+<button type="button" class="panel__toggle" data-motion-toggle aria-pressed="false" aria-label={label} hidden>
+  <svg class="panel__toggle-pause" viewBox="0 0 10 10" aria-hidden="true" focusable="false">
+    <rect x="1.5" y="1" width="2.5" height="8" rx="0.5"></rect>
+    <rect x="6" y="1" width="2.5" height="8" rx="0.5"></rect>
+  </svg>
+  <svg class="panel__toggle-play" viewBox="0 0 10 10" aria-hidden="true" focusable="false">
+    <path d="M 2 1 L 9 5 L 2 9 Z"></path>
+  </svg>
+</button>

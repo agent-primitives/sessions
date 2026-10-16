@@ -10,6 +10,30 @@ import (
 // state this build does not know about is better reported as unknown than as a concrete state a
 // caller would act on.
 
+// DeletionStateToProto converts a domain DeletionState to its wire enum.
+func DeletionStateToProto(d api.DeletionState) v1.DeletionState {
+	switch d {
+	case api.DeletionActive:
+		return v1.DeletionState_DELETION_ACTIVE
+	case api.DeletionPending:
+		return v1.DeletionState_DELETION_PENDING
+	default:
+		return v1.DeletionState_DELETION_STATE_UNSPECIFIED
+	}
+}
+
+// DeletionStateFromProto converts a wire DeletionState enum to its domain form.
+func DeletionStateFromProto(d v1.DeletionState) api.DeletionState {
+	switch d {
+	case v1.DeletionState_DELETION_ACTIVE:
+		return api.DeletionActive
+	case v1.DeletionState_DELETION_PENDING:
+		return api.DeletionPending
+	default:
+		return ""
+	}
+}
+
 // ComputeStateToProto converts a domain ComputeState to its wire enum.
 func ComputeStateToProto(c api.ComputeState) v1.ComputeState {
 	switch c {

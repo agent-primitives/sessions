@@ -282,7 +282,7 @@ func TestApprovalMigration(t *testing.T) {
 				t.Fatal("migration changed journal bytes/hashes or old metadata")
 			}
 			var stamp int
-			if err := raw.QueryRow(`PRAGMA user_version`).Scan(&stamp); err != nil || stamp != 3 {
+			if err := raw.QueryRow(`PRAGMA user_version`).Scan(&stamp); err != nil || stamp != SchemaVersion {
 				t.Fatalf("stamp=%d err=%v", stamp, err)
 			}
 			uids := []string{"sess-43c1f32622cd7ac118bed408", "sess-78ec0aced8e04aa38d6eac9f"}

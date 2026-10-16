@@ -129,11 +129,13 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
 - The fork checkpoint is committed under a fence and a CAS on the seq the caller validated, so a turn
   racing the fork can never widen the children's prefix past the RAM they were cloned from. A fork
   that is *refused* takes the fence path not at all: a request that changes nothing must not
-  supersede a turn in flight on the parent. A fork that proceeds does supersede it, since the
-  checkpoint frees the parent's worker. Unlike `Suspend`, `Fork` is not covered by the Registry's
-  session guard; `Suspend` rejects overlap instead of interrupting the running turn. The one rough
-  edge is a fork that mints its fence and then aborts on the re-check: it
-  supersedes the writer that beat it even though it gives up. Closing that needs a read-only fence
+  supersede a turn in flight on the parent. A stateful fork that proceeds does supersede it,
+  closing its harness stream before checkpointing; Suspend instead refuses overlap with a turn.
+  Fork holds shared deletion admission through checkpoint, fan-out and rollback, so Delete is
+  refused until it returns. Failed fan-out releases the checkpoint before rollback, allowing new
+  parent turns while the failed children are stopped. Independent Registries or hosts are outside
+  this local admission. A fork that mints its fence and then aborts on the re-check still supersedes
+  the writer that beat it even though it gives up. Closing that needs a read-only fence
   accessor on `eventlog.Store` (`NewFence` is currently the only way to obtain one, and it mutates),
   which is a wider API change than this path warrants.
 - Ending the parent's harness streams sits between two fences. The first stops an in-flight turn
@@ -225,6 +227,13 @@ current substrate supports: through `atenet-router`, the cluster's actor ingress
 
 ```mermaid
 flowchart LR
+  accTitle: Conformance traffic on agent-substrate
+  accDescr {
+    The in-cluster conformance Job calls ate-api-server over Control gRPC with a service-account
+    token, and opens Harness.Connect over h2c to atenet-router, addressed by ate-target-actor.
+    The router resumes the actor through ate-api-server if needed, then forwards over mTLS h2 to
+    atunnel on the worker, which reaches the actor harness on port 80 over h2c on a veth pair.
+  }
   job["conformance Job<br/>in-cluster `go test`"]
   api["ate-api-server"]
   router["atenet-router<br/>(Envoy + ext_proc)"]
@@ -353,11 +362,19 @@ The counter's I4 contract is harness-side and unit-tested: it is increment-only 
 ## CI
 
 `.github/workflows/substrate-e2e.yml` runs the whole suite in one cluster, on every PR and nightly
-(heavy — kind + KVM + micro-VM assets — but ~15 min, and the claims it checks are the ones no unit test
-can make). A concurrency group cancels a superseded run so one push does not leave two clusters
+(heavy — kind + KVM + micro-VM assets — but the claims it checks are the ones no unit test can
+make). A concurrency group cancels a superseded run so one push does not leave two clusters
 standing. It copies substrate's own recipe: `create-kind-cluster` + `install-ate-kind`, then
-`run-microvm-demo-kind` before either tier runs (stages the kata + cloud-hypervisor asset cache and
-installs the micro-VM SandboxConfig both templates name).
+`install-microvm-deps.sh --install` before either tier runs (stages the kata + cloud-hypervisor
+asset cache and installs the micro-VM SandboxConfig both templates name). Substrate publishes no
+images, so its binaries are built from source at `SUBSTRATE_REF`; the workflow caches the Go build
+and module caches and the envoy-dataplane image's buildx cache between runs.
+
+Scheduled and manual runs add a canary job, `substrate-conformance (substrate main)`, that runs the
+same suite against agent-substrate's `main` head, with the adapter's client moved to that commit in
+the runner's checkout only. It surfaces upstream drift before a bump; it never runs on a pull
+request and its failure does not fail the run. It is known red until the next substrate bump: `main`
+renamed `cmd/ateom-microvm` to `cmd/ateworker-microvm` and the module to `go.ate.dev/substrate`.
 
 The workflow applies only the namespace and the micro-VM WorkerPools
 (`deploy/substrate/namespace.yaml`, `echo-microvm-workerpool.yaml`,
@@ -384,13 +401,13 @@ The micro-VM class needs a Linux host with `/dev/kvm`; the recipe mirrors the CI
 `ECHO_SANDBOX_CLASS` and `COUNTER_SANDBOX_CLASS`: `microvm` (the default) or `gvisor`. Any other
 value is refused. `KIND_CLUSTER_NAME` selects the cluster for the `hack/` scripts.
 
-On a host without KVM (an arm64 Mac running kind), skip `run-microvm-demo-kind`, install both gVisor
-WorkerPools, and run both tiers with `gvisor`. The block below starts from a host with only Docker,
-kind, kubectl, ko, Go and git installed, and runs from the root of this checkout. It clones
+On a host without KVM (an arm64 Mac running kind), skip `install-microvm-deps.sh`, install both
+gVisor WorkerPools, and run both tiers with `gvisor`. The block below starts from a host with only
+Docker, kind, kubectl, ko, Go and git installed, and runs from the root of this checkout. It clones
 agent-substrate at the commit the workflow pins (`SUBSTRATE_REF`), creates the kind cluster and its
-local registry (`localhost:5001`) with substrate's `hack/` scripts, and installs `ate-system` the way
-CI does. `create-kind-cluster.sh` deletes any existing cluster named `KIND_CLUSTER_NAME` before it
-creates one, so pick a name you do not use for anything else.
+local registry (`localhost:5001`) with substrate's `hack/` scripts, and installs `ate-system` the
+way CI does. `create-kind-cluster.sh` deletes any existing cluster named `KIND_CLUSTER_NAME` before
+it creates one, so pick a name you do not use for anything else.
 
 The pool manifests name the worker image as a `ko://` import path, which the WorkerPool controller
 passes to its Pods unchanged, so the block builds `ateom-gvisor` from the same agent-substrate
@@ -408,8 +425,8 @@ git -C "${SUBSTRATE}" checkout "${SUBSTRATE_REF}"
 
 # Cluster, local registry and ate-system, as the workflow does.
 (cd "${SUBSTRATE}" && hack/create-kind-cluster.sh)
-(cd "${SUBSTRATE}" && ATE_CREDENTIAL_PROVIDER='{"name":"k8s.io"}' ATE_INSTALL_ROLLOUT_TIMEOUT=10m \
-  hack/install-ate-kind.sh --deploy-ate-system)
+(cd "${SUBSTRATE}" && ATE_CREDENTIAL_PROVIDER='{"name":"k8s.io"}' \
+  hack/install-ate-kind.sh --deploy-ate-system --rollout-timeout 10m)
 
 # Images: the conformance test binary, the harness and the gVisor worker.
 E2E_IMAGE=localhost:5001/agentsessions-e2e:local
@@ -454,14 +471,16 @@ RESUME marker. These tests prove orchestration and retention behavior, not real 
 
 ## In progress
 
-- **Fork tag lifecycle.** A fork tags the parent (`fork-<child-uid>`) so `CreateActor` can seed the
-  child from it, and each tag owns a full copy of the parent's snapshot. The tag name is derived from
-  the child session UID, so `Stop` deletes it after the child and a failed fork deletes it on the way
-  out. A child's tag is kept indefinitely: `DeleteSession` is unimplemented and no session teardown
-  calls `Stop`. Suspended actors are likewise retained indefinitely. Operators must reclaim actors
-  and fork tags directly in Substrate; there is no automatic retention deadline. One tag per fan-out
-  instead of per child would save N-1 copies, but a shared tag can only be deleted once every child
-  has suspended at least once.
+- **Fork tag lifecycle.** A fork tags the parent (`fork-<child-uid>`) so `CreateActor` can seed
+  the child from it, and each tag owns a full copy of the parent's snapshot. The tag name is
+  derived from the child session UID, so `Stop` deletes it after the child and a failed fork
+  deletes it on the way out. `DeleteSession` permanently tombstones the UID and returns
+  `PENDING`: durable deletion intent only, without calling `Stop` or reclaiming resources.
+  Suspended actors and fork tags remain retained indefinitely. Ownership and cleanup-target
+  persistence, retryable teardown and completion belong to #88; until that lands, operators must
+  reconcile and reclaim actors and fork tags directly in Substrate. There is no automatic
+  retention deadline. One tag per fan-out instead of per child would save N-1 copies, but a
+  shared tag can only be deleted once every child has suspended at least once.
 - **I4 is harness-side.** `controller.Exec` sends the full journal as `Start.History` on every turn,
   including the post-restore turn ([spec](../spec.md) `EXE-7`). A `REQUIRES_MEMORY_SNAPSHOT` harness
   must not rebuild state from it; the counter's increment-only `Run` carries this.

@@ -104,6 +104,7 @@ Source of truth: api/*.proto. Edit the proto comments, not this file.
     - [SuspendRequest](#agentsessions-v1-SuspendRequest)
   
     - [ComputeState](#agentsessions-v1-ComputeState)
+    - [DeletionState](#agentsessions-v1-DeletionState)
     - [ExecState](#agentsessions-v1-ExecState)
   
     - [Sessions](#agentsessions-v1-Sessions)
@@ -685,6 +686,7 @@ itself is a separate host-owned APPROVAL_RESULT; it is not embedded in this mess
 | LIFECYCLE_FORK | 3 |  |
 | LIFECYCLE_BASELINE | 4 |  |
 | LIFECYCLE_CANCEL | 5 |  |
+| LIFECYCLE_DELETE | 6 | Host-owned, session-scoped permanent deletion intent (empty Event.execution_id). It fences writes but does not terminate compute or confirm resource reclamation. |
 
 
 
@@ -1485,8 +1487,9 @@ Children inherit the parent&#39;s annotations and origin.
 <a name="agentsessions-v1-ListSessionsRequest"></a>
 
 ### ListSessionsRequest
-ListSessions enumerates sessions from the durable store, so it returns sessions that have no
-events and no live incarnation yet. Paging is keyset over (create_time DESC, uid ASC), which is
+ListSessions enumerates ACTIVE sessions from the durable store, including sessions that have
+no events and no live incarnation yet. Permanently tombstoned UIDs are hidden before pagination.
+Paging is keyset over (create_time DESC, uid ASC), which is
 stable when a session is created mid-pagination; an offset would skip or repeat rows.
 
 
@@ -1580,9 +1583,11 @@ stable when a session is created mid-pagination; an offset would skip or repeat 
 | metadata | [ResourceMetadata](#agentsessions-v1-ResourceMetadata) |  |  |
 | harness | [string](#string) |  |  |
 | model | [string](#string) |  | model-agnostic id |
-| exec_state | [ExecState](#agentsessions-v1-ExecState) |  | Every Session reply uses the same append-transaction projection at last_seq: no events reports EXEC_PENDING; a valid owned unanswered host approval request in the latest first-seen execution reports EXEC_AWAITING; other histories retain EXEC_COMPLETED. COMPLETED is a compatibility fallback, not proof of END, a receipt, or admission. |
+| exec_state | [ExecState](#agentsessions-v1-ExecState) |  | Every Session reply uses the same append-transaction projection at last_seq: no events before deletion reports EXEC_PENDING; a valid owned unanswered host approval request in the latest first-seen execution reports EXEC_AWAITING; other histories retain EXEC_COMPLETED. DELETE preserves this execution axis but withholds actionable pending_approval. COMPLETED is a compatibility fallback, not proof of END, a receipt, or admission. |
 | compute_state | [ComputeState](#agentsessions-v1-ComputeState) |  | incarnation axis |
-| pending_approval | [ApprovalRef](#agentsessions-v1-ApprovalRef) |  | Set for a valid unanswered host-owned APPROVAL_REQUEST in the latest first-seen execution at last_seq. Requests/decisions match execution_id, tool_call_id and request_seq. Calls whose TOOL_CALL precedes the child&#39;s latest FORK are excluded. Unset when no request is reportable, approval-bearing evidence is invalid, or the projection lags last_seq. |
+| pending_approval | [ApprovalRef](#agentsessions-v1-ApprovalRef) |  | Set for a valid unanswered host-owned APPROVAL_REQUEST in the latest first-seen execution at last_seq on an ACTIVE session. Requests/decisions match execution_id, tool_call_id and request_seq. Calls whose TOOL_CALL precedes the child&#39;s latest FORK are excluded. Unset when deleted, no request is reportable, approval-bearing evidence is invalid, or the projection lags last_seq. |
+| deletion_state | [DeletionState](#agentsessions-v1-DeletionState) |  | independent permanent-deletion axis |
+| deletion_requested_time | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  | Absent for ACTIVE; set once when the host commits the durable PENDING tombstone. |
 | last_seq | [int64](#int64) |  | event-log cursor |
 | parent_uid | [string](#string) |  | fork lineage |
 | fork_seq | [int64](#int64) |  |  |
@@ -1689,6 +1694,22 @@ instead. Wiring session status is tracked separately.
 
 
 
+<a name="agentsessions-v1-DeletionState"></a>
+
+### DeletionState
+DeletionState is independent of the execution and compute axes. PENDING is a permanent
+UID tombstone and durable deletion intent, not confirmation that resources were reclaimed.
+Until ownership and cleanup are implemented (#88), deletion emits PENDING only: actors,
+fork-child pins and snapshots remain retained, and no Runtime.Stop is attempted.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| DELETION_STATE_UNSPECIFIED | 0 |  |
+| DELETION_ACTIVE | 1 |  |
+| DELETION_PENDING | 2 |  |
+
+
+
 <a name="agentsessions-v1-ExecState"></a>
 
 ### ExecState
@@ -1720,11 +1741,11 @@ flattened lifecycle enum, because collapsing them loses which axis actually move
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
 | CreateSession | [CreateSessionRequest](#agentsessions-v1-CreateSessionRequest) | [Session](#agentsessions-v1-Session) |  |
-| GetSession | [GetSessionRequest](#agentsessions-v1-GetSessionRequest) | [Session](#agentsessions-v1-Session) |  |
+| GetSession | [GetSessionRequest](#agentsessions-v1-GetSessionRequest) | [Session](#agentsessions-v1-Session) | GetSession remains available for audit after deletion, including metadata and deletion intent time. |
 | ListSessions | [ListSessionsRequest](#agentsessions-v1-ListSessionsRequest) | [ListSessionsResponse](#agentsessions-v1-ListSessionsResponse) |  |
-| DeleteSession | [DeleteSessionRequest](#agentsessions-v1-DeleteSessionRequest) | [Session](#agentsessions-v1-Session) | Not implemented: the server returns UNIMPLEMENTED. Declared so the delete path can land without a breaking change to the service. |
+| DeleteSession | [DeleteSessionRequest](#agentsessions-v1-DeleteSessionRequest) | [Session](#agentsessions-v1-Session) | DeleteSession commits irreversible soft-deletion intent for a known UID. The host atomically appends a session-scoped, host-owned LIFECYCLE_DELETE (empty execution_id), advances the writer fence and marks PENDING. Metadata, the UID and the hash-chained journal are retained forever; the UID cannot be reused. Children and their copied prefixes are unaffected: no cascade or data erasure is promised. ListSessions hides the UID; GetSession and raw Sessions.Replay remain read-only audit access, without reconstructing or running a harness. Valid mutation requests against PENDING fail with FAILED_PRECONDITION before routing, recovery or compute effects: Exec, Fork (including historical at_seq), Resume, Suspend and Approve are refused, including exact historical decision retries. Pending approval metadata grants no permission. Until ownership and cleanup land (#88), OK &#43; PENDING acknowledges durable intent only. No Runtime.Stop, actor/pin release, physical snapshot GC or TERMINATED transition is attempted or promised. Execution and compute reporting stay independent. The retained journal is audit evidence, not a complete or authoritative cleanup-target inventory; the allocation ownership and cleanup-target schema belong to #88, not an inferred default harness or owner. Repeated PENDING deletion returns the identical Session: no timestamp, update_time, journal, fence or compute-projection changes. Clients must inspect deletion_state, not infer reclamation from an OK status. Empty uid is INVALID_ARGUMENT; an unknown nonempty uid is NOT_FOUND without creating a row. Overlap with a mutation in the same Registry/host is ABORTED before mutation, without canceling the holder; retry after it finishes. Storage faults are INTERNAL, cancellation/deadline retain CANCELLED/DEADLINE_EXCEEDED. An error or lost reply after intent commits cannot undo the hidden PENDING tombstone or erase its audit evidence: use GetSession or retry to learn the outcome. Admission serialization is local to one Registry/host. Durable fences block subsequent writes from this build&#39;s writers; already-open older binaries do not enforce tombstones. A separate host can provision compute before its first fence; cross-host exclusion of compute effects is not guaranteed. Operators still need runtime-side resource reconciliation. |
 | Exec | [ExecRequest](#agentsessions-v1-ExecRequest) | [ExecUpdate](#agentsessions-v1-ExecUpdate) stream | Exec runs one execution/turn. The live stream carries committed LogRecords plus ephemeral Deltas; Replay re-delivers committed records only (read-only). |
-| Replay | [ReplayRequest](#agentsessions-v1-ReplayRequest) | [LogRecord](#agentsessions-v1-LogRecord) stream |  |
+| Replay | [ReplayRequest](#agentsessions-v1-ReplayRequest) | [LogRecord](#agentsessions-v1-LogRecord) stream | Raw read-only audit: remains available for tombstoned UIDs, including LIFECYCLE_DELETE records. Unlike controller replay, this does not reconstruct or run the harness. |
 | Approve | [ApproveRequest](#agentsessions-v1-ApproveRequest) | [ApproveResponse](#agentsessions-v1-ApproveResponse) | Implemented durable approval decisions for STATELESS_REPLAY executions. OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple, approved value, reason and identity returns the existing decision, even after resolution. A changed decision/reason/identity for that request is FAILED_PRECONDITION, never an overwrite. INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created for a non-stateless execution; Approve does not Describe or resolve a harness. ABORTED: local contention, append-CAS conflict or superseded fence; retry after reading the session. Identity is provenance only; this method provides no authorization, policy hook, expiry, implicit Resume, or Cancel behavior. |
 | Cancel | [CancelRequest](#agentsessions-v1-CancelRequest) | [Session](#agentsessions-v1-Session) | In-flight control: cancel the running execution. Not implemented: the server returns UNIMPLEMENTED. |
 | Suspend | [SuspendRequest](#agentsessions-v1-SuspendRequest) | [Session](#agentsessions-v1-Session) | Compute-layer durability. There is no warm Pause: no Runtime backend implements a node-local warm checkpoint, so a session goes straight from live to a cold snapshot. Suspend routes an owned unreceipted approval to its recorded harness; inherited approvals and ordinary sessions use their stored default. An unserved recorded name is FAILED_PRECONDITION, with no fallback. cold, free worker |

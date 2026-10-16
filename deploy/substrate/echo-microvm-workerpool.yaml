@@ -5,7 +5,8 @@
 # Only the pool is a Kubernetes object. The ActorTemplate is a substrate API resource that lives in an
 # atespace, so the conformance suite creates it through Control (integrations/substrate/e2e/
 # templates_test.go) with the harness image under test. It names the cluster-scoped `microvm`
-# SandboxConfig, which substrate's run-microvm-demo-kind.sh installs along with the assets it stages.
+# SandboxConfig, which substrate's hack/install-microvm-deps.sh --install installs along with the
+# assets it stages (run-microvm-demo-kind.sh calls the same script).
 #
 # The `workload` label is repo-scoped on purpose: worker eligibility is the sandbox class plus a label
 # selector matched over every worker in the cluster with no namespace filter, and

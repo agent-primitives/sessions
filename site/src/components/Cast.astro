@@ -4,6 +4,12 @@
 // The player is bundled from npm rather than loaded from asciinema.org, so nothing is uploaded and
 // the page has no third-party dependency at runtime. The .cast files in public/casts are real
 // recordings produced by the scripts in hack/demos, not hand-written transcripts.
+//
+// The recording loops, so the chrome bar carries the same pause button as the other figures; the
+// player's own controls only appear on hover. Under reduced motion it does not autoplay and shows
+// the poster frame until someone presses play.
+import MotionToggle from "./MotionToggle.astro";
+
 interface Props {
   src: string;
   title: string;
@@ -17,6 +23,7 @@ const id = `cast-${src.replace(/\W+/g, "-")}`;
 
 <figure class="cast panel">
   <div class="panel__bar">
+    <MotionToggle label="Pause the recording" />
     <span class="panel__label">{title}</span>
     <span class="panel__note cast__badge">recorded</span>
   </div>
@@ -35,25 +42,102 @@ const id = `cast-${src.replace(/\W+/g, "-")}`;
 <script>
   import * as AsciinemaPlayer from "asciinema-player";
   import "asciinema-player/dist/bundle/asciinema-player.css";
+  import { prefersReducedMotion } from "../scripts/motion";
 
   for (const el of document.querySelectorAll<HTMLElement>("[data-cast]")) {
     const src = el.dataset.src!;
+    const button = el.closest(".cast")?.querySelector<HTMLButtonElement>("[data-motion-toggle]");
+    type Player = ReturnType<typeof AsciinemaPlayer.create>;
+    let player: Player | undefined;
+    // "Paused" is the user's intent until the player exists, then the player's own state.
+    let paused = prefersReducedMotion();
+
+    const reflect = (p: boolean) => {
+      paused = p;
+      button?.setAttribute("aria-pressed", String(p));
+    };
+
+    if (button) {
+      button.hidden = false;
+      reflect(paused);
+      button.addEventListener("click", () => {
+        if (!player) return reflect(!paused);
+        if (paused) player.play();
+        else player.pause();
+      });
+    }
+
+    // At its natural 13px the terminal is about 800px wide, wider than the panel below 60rem, where
+    // it was cut off on both sides. There it scales to the panel instead; the player's fullscreen
+    // control gives a readable size on a phone. The player takes its fit mode only at creation, so
+    // when the query flips after that (a tablet rotating, the page zoomed) it is rebuilt.
+    const narrowQuery = window.matchMedia("(max-width: 60rem)");
+    let fitted = false;
+    // Whether any player here has played. Until then the reader has only seen the poster, and a
+    // rebuild shows the poster again rather than seeking to the poster's frame, so play still starts
+    // from the beginning.
+    let started = false;
+
+    // `at` is where a rebuilt player picks up, in the player's own time (idle pauses already capped,
+    // the timeline getCurrentTime reports). startAt cannot carry it: that option counts on the raw
+    // recording, before the idle cap, so it would land seconds early. A rebuilt player is created
+    // idle, seeks to `at` (which draws that frame and moves the play position there) and then plays
+    // only if the old one was playing, so either way play continues from the same moment.
+    const mount = (at?: number) => {
+      const narrow = narrowQuery.matches;
+      fitted = narrow;
+      el.classList.toggle("cast__player--fit", narrow);
+      const p = AsciinemaPlayer.create(src, el, {
+        autoPlay: at === undefined && !paused,
+        loop: true,
+        // Long pauses are real (a rollout takes time) but boring to watch, so cap them.
+        idleTimeLimit: Number(el.dataset.idle),
+        ...(at === undefined && { poster: el.dataset.poster }),
+        fit: narrow ? "width" : false,
+        terminalFontSize: "13px",
+        theme: "asciinema",
+      });
+      // Disposing a player stops it, which must not read as the user pausing it.
+      p.addEventListener("playing", () => {
+        if (p !== player) return;
+        started = true;
+        reflect(false);
+      });
+      p.addEventListener("pause", () => p === player && reflect(true));
+      p.addEventListener("ended", () => p === player && reflect(true));
+      player = p;
+      if (at !== undefined) {
+        // Commands queue in order, so play waits for the seek to finish.
+        void p.seek(at);
+        if (!paused) void p.play();
+      }
+    };
+
+    const refit = () => {
+      if (!player || narrowQuery.matches === fitted) return;
+      // Entering fullscreen from a narrow window widens it past 60rem; rebuilding then would remove
+      // the fullscreen element and throw the reader out. Wait until they leave fullscreen.
+      const full =
+        document.fullscreenElement ??
+        (document as Document & { webkitFullscreenElement?: Element }).webkitFullscreenElement;
+      if (full && el.contains(full)) return;
+      const old = player;
+      const at = started ? old.getCurrentTime() : undefined;
+      player = undefined;
+      old.dispose();
+      mount(at !== undefined && Number.isFinite(at) && at > 0 ? at : undefined);
+    };
+    narrowQuery.addEventListener("change", refit);
+    document.addEventListener("fullscreenchange", refit);
+    document.addEventListener("webkitfullscreenchange", refit);
+
     // Autoplay only once the recording scrolls into view, and only then create the player, so a
     // page with several recordings does not start them all at load.
     const observer = new IntersectionObserver(
       (entries, obs) => {
         for (const entry of entries) {
           if (!entry.isIntersecting) continue;
-          AsciinemaPlayer.create(src, el, {
-            autoPlay: true,
-            loop: true,
-            // Long pauses are real (a rollout takes time) but boring to watch, so cap them.
-            idleTimeLimit: Number(el.dataset.idle),
-            poster: el.dataset.poster,
-            fit: false,
-            terminalFontSize: "13px",
-            theme: "asciinema",
-          });
+          mount();
           obs.unobserve(entry.target);
         }
       },
@@ -86,5 +170,11 @@ const id = `cast-${src.replace(/\W+/g, "-")}`;
     display: flex;
     justify-content: center;
     padding: 0.5rem 0;
+  }
+
+  /* fit: "width" sizes the player from its container's width, which a centring flex row would
+     shrink to nothing, so a fitted player sits in a plain block. */
+  .cast__player--fit {
+    display: block;
   }
 </style>

@@ -151,6 +151,12 @@ cancelled turn stops an in-flight completion instead of orphaning it.
 
 ```mermaid
 sequenceDiagram
+  accTitle: Model calls on a live turn and on replay
+  accDescr {
+    On a live turn the harness calls sink.Model, and the host invokes the provider, records
+    MODEL_CALL and OUTPUT, and returns the completion. On replay the same call is answered from
+    the record and the model provider is not called.
+  }
   participant H as Your harness (Run)
   participant Host as Host / controller
   participant M as Model provider
@@ -352,11 +358,13 @@ catching such an error cannot permit a later live effect or mark the reconstruct
 Ordinary tool/model argument normalization and default mediation remain unchanged; gating does not
 add a general sink-concurrency or tool-validation contract.
 
-Clients discover the pending tuple from Session metadata, commit a decision using RPC/SDK Approve,
-then Resume explicitly. Both CLI `approve` and `deny` do those steps. Identity is provenance only,
-not policy/authentication, and there is no authorization hook, approval timeout or expiry. Snapshots
-and unresolved requests are retained indefinitely; Cancel/DeleteSession remain unavailable. See
-[client examples](interaction-model.md#approval-decisions-and-recovery) and [security.md](security.md).
+Clients discover the pending tuple from Session metadata, commit a decision using RPC/SDK
+Approve, then Resume explicitly. Both CLI `approve` and `deny` do those steps. Identity is
+provenance only, not policy/authentication, and there is no authorization hook, approval timeout
+or expiry. Snapshots and unresolved requests are retained indefinitely; Cancel remains
+unavailable. DeleteSession commits permanent intent without resource cleanup and refuses further
+decisions, including exact retries. See [client
+examples](interaction-model.md#approval-decisions-and-recovery) and [security.md](security.md).
 
 ### Rule 5: pass reasoning parts back verbatim
 

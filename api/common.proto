@@ -269,6 +269,9 @@ message Lifecycle {
     LIFECYCLE_FORK = 3;
     LIFECYCLE_BASELINE = 4;
     LIFECYCLE_CANCEL = 5;
+    // Host-owned, session-scoped permanent deletion intent (empty Event.execution_id).
+    // It fences writes but does not terminate compute or confirm resource reclamation.
+    LIFECYCLE_DELETE = 6;
   }
   Kind kind = 1;
   string detail = 2; // e.g. "fork parent=<uid>@<seq>", baseline id

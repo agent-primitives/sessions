@@ -68,6 +68,10 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		)
 	}()
 
+	if err := eventlog.CheckWritable(c.log); err != nil {
+		return false, err
+	}
+
 	recs, err := c.log.Read(1)
 	if err != nil {
 		return false, err

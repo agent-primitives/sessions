@@ -721,6 +721,8 @@ func lifecycleKindToProto(k api.LifecycleKind) v1.Lifecycle_Kind {
 		return v1.Lifecycle_LIFECYCLE_BASELINE
 	case api.LifecycleCancel:
 		return v1.Lifecycle_LIFECYCLE_CANCEL
+	case api.LifecycleDelete:
+		return v1.Lifecycle_LIFECYCLE_DELETE
 	default:
 		return v1.Lifecycle_LIFECYCLE_UNSPECIFIED
 	}
@@ -738,6 +740,8 @@ func lifecycleKindFromProto(k v1.Lifecycle_Kind) api.LifecycleKind {
 		return api.LifecycleBaseline
 	case v1.Lifecycle_LIFECYCLE_CANCEL:
 		return api.LifecycleCancel
+	case v1.Lifecycle_LIFECYCLE_DELETE:
+		return api.LifecycleDelete
 	default:
 		return ""
 	}

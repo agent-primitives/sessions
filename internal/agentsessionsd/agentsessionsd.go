@@ -88,7 +88,8 @@ type options struct {
 type ToolExecutorFunc func(harness string, sessions *client.Client) (controller.ToolFunc, error)
 
 // WithToolExecutors installs host tool executors for CONTROLLER_MEDIATED and approved
-// REQUIRES_APPROVAL tool calls. Without it no harness has one, and such a call fails the turn.
+// REQUIRES_APPROVAL tool calls. Without it or -tool-executors no harness has one, and such a call
+// fails the turn. Combining the option and flag is a startup configuration error.
 // Only -harness entries are asked: the built-in harnesses and those registered through
 // HarnessRegistry get no executor.
 //
@@ -114,6 +115,7 @@ func Run(args []string, opts ...Option) error {
 	addr := fs.String("addr", "127.0.0.1:8080", "address to serve the Sessions API on")
 	registryAddr := fs.String("registry-addr", "", "optional literal loopback IP:port for the plaintext, unauthenticated HarnessRegistry operator API")
 	journal := fs.String("journal", "agentsessions.db", "sqlite journal path")
+	toolConfigPath := fs.String("tool-executors", "", "optional versioned JSON tool executor config; CLI -harness entries only")
 	project := fs.String("project", sqlitelog.DefaultProject, "default project (tenant)")
 	model := fs.String("model", "", "model id for an OpenAI-compatible endpoint; empty uses the built-in echo model")
 	modelBaseURL := fs.String("model-base-url", openai.DefaultBaseURL, "base URL of the OpenAI-compatible endpoint")
@@ -149,8 +151,22 @@ func Run(args []string, opts ...Option) error {
 		}
 	}
 
+	var toolConfig *toolExecutorConfig
+	if *toolConfigPath != "" {
+		if o.executors != nil {
+			return errors.New("-tool-executors conflicts with WithToolExecutors")
+		}
+		var err error
+		if toolConfig, err = loadToolExecutorConfig(*toolConfigPath, remotes); err != nil {
+			return err
+		}
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+	if toolConfig != nil {
+		o.executors = toolConfig.factory(logger)
+	}
 
 	// The executors' client of this daemon's own Sessions API. client.Dial does not connect, and the
 	// dialer reads the listener's address, bound below before the server accepts a request. The

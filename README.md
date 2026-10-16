@@ -105,6 +105,7 @@ The sources live in [`docs/`](docs/README.md):
   deliberately does not provide.
 - [**Quickstart**](docs/quickstart.md): exec / replay / fork / suspend / resume and verify the chain, locally.
 - [**Writing a harness**](docs/harness-authoring.md): plug your agent into the `api.Harness` SPI.
+- [**Tool executors**](docs/tool-executors.md): route CLI-registered harness tools to operator-run Unix sockets.
 - [**Architecture**](docs/architecture.md): how the neutral core is built.
 - [**Running on agent-substrate**](docs/substrate-conformance.md): both capability tiers, green in CI.
 - [**Observability**](docs/observability.md): structured request-flow logs and correlation.

@@ -31,6 +31,7 @@ Run these before pushing; they are the same gates the `ci` workflow enforces.
 | Cross-language chain audit | `./hack/verify_chain.sh` (also audits every journal in `sqlitelog/testdata`) |
 | Persisted-format compatibility | `go test ./session ./sqlitelog -run 'SchemaV4Fixture\|MigratedAndFresh'` (part of Tests) |
 | Proto lint | `buf lint` |
+| Fuzzing (30s per target; nightly longer) | `./hack/fuzz.sh <dir> 30s` for each `<dir>` in `./hack/fuzz.sh --packages` |
 
 Two gates catch stale generated files, and both fail the build rather than regenerating for you:
 

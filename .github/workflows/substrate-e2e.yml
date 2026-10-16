@@ -34,17 +34,19 @@ on:
     branches: [main]
   pull_request:
     # The live cluster e2e is heavy; skip it for changes that cannot affect substrate conformance
-    # (docs, the site, the demo UI, demo media, and repository metadata). Any code, deploy, or
-    # workflow change still runs it, and push to main plus the nightly schedule always run the full
-    # suite.
+    # (docs, the demo UI, demo media, and the license). Any code, deploy, or workflow change still
+    # runs it, and push to main plus the nightly schedule always run the full suite.
+    #
+    # substrate-conformance is a required check, and GitHub leaves a required check from a
+    # path-skipped workflow pending, so a PR whose files all match here cannot merge. Do not add a
+    # path that ci.yml still runs for (site/**, .github/dependabot.yml, .github/CODEOWNERS): such a
+    # PR would wait on this check forever instead of running it. LICENSE is listed because ci.yml
+    # already skips it.
     paths-ignore:
       - "docs/**"
       - "**/*.md"
       - "cmd/agentui/**"
       - "demos/**"
-      - "site/**"
-      - ".github/dependabot.yml"
-      - ".github/CODEOWNERS"
       - "LICENSE"
   schedule:
     - cron: "0 7 * * *" # nightly, so a green main is re-proven against a fresh cluster
@@ -74,6 +76,13 @@ jobs:
     # The pinned entry keeps the bare job name: it is the required status check. The canary entry
     # (main) exists only on scheduled and manual runs, so it can never gate a pull request, and
     # continue-on-error keeps its failure out of the run's result.
+    #
+    # The canary is known red until the substrate bump: at main's head (603e0062) ateom-microvm is
+    # cmd/ateworker-microvm and the module path is go.ate.dev/substrate, so it fails at "Apply the
+    # echo micro-VM WorkerPool" and would next fail building the adapter. Read its result in the
+    # job list until then; continue-on-error hides it from the run's status and notifications.
+    # TODO(canary): drop continue-on-error once the canary is green after the bump, so new drift
+    # turns the nightly run red (it still never runs on a pull request).
     name: ${{ matrix.substrate == 'main' && 'substrate-conformance (substrate main)' || 'substrate-conformance' }}
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.substrate == 'main' }}
@@ -154,13 +163,14 @@ jobs:
           path: _substrate/bin/microvm-assets/amd64
           key: microvm-assets-amd64-${{ hashFiles('_substrate/hack/microvm-assets/assemble.sh') }}
 
-      - name: Cache the envoy-dataplane image build
+      - name: Restore the envoy-dataplane image build cache
         # ate-setup builds the egress gateway's envoy image (a Rust dynamic module) with docker
         # buildx, about two minutes cold. Keyed on the build context, which is all the build reads.
+        # Saved right after the install below, so a later failure does not discard a cold build.
         id: envoy-cache
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
-          path: ${{ runner.temp }}/envoy-dataplane-cache
+          path: _envoy-dataplane-cache
           key: envoy-dataplane-${{ runner.os }}-${{ hashFiles('_substrate/cmd/dataplane/envoy/**') }}
 
       - name: Set up a buildx builder for the envoy-dataplane image
@@ -194,11 +204,23 @@ jobs:
         env:
           DOCKER_BUILD_FLAGS: >-
             --builder=envoy-dataplane
-            --cache-from=type=local,src=${{ runner.temp }}/envoy-dataplane-cache
-            ${{ steps.envoy-cache.outputs.cache-hit != 'true' && format('--cache-to=type=local,dest={0}/envoy-dataplane-cache,mode=min', runner.temp) || '' }}
+            --cache-from=type=local,src=${{ github.workspace }}/_envoy-dataplane-cache
+            ${{ steps.envoy-cache.outputs.cache-hit != 'true' && format('--cache-to=type=local,dest={0}/_envoy-dataplane-cache,mode=min', github.workspace) || '' }}
         run: |
           hack/create-kind-cluster.sh
           hack/install-ate-kind.sh --deploy-ate-system --rollout-timeout 10m
+
+      - name: Save the envoy-dataplane image build cache
+        # Only when the restore missed and the build wrote a cache (buildx writes index.json once
+        # the export completes), and even if the install failed after the envoy build finished.
+        if: >-
+          !cancelled()
+          && steps.envoy-cache.outputs.cache-hit != 'true'
+          && hashFiles('_envoy-dataplane-cache/index.json') != ''
+        uses: actions/cache/save@v6
+        with:
+          path: _envoy-dataplane-cache
+          key: ${{ steps.envoy-cache.outputs.cache-primary-key }}
 
       - name: Wait for the disk cleanup
         run: |

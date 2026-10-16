@@ -363,7 +363,8 @@ and module caches and the envoy-dataplane image's buildx cache between runs.
 Scheduled and manual runs add a canary job, `substrate-conformance (substrate main)`, that runs the
 same suite against agent-substrate's `main` head, with the adapter's client moved to that commit in
 the runner's checkout only. It surfaces upstream drift before a bump; it never runs on a pull
-request and its failure does not fail the run.
+request and its failure does not fail the run. It is known red until the next substrate bump: `main`
+renamed `cmd/ateom-microvm` to `cmd/ateworker-microvm` and the module to `go.ate.dev/substrate`.
 
 The workflow applies only the namespace and the micro-VM WorkerPools
 (`deploy/substrate/namespace.yaml`, `echo-microvm-workerpool.yaml`,

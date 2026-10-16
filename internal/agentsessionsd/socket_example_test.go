@@ -3,7 +3,9 @@ package agentsessionsd
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -104,6 +106,50 @@ func TestDocumentedPythonExecutorThroughDaemon(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no Python executor receipt")
+	}
+}
+
+func TestDocumentedPythonExecutorLogsStorageFailureWithoutPayload(t *testing.T) {
+	dir, err := os.MkdirTemp("", "sessions-example-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket, database := filepath.Join(dir, "tool.sock"), filepath.Join(dir, "effects.db")
+	startPythonToolExample(t, socket, database)
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = db.Exec("ROLLBACK") }()
+	conn, err := net.DialTimeout("unix", socket, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(8 * time.Second))
+	_, err = io.WriteString(conn, `{"version":1,"harness":"h","session_uid":"s","call_id":"c","tool":"publish","arguments":{"text":"TOP_SECRET_DO_NOT_LOG"},"idempotency_key":"k"}`+"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply map[string]any
+	if err := json.NewDecoder(conn).Decode(&reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply["is_error"] != true || reply["error"] != "request refused" {
+		t.Fatalf("wire error was not sanitized: %v", reply)
+	}
+	diagnostics, err := os.ReadFile(filepath.Join(dir, "ready"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(diagnostics), "SQLITE_BUSY") || strings.Contains(string(diagnostics), "TOP_SECRET_DO_NOT_LOG") {
+		t.Fatalf("missing safe storage diagnostic: %s", diagnostics)
 	}
 }
 

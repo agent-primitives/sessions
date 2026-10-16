@@ -155,6 +155,7 @@ recovery resends the original key, so a durable executor returns its stored resu
 
 The Python example demonstrates the latter guarantee only for its transactional **local**
 SQLite insert. It serializes requests and refuses changed arguments under a reused key.
+Storage failures log only the SQLite error class/code to stderr, not arguments or raw errors.
 Do not replace the insert with an HTTP request and assume the database makes remote delivery
 atomic; the remote service needs its own idempotency/reconciliation mechanism.
 

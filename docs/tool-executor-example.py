@@ -80,7 +80,11 @@ def main():
                         raise ValueError("request must be an object")
                     reply = {"version": 1, "call_id": request.get("call_id", ""),
                              "is_error": False, "output": execute(db, request)}
-                except (ValueError, OSError, sqlite3.Error):
+                except (ValueError, OSError, sqlite3.Error) as err:
+                    if isinstance(err, sqlite3.Error):
+                        print("executor storage failure:", type(err).__name__,
+                              getattr(err, "sqlite_errorname", "unknown"),
+                              file=sys.stderr, flush=True)
                     reply = {"version": 1,
                              "call_id": request.get("call_id", "") if isinstance(request, dict) else "",
                              "is_error": True, "error": "request refused"}

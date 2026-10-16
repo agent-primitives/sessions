@@ -121,10 +121,13 @@ not provide.
   in. `-substrate-harness name=atespace/template[,memory]` serves a harness as one actor per session
   in `-substrate-atespace`, controlled over the ate-api (`-ateapi-addr`, TLS, with
   `-ateapi-token-file` re-read on every call, `-ateapi-ca-file` or `-ateapi-insecure-skip-verify`)
-  and reached through `-atenet-router`. It requires `-model`, and refuses the other substrate flags
-  without a `-substrate-harness`. It takes one `-substrate-harness` and exits with status 2 on a
-  second: actors are named by session UID in the one atespace, so two substrate harnesses would
-  share a session's actor. The rule is per daemon: two hosts sharing a journal and an atespace with
+  and reached through `-atenet-router`. Each ate-api call has a fixed two-minute deadline, or the
+  caller's earlier one: a hung ate-api fails the session operation instead of holding it, and so
+  does a call that takes longer, such as a `SuspendActor` or `ResumeActor` waiting on a large RAM
+  snapshot. It requires `-model`, and refuses the other substrate flags without a
+  `-substrate-harness`. It takes one `-substrate-harness` and exits with status 2 on a second:
+  actors are named by session UID in the one atespace, so two substrate harnesses would share a
+  session's actor. The rule is per daemon: two hosts sharing a journal and an atespace with
   different `-substrate-harness` names share it too (see `docs/substrate-conformance.md`). The
   neutral `cmd/agentsessionsd` does not offer these flags; both binaries are now built from
   `internal/agentsessionsd`.

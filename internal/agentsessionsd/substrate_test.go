@@ -24,8 +24,10 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/agent-primitives/sessions/api"
@@ -279,6 +281,91 @@ func TestSubstrateDialsATEAPIWithTLSAndToken(t *testing.T) {
 				t.Fatalf("server saw no call: %v", err)
 			}
 		})
+	}
+}
+
+// Every ate-api call carries a deadline of at most ateapiCallTimeout, so a hung ate-api fails the
+// call when the caller's context has none, and a caller's earlier deadline is kept.
+func TestSubstrateBoundsEachATEAPICall(t *testing.T) {
+	old := ateapiCallTimeout
+	ateapiCallTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { ateapiCallTimeout = old })
+
+	dir := t.TempDir()
+	certPEM, keyPEM := selfSignedCert(t, "api.ate-system.svc")
+	caFile := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(caFile, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The server hangs until the call's context ends and reports the deadline it saw.
+	deadlines := make(chan time.Duration, 2)
+	srv := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})),
+		grpc.UnknownServiceHandler(func(_ any, stream grpc.ServerStream) error {
+			d, ok := stream.Context().Deadline()
+			if !ok {
+				deadlines <- -1
+			} else {
+				deadlines <- time.Until(d)
+			}
+			<-stream.Context().Done()
+			return stream.Context().Err()
+		}),
+	)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	f := registerSubstrateFlags(fs)
+	if err := fs.Parse([]string{"-substrate-harness", "w=t/w", "-substrate-atespace", "s", "-ateapi-addr", lis.Addr().String(),
+		"-ateapi-ca-file", caFile, "-ateapi-server-name", "api.ate-system.svc"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.check(fs, "m", nil); err != nil {
+		t.Fatal(err)
+	}
+	var conn grpc.ClientConnInterface
+	_, closeConn, err := f.backends(func(c grpc.ClientConnInterface) substrate.ControlClient { conn = c; return nil }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeConn()
+
+	// No caller deadline: the call fails with DeadlineExceeded after ateapiCallTimeout.
+	done := make(chan error, 1)
+	go func() {
+		done <- conn.Invoke(context.Background(), "/ateapi.Control/GetActor", &emptypb.Empty{}, &emptypb.Empty{})
+	}()
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		srv.Stop() // ends the hung call
+		t.Fatalf("call with no deadline still running after 5s, want it ended after %v", ateapiCallTimeout)
+	}
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("call with no deadline: err = %v, want DeadlineExceeded", err)
+	}
+	if d := <-deadlines; d < 0 || d > ateapiCallTimeout {
+		t.Fatalf("server saw deadline in %v, want at most %v", d, ateapiCallTimeout)
+	}
+
+	// An earlier caller deadline is kept.
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	err = conn.Invoke(ctx, "/ateapi.Control/GetActor", &emptypb.Empty{}, &emptypb.Empty{})
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("call with an earlier deadline: err = %v, want DeadlineExceeded", err)
+	}
+	if d := <-deadlines; d < 0 || d > 50*time.Millisecond {
+		t.Fatalf("server saw deadline in %v, want the caller's 50ms at most", d)
 	}
 }
 

@@ -162,12 +162,11 @@ not provide.
   transaction without rewriting old events or hashes; existing sessions stay ACTIVE. The internal
   `DeletionComplete` state and `deletion_completed_at` column are reserved for cleanup; this build
   never writes them, and the completion timestamp remains zero. They are not exposed on the wire.
-  Older builds refuse v4 at open time only. Already-open older writers can still append, mint fences
-  and update
-  metadata after DELETE because they do not enforce tombstones. Before the first v4 open, stop
-  every older host and embedded `agentctl` process sharing the journal; upgrade all writers before
-  restarting them. Back up before upgrading. The new LIFECYCLE_DELETE hash requires a deletion-aware
-  reader. Cancel remains unimplemented.
+  Older builds refuse v4 at open time only. Already-open older writers can still append, mint
+  fences and update metadata after DELETE because they do not enforce tombstones. Before the
+  first v4 open, stop every older host and embedded `agentctl` process sharing the journal;
+  upgrade all writers before restarting them. Back up before upgrading. The new LIFECYCLE_DELETE
+  hash requires a deletion-aware reader. Cancel remains unimplemented.
 - `Exec` refuses a stateless harness override when the session's served stored harness requires
   memory snapshots (`FAILED_PRECONDITION`, before any fence or journal write). `Resume` and
   no-input Exec recovery also refuse an older interrupted override before compute changes or
@@ -291,8 +290,9 @@ not provide.
 - `Runtime.Snapshot(..., SnapshotExternal)` owns the cold transition: capture state, release dedicated
   compute where applicable, and retain any handle needed by `Restore`. Out-of-tree runtimes that only
   capture state must implement that transition themselves; the Placer no longer calls `Stop` afterward.
-  Suspended actors and fork-child snapshot pins are retained indefinitely: `DeleteSession` is
-  unimplemented and no session teardown calls `Stop`. Operators must reclaim them directly in Substrate.
+  Suspended actors and fork-child snapshot pins are retained indefinitely: `DeleteSession` records
+  durable intent only and no session teardown calls `Stop`. Operators must reclaim them directly
+  in Substrate.
   No signatures or wire formats change, and restoring a snapshot after destructive `Stop` is not
   guaranteed.
 

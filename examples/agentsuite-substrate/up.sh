@@ -10,7 +10,9 @@
 # --templates-only once the ActorTemplates hold their golden snapshots, before the model Secret and
 # the Deployments change.
 #
-# Idempotent: an existing cluster, template or deployment is reused. See README.md for the tools.
+# Idempotent: an existing cluster, template or deployment is reused. A template is reused by its
+# name, which does not cover the render itself: after a render change, run down.sh first. See
+# README.md.
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 

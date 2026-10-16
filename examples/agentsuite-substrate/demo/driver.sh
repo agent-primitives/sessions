@@ -638,14 +638,16 @@ EOF
 	run -f <<'EOF'
 bat -r 1:32 /tmp/render/actortemplate.json
 EOF
-	page "The rest: wakeup probe, resources, MEMORY snapshots and the micro-VM sandbox"
+	page "The rest: wakeup probe, MEMORY snapshots, the micro-VM sandbox and the resources that size it"
 	run -f <<'EOF'
 bat -r 33:65 /tmp/render/actortemplate.json
 EOF
 	lines_hold /tmp/render/actortemplate.json 3:'"atespace": "agentsuite-demo"' 4:"\"name\": \"${TEMPLATE}\"" 8:'"workload": "agentsuite-demo-microvm"' \
-		14:"\"image\": \"${IMAGE}\"" 26:'"value": "/agent"' 29:'"name": "AGENTSUITE_MODEL"' 30:"\"value\": \"${model}\"" 47:'"quantity": "1"' \
-		51:'"quantity": "512Mi"' 58:"\"storageLocation\": \"gs://ate-snapshots/agentsuite-demo/${TEMPLATE}/\"" 59:'SNAPSHOT_FIDELITY_MEMORY' \
-		62:'SANDBOX_CLASS_MICROVM' 63:'"configName": "microvm"'
+		14:"\"image\": \"${IMAGE}\"" 26:'"value": "/agent"' 29:'"name": "AGENTSUITE_MODEL"' 30:"\"value\": \"${model}\"" \
+		46:"\"storageLocation\": \"gs://ate-snapshots/agentsuite-demo/${TEMPLATE}/\"" 47:'SNAPSHOT_FIDELITY_MEMORY' \
+		50:'SANDBOX_CLASS_MICROVM' 51:'"configName": "microvm"' 53:'"resources"' 57:'"quantity": "1"' 61:'"quantity": "512Mi"'
+	template_check /tmp/render/actortemplate.json 'all("resources" not in c for c in t["containers"])' ||
+		fail "the harness container declares resources: the micro-VM guest is the template's memory less the VMM reserve"
 	template_check /tmp/render/actortemplate.json 'not any(isinstance(v, dict) and any(w in str(v.get("name", "")).upper() for w in ("KEY", "TOKEN", "SECRET", "AUTH", "PASSWORD")) for v in walk(t))' ||
 		fail "the template's env names a credential"
 	page "1/6  Suite name, agent id and a hash of image digest, binding and model name the template; the binding its atespace"
@@ -662,15 +664,15 @@ demo/split-view.py suites/kaimahi-minimal/agents/writer.json:9-12 -- /tmp/render
 EOF
 	page "4/6  The binding's sandbox becomes the template's sandboxConfig: a micro-VM"
 	run -f <<'EOF'
-demo/split-view.py binding-microvm.json:7 -- /tmp/render/actortemplate.json:61-64
+demo/split-view.py binding-microvm.json:7 -- /tmp/render/actortemplate.json:49-52
 EOF
 	page "5/6  The binding's snapshot becomes snapshotConfig: MEMORY snapshots, stored under the template's own name"
 	run -f <<'EOF'
-demo/split-view.py binding-microvm.json:8 -- /tmp/render/actortemplate.json:57-60
+demo/split-view.py binding-microvm.json:8 -- /tmp/render/actortemplate.json:45-48
 EOF
-	page "6/6  The binding's resources and workerSelector become the container's limits and the template's workerSelector"
+	page "6/6  The binding's resources and workerSelector become the template's: they size the micro-VM and pick its worker"
 	run -f <<'EOF'
-demo/split-view.py binding-microvm.json:9-10 -- /tmp/render/actortemplate.json:6-10,43-54
+demo/split-view.py binding-microvm.json:9-10 -- /tmp/render/actortemplate.json:6-10,53-64
 EOF
 	page "And the flag that registers harness writer with agentsessionsd, pointing at this template"
 	run <<'EOF'
@@ -689,9 +691,9 @@ EOF
 	[[ "${s}" == "${suite_sums}" ]] || fail "the suite's files changed"
 	page "What -tier memory changes: the name, AGENTSUITE_MEMORY=ram, and a harness that REQUIRES_MEMORY_SNAPSHOT"
 	run -f <<'EOF'
-demo/split-view.py /tmp/render/actortemplate.json:4,58 /tmp/render/harness-registration.json:3,11 -- /tmp/render-memory/actortemplate.json:4,31-34,62 /tmp/render-memory/harness-registration.json:3,11
+demo/split-view.py /tmp/render/actortemplate.json:4,46 /tmp/render/harness-registration.json:3,11 -- /tmp/render-memory/actortemplate.json:4,31-34,50 /tmp/render-memory/harness-registration.json:3,11
 EOF
-	lines_hold /tmp/render-memory/actortemplate.json 4:"${MEMTEMPLATE}" 33:'"name": "AGENTSUITE_MEMORY"' 34:'"value": "ram"' 62:"${MEMTEMPLATE}"
+	lines_hold /tmp/render-memory/actortemplate.json 4:"${MEMTEMPLATE}" 33:'"name": "AGENTSUITE_MEMORY"' 34:'"value": "ram"' 50:"${MEMTEMPLATE}"
 	lines_hold /tmp/render-memory/harness-registration.json 3:'"name": "writer-memory"' 11:RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT
 	lines_hold /tmp/render/harness-registration.json 3:'"name": "writer"' 11:RESUMABILITY_STATELESS_REPLAY
 	page "Compositions are honored: the suite has no linux/arm64 composition for writer, so emit refuses"

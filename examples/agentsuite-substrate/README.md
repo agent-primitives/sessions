@@ -77,10 +77,11 @@ kaimahi's.
 | `containers[0].env` | `HARNESS_ADDR=:80`, `HARNESS_READYZ=:8081`, `AGENT_DIR=/agent`, `AGENTSUITE_MODEL` when `-model` is given, and `AGENTSUITE_MEMORY=ram` for `-tier memory`. No model credentials: they stay with the host. |
 | `containers[0].wakeupProbe` | `GET /readyz` on 8081 |
 | `containers[0].securityContext` | `capabilities: {}`, adding none |
-| `containers[0].resources` | `binding.resources` |
+| `containers[0].resources` | Unset: the sandbox bounds the container (see `resources`). |
 | `sandboxConfig` | `binding.sandbox`: `SANDBOX_CLASS_MICROVM`, `microvm` (or `SANDBOX_CLASS_GVISOR`, `gvisor-default`) |
 | `snapshotConfig` | `preferredFidelity` from `binding.snapshot.fidelity`, which must be `MEMORY` (or unset) for `-tier memory`: that tier keeps the conversation in RAM. `storageLocation` is `binding.snapshot.storageLocation` + `<name>/`. |
 | `workerSelector` | `binding.workerSelector` |
+| `resources` | `binding.resources`. Substrate sizes the sandbox and books the worker from these. A micro-VM gets the CPU rounded up to whole vCPUs and the memory less the VMM reserve (128MiB at substrate `96dffb2`), so `512Mi` boots a 384MiB guest; ateom-microvm refuses a container limit above the guest, which is why the container declares none. gVisor applies these limits to the container. |
 
 The harness registration is a `HarnessRegistration` with `spec.substrate {atespace, template}`,
 `STATELESS_REPLAY` and `descriptor_id: triage`. `agentsessionsd` does not serve the registry, so
@@ -127,6 +128,10 @@ is named `triage-memory`, is `REQUIRES_MEMORY_SNAPSHOT`, and is applied as
   not create. A cluster it created whose setup record is missing or unreadable is refused rather
   than recreated, since recreating an installed cluster would delete the daemon's session journal:
   run `./down.sh`, then `up.sh` again.
+- `up.sh` also reuses an ActorTemplate that already has the rendered name. The name covers the
+  image, the binding, the model and the tier, not what `emit render` writes from them, so after
+  updating this example on a cluster that already has its templates (for example to the render
+  that moved `resources` from the container onto the template), run `./down.sh` before `up.sh`.
 
 ## A real model
 

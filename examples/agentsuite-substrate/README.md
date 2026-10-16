@@ -135,6 +135,10 @@ AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 AGENTSUITE_MODEL=<model> MOD
 AGENTSUITE_MODEL_BASE_URL=https://api.openai.com/v1 ./demo.sh
 ```
 
+`demo.sh` takes the same `AGENTSUITE_MODEL_BASE_URL` as `up.sh`, unset for the fake model, and
+fails before it runs a turn when the deployed `agentsessionsd` was started with another one, so a
+fake-backed run is never reported as a real provider's, or the reverse.
+
 Azure OpenAI serves a deployment at `/openai/deployments/<deployment>/chat/completions` and pins
 its API version in an `api-version` query parameter, with the key in an `api-key` header. Put the
 path and the query in `AGENTSUITE_MODEL_PATH` and the header name in `AGENTSUITE_MODEL_AUTH_HEADER`;

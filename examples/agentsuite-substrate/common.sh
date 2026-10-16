@@ -51,6 +51,9 @@ cluster_listed() {
 # A dedicated kubeconfig: kind would otherwise switch the caller's current context.
 export KUBECONFIG="${STATE}/kubeconfig"
 NS=agentsuite-demo
+# The in-cluster fake model's base URL: what up.sh deploys agentsessionsd with when no real provider
+# is set, and how demo.sh tells which one it was deployed with.
+FAKE_MODEL_URL="http://fakemodel.${NS}.svc:8080/v1"
 ATESPACE=agentsuite-demo
 # The suite (a directory under this one) and the agent in it that becomes the harness. The default
 # is the demo's own fixture, which has compositions for amd64 and arm64; kaimahi's minimal suite

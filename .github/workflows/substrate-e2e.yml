@@ -42,8 +42,10 @@ on:
     # path that ci.yml still runs for (site/**, .github/dependabot.yml, .github/CODEOWNERS): such a
     # PR would wait on this check forever instead of running it. LICENSE is listed because ci.yml
     # already skips it. cmd/agentui/** and demos/** predate this rule and break it: ci.yml runs for
-    # them, so a PR touching only those paths already waits on this check forever. The fix is a
-    # change-detection gate that still reports the check.
+    # them, so a PR touching only those paths already waits on this check forever. docs/** is safe
+    # only while docs/ holds markdown alone (ci.yml skips **/*.md, not docs/**); a PR adding only an
+    # image or diagram there would wait the same way. The fix is a change-detection gate that still
+    # reports the check.
     # TODO(ci): file the tracking issue and link it here.
     paths-ignore:
       - "docs/**"

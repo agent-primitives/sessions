@@ -105,7 +105,7 @@ func (s *liveSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResul
 func (s *liveSink) toolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
 	call := tc
 	if call.Mediation == api.MediationRequiresApproval {
-		return api.ToolResult{}, ErrApprovalUnavailable // Host handoff is not available yet.
+		return s.parkTool(ctx, call)
 	}
 	if s.calls[call.ID] {
 		return api.ToolResult{}, ErrInvalidApprovalCall

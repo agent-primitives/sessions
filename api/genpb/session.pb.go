@@ -379,17 +379,20 @@ func (x *ComputeRef) GetFenceToken() int64 {
 }
 
 type Session struct {
-	state        protoimpl.MessageState `protogen:"open.v1"`
-	Metadata     *ResourceMetadata      `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	Harness      string                 `protobuf:"bytes,2,opt,name=harness,proto3" json:"harness,omitempty"`
-	Model        string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`                                                                        // model-agnostic id
-	ExecState    ExecState              `protobuf:"varint,13,opt,name=exec_state,json=execState,proto3,enum=agentsessions.v1.ExecState" json:"exec_state,omitempty"`             // execution/turn axis
-	ComputeState ComputeState           `protobuf:"varint,14,opt,name=compute_state,json=computeState,proto3,enum=agentsessions.v1.ComputeState" json:"compute_state,omitempty"` // incarnation axis
-	// Set by hosts supporting approval reporting for a valid unanswered host-owned APPROVAL_REQUEST
-	// in the latest first-seen execution at last_seq. Requests/decisions match execution_id,
-	// tool_call_id and request_seq. Calls whose TOOL_CALL precedes the child's latest FORK are excluded.
-	// Unset when no request is reportable, approval-bearing evidence is invalid, the projection lags
-	// last_seq, or the host does not support reporting. The reference Sessions service leaves it unset.
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Metadata *ResourceMetadata      `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	Harness  string                 `protobuf:"bytes,2,opt,name=harness,proto3" json:"harness,omitempty"`
+	Model    string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"` // model-agnostic id
+	// Every Session reply uses the same append-transaction projection at last_seq: no events
+	// reports EXEC_PENDING; a valid owned unanswered host approval request in the latest
+	// first-seen execution reports EXEC_AWAITING; other histories retain EXEC_COMPLETED.
+	// COMPLETED is a compatibility fallback, not proof of END, a receipt, or admission.
+	ExecState    ExecState    `protobuf:"varint,13,opt,name=exec_state,json=execState,proto3,enum=agentsessions.v1.ExecState" json:"exec_state,omitempty"`
+	ComputeState ComputeState `protobuf:"varint,14,opt,name=compute_state,json=computeState,proto3,enum=agentsessions.v1.ComputeState" json:"compute_state,omitempty"` // incarnation axis
+	// Set for a valid unanswered host-owned APPROVAL_REQUEST in the latest first-seen execution
+	// at last_seq. Requests/decisions match execution_id, tool_call_id and request_seq. Calls whose
+	// TOOL_CALL precedes the child's latest FORK are excluded. Unset when no request is reportable,
+	// approval-bearing evidence is invalid, or the projection lags last_seq.
 	PendingApproval *ApprovalRef `protobuf:"bytes,15,opt,name=pending_approval,json=pendingApproval,proto3" json:"pending_approval,omitempty"`
 	LastSeq         int64        `protobuf:"varint,5,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`      // event-log cursor
 	ParentUid       string       `protobuf:"bytes,6,opt,name=parent_uid,json=parentUid,proto3" json:"parent_uid,omitempty"` // fork lineage
@@ -792,8 +795,15 @@ type ExecRequest struct {
 	// or model still calls CreateSession; this exists so the common case is one call rather than
 	// three (create, read the cursor, exec).
 	Session string `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
-	// Input messages for this turn. Empty = resume/re-drive the last non-terminal
-	// execution with no new input (recovery after a crash/interruption).
+	// Input messages for a new turn. While this session owns an unreceipted approval call,
+	// new inputs are FAILED_PRECONDITION, including after a decision but before its receipt.
+	// For an existing current approval-bearing, non-terminal execution, empty inputs recover
+	// that recorded invocation via Resume, without a new EXECUTION_START. Recorded inputs,
+	// config, harness, version and resume cursor win over this request's invocation overrides.
+	// Pending requests return a paused Session without runtime IO; a call-only crash cut repairs
+	// the request first. expected_last_seq is checked under the session guard before runtime IO
+	// or repair, and deadline_unix bounds recovery. Other inputless Exec calls retain their
+	// ordinary new-turn behavior; use Resume for general interrupted-turn recovery.
 	Inputs []*Message `protobuf:"bytes,2,rep,name=inputs,proto3" json:"inputs,omitempty"`
 	// Cursor handed to the harness as Start.resume_from_seq. The host does not interpret it; only a
 	// harness knows what resuming from a sequence means for its own state. To re-read committed
@@ -802,7 +812,9 @@ type ExecRequest struct {
 	ResumeFromSeq int64 `protobuf:"varint,3,opt,name=resume_from_seq,json=resumeFromSeq,proto3" json:"resume_from_seq,omitempty"`
 	// Empty = the session's harness. A different harness runs this turn only, unless either one is
 	// a registered harness (see HarnessRegistry): then the session is pinned and the call is
-	// FAILED_PRECONDITION.
+	// FAILED_PRECONDITION. A stored REQUIRES_MEMORY_SNAPSHOT harness also refuses a
+	// STATELESS_REPLAY override before any fence or journal write: parking only the override
+	// cannot checkpoint the stored harness's live memory.
 	Harness string `protobuf:"bytes,4,opt,name=harness,proto3" json:"harness,omitempty"`
 	// Opaque per-execution config, passed through to Start.config. Non-empty bytes are journaled
 	// verbatim in EXECUTION_START before the harness runs, and restored for controller replay/resume.
@@ -1515,9 +1527,12 @@ type ExecUpdate_Delta struct {
 
 type ExecUpdate_Session struct {
 	// The session this execution runs against, sent as the FIRST frame of every Exec stream. It is
-	// how a caller learns the uid of a session Exec created for it, and it reports the cursor the
-	// turn started from, so a caller that wants the strict CAS on its next turn has the value
-	// without a separate GetSession.
+	// how a caller learns the uid of a session Exec created for it, and it reports the cursor
+	// the turn started from. A successful approval park or approval-bearing no-input recovery
+	// also sends a FINAL current Session before OK stream closure. That frame carries the latest
+	// cursor and pending approval, when present; use the latest Session and committed record
+	// cursors for the next CAS, not the initial frame alone. A pause is not a terminal END/ERROR,
+	// and a pending query alone is not proof that compute has been made cold.
 	//
 	// It is sent before the turn runs, so a failed execution still tells the caller which session
 	// it was against. A caller therefore sees this frame BEFORE any error, and must read the

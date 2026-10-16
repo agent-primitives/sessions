@@ -120,9 +120,9 @@ type Placer struct {
 type sessionSet struct {
 	mu   sync.Mutex
 	live map[string]map[*liveHarness]struct{} // session UID -> open harness connections
-	// checkpoints holds the session UIDs a stateful fork or a Suspend is checkpointing. While a
-	// session is in it, no harness connection can be opened for the session and no other fork or
-	// Suspend can checkpoint it.
+	// checkpoints holds session UIDs fenced by a stateful Fork, Suspend or approval decision.
+	// While a session is in it, no harness connection can be opened for the session and no
+	// other operation can acquire its checkpoint mark.
 	checkpoints map[string]struct{}
 	// shared is set when a Registry owns the set, so a Placer cannot join two registries' sets.
 	shared bool
@@ -171,7 +171,14 @@ func WithHarness(name string) ExecOption {
 type ResumeOption func(*resumeConfig)
 
 type resumeConfig struct {
-	harness string
+	harness  string
+	observer controller.Observer
+}
+
+// WithResumeObserver reports newly committed recovery records and streaming chunks, including
+// SUSPEND on a second approval park. It does not re-emit previously recorded effects.
+func WithResumeObserver(o controller.Observer) ResumeOption {
+	return func(c *resumeConfig) { c.observer = o }
 }
 
 // WithResumeHarness identifies the registry entry selected for this recovery attempt. The
@@ -268,15 +275,21 @@ func (p *Placer) trySessionLock(sessionUID string) (func(), error) {
 	return p.guard.tryLock(sessionUID)
 }
 
+// RuntimeCapabilities reports the backend's compute capabilities without contacting the harness.
+func (p *Placer) RuntimeCapabilities() api.RuntimeCapabilities {
+	return p.backend.Capabilities()
+}
+
 // Describe asks the placed harness for its descriptor, the same call Exec gates placement on. It
 // provisions nothing.
 func (p *Placer) Describe(ctx context.Context) (api.Descriptor, error) {
 	return p.backend.Describe(ctx)
 }
 
-// Exec places one turn: Create the incarnation, mint the fence from the log and stamp it on the
-// incarnation, bind a controller to that same token, and drive the (placed) harness. The log stays the
-// single fence authority; the returned incarnation carries the fence for Suspend/Resume (step 5).
+// Exec rejects an owned unreceipted approval before runtime admission; otherwise it creates an
+// incarnation and drives the harness under a log-minted fence stamped on the returned incarnation.
+// A new approval gate closes the dial, snapshots and commits SUSPEND under that same fence before
+// returning *api.ApprovalParkedError. Handoff failures return the actual operational cause.
 func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string, inputs []api.Message, expectedLastSeq int64, opts ...ExecOption) (inc api.Incarnation, err error) {
 	var cfg execConfig
 	for _, o := range opts {
@@ -303,6 +316,13 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}
 	defer release()
 
+	state, err := controller.InspectApproval(log, 0)
+	if err != nil {
+		return api.Incarnation{}, err
+	}
+	if state != nil && !state.Inherited && state.Receipt == nil {
+		return api.Incarnation{}, controller.ErrApprovalBlocked
+	}
 	if _, err := p.admit(ctx, sessionUID); err != nil {
 		return api.Incarnation{}, err
 	}
@@ -326,14 +346,24 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		"runtime", inc.Runtime,
 		"transport", addressTransport(inc.Address),
 	)
+	operationCtx := ctx
 	ctx, live, err := p.openHarness(ctx, sessionUID, inc)
 	if err != nil {
 		dialFinished(err, "error_kind", "harness_dial_failed")
 		return inc, err
 	}
 	dialFinished(nil)
-	defer p.releaseHarness(ctx, sessionUID, inc.ID, live)
+	defer func() {
+		// Ordinary cleanup logs close failures without replacing the turn outcome.
+		_ = p.releaseHarness(ctx, sessionUID, inc.ID, live)
+	}()
 	har := live.harness
+	closeInvocation := func() error {
+		if err := live.checkSuperseded(ctx); err != nil {
+			return err
+		}
+		return p.releaseHarness(ctx, sessionUID, inc.ID, live)
+	}
 	if err := p.recheck(ctx, sessionUID, har); err != nil {
 		return inc, err
 	}
@@ -360,6 +390,10 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		return inc, err
 	}
 	if err := c.Exec(ctx, har, inputs, expectedLastSeq); err != nil {
+		var park *api.ApprovalParkedError
+		if errors.As(err, &park) && api.IsParkUnwind(err, park.Ref) {
+			return inc, p.handoffPark(operationCtx, log, sessionUID, fence, park, closeInvocation, cfg.observer)
+		}
 		return inc, turnError(ctx, err)
 	}
 	return inc, nil
@@ -545,12 +579,9 @@ func tcpDial(address string, opts []grpc.DialOption) (api.Harness, func() error,
 	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
 }
 
-// ErrCheckpointing is returned when a turn cannot proceed because its session is being
-// checkpointed as the parent of a stateful Fork, which lasts until every child is cloned from the
-// checkpoint: either the turn tried to open a harness connection meanwhile, or the checkpoint ended
-// the connection the turn was using. A stateful Fork or a Suspend that finds the session already
-// being checkpointed by another one returns it too. It is retryable once the checkpoint returns;
-// session.Service maps it to codes.Aborted.
+// ErrCheckpointing is returned when another operation holds the session's checkpoint mark,
+// or a checkpoint ended the harness connection a turn was using. It is retryable once that
+// operation returns; session.Service maps it to codes.Aborted.
 var ErrCheckpointing = errors.New("placement: session is being checkpointed")
 
 // errSuperseded is the cancellation cause of a turn whose harness connection a checkpoint ended. The
@@ -652,7 +683,7 @@ func (p *Placer) openHarness(ctx context.Context, sessionUID string, inc api.Inc
 }
 
 // releaseHarness deregisters and closes a turn's harness connection when the turn returns.
-func (p *Placer) releaseHarness(ctx context.Context, sessionUID, incarnationID string, l *liveHarness) {
+func (p *Placer) releaseHarness(ctx context.Context, sessionUID, incarnationID string, l *liveHarness) error {
 	p.sessions.mu.Lock()
 	delete(p.sessions.live[sessionUID], l)
 	if len(p.sessions.live[sessionUID]) == 0 {
@@ -666,6 +697,7 @@ func (p *Placer) releaseHarness(ctx context.Context, sessionUID, incarnationID s
 	)
 	err := l.end(context.Canceled)
 	finish(err, "error_kind", closeErrorKind(err))
+	return err
 }
 
 // refuseDuringCheckpoint fails with ErrCheckpointing while a checkpoint of the session is in
@@ -686,16 +718,15 @@ func (p *Placer) refuseDuringCheckpoint(sessionUID string) error {
 // mark (checkSuperseded) and writes nothing. A connection stays marked even if the checkpoint
 // aborts. Every successful call must be paired with endCheckpoint.
 //
-// Checkpoints do not nest: while another fork holds the mark, from its checkpoint until its last
-// child is cloned, or a Suspend holds it, beginCheckpoint fails with ErrCheckpointing and changes
-// nothing. A second fork would otherwise mint a fence that fails the first one's SUSPEND record
-// after the parent is already cold, or checkpoint the parent again and replace the snapshot the
-// first one's remaining children clone from; a fork beside a Suspend would fail the Suspend's
-// record the same way.
+// Checkpoints do not nest: while another operation holds the mark, beginCheckpoint fails with
+// ErrCheckpointing and changes nothing. A second fork would otherwise mint a fence that fails the
+// first one's SUSPEND record after the parent is already cold, or checkpoint the parent again and
+// replace the snapshot the first one's remaining children clone from; a fork beside a Suspend
+// would fail the Suspend's record the same way.
 func (p *Placer) beginCheckpoint(sessionUID string) ([]*liveHarness, error) {
 	p.sessions.mu.Lock()
 	defer p.sessions.mu.Unlock()
-	if err := p.setCheckpointLocked(sessionUID); err != nil {
+	if err := p.sessions.setCheckpointLocked(sessionUID); err != nil {
 		return nil, err
 	}
 	open := make([]*liveHarness, 0, len(p.sessions.live[sessionUID]))
@@ -706,34 +737,34 @@ func (p *Placer) beginCheckpoint(sessionUID string) ([]*liveHarness, error) {
 	return open, nil
 }
 
-// markCheckpoint sets the session's checkpoint mark for a Suspend. Unlike beginCheckpoint it ends
-// no harness connection: Suspend holds the session guard, and every connection is opened by an Exec
-// or Resume under that guard, so none is open. It fails with ErrCheckpointing, changing nothing,
-// while a fork holds the mark. Every successful call must be paired with endCheckpoint.
-func (p *Placer) markCheckpoint(sessionUID string) error {
-	p.sessions.mu.Lock()
-	defer p.sessions.mu.Unlock()
-	return p.setCheckpointLocked(sessionUID)
+// markCheckpoint excludes a stateful Fork while a guarded Suspend or approval decision runs.
+// The caller holds the session guard; marking does not close harness connections. It fails with
+// ErrCheckpointing, changing nothing, while another operation holds the mark.
+// Pair success with endCheckpoint.
+func (s *sessionSet) markCheckpoint(sessionUID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.setCheckpointLocked(sessionUID)
 }
 
-// setCheckpointLocked sets the session's checkpoint mark, or fails with ErrCheckpointing if a fork
-// or Suspend already holds it. The caller holds sessionSet.mu.
-func (p *Placer) setCheckpointLocked(sessionUID string) error {
-	if _, ok := p.sessions.checkpoints[sessionUID]; ok {
-		return fmt.Errorf("%w: session %q is already being checkpointed by a fork or Suspend", ErrCheckpointing, sessionUID)
+// setCheckpointLocked sets the shared mark, or fails if another operation holds it.
+// The caller holds sessionSet.mu.
+func (s *sessionSet) setCheckpointLocked(sessionUID string) error {
+	if _, ok := s.checkpoints[sessionUID]; ok {
+		return fmt.Errorf("%w: session %q checkpoint mark is held by another operation", ErrCheckpointing, sessionUID)
 	}
-	if p.sessions.checkpoints == nil {
-		p.sessions.checkpoints = map[string]struct{}{}
+	if s.checkpoints == nil {
+		s.checkpoints = map[string]struct{}{}
 	}
-	p.sessions.checkpoints[sessionUID] = struct{}{}
+	s.checkpoints[sessionUID] = struct{}{}
 	return nil
 }
 
 // endCheckpoint lifts the mark beginCheckpoint or markCheckpoint set.
-func (p *Placer) endCheckpoint(sessionUID string) {
-	p.sessions.mu.Lock()
-	defer p.sessions.mu.Unlock()
-	delete(p.sessions.checkpoints, sessionUID)
+func (s *sessionSet) endCheckpoint(sessionUID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.checkpoints, sessionUID)
 }
 
 // endHarnesses ends the harness connections beginCheckpoint returned, and must run before a stateful
@@ -818,29 +849,76 @@ func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	defer release()
 	// The guard is taken first and never waited on (tryLock), and the mark is set under
 	// sessionSet.mu, which is never held while taking the guard, so the two cannot deadlock.
-	if err := p.markCheckpoint(sessionUID); err != nil {
+	if err := p.sessions.markCheckpoint(sessionUID); err != nil {
 		return api.SnapshotRef{}, err
 	}
-	defer p.endCheckpoint(sessionUID)
+	defer p.sessions.endCheckpoint(sessionUID)
 
+	return p.suspend(ctx, log, sessionUID, nil)
+}
+
+// suspend runs with the shared session guard already held. A nil cursor preserves public
+// Suspend's fresh-fence behavior; automatic parks supply the invocation fence and captured head.
+type suspendCursor struct {
+	head, fence int64
+	observer    controller.Observer
+}
+
+func (p *Placer) suspend(ctx context.Context, log eventlog.Store, sessionUID string, cursor *suspendCursor) (ref api.SnapshotRef, err error) {
 	inc := api.Incarnation{ID: sessionUID}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
 	if err != nil {
 		return api.SnapshotRef{}, err
 	}
 	appendFinished := observability.StartDebug(ctx, p.logger, "placement", "append_suspend_event", "session_uid", sessionUID)
-	if err := appendLifecycle(log, api.Lifecycle{Kind: api.LifecycleSuspend, Snapshot: &ref}); err != nil {
-		appendFinished(err, "error_kind", placementErrorKind(err))
+	lc := api.Lifecycle{Kind: api.LifecycleSuspend, Snapshot: &ref}
+	if cursor == nil {
+		err = appendLifecycle(log, lc)
+	} else {
+		var record eventlog.Record
+		record, err = log.Append(cursor.head, cursor.fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &lc})
+		if err == nil && cursor.observer.OnRecord != nil {
+			cursor.observer.OnRecord(record)
+		}
+	}
+	appendFinished(err, "error_kind", placementErrorKind(err))
+	if err != nil {
 		return api.SnapshotRef{}, err
 	}
-	appendFinished(nil)
 	return ref, nil
 }
 
-// Resume recovers the recorded SnapshotRef, Restores an incarnation, mints a NEW fence (superseding
-// any zombie writer), binds a controller to it, re-drives any interrupted turn (replay for a
-// filesystem-only backend), and records a RESUME marker. A session with no prior SUSPEND (crash mid
-// turn) falls back to re-provisioning from the session handle.
+// handoffPark releases the invocation connection before compute, keeping the same guard and
+// fence through the captured-head SUSPEND append. Only a fully committed handoff returns park.
+func (p *Placer) handoffPark(ctx context.Context, log eventlog.Store, sessionUID string, fence int64, park *api.ApprovalParkedError, closeInvocation func() error, observer controller.Observer) error {
+	if err := p.sessions.markCheckpoint(sessionUID); err != nil {
+		return err
+	}
+	defer p.sessions.endCheckpoint(sessionUID)
+	state, err := controller.InspectApproval(log, 0)
+	if err != nil {
+		return err
+	}
+	if state == nil || state.Inherited || state.Receipt != nil || state.Request == nil || state.Decision != nil ||
+		park.Ref != (api.ApprovalRef{ExecutionID: state.ExecutionID, ToolCallID: state.Call.ID, RequestSeq: state.Request.Seq}) {
+		return fmt.Errorf("%w: park does not match the recorded owned request", controller.ErrReplayDiverged)
+	}
+	if err := closeInvocation(); err != nil {
+		return err
+	}
+	if _, err := p.suspend(ctx, log, sessionUID, &suspendCursor{head: state.Head, fence: fence, observer: observer}); err != nil {
+		return err
+	}
+	return park
+}
+
+// Resume returns *api.ApprovalParkedError for an owned pending request without runtime IO or a
+// new fence. A call-only cut mints a fence and repairs one request at the captured head, also
+// without runtime IO. Neither park proves cold compute: only a committed SUSPEND records that.
+// Otherwise Resume restores the recorded SnapshotRef (or the session handle when no owned
+// SUSPEND exists), mints a new fence, re-drives the turn and records RESUME on ordinary success.
+// A new gate instead closes the dial, snapshots and commits SUSPEND under that recovery fence,
+// returning a typed park without RESUME. Repair/handoff failures return their actual cause.
 func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID string, opts ...ResumeOption) error {
 	var cfg resumeConfig
 	for _, o := range opts {
@@ -854,6 +932,35 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	return p.resume(ctx, log, sessionUID, cfg)
 }
 
+// resumeApproval answers an unresolved gate without allocating an actor. Inspection/route checks
+// precede this helper under the shared guard; only a missing request needs a new writer fence.
+func (p *Placer) resumeApproval(log eventlog.Store, state *controller.ApprovalState, observer controller.Observer) (bool, error) {
+	if state == nil || state.Receipt != nil {
+		return false, nil
+	}
+	if state.Inherited {
+		return true, controller.ErrInheritedToolIntent
+	}
+	if state.Decision != nil {
+		return false, nil
+	}
+	if state.Request != nil {
+		return true, &api.ApprovalParkedError{Ref: api.ApprovalRef{ExecutionID: state.ExecutionID, ToolCallID: state.Call.ID, RequestSeq: state.Request.Seq}}
+	}
+	fence, err := log.NewFence()
+	if err != nil {
+		return true, err
+	}
+	record, err := log.Append(state.Head, fence, api.Event{ExecutionID: state.ExecutionID, Kind: api.EventApprovalRequest, Approval: &api.ApprovalRequest{ToolCallID: state.Call.ID}})
+	if err != nil {
+		return true, err
+	}
+	if observer.OnRecord != nil {
+		observer.OnRecord(record)
+	}
+	return true, &api.ApprovalParkedError{Ref: api.ApprovalRef{ExecutionID: state.ExecutionID, ToolCallID: state.Call.ID, RequestSeq: record.Seq}}
+}
+
 // resume runs the recovery transition with the session guard already held by Placer or Registry.
 func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID string, cfg resumeConfig) (err error) {
 	ctx = observability.EnsureRequestID(ctx)
@@ -863,6 +970,13 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		finish(err, "error_kind", placementErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
 
+	state, err := controller.InspectApproval(log, 0)
+	if err != nil {
+		return err
+	}
+	if handled, err := p.resumeApproval(log, state, cfg.observer); handled {
+		return err
+	}
 	// Gate before Restore, exactly as Exec does before Create: Resume re-drives an interrupted turn,
 	// so it must not reach a harness the backend cannot host.
 	if _, err := p.admit(ctx, sessionUID); err != nil {
@@ -888,14 +1002,24 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		"runtime", inc.Runtime,
 		"transport", addressTransport(inc.Address),
 	)
+	operationCtx := ctx
 	ctx, live, err := p.openHarness(ctx, sessionUID, inc)
 	if err != nil {
 		dialFinished(err, "error_kind", "harness_dial_failed")
 		return err
 	}
 	dialFinished(nil)
-	defer p.releaseHarness(ctx, sessionUID, inc.ID, live)
+	defer func() {
+		// Ordinary cleanup logs close failures without replacing the turn outcome.
+		_ = p.releaseHarness(ctx, sessionUID, inc.ID, live)
+	}()
 	har := live.harness
+	closeInvocation := func() error {
+		if err := live.checkSuperseded(ctx); err != nil {
+			return err
+		}
+		return p.releaseHarness(ctx, sessionUID, inc.ID, live)
+	}
 	if err := p.recheck(ctx, sessionUID, har); err != nil {
 		return err
 	}
@@ -911,12 +1035,16 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	if err := live.checkSuperseded(ctx); err != nil {
 		return err
 	}
-	copts := append(p.controllerOpts(fence, sessionUID, controller.Observer{}), controller.WithHarness(cfg.harness))
+	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer), controller.WithHarness(cfg.harness))
 	c, err := controller.New(log, p.model, copts...)
 	if err != nil {
 		return err
 	}
 	if _, err := c.Resume(ctx, har); err != nil {
+		var park *api.ApprovalParkedError
+		if errors.As(err, &park) && api.IsParkUnwind(err, park.Ref) {
+			return p.handoffPark(operationCtx, log, sessionUID, fence, park, closeInvocation, cfg.observer)
+		}
 		return turnError(ctx, err)
 	}
 	head, err := log.Head()
@@ -925,8 +1053,11 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	}
 	// RESUME marker under the incarnation's fence (controller.Resume used the same token).
 	appendFinished := observability.StartDebug(ctx, p.logger, "placement", "append_resume_event", "session_uid", sessionUID)
-	_, err = log.Append(head, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleResume}})
+	record, err := log.Append(head, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleResume}})
 	appendFinished(err, "error_kind", placementErrorKind(err))
+	if err == nil && cfg.observer.OnRecord != nil {
+		cfg.observer.OnRecord(record)
+	}
 	return err
 }
 
@@ -1110,7 +1241,7 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if err != nil {
 		return api.SnapshotRef{}, nil, err
 	}
-	release := sync.OnceFunc(func() { p.endCheckpoint(parentUID) })
+	release := sync.OnceFunc(func() { p.sessions.endCheckpoint(parentUID) })
 	// Lift the mark on every path but the one that hands release to the caller, a panic included:
 	// a recovered panic in the runtime's Snapshot must not leave the parent refused for good.
 	handedOff := false

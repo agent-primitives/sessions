@@ -115,6 +115,9 @@ func sessionProto(info sqlitelog.SessionInfo) (*v1.Session, error) {
 		ParentUid:    info.ParentUID,
 		ForkSeq:      info.ForkSeq,
 	}
+	if ref := info.PendingApproval; ref.RequestSeq > 0 {
+		out.PendingApproval = &v1.ApprovalRef{ExecutionId: ref.ExecutionID, ToolCallId: ref.ToolCallID, RequestSeq: ref.RequestSeq}
+	}
 	if err := applyMetadata(out, info); err != nil {
 		return nil, status.Errorf(codes.Internal, "session %q: %v", info.UID, err)
 	}
@@ -123,16 +126,15 @@ func sessionProto(info sqlitelog.SessionInfo) (*v1.Session, error) {
 
 // execStateOf reports the execution axis from the metadata row.
 //
-// It is a projection, with the same caveat as compute_state: it says what the log implies, not what
-// is happening right now. A session with no events has never run, so it is PENDING. Anything else
-// is reported COMPLETED, because Exec is synchronous and returns only after the turn reaches END.
-//
-// The case it cannot see is a turn interrupted mid-flight, which stays COMPLETED here until Resume
-// re-drives it. Distinguishing that needs the kind of the log's last event, and an event body is an
-// opaque blob no query can filter on, so answering it for a whole listing would mean decoding one
-// record per session. That is worth doing when something depends on the distinction; today nothing
-// does, and the recovery path keys off the log rather than off this field.
+// A session with no events is PENDING; otherwise this metadata-only fallback is COMPLETED.
+// A valid owned unresolved host approval request reports AWAITING from the same row snapshot.
+// This helper is not a general journal reducer: ordinary/legacy interrupted turns, and decided
+// approval calls without receipts, retain the fallback. Recovery and admission therefore key off
+// the journal, not this enum; COMPLETED here is not proof of a receipt or a terminal END.
 func execStateOf(info sqlitelog.SessionInfo) v1.ExecState {
+	if info.PendingApproval.RequestSeq > 0 {
+		return v1.ExecState_EXEC_AWAITING
+	}
 	if info.LastSeq == 0 {
 		return v1.ExecState_EXEC_PENDING
 	}
@@ -275,8 +277,8 @@ func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest)
 // FailedPrecondition when either one is registered: an override onto a registered harness would
 // let any session run turns on it, retired or not, and a session created on a registration keeps
 // its turns on that registration. Between harnesses that are not registered, the documented
-// per-turn override is unchanged.
-func (s *Service) placerFor(uid, override string) (*placement.Placer, string, error) {
+// per-turn override is unchanged except that a memory-tier session cannot use a stateless override.
+func (s *Service) placerFor(ctx context.Context, uid, override string) (*placement.Placer, string, error) {
 	if uid == "" {
 		return nil, "", status.Error(codes.InvalidArgument, "session is required")
 	}
@@ -330,6 +332,9 @@ func (s *Service) placerFor(uid, override string) (*placement.Placer, string, er
 		if err := s.checkStatic(override); err != nil {
 			return nil, "", err
 		}
+		if err := s.checkMemoryOverride(ctx, uid, harness, override); err != nil {
+			return nil, "", err
+		}
 		harness = override
 	}
 	p, err := s.registry.For(harness)
@@ -337,6 +342,54 @@ func (s *Service) placerFor(uid, override string) (*placement.Placer, string, er
 		return nil, "", harnessError(err)
 	}
 	return p, harness, nil
+}
+
+// checkMemoryOverride refuses a stateless override of a memory-tier session before Exec or Resume
+// can change compute, mint a fence or write records. Parking only the override would leave the
+// stored harness's memory live while SUSPEND reports the whole session cold and routes later
+// Suspend calls away.
+func (s *Service) checkMemoryOverride(ctx context.Context, uid, stored, override string) error {
+	// Older rows may name an unserved built-in; retain their existing explicit-override path.
+	if !s.registry.Has(stored) {
+		return nil
+	}
+	p, err := s.registry.For(stored)
+	if err != nil {
+		return harnessError(err)
+	}
+	// A runtime that cannot hold memory cannot have placed a memory-tier harness. In
+	// particular, a down remote stored harness must not block a stateless override.
+	if !p.RuntimeCapabilities().MemorySnapshot {
+		return nil
+	}
+	describe := func(name string) (api.Descriptor, error) {
+		p, err := s.registry.For(name)
+		if err != nil {
+			return api.Descriptor{}, harnessError(err)
+		}
+		dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		desc, err := p.Describe(dctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return api.Descriptor{}, status.FromContextError(ctx.Err()).Err()
+			}
+			return api.Descriptor{}, status.Errorf(codes.Unavailable, "describe harness %q before override: %v", name, err)
+		}
+		return desc, nil
+	}
+	desc, err := describe(stored)
+	if err != nil || desc.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
+		return err
+	}
+	desc, err = describe(override)
+	if err != nil {
+		return err
+	}
+	if desc.Capabilities.Resumability == api.ResumabilityStatelessReplay {
+		return status.Errorf(codes.FailedPrecondition, "session %q requires memory snapshots on harness %q; a stateless turn cannot override it with %q", uid, stored, override)
+	}
+	return nil
 }
 
 // checkResumedHarness applies the routing rules to the harness Resume resolved for a session whose
@@ -458,11 +511,38 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		sess = created
 	}
 
-	placer, harness, err := s.placerFor(uid, req.GetHarness())
-	if err != nil {
-		return err
-	}
 	log := s.store.Session(uid)
+	var recoveryInfo *sqlitelog.SessionInfo
+	// Inspect before route selection: an owned unreceipted gate blocks new input even
+	// when the caller names an unavailable harness. Only approval-bearing no-input
+	// calls take this recovery path; ordinary inputless Exec keeps its existing behavior.
+	if uid != "" && sess == nil {
+		info, lookupErr := s.store.SessionInfo(uid)
+		if lookupErr == nil {
+			state, inspectErr := controller.InspectApproval(log, 0)
+			if inspectErr != nil {
+				return execError(inspectErr)
+			}
+			if state != nil && !state.Completed {
+				if len(req.GetInputs()) == 0 {
+					recoveryInfo = &info
+				} else if !state.Inherited && state.Receipt == nil {
+					return execError(controller.ErrApprovalBlocked)
+				}
+			}
+		} else if !errors.Is(lookupErr, sqlitelog.ErrSessionNotFound) {
+			return sessionStoreError(lookupErr, uid)
+		}
+	}
+	var placer *placement.Placer
+	var harness string
+	if recoveryInfo == nil {
+		var err error
+		placer, harness, err = s.placerFor(ctx, uid, req.GetHarness())
+		if err != nil {
+			return err
+		}
+	}
 	headBefore, err := log.Head()
 	if err != nil {
 		return status.Errorf(codes.Internal, "head: %v", err)
@@ -539,11 +619,55 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	if d := req.GetDeadlineUnix(); d > 0 {
 		execOpts = append(execOpts, placement.WithDeadline(time.Unix(d, 0)))
 	}
-	if _, err := placer.Exec(ctx, log, uid, inputs, expected, execOpts...); err != nil {
-		return execError(err)
+	var operationErr error
+	var refused error
+	if recoveryInfo != nil {
+		if d := req.GetDeadlineUnix(); d > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithDeadline(ctx, time.Unix(d, 0))
+			defer cancel()
+		}
+		stored := recoveryInfo.Harness
+		if stored == "" {
+			stored = s.registry.Default()
+		}
+		check := func(name string) error {
+			if ctx.Err() != nil {
+				refused = status.FromContextError(ctx.Err()).Err()
+			} else if req.ExpectedLastSeq != nil {
+				head, err := log.Head()
+				if err != nil {
+					refused = status.Errorf(codes.Internal, "head: %v", err)
+				} else if head != req.GetExpectedLastSeq() {
+					refused = status.Error(codes.Aborted, eventlog.ErrConflict.Error())
+				}
+			}
+			if refused == nil {
+				refused = s.checkResumedHarness(uid, stored, name)
+			}
+			if refused == nil && name != stored {
+				refused = s.checkMemoryOverride(ctx, uid, stored, name)
+			}
+			return refused
+		}
+		operationErr = s.registry.Resume(ctx, log, uid, recoveryInfo.Harness,
+			placement.WithResolvedHarnessCheck(check), placement.WithRegistryResumeObserver(observer))
+	} else {
+		_, operationErr = placer.Exec(ctx, log, uid, inputs, expected, execOpts...)
 	}
 	if sendErr != nil {
 		return sendErr
+	}
+	var park *api.ApprovalParkedError
+	parked := errors.As(operationErr, &park) && api.IsParkUnwind(operationErr, park.Ref)
+	if operationErr != nil && !parked {
+		if refused != nil && operationErr == refused {
+			return refused
+		}
+		if recoveryInfo != nil {
+			return resumeError(operationErr)
+		}
+		return execError(operationErr)
 	}
 	// A turn that committed records the observer never saw would leave the caller with a partial
 	// view, so the log stays the authority on what the stream owed.
@@ -558,6 +682,17 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 			}
 			recordsSent++
 		}
+	}
+	if recoveryInfo != nil || parked {
+		info, err := s.store.SessionInfo(uid)
+		if err != nil {
+			return sessionStoreError(err, uid)
+		}
+		current, err := sessionProto(info)
+		if err != nil {
+			return err
+		}
+		return stream.Send(&v1.ExecUpdate{Update: &v1.ExecUpdate_Session{Session: current}})
 	}
 	return nil
 }
@@ -620,7 +755,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		return nil, status.Error(codes.InvalidArgument, "ForkRequest.identity is unsupported: per-child principals are not enforced")
 	}
 
-	placer, _, err := s.placerFor(req.GetSession(), "")
+	placer, _, err := s.placerFor(ctx, req.GetSession(), "")
 	if err != nil {
 		return nil, err
 	}
@@ -738,24 +873,35 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 	finish := observability.Start(ctx, s.logger, "session", "suspend", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 
-	placer, _, err := s.placerFor(req.GetSession(), "")
-	if err != nil {
-		return nil, err
+	uid := req.GetSession()
+	if uid == "" {
+		return nil, status.Error(codes.InvalidArgument, "session is required")
 	}
-	log := s.store.Session(req.GetSession())
-	if _, err := placer.Suspend(ctx, log, req.GetSession()); err != nil {
-		// A running turn, or a stateful Fork checkpointing the session, refuses the Suspend before
-		// it touches compute or the journal; retry once that returns.
-		if errors.Is(err, placement.ErrSessionBusy) || errors.Is(err, placement.ErrCheckpointing) {
-			return nil, status.Error(codes.Aborted, err.Error())
+	info, err := s.store.SessionInfo(uid)
+	if err != nil {
+		return nil, sessionStoreError(err, uid)
+	}
+	stored := info.Harness
+	if stored == "" {
+		stored = s.registry.Default()
+	}
+	var refused error
+	check := func(name string) error {
+		refused = s.checkResumedHarness(uid, stored, name)
+		return refused
+	}
+	log := s.store.Session(uid)
+	if _, err := s.registry.Suspend(ctx, log, uid, info.Harness, placement.WithResolvedHarnessCheck(check)); err != nil {
+		if refused != nil && err == refused {
+			return nil, refused
 		}
-		return nil, status.Errorf(codes.Internal, "suspend: %v", err)
+		return nil, suspendError(err)
 	}
 	// The SUSPEND append already moved the stored compute_state projection, so re-reading is
 	// what keeps the response and a subsequent ListSessions from disagreeing.
-	info, err := s.store.SessionInfo(req.GetSession())
+	info, err = s.store.SessionInfo(uid)
 	if err != nil {
-		return nil, sessionStoreError(err, req.GetSession())
+		return nil, sessionStoreError(err, uid)
 	}
 	return sessionProto(info)
 }
@@ -783,13 +929,18 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	}
 	// The registry resolves the pending turn's recorded harness, which can differ from the
 	// session's. Whichever name it picked gets the static-name collision rule, and a name that
-	// differs from the session's gets the pin rule Exec applies to an override.
+	// differs from the session's gets the pin and memory-tier rules Exec applies to an override.
 	var refused error
 	check := func(name string) error {
 		refused = s.checkResumedHarness(uid, stored, name)
+		if refused == nil && name != stored {
+			refused = s.checkMemoryOverride(ctx, uid, stored, name)
+		}
 		return refused
 	}
-	if err := s.registry.Resume(ctx, log, uid, info.Harness, placement.WithResolvedHarnessCheck(check)); err != nil {
+	err = s.registry.Resume(ctx, log, uid, info.Harness, placement.WithResolvedHarnessCheck(check))
+	var park *api.ApprovalParkedError
+	if err != nil && (!errors.As(err, &park) || !api.IsParkUnwind(err, park.Ref)) {
 		if refused != nil && err == refused {
 			return nil, refused
 		}
@@ -802,10 +953,25 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	return sessionProto(info)
 }
 
+func suspendError(err error) error {
+	switch {
+	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, placement.ErrCheckpointing), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
+		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, controller.ErrReplayDiverged):
+		return status.Errorf(codes.FailedPrecondition, "suspend: %v", err)
+	case errors.Is(err, placement.ErrUnknownHarness):
+		return harnessError(err)
+	default:
+		return status.Errorf(codes.Internal, "suspend: %v", err)
+	}
+}
+
 func resumeError(err error) error {
 	switch {
-	case errors.Is(err, placement.ErrSessionBusy):
+	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
 		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport):
+		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
 	case errors.Is(err, controller.ErrInheritedToolIntent):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v; fork at or after the TOOL_RESULT, or Exec a new turn", err)
 	case errors.Is(err, controller.ErrIncompleteInvocation):
@@ -842,7 +1008,7 @@ func execError(err error) error {
 	switch {
 	case errors.Is(err, placement.ErrSessionBusy):
 		return status.Error(codes.Aborted, err.Error())
-	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch):
+	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport), errors.Is(err, placement.ErrUnplaceable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return status.Error(codes.Unavailable, err.Error())

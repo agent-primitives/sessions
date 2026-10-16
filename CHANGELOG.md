@@ -71,17 +71,23 @@ provide.
 - Controller `InspectApproval` and decision-only `Approve` validate durable request/decision/receipt
   evidence, including exact retries and session-owned versus inherited effects. The internal
   approval engine supports captured-head repair and correlated denial/executor-error receipts.
-  Public live gate creation and recorded gated Resume/Replay remain unavailable before harness
-  or tool execution; the host does not yet support the park handoff.
+  Live `REQUIRES_APPROVAL` calls now park stateless executions at a durable host-owned request.
+  Placement closes the invocation, snapshots externally and commits SUSPEND before reporting
+  a successful pause; transport/close/snapshot/append failures remain errors with the request
+  recoverable.
 - `Harness.Connect` bridge supports the stateless approval exchange: full session/execution/call
   correlation, park acknowledgement plus actual stream closure, and decision-before-receipt order.
-  This supports host sinks implementing the protocol; a transport park alone is not a successful
-  public Session pause. `Sessions.Approve` remains `UNIMPLEMENTED`.
-- Approval wire types: correlated request references, decision-only `Approve` messages, explicit
-  receipt statuses/sequences and transport-only park acknowledgements. `Approve` remains
-  `UNIMPLEMENTED`; the reference controller still rejects `REQUIRES_APPROVAL`, and Session
-  replies leave `pending_approval` unset. Go types/converters carry the contract without enabling
-  a public approval workflow.
+  A transport park alone is not a successful public Session pause.
+- `Sessions.Approve` and `client.Client.Approve` commit only a decision; call Resume separately.
+  CLI `approve` and `deny` commit then Resume, explicitly preserving the committed decision on
+  recovery failure. Identity is recorded provenance, not authorization. Cancel/DeleteSession
+  remain `UNIMPLEMENTED`; unresolved requests and retained snapshots have no expiry.
+- Every Session reply and initial/final approval Exec frame uses captured metadata/cursor and
+  the storage projection. Pending owned requests report AWAITING with `pending_approval`;
+  clearing a reference after a decision does not prove a receipt or completion. SDK Exec retains
+  the latest Session and maximum committed cursor, including partial failure.
+- Approval wire types provide correlated request references, explicit receipt statuses/sequences
+  and transport-only park acknowledgements without changing old field numbers or default hashes.
 - SQLite `SessionInfo` captures the journal-derived `last_seq` and a reporting-only
   `PendingApproval` with metadata, using an incremental approval projection in the append
   transaction. Calls whose `TOOL_CALL` precedes the child's latest `FORK` are excluded, as are
@@ -125,6 +131,27 @@ provide.
 
 ### Compatibility
 
+- `Exec` refuses a stateless harness override when the session's served stored harness requires
+  memory snapshots (`FAILED_PRECONDITION`, before any fence or journal write). `Resume` and
+  no-input Exec recovery also refuse an older interrupted override before compute changes or
+  journal repair; an ordinary interrupted turn can be superseded by a new Exec on the stored
+  harness. Parking only the override cannot checkpoint the stored harness's live memory.
+  Stateless-to-stateless overrides are unchanged: a stored runtime without memory-snapshot
+  support is not contacted for this check, even when its remote harness is down.
+- `Approve` and a stateful `Fork` on the same session now exclude each other through the shared
+  checkpoint mark. A refused approval returns `ABORTED` without minting a fence or writing a
+  decision; retry after the fork finishes. This coordination covers one Registry/host only.
+- Ordinary `Resume` and `Suspend` now return `ABORTED`, rather than `INTERNAL`, for journal CAS
+  conflicts (`eventlog.ErrConflict`) and superseded fences (`eventlog.ErrFenced`).
+- Owned unreceipted approval calls block new input, including after a decision. No-input Exec
+  recovers the existing current approval invocation with its recorded config, inputs, route and
+  cursor, checking CAS/deadline under the guard before runtime IO or request repair. Unrelated
+  inputless Exec retains ordinary new-turn behavior. Pending Resume queries do not touch compute;
+  recorded-route Suspend can retry failed automatic handoff for owned approvals, with no
+  stored-default fallback. Inherited approvals suspend through the child's stored-default harness
+  so its own compute is checkpointed; Resume still refuses unresolved inherited tool intents.
+  Gated executor failures become handled EXECUTOR_ERROR receipts for model continuation; a
+  missing executor is a recoverable precondition, not a receipt. Ordinary tool errors are unchanged.
 - Controller Start now carries the session UID on live, replay and resumed invocations, and the
   bridge includes it on host control frames. Hosts serving tool results must echo the Start
   session as well as execution/call correlation; omitted or different tool-frame namespaces

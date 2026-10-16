@@ -109,11 +109,12 @@ func TestResumeOverlapPrecedesPendingInvocationResolution(t *testing.T) {
 				t.Fatal("Exec did not acquire the shared guard and reach Create")
 			}
 			before := routingRecords(t, log)
+			describes := recorded.describes.Load() // Exec preflights the stored harness before overriding
 			_, err = client.Resume(ctx, &v1.ResumeRequest{Session: uid})
 			if status.Code(err) != codes.Aborted {
 				t.Errorf("overlapping Resume inspected pending evidence before checking busy: %v, want Aborted", err)
 			}
-			if !reflect.DeepEqual(before, routingRecords(t, log)) || recorded.describes.Load() != 0 || recorded.restores.Load() != 0 {
+			if !reflect.DeepEqual(before, routingRecords(t, log)) || recorded.describes.Load() != describes || recorded.restores.Load() != 0 {
 				t.Error("overlapping Resume changed journal or attempted default placement")
 			}
 			unblock()

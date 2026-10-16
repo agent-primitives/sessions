@@ -10,6 +10,36 @@ import (
 	"github.com/aramase/agentsessions/api"
 )
 
+func TestIsParkUnwind(t *testing.T) {
+	ref := api.ApprovalRef{ExecutionID: "e1", ToolCallID: "c1", RequestSeq: 3}
+	park := &api.ApprovalParkedError{Ref: ref}
+	other := &api.ApprovalParkedError{Ref: api.ApprovalRef{ExecutionID: "e2", ToolCallID: "c1", RequestSeq: 3}}
+	failure := errors.New("run failed")
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"failure", failure, false},
+		{"bare sentinel", api.ErrApprovalParked, false},
+		{"nil park", (*api.ApprovalParkedError)(nil), false},
+		{"park", park, true},
+		{"wrong request", other, false},
+		{"wrapped", fmt.Errorf("run: %w", park), true},
+		{"joined matching", errors.Join(park, fmt.Errorf("run: %w", park)), true},
+		{"joined mismatch", errors.Join(park, other), false},
+		{"joined failure", errors.Join(park, failure), false},
+		{"nested failure", fmt.Errorf("run: %w", errors.Join(park, errors.Join(park, failure))), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := api.IsParkUnwind(tc.err, ref); got != tc.want {
+				t.Fatalf("IsParkUnwind=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestApprovalContract(t *testing.T) {
 	encode := func(v any) string {
 		t.Helper()

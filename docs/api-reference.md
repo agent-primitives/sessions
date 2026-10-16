@@ -747,10 +747,8 @@ implements it via a thin adapter. The host drives one execution per Connect stre
 the harness streams typed Events terminated by one EVENT_END, except a host-requested approval
 park, which ends with a correlated EVENT_PARKED acknowledgement and stream closure, not END.
 Beyond plain streaming, it adds tool-call / approval mediation, per-call usage, and capabilities.
-The approval/park protocol below supports STATELESS_REPLAY only. The reference bridge
-implements this exchange; public controller dispatch remains unavailable until host park
-handoff is supported. Unsupported peers and memory-snapshot harnesses must not execute
-REQUIRES_APPROVAL effects.
+The host and bridge implement durable approval/park for STATELESS_REPLAY only. Unsupported
+peers and memory-snapshot harnesses must not execute REQUIRES_APPROVAL effects.
 
 
 <a name="agentsessions-v1-Cancel"></a>
@@ -811,9 +809,9 @@ is_error=false) or EXECUTOR_ERROR with is_error=true. Conflicting decisions or r
 fail closed rather than being served to a different call. The harness may not manufacture
 durable APPROVAL_REQUEST/APPROVAL_RESULT events. The gate is not supported for memory-snapshot
 harnesses; reject it before executing an effect rather than pretending a park is a snapshot.
-Supporting implementations serialize sink operations; callbacks must not re-enter that sink.
-A recorded-prefix identity/correlation mismatch must not authorize a later model/tool effect
-or mark recovery complete, even if the harness catches the error.
+Host sink operations for an execution are serialized; callbacks must not re-enter that sink.
+Once a recorded-prefix identity/correlation mismatch occurs, the execution remains divergent:
+catching the error cannot authorize a later model/tool effect or mark recovery complete.
 
 
 | Field | Type | Label | Description |
@@ -961,7 +959,7 @@ this against a runtime&#39;s RuntimeCapabilities.
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
 | Describe | [DescribeRequest](#agentsessions-v1-DescribeRequest) | [HarnessDescriptor](#agentsessions-v1-HarnessDescriptor) | Describe returns the static contract; used to match the harness to a runtime. |
-| Connect | [ControllerFrame](#agentsessions-v1-ControllerFrame) stream | [Event](#agentsessions-v1-Event) stream | Connect drives ONE execution. The host sends Start (and optional control frames). Normally the harness streams Events terminated by exactly one EVENT_END. An unresolved approval instead follows park -&gt; correlated EVENT_PARKED -&gt; stream closure, with no EVENT_END. Durable requests/decisions belong to the host; this protocol applies to STATELESS_REPLAY only. The reference bridge supports this exchange. Public host approval dispatch remains unavailable; transport ACK and closure alone do not establish a successful host pause. |
+| Connect | [ControllerFrame](#agentsessions-v1-ControllerFrame) stream | [Event](#agentsessions-v1-Event) stream | Connect drives ONE execution. The host sends Start (and optional control frames). Normally the harness streams Events terminated by exactly one EVENT_END. An unresolved approval instead follows park -&gt; correlated EVENT_PARKED -&gt; stream closure, with no EVENT_END. Durable requests/decisions belong to the host; this protocol applies to STATELESS_REPLAY only. After ACK and actual stream closure, the host closes the invocation connection, performs an external snapshot and commits SUSPEND before reporting a successful live pause. Handoff failures retain the durable request and their actual error; they are not park success. |
 
  
 
@@ -1387,9 +1385,9 @@ reasoning) part. No seq; never hash-chained (§8, A2A TaskArtifactUpdateEvent).
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | session | [string](#string) |  | The session to run against. Empty creates one first, using the server defaults and the harness below, and returns it as the stream&#39;s first frame. A caller that wants to set a project, name, or model still calls CreateSession; this exists so the common case is one call rather than three (create, read the cursor, exec). |
-| inputs | [Message](#agentsessions-v1-Message) | repeated | Input messages for this turn. Empty = resume/re-drive the last non-terminal execution with no new input (recovery after a crash/interruption). |
+| inputs | [Message](#agentsessions-v1-Message) | repeated | Input messages for a new turn. While this session owns an unreceipted approval call, new inputs are FAILED_PRECONDITION, including after a decision but before its receipt. For an existing current approval-bearing, non-terminal execution, empty inputs recover that recorded invocation via Resume, without a new EXECUTION_START. Recorded inputs, config, harness, version and resume cursor win over this request&#39;s invocation overrides. Pending requests return a paused Session without runtime IO; a call-only crash cut repairs the request first. expected_last_seq is checked under the session guard before runtime IO or repair, and deadline_unix bounds recovery. Other inputless Exec calls retain their ordinary new-turn behavior; use Resume for general interrupted-turn recovery. |
 | resume_from_seq | [int64](#int64) |  | Cursor handed to the harness as Start.resume_from_seq. The host does not interpret it; only a harness knows what resuming from a sequence means for its own state. To re-read committed records after a disconnect, use Replay, which is the read path for exactly that. Non-zero cursors are journaled in EXECUTION_START and restored during controller replay/interrupted resume. |
-| harness | [string](#string) |  | Empty = the session&#39;s harness. A different harness runs this turn only, unless either one is a registered harness (see HarnessRegistry): then the session is pinned and the call is FAILED_PRECONDITION. |
+| harness | [string](#string) |  | Empty = the session&#39;s harness. A different harness runs this turn only, unless either one is a registered harness (see HarnessRegistry): then the session is pinned and the call is FAILED_PRECONDITION. A stored REQUIRES_MEMORY_SNAPSHOT harness also refuses a STATELESS_REPLAY override before any fence or journal write: parking only the override cannot checkpoint the stored harness&#39;s live memory. |
 | config | [bytes](#bytes) |  | Opaque per-execution config, passed through to Start.config. Non-empty bytes are journaled verbatim in EXECUTION_START before the harness runs, and restored for controller replay/resume. Do not put credentials here: config is durable journal content exposed by Replay. |
 | expected_last_seq | [int64](#int64) | optional | Single-writer CAS: the host commits this execution&#39;s first event only if the log head equals expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log. It is optional because the guarantee should be opt-in rather than the price of a simple call. Unset means &#34;append at whatever the head is now&#34;, which is what a caller with a single writer wants. Set means the strict check, and 0 is a real value there: it asserts the session has no events yet. That distinction is why this carries explicit presence instead of treating 0 as &#34;unset&#34; -- a caller could not otherwise say &#34;this must be the first turn&#34;. |
 | deadline_unix | [int64](#int64) |  | optional execution deadline (unix seconds); host cancels past it |
@@ -1410,7 +1408,7 @@ ephemeral streaming Delta (transport only — not logged, not hash-chained).
 | ----- | ---- | ----- | ----------- |
 | record | [LogRecord](#agentsessions-v1-LogRecord) |  |  |
 | delta | [Delta](#agentsessions-v1-Delta) |  |  |
-| session | [Session](#agentsessions-v1-Session) | | The session this execution runs against, sent as the FIRST frame of every Exec stream. It is how a caller learns the uid of a session Exec created for it, and it reports the cursor the turn started from, so a caller that wants the strict CAS on its next turn has the value without a separate GetSession. It is sent before the turn runs, so a failed execution still tells the caller which session it was against. A caller therefore sees this frame BEFORE any error, and must read the stream to completion rather than treating the first receive as the result. |
+| session | [Session](#agentsessions-v1-Session) | | The session this execution runs against, sent as the FIRST frame of every Exec stream. It is how a caller learns the uid of a session Exec created for it, and it reports the cursor the turn started from. A successful approval park or approval-bearing no-input recovery also sends a FINAL current Session before OK stream closure. That frame carries the latest cursor and pending approval, when present; use the latest Session and committed record cursors for the next CAS, not the initial frame alone. A pause is not a terminal END/ERROR, and a pending query alone is not proof that compute has been made cold. It is sent before the turn runs, so a failed execution still tells the caller which session it was against. A caller therefore sees this frame BEFORE any error, and must read the stream to completion rather than treating the first receive as the result. |
 
 
 
@@ -1580,9 +1578,9 @@ stable when a session is created mid-pagination; an offset would skip or repeat 
 | metadata | [ResourceMetadata](#agentsessions-v1-ResourceMetadata) |  |  |
 | harness | [string](#string) |  |  |
 | model | [string](#string) |  | model-agnostic id |
-| exec_state | [ExecState](#agentsessions-v1-ExecState) |  | execution/turn axis |
+| exec_state | [ExecState](#agentsessions-v1-ExecState) |  | Every Session reply uses the same append-transaction projection at last_seq: no events reports EXEC_PENDING; a valid owned unanswered host approval request in the latest first-seen execution reports EXEC_AWAITING; other histories retain EXEC_COMPLETED. COMPLETED is a compatibility fallback, not proof of END, a receipt, or admission. |
 | compute_state | [ComputeState](#agentsessions-v1-ComputeState) |  | incarnation axis |
-| pending_approval | [ApprovalRef](#agentsessions-v1-ApprovalRef) |  | Set by hosts supporting approval reporting for a valid unanswered host-owned APPROVAL_REQUEST in the latest first-seen execution at last_seq. Requests/decisions match execution_id, tool_call_id and request_seq. Calls whose TOOL_CALL precedes the child&#39;s latest FORK are excluded. Unset when no request is reportable, approval-bearing evidence is invalid, the projection lags last_seq, or the host does not support reporting. The reference Sessions service leaves it unset. |
+| pending_approval | [ApprovalRef](#agentsessions-v1-ApprovalRef) |  | Set for a valid unanswered host-owned APPROVAL_REQUEST in the latest first-seen execution at last_seq. Requests/decisions match execution_id, tool_call_id and request_seq. Calls whose TOOL_CALL precedes the child&#39;s latest FORK are excluded. Unset when no request is reportable, approval-bearing evidence is invalid, or the projection lags last_seq. |
 | last_seq | [int64](#int64) |  | event-log cursor |
 | parent_uid | [string](#string) |  | fork lineage |
 | fork_seq | [int64](#int64) |  |  |
@@ -1725,10 +1723,10 @@ flattened lifecycle enum, because collapsing them loses which axis actually move
 | DeleteSession | [DeleteSessionRequest](#agentsessions-v1-DeleteSessionRequest) | [Session](#agentsessions-v1-Session) | Not implemented: the server returns UNIMPLEMENTED. Declared so the delete path can land without a breaking change to the service. |
 | Exec | [ExecRequest](#agentsessions-v1-ExecRequest) | [ExecUpdate](#agentsessions-v1-ExecUpdate) stream | Exec runs one execution/turn. The live stream carries committed LogRecords plus ephemeral Deltas; Replay re-delivers committed records only (read-only). |
 | Replay | [ReplayRequest](#agentsessions-v1-ReplayRequest) | [LogRecord](#agentsessions-v1-LogRecord) stream |  |
-| Approve | [ApproveRequest](#agentsessions-v1-ApproveRequest) | [ApproveResponse](#agentsessions-v1-ApproveResponse) | Not implemented: the reference server returns UNIMPLEMENTED. Supporting hosts commit durable decisions only, never implicitly Resume or execute a tool; exact retries return the existing decision. Identity is provenance, not authorization. |
+| Approve | [ApproveRequest](#agentsessions-v1-ApproveRequest) | [ApproveResponse](#agentsessions-v1-ApproveResponse) | Implemented durable approval decisions for STATELESS_REPLAY executions. OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple, approved value, reason and identity returns the existing decision, even after resolution. A changed decision/reason/identity for that request is FAILED_PRECONDITION, never an overwrite. INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created for a non-stateless execution; Approve does not Describe or resolve a harness. ABORTED: local contention, append-CAS conflict or superseded fence; retry after reading the session. Identity is provenance only; this method provides no authorization, policy hook, expiry, implicit Resume, or Cancel behavior. |
 | Cancel | [CancelRequest](#agentsessions-v1-CancelRequest) | [Session](#agentsessions-v1-Session) | In-flight control: cancel the running execution. Not implemented: the server returns UNIMPLEMENTED. |
-| Suspend | [SuspendRequest](#agentsessions-v1-SuspendRequest) | [Session](#agentsessions-v1-Session) | Compute-layer durability. There is no warm Pause: no Runtime backend implements a node-local warm checkpoint, so a session goes straight from live to a cold snapshot. cold, free worker |
-| Resume | [ResumeRequest](#agentsessions-v1-ResumeRequest) | [Session](#agentsessions-v1-Session) |  |
+| Suspend | [SuspendRequest](#agentsessions-v1-SuspendRequest) | [Session](#agentsessions-v1-Session) | Compute-layer durability. There is no warm Pause: no Runtime backend implements a node-local warm checkpoint, so a session goes straight from live to a cold snapshot. Suspend routes an owned unreceipted approval to its recorded harness; inherited approvals and ordinary sessions use their stored default. An unserved recorded name is FAILED_PRECONDITION, with no fallback. cold, free worker |
+| Resume | [ResumeRequest](#agentsessions-v1-ResumeRequest) | [Session](#agentsessions-v1-Session) | A recorded STATELESS_REPLAY override of a stored REQUIRES_MEMORY_SNAPSHOT harness is FAILED_PRECONDITION before compute changes or journal repair, as for Exec admission. Otherwise an unresolved owned approval returns its current paused Session without runtime IO. A call-only cut repairs the request; neither outcome proves cold compute. After a decision, recovery uses the recorded invocation and SnapshotRef. It may park at another gate (without RESUME), or finish and commit RESUME. A missing executor is FAILED_PRECONDITION and leaves the decision recoverable. Approved executor failures are durable EXECUTOR_ERROR receipts, available to the harness for continuation, not transport failures. Snapshots and unresolved requests are retained indefinitely; there is no approval expiry or automatic decision. |
 | Fork | [ForkRequest](#agentsessions-v1-ForkRequest) | [ForkResponse](#agentsessions-v1-ForkResponse) | The differentiator: branch a session at a sequence into one or more children. Forking a REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event lands on its chain) because the children are cloned from that snapshot; resume brings it back. |
 
  

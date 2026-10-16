@@ -225,15 +225,17 @@ func TestRecoveryRejectsInvalidRecordedToolIntent(t *testing.T) {
 		{"empty key", func(c *api.ToolCall) { c.IdempotencyKey = "" }, controller.ErrMissingIdempotencyKey},
 		{"unmediated", func(c *api.ToolCall) { c.Mediation = api.MediationInHarnessReported }, controller.ErrUnmediatedToolCall},
 		{"unspecified", func(c *api.ToolCall) { c.Mediation = "" }, controller.ErrUnmediatedToolCall},
-		// Approval has no live sentinel on main. Invalid recorded approval evidence is classified
-		// as divergence, without inventing an error-string match or a new public approval API.
-		{"approval", func(c *api.ToolCall) { c.Mediation = api.MediationRequiresApproval }, controller.ErrApprovalUnavailable},
+		// A gated emission must not consume an ordinary recorded call with the same identity.
+		{"approval", func(c *api.ToolCall) { c.Mediation = api.MediationRequiresApproval }, controller.ErrReplayDiverged},
 	} {
 		for _, path := range []string{"replay", "resume result", "resume intent"} {
 			t.Run(path+"/"+change.name, func(t *testing.T) {
 				log := memStore(t)
 				call := recordedToolCall()
 				change.change(&call)
+				if change.name == "approval" {
+					call.Mediation = api.MediationControllerMediated
+				}
 				events := []api.Event{{Kind: api.EventToolCall, ToolCall: &call}}
 				if path != "resume intent" {
 					events = append(events, api.Event{Kind: api.EventToolResult, Result: &api.ToolResult{ID: call.ID}})
@@ -252,13 +254,16 @@ func TestRecoveryRejectsInvalidRecordedToolIntent(t *testing.T) {
 				if call.IdempotencyKey == "" {
 					call.IdempotencyKey = "key-1"
 				}
+				if change.name == "approval" {
+					call.Mediation = api.MediationRequiresApproval
+				}
 				h := &callHarness{calls: []api.ToolCall{call}}
 				if path == "replay" {
 					_, err = c.Replay(t.Context(), h)
 				} else {
 					_, err = c.Resume(t.Context(), h)
 				}
-				if (change.cause != controller.ErrApprovalUnavailable && !errors.Is(err, controller.ErrReplayDiverged)) || !errors.Is(err, change.cause) || attempts != 0 || len(h.results) != 0 {
+				if !errors.Is(err, controller.ErrReplayDiverged) || !errors.Is(err, change.cause) || attempts != 0 || len(h.results) != 0 {
 					t.Fatalf("want divergence and %v before results/effects: attempts=%d results=%d err=%v", change.cause, attempts, len(h.results), err)
 				}
 			})
@@ -953,7 +958,10 @@ type handlesMediationRejectionHarness struct {
 }
 
 func (*handlesMediationRejectionHarness) Describe(ctx context.Context) (api.Descriptor, error) {
-	return (&callHarness{}).Describe(ctx)
+	desc, err := (&callHarness{}).Describe(ctx)
+	// Unsupported approval is still a handleable pre-intent refusal.
+	desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
+	return desc, err
 }
 
 func (h *handlesMediationRejectionHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
@@ -1069,9 +1077,12 @@ func assertMediationRejection(t *testing.T, err error, mediation api.Mediation) 
 	if err == nil || errors.Is(err, controller.ErrReplayDiverged) {
 		t.Fatalf("want handleable mediation rejection, got %v", err)
 	}
-	// Approval has no live sentinel; preserve that generic rejection without matching its text.
-	if mediation != api.MediationRequiresApproval && !errors.Is(err, controller.ErrUnmediatedToolCall) {
-		t.Fatalf("want unmediated tool rejection, got %v", err)
+	want := controller.ErrUnmediatedToolCall
+	if mediation == api.MediationRequiresApproval {
+		want = controller.ErrApprovalUnavailable
+	}
+	if !errors.Is(err, want) {
+		t.Fatalf("want %v, got %v", want, err)
 	}
 }
 
@@ -1081,6 +1092,12 @@ type mediationFallbackHarness struct {
 	continuesAfterToolFailureHarness
 	rejected       api.ToolCall
 	rejectionError error
+}
+
+func (*mediationFallbackHarness) Describe(ctx context.Context) (api.Descriptor, error) {
+	desc, err := (&callHarness{}).Describe(ctx)
+	desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
+	return desc, err
 }
 
 func (h *mediationFallbackHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {

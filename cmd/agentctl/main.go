@@ -11,6 +11,8 @@
 //	agentctl fork    --session <uid> --at N    # branch into a child session
 //	agentctl suspend --session <uid>
 //	agentctl resume  --session <uid>
+//	agentctl approve <uid>                  # commit approval, then Resume
+//	agentctl deny    <uid> --reason "no"    # commit denial, then Resume
 //	agentctl harness register --server 127.0.0.1:8081 --name mine --spec spec.json
 //	agentctl harness get|list|retire --server 127.0.0.1:8081 [flags]
 package main
@@ -51,6 +53,8 @@ func main() {
 		"fork":    cmdFork,
 		"suspend": cmdSuspend,
 		"resume":  cmdResume,
+		"approve": cmdApprove,
+		"deny":    cmdDeny,
 		"version": cmdVersion,
 		"harness": cmdHarness,
 	}
@@ -66,7 +70,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: agentctl <create|list|get|exec|replay|fork|suspend|resume|harness|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: agentctl <create|list|get|exec|replay|fork|suspend|resume|approve|deny|harness|version> [flags]")
 }
 
 type config struct {

@@ -6,14 +6,15 @@ import (
 	"fmt"
 
 	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/eventlog"
 )
 
 // ErrApprovalBlocked rejects a new turn while this session owns an approval intent without receipt.
 var ErrApprovalBlocked = errors.New("controller: unresolved approval blocks a new execution")
 
-// ErrApprovalUnavailable rejects unsupported gates, including public dispatch until host handoff is available.
-var ErrApprovalUnavailable = errors.New("controller: approval execution is unavailable")
+// ErrApprovalUnavailable is returned by Exec, Resume and Replay for approval on a
+// non-STATELESS_REPLAY harness, or when replay/recovery reproduces a historical
+// pre-intent approval rejection without consuming a different call's evidence.
+var ErrApprovalUnavailable = errors.New("controller: approval requires STATELESS_REPLAY")
 
 // ErrInvalidApprovalCall rejects missing or reused gated call identities before intent is written.
 var ErrInvalidApprovalCall = errors.New("controller: invalid approval call identity")
@@ -174,24 +175,6 @@ func serveApproval(state *ApprovalState, receipt *api.ToolResult) (api.ToolResul
 	decision := *state.Decision.Event.ApprovalResult
 	result.Approval = &decision
 	return result, nil
-}
-
-// hasRecordedApproval is an admission guard, not a validator: even malformed gated
-// evidence cannot reach public recovery or request repair before host handoff exists.
-func hasRecordedApproval(records []eventlog.Record) bool {
-	for _, r := range records {
-		e := r.Event
-		// ID-less records remain subject to the legacy shape validator.
-		if e.ExecutionID == "" {
-			continue
-		}
-		if e.Kind == api.EventApprovalRequest || e.Kind == api.EventApprovalResult ||
-			e.ToolCall != nil && e.ToolCall.Mediation == api.MediationRequiresApproval ||
-			e.Result != nil && (e.Result.ApprovalRequestSeq != 0 || e.Result.ApprovalDecisionSeq != 0 || e.Result.Approval != nil || e.Result.Code == api.ToolResultCodeApprovalDenied) {
-			return true
-		}
-	}
-	return false
 }
 
 // pendingApproval repairs a call-only cut with the captured scan head and existing fence.

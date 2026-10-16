@@ -71,17 +71,50 @@ enumerate a tenant it did not ask for. Results are newest first and paged with a
 the last `(create time, uid)` seen, so a session created while a caller walks pages neither skips
 nor duplicates a row.
 
-Two fields are derived rather than stored:
+The cursor and lifecycle status are derived rather than caller-writable:
 
-- `last_seq` is `MAX(seq)` over the log, so the cursor a listing reports is always the log's own.
+- `last_seq` is derived from the indexed event head, including events appended by an older writer
+  that does not update the approval projection.
 - `compute_state` is a projection maintained in the same transaction that appends an event, since an
   event body is an opaque blob no query can filter on. It records **what the log implies about
-  compute**, not a live probe of the backend. Any ordinary event moves a session to `LIVE`, because
-  something had to be running to produce it; `SUSPEND` and `FORK` land it `COLD`, and `RESUME`
+  compute**, not a live probe of the backend. Execution activity implies `LIVE`; `SUSPEND` and
+  `FORK` land it `COLD`, and `RESUME`
   returns it to `LIVE`. A session that has been created but never run stays `NONE`, which is what
   makes it visible in a listing before it has any compute. `LIVE` goes stale if the process behind
   it later died. A backend that can enumerate its own incarnations is the thing that would make this
-  exact; reconciling against the runtime is not implemented.
+  exact; reconciling against the runtime is not implemented. Approval requests/decisions do not
+  themselves move compute: a request repair or pending query cannot prove that a snapshot committed.
+- `pending_approval` is an output-only tuple projected inside the append transaction. Metadata,
+  correlation and `last_seq` are read atomically; rendering does not decode the journal. Later
+  appends do not change an earlier captured response, including one with a zero cursor.
+
+### How exec_state is derived
+
+Every Session reply — Create, Get, List, Fork, Resume, Suspend, Approve and Exec frames — uses the
+same captured projection. No events reports `PENDING`. A valid owned unanswered host request in
+the latest execution (ordered by first-seen non-lifecycle identity) reports `AWAITING` and exposes
+`pending_approval`. Requests and decisions match execution ID, call ID and the request's journal
+sequence. Errors and ordinary lifecycle markers do not resolve it; a decision, END, or newer
+execution removes the pending reference.
+
+Calls whose TOOL_CALL precedes a child's latest FORK marker are inherited and excluded from
+reporting. A later call in an inherited execution belongs to the child and can report its own
+request. Controller admission, decisions and recovery validate the same per-call ownership rule
+independently of the reporting projection.
+
+Malformed approval-bearing evidence anywhere in the captured history suppresses actionable references,
+matching strict inspection. Malformed nongated histories do not. A projection lagging the journal
+head also suppresses references. If an already-open older writer skips projection updates, later
+appends do not restore reporting for that session by skipping the missing evidence. A v2→v3
+backfill isolates an
+undecodable session, preserving its cursor/metadata but permanently withholding references while
+healthy neighbors remain readable. SQL faults abort the migration. Queries are not integrity checks:
+raw journal reads/Verify and strict commands still detect undecodable evidence.
+
+Other histories retain the compatibility `COMPLETED` fallback, including ordinary/legacy interrupted
+turns and decided calls without receipts. That status does not prove completion or admission: an
+unreceipted owned call still blocks new input. Execution and compute axes are independent; recovery
+uses the journal rather than trusting an enum.
 
 A fork inherits the parent's `project`, `harness` and `model`, because those define the workload and
 a branch of a run is still that run. It does **not** inherit the parent's name. A name is a label the
@@ -117,40 +150,16 @@ cost, audit, and tool approval are first-class rather than parsed out of text af
 | `MODEL_CALL` | A call to a model was made (records the model, params, and an input hash for the replay check). |
 | `OUTPUT` | Assistant output (a delta or a full message). |
 | `TOOL_CALL` / `TOOL_RESULT` | A tool invocation and its outcome. Aligned with an MCP tool call. |
-| `APPROVAL_REQUEST` / `APPROVAL_RESULT` | A human or policy approval gate around a tool. |
+| `APPROVAL_REQUEST` / `APPROVAL_RESULT` | A host-owned request and explicit caller decision around a stateless tool call. |
 | `USAGE` | Per-call token and cost accounting. |
 | `LIFECYCLE` | A compute or session transition (`SUSPEND`, `RESUME`, `FORK`, `BASELINE`, `CANCEL`). |
 | `END` | The terminal state of one execution (`COMPLETED` / `FAILED` / `CANCELED`). |
 | `ERROR` | An error, mirroring a gRPC status. |
 
-The same `Event` type is shared by the session log and the harness stream. Durable harness events
-become journal records alongside host-owned invocation and lifecycle records. `PARKED` is a
-transport-only acknowledgement in the declared approval protocol, never a durable log outcome.
-The bridge supports the approval exchange for protocol-aware host sinks, but the reference
-controller rejects live gates before recording their intent and refuses recorded gated recovery.
-`Sessions.Approve` is declared but returns `UNIMPLEMENTED`; transport closure alone is not a
-successful public Session pause. Content is
+The same `Event` type is shared by the session log and the harness stream, so what a harness emits is
+exactly what gets journaled; the host additionally owns invocation and lifecycle records. Content is
 carried as A2A-style `Message`s (a role plus a list of `Part`s: text, file, structured data, an opaque
 reasoning block, a model's tool call, or a tool's result).
-
-### Captured storage approval projection
-
-SQLite schema 3 reduces approval evidence while appending each persisted protobuf event, in the
-same transaction as metadata and the projection cursor. `SessionInfo.LastSeq` is derived from the
-indexed event head. `sqlitelog.SessionInfo.PendingApproval` selects a valid unanswered request in
-the latest first-seen execution, matching execution ID, tool-call ID and request sequence. Calls
-whose TOOL_CALL precedes the child's latest FORK are excluded; a later call in an inherited
-execution belongs to the child. Invalid approval-bearing evidence suppresses references;
-malformed nongated history does not. A projection that lags the event head also suppresses the
-reference. If an already-open older writer skips projection updates, later appends do not restore
-reporting for that session by skipping the missing evidence.
-
-This store-level projection does not enable the public approval workflow: Session replies still
-leave `pending_approval` unset. Host-only approval requests/decisions do not make cold compute live.
-The captured values remain valid after later appends, but are not an integrity check for direct
-out-of-band database edits. The v2 backfill preserves journal bytes/hashes and isolates undecodable
-sessions without exposing actionable references; SQL errors roll back. Older binaries refuse to
-reopen schema 3, so keep a backup if downgrade may be needed.
 
 ### Durable execution invocation
 
@@ -180,9 +189,20 @@ fails closed. `Sessions.Replay` still streams stored records without running or 
 `Sessions.Resume` routes an interrupted turn to its recorded registry entry, including that entry's
 backend, model and tool executor. An unserved recorded name or mismatched version is
 `FAILED_PRECONDITION`, never fallback to another harness. Restore the recorded entry/version before
-retrying. A new Exec can supersede an interrupted turn and records its own invocation identity.
+retrying. A new Exec can supersede an ordinary interrupted turn and records its own invocation
+identity; an owned approval call blocks new inputs until its receipt commits.
 An override is still per-turn: session metadata is unchanged and a later Exec with no override uses
-the stored default. Completed Resume, Suspend and Fork retain their existing session-default routing.
+the stored default. A session whose served stored harness requires memory snapshots refuses a
+stateless override with `FAILED_PRECONDITION` before any fence or journal write: parking only the
+override would leave the stored harness's live memory uncheckpointed. Resume and no-input Exec
+recovery apply the same refusal to older interrupted overrides before compute changes or journal
+repair. An ordinary interrupted override can be superseded with a new Exec on the stored harness.
+A stored runtime without memory-snapshot support is not contacted for this check, so a down remote
+stored harness does not block a stateless override. Completed Resume, ordinary Suspend and Fork
+retain their existing session-default routing. An owned unreceipted approval's Suspend uses its recorded invocation route, including retry
+after a failed automatic snapshot or append. An inherited approval instead suspends through the
+child's stored default to checkpoint its own compute; Resume still refuses unresolved inherited
+tool intents.
 
 Older start markers without a name fall back to the session's stored harness; those without a
 version retain unversioned behavior. These rules apply independently if only one field is missing,

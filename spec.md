@@ -194,7 +194,7 @@ no flattened lifecycle enum.
 | `EVENT_EXECUTION_START` | `ExecutionStart` | host | First record of every new execution (§8.1). |
 | `EVENT_INPUT` | `Message` | host | One per input message. |
 | `EVENT_MODEL_CALL` | `ModelCall` | host | Recorded before the provider is invoked. Journal form keeps `model`, `params`, `input_hash`, `id`; the reference host records only `model`, `input_hash` and `id`, so `params` is covered by `input_hash` alone (`EXE-11`). |
-| `EVENT_OUTPUT` | `Message` | host | The finalized completion. Deltas are never journaled. |
+| `EVENT_OUTPUT` | `Message` | host | The finalized model completion (`EXE-12`), or text the harness emits through `Output`: one `assistant` text record per call (a wire harness's message keeps only its text parts). Streaming deltas (`ExecUpdate.delta`) are never journaled. |
 | `EVENT_TOOL_CALL` | `ToolCall` | host | Intent, recorded before a host-executed tool runs. |
 | `EVENT_TOOL_RESULT` | `ToolResult` | host | Receipt, or a harness-reported result. |
 | `EVENT_APPROVAL_REQUEST` | `ApprovalRequest` | host only | §10. |
@@ -220,7 +220,9 @@ no flattened lifecycle enum.
   (`eventlog.ErrConflict`) and commit nothing.
 - `LOG-8`: The head read, the sequence check, the fence check, the insert, and any projection
   updates (`compute_state`, approval projection) MUST be atomic. Two concurrent appends at the
-  same head MUST result in exactly one commit; the loser fails with the conflict error.
+  same head MUST NOT both commit; if either carries the current fence, exactly one commits. The
+  loser fails with the conflict error, or with the fenced error (`LOG-12`) when its fence is stale
+  and it reaches the store first.
 - `LOG-9`: When both the sequence and the fence are stale, the reference store reports the conflict
   error, because the sequence check runs first.
 - `LOG-10`: A host MUST map the conflict error to `ABORTED`.
@@ -383,8 +385,9 @@ wire as §12 frames: model call, output, tool call, reported tool result, and us
   host-internal: only the host that wrote it is required to reproduce it.
 - TODO(spike): `input_hash` is not language-neutral. Should it be redefined over canonical bytes
   (`CHAIN-1`) so a journal written by one host implementation can be replayed by another?
-- `EXE-12`: Streaming deltas MUST NOT be journaled. Exactly one `EVENT_OUTPUT` records the finalized
-  completion.
+- `EXE-12`: Model streaming deltas (`ExecUpdate.delta`) MUST NOT be journaled. Exactly one
+  `EVENT_OUTPUT` records each finalized completion. Text a harness passes to `Output` is not a
+  delta: each call is journaled as its own `EVENT_OUTPUT`.
 
 ### 8.4 Determinism invariants
 

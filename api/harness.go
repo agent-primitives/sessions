@@ -70,7 +70,7 @@ type Start struct {
 	// Model-only callers that do not use that envelope may leave it empty.
 	SessionUID    string    `json:",omitempty"`
 	Config        []byte    // opaque per-execution config; journaled verbatim and restored on replay/resume
-	History       []Event   // replay context; empty if the sandbox was memory-restored
+	History       []Event   // every event before this execution's start, also after a memory restore
 	Inputs        []Message // invocation inputs; originals are restored on controller replay/resume
 	Identity      IdentityContext
 	ResumeFromSeq int64 // opaque harness cursor, journaled with Config; distinct from the append CAS cursor

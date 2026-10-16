@@ -261,12 +261,47 @@ func (r *Registry) For(harness string) (*Placer, error) {
 	return p, nil
 }
 
+// WithSessionGuard runs operation synchronously under the same reclaimable guard as every
+// Placer in this Registry. Contention returns ErrSessionBusy without calling operation.
+// The callback must not call guarded Registry or Placer methods: the guard is not reentrant.
+func (r *Registry) WithSessionGuard(sessionUID string, operation func() error) error {
+	release, err := r.guard.tryDeleteLock(sessionUID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return operation()
+}
+
+// WithSessionRead protects a routing read phase from deletion without serializing it with
+// running turns or Fork rollback. Contention refuses the callback before it can wait for SQL.
+// The callback must not call WithSessionGuard: shared admission cannot upgrade to exclusive.
+func (r *Registry) WithSessionRead(sessionUID string, operation func() error) error {
+	release, err := r.guard.tryReadLock(sessionUID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return operation()
+}
+
 // RegistryResumeOption configures one Registry.Resume call.
 type RegistryResumeOption func(*registryResumeConfig)
 
 type registryResumeConfig struct {
-	check    func(name string) error
-	observer controller.Observer
+	check           func(name string) error
+	observer        controller.Observer
+	expectedLastSeq *int64
+}
+
+// WithResumeExpectedLastSeq makes Registry.Resume refuse a different journal head with
+// eventlog.ErrConflict, including both values. Checks run under the shared session guard before
+// inspection, after an early fence before Restore/repair, and after a restored turn's regular
+// writer fence before Run. A late refusal may already have restored compute. Either fence can
+// supersede another writer even on refusal; pending approval queries need no fence. Without this
+// option behavior is unchanged.
+func WithResumeExpectedLastSeq(seq int64) RegistryResumeOption {
+	return func(c *registryResumeConfig) { c.expectedLastSeq = &seq }
 }
 
 // WithRegistryResumeObserver reports newly committed recovery records and streaming chunks.
@@ -300,6 +335,12 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 	}
 	defer release()
 
+	if err := eventlog.CheckWritable(log); err != nil {
+		return err
+	}
+	if err := checkResumeHead(log, cfg.expectedLastSeq); err != nil {
+		return err
+	}
 	state, err := controller.InspectApproval(log, 0)
 	if err != nil {
 		return err
@@ -331,10 +372,25 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 			return err
 		}
 	}
-	if handled, err := p.resumeApproval(log, state, cfg.observer); handled {
+	resume := resumeConfig{harness: name, observer: cfg.observer, expectedLastSeq: cfg.expectedLastSeq}
+	if handled, err := p.resumeApproval(log, sessionUID, state, resume); handled {
 		return err
 	}
-	return p.resume(ctx, log, sessionUID, resumeConfig{harness: name, observer: cfg.observer})
+	return p.resume(ctx, log, sessionUID, resume)
+}
+
+func checkResumeHead(log eventlog.Store, expected *int64) error {
+	if expected == nil {
+		return nil
+	}
+	head, err := log.Head()
+	if err != nil {
+		return err
+	}
+	if head != *expected {
+		return fmt.Errorf("%w: expected_last_seq %d, head %d", eventlog.ErrConflict, *expected, head)
+	}
+	return nil
 }
 
 // Approve journals only a decision under the shared session guard. The decision does not need
@@ -366,6 +422,9 @@ func (r *Registry) Suspend(ctx context.Context, log eventlog.Store, sessionUID, 
 		return api.SnapshotRef{}, err
 	}
 	defer release()
+	if err := eventlog.CheckWritable(log); err != nil {
+		return api.SnapshotRef{}, err
+	}
 	state, err := controller.InspectApproval(log, 0)
 	if err != nil {
 		return api.SnapshotRef{}, err

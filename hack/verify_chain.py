@@ -68,6 +68,20 @@ TOOL_CALL_GOLDEN = (
     "e8911826d1370b0b96f3d3a1efaf63bc20f3808cdc189d937b5155ac3f8d509c",
 )
 
+# Session-scoped DELETE intent (canon.TestLifecycleDeleteCanonicalVector). Enum names and an
+# exact nanosecond timestamp must bind to the same hash without a Go serializer or execution ID.
+DELETE_GOLDEN = (
+    {"schema_version": 1, "ts": "2023-11-14T22:13:20.123456789Z",
+     "kind": "EVENT_LIFECYCLE", "lifecycle": {"kind": "LIFECYCLE_DELETE"}},
+    "bfbda987672b922ac194edadeec95fad94093740ab2a6bf9786f09c4a56d3d90",
+)
+
+# Independently specified canonical bytes for the DELETE record above, matching the Go literal.
+DELETE_CANONICAL = (
+    b'{"event":{"kind":"EVENT_LIFECYCLE","lifecycle":{"kind":"LIFECYCLE_DELETE"},'
+    b'"schema_version":1,"ts":"2023-11-14T22:13:20.123456789Z"},"prev_hash":"","seq":"1"}'
+)
+
 EVENT_TYPE = "agentsessions.v1.Event"
 
 
@@ -79,7 +93,12 @@ def _stdlib_jcs(value):
 
 
 def golden_check():
-    vectors = [(GOLDEN_EVENT, GOLDEN_EXPECTED), *START_GOLDENS, TOOL_CALL_GOLDEN]
+    delete_record = {"event": DELETE_GOLDEN[0], "prev_hash": "", "seq": "1"}
+    if _stdlib_jcs(delete_record) != DELETE_CANONICAL:
+        print("MISMATCH: DELETE canonical bytes differ from the independent literal", file=sys.stderr)
+        return 1
+    print("DELETE canonical:", DELETE_CANONICAL.decode("utf-8"))
+    vectors = [(GOLDEN_EVENT, GOLDEN_EXPECTED), *START_GOLDENS, TOOL_CALL_GOLDEN, DELETE_GOLDEN]
     for event, expected in vectors:
         record = {"event": event, "prev_hash": "", "seq": "1"}
         digest = hashlib.sha256(_stdlib_jcs(record)).hexdigest()

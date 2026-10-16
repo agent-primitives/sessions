@@ -2,7 +2,14 @@
 // Starlight hides the sidebar on splash pages, which left the landing page with no route into the
 // docs except the one hero button. This appends persistent nav links beside the site title so the
 // docs are reachable from anywhere, including the landing page and on mobile.
+//
+// Below 50rem Starlight moves the GitHub link and the theme switch into the sidebar's menu, and a
+// page with no sidebar (the landing page, the 404 page) has no menu, so they were simply gone. On
+// those pages a menu button of the same kind, in the same place, opens the site links, GitHub and
+// the theme switch. Pages with a sidebar keep Starlight's own menu.
 import Default from "@astrojs/starlight/components/SiteTitle.astro";
+import MobileMenuFooter from "@astrojs/starlight/components/MobileMenuFooter.astro";
+import { Icon } from "@astrojs/starlight/components";
 
 const links = [
   { label: "Quickstart", href: "/quickstart/" },
@@ -11,11 +18,12 @@ const links = [
 ];
 
 const path = Astro.url.pathname;
+const { hasSidebar } = Astro.locals.starlightRoute;
 ---
 
 <Default {...Astro.props}><slot /></Default>
 
-<nav class="topnav" aria-label="Main">
+<nav class="topnav" aria-label="Site">
   {
     links.map(({ label, href }) => (
       <a href={href} aria-current={path.startsWith(href) ? "page" : undefined}>
@@ -24,6 +32,45 @@ const path = Astro.url.pathname;
     ))
   }
 </nav>
+
+{
+  !hasSidebar && (
+    <>
+      <button popovertarget="site-menu" class="site-menu-button print:hidden">
+        <Icon name="bars" class="open-menu" />
+        <Icon name="close" class="close-menu" />
+        <span class="sr-only">Menu</span>
+      </button>
+      <div popover id="site-menu" class="site-menu">
+        <nav aria-label="Site menu">
+          <ul>
+            {links.map(({ label, href }) => (
+              <li>
+                <a href={href} aria-current={path.startsWith(href) ? "page" : undefined}>
+                  {label === "API" ? "API reference" : label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+        <MobileMenuFooter />
+      </div>
+    </>
+  )
+}
+
+<script>
+  // Rendered in every page's header, so this is where site-wide behaviour hooks in.
+  import "../scripts/scroll-regions";
+
+  // The menu is only reachable below 50rem; close it if the window grows past that while open.
+  const menu = document.getElementById("site-menu");
+  if (menu) {
+    window.matchMedia("(min-width: 50rem)").addEventListener("change", (e) => {
+      if (e.matches) menu.hidePopover();
+    });
+  }
+</script>
 
 <style>
   .topnav {
@@ -53,8 +100,7 @@ const path = Astro.url.pathname;
     border-bottom-color: var(--sl-color-accent);
   }
 
-  /* The header is tight on small screens; drop the separator and shrink before hiding anything,
-     because on a splash page these links are the only navigation available. */
+  /* The header is tight on small screens; drop the separator and shrink before hiding anything. */
   @media (max-width: 50rem) {
     .topnav {
       gap: 0.75rem;
@@ -67,9 +113,103 @@ const path = Astro.url.pathname;
     }
   }
 
+  /* Below this the links no longer fit beside the title and search. Doc pages still reach them
+     through Starlight's sidebar menu, and pages without a sidebar through the site menu. */
   @media (max-width: 30rem) {
     .topnav {
       display: none;
+    }
+  }
+
+  /* Mirrors Starlight's MobileMenuToggle: same size, shape, colours and position. */
+  .site-menu-button {
+    position: fixed;
+    top: calc((var(--sl-nav-height) - var(--sl-menu-button-size)) / 2);
+    inset-inline-end: var(--sl-nav-pad-x);
+    z-index: var(--sl-z-index-navbar);
+    display: flex;
+    border: 0;
+    border-radius: 50%;
+    width: var(--sl-menu-button-size);
+    height: var(--sl-menu-button-size);
+    padding: 0.5rem;
+    background-color: var(--sl-color-white);
+    color: var(--sl-color-black);
+    box-shadow: var(--sl-shadow-md);
+    cursor: pointer;
+  }
+
+  .site-menu-button:has(+ :popover-open) {
+    background-color: var(--sl-color-gray-2);
+    box-shadow: none;
+  }
+
+  .site-menu-button:has(+ :popover-open) .open-menu,
+  .site-menu-button:not(:has(+ :popover-open)) .close-menu {
+    display: none;
+  }
+
+  :global([data-theme="light"]) .site-menu-button {
+    background-color: var(--sl-color-black);
+    color: var(--sl-color-white);
+  }
+
+  :global([data-theme="light"]) .site-menu-button:has(+ :popover-open) {
+    background-color: var(--sl-color-gray-5);
+  }
+
+  /* Mirrors Starlight's sidebar pane on mobile: full width under the header. */
+  .site-menu {
+    border: unset;
+    padding: 1rem var(--sl-sidebar-pad-x) 0;
+    height: unset;
+    color: unset;
+    margin: 0;
+    position: fixed;
+    z-index: var(--sl-z-index-menu);
+    inset-block: var(--sl-nav-height) 0;
+    inset-inline: 0;
+    width: 100%;
+    overflow-y: auto;
+    background-color: var(--sl-color-black);
+  }
+
+  .site-menu ul {
+    list-style: none;
+    margin: 0 0 0.75rem;
+    padding: 0;
+  }
+
+  .site-menu a {
+    display: block;
+    padding: 0.4rem 0;
+    font-size: var(--sl-text-lg);
+    font-weight: 600;
+    color: var(--sl-color-white);
+    text-decoration: none;
+  }
+
+  .site-menu a[aria-current="page"] {
+    color: var(--sl-color-text-accent);
+  }
+
+  @media (min-width: 50rem) {
+    .site-menu-button,
+    .site-menu {
+      display: none;
+    }
+  }
+</style>
+
+<style is:global>
+  /* Reserve room for the menu button, as Starlight does for its own on pages with a sidebar. */
+  :root:not([data-has-sidebar]) header.header {
+    padding-inline-end: calc(var(--sl-nav-gap) + var(--sl-nav-pad-x) + var(--sl-menu-button-size));
+  }
+
+  @media (min-width: 50rem) {
+    :root:not([data-has-sidebar]) header.header {
+      padding-inline-end: var(--sl-nav-pad-x);
     }
   }
 </style>

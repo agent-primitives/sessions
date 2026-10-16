@@ -58,6 +58,7 @@ export default defineConfig({
           label: "Reference",
           items: [
             { label: "API reference", slug: "api-reference" },
+            { label: "Specification (draft)", slug: "spec" },
             { label: "FAQ", slug: "faq" },
           ],
         },

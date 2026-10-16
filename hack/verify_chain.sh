@@ -16,7 +16,9 @@ buf build api -o "$WORK/schema.binpb"
 
 echo "==> record a real journal via agentctl"
 CGO_ENABLED=0 go build -o "$WORK/agentctl" ./cmd/agentctl
-"$WORK/agentctl" exec --journal "$WORK/journal.db" --input "audit me" >/dev/null
+SESSION="$("$WORK/agentctl" create --journal "$WORK/journal.db")"
+"$WORK/agentctl" exec --journal "$WORK/journal.db" --session "$SESSION" --input "audit me" >/dev/null
+"$WORK/agentctl" delete --journal "$WORK/journal.db" --session "$SESSION" >/dev/null
 
 echo "==> create a python venv with protobuf + jcs"
 python3 -m venv "$WORK/venv"

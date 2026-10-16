@@ -21,6 +21,16 @@ type Store interface {
 	Verify() error
 }
 
+// CheckWritable performs the optional durable-deletion preflight. Unknown fresh logs remain
+// writable. Wrappers around durable stores must forward CheckWritable to preserve refusal before
+// compute work; Append and NewFence still enforce the authoritative storage barrier.
+func CheckWritable(log Store) error {
+	if writable, ok := log.(interface{ CheckWritable() error }); ok {
+		return writable.CheckWritable()
+	}
+	return nil
+}
+
 // AsStore adapts the in-memory Log (whose reads cannot fail) to the error-returning Store.
 func AsStore(l *Log) Store { return storeAdapter{l} }
 

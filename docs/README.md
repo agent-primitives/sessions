@@ -28,6 +28,10 @@ Start here. Each document is small and problem-scoped; this page is the index.
 - **[api-reference.md](api-reference.md)**: every message, field, enum, and RPC in
   `agentsessions.v1`, generated from the `.proto` comments. Generated file: edit the protos, then run
   `./hack/gen-api-reference.sh`. CI fails if the two drift apart.
+- **[spec.md](../spec.md)**: the draft protocol specification. The normative rules (BCP 14
+  keywords) for sessions, the event log, the provenance chain, the harness wire protocol, the
+  runtime contract, and conformance. It lives at the repository root; the site publishes it with
+  its `TODO(spike)` markers rendered as open questions.
 
 ## By goal
 
@@ -42,5 +46,6 @@ Start here. Each document is small and problem-scoped; this page is the index.
 | Operate and debug it | [observability.md](observability.md) |
 | Know what is safe to expose | [security.md](security.md) |
 | Look up a message, field, or RPC | [api-reference.md](api-reference.md) |
+| Know the exact rules an implementation must follow | [spec.md](../spec.md) |
 
 For the project overview and status, see the [root README](../README.md).

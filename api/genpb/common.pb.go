@@ -288,6 +288,9 @@ const (
 	Lifecycle_LIFECYCLE_FORK        Lifecycle_Kind = 3
 	Lifecycle_LIFECYCLE_BASELINE    Lifecycle_Kind = 4
 	Lifecycle_LIFECYCLE_CANCEL      Lifecycle_Kind = 5
+	// Host-owned, session-scoped permanent deletion intent (empty Event.execution_id).
+	// It fences writes but does not terminate compute or confirm resource reclamation.
+	Lifecycle_LIFECYCLE_DELETE Lifecycle_Kind = 6
 )
 
 // Enum value maps for Lifecycle_Kind.
@@ -299,6 +302,7 @@ var (
 		3: "LIFECYCLE_FORK",
 		4: "LIFECYCLE_BASELINE",
 		5: "LIFECYCLE_CANCEL",
+		6: "LIFECYCLE_DELETE",
 	}
 	Lifecycle_Kind_value = map[string]int32{
 		"LIFECYCLE_UNSPECIFIED": 0,
@@ -307,6 +311,7 @@ var (
 		"LIFECYCLE_FORK":        3,
 		"LIFECYCLE_BASELINE":    4,
 		"LIFECYCLE_CANCEL":      5,
+		"LIFECYCLE_DELETE":      6,
 	}
 )
 
@@ -2583,21 +2588,22 @@ const file_common_proto_rawDesc = "" +
 	"\n" +
 	"HarnessEnd\x12\x14\n" +
 	"\x05state\x18\x01 \x01(\tR\x05state\x12-\n" +
-	"\x05error\x18\x02 \x01(\v2\x17.agentsessions.v1.ErrorR\x05error\"\x99\x03\n" +
+	"\x05error\x18\x02 \x01(\v2\x17.agentsessions.v1.ErrorR\x05error\"\xaf\x03\n" +
 	"\tLifecycle\x124\n" +
 	"\x04kind\x18\x01 \x01(\x0e2 .agentsessions.v1.Lifecycle.KindR\x04kind\x12\x16\n" +
 	"\x06detail\x18\x02 \x01(\tR\x06detail\x12%\n" +
 	"\x0esnapshot_local\x18\x03 \x01(\tR\rsnapshotLocal\x122\n" +
 	"\x15snapshot_external_uri\x18\x04 \x01(\tR\x13snapshotExternalUri\x12'\n" +
 	"\x0fsnapshot_memory\x18\x05 \x01(\bR\x0esnapshotMemory\x12'\n" +
-	"\x0fsnapshot_sealed\x18\x06 \x01(\bR\x0esnapshotSealed\"\x90\x01\n" +
+	"\x0fsnapshot_sealed\x18\x06 \x01(\bR\x0esnapshotSealed\"\xa6\x01\n" +
 	"\x04Kind\x12\x19\n" +
 	"\x15LIFECYCLE_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11LIFECYCLE_SUSPEND\x10\x01\x12\x14\n" +
 	"\x10LIFECYCLE_RESUME\x10\x02\x12\x12\n" +
 	"\x0eLIFECYCLE_FORK\x10\x03\x12\x16\n" +
 	"\x12LIFECYCLE_BASELINE\x10\x04\x12\x14\n" +
-	"\x10LIFECYCLE_CANCEL\x10\x05\"\xc9\x01\n" +
+	"\x10LIFECYCLE_CANCEL\x10\x05\x12\x14\n" +
+	"\x10LIFECYCLE_DELETE\x10\x06\"\xc9\x01\n" +
 	"\x0eExecutionStart\x12\x16\n" +
 	"\x06config\x18\x01 \x01(\fR\x06config\x12&\n" +
 	"\x0fresume_from_seq\x18\x02 \x01(\x03R\rresumeFromSeq\x12$\n" +

@@ -74,6 +74,37 @@ func toolResultMessage() *api.Message {
 	}
 }
 
+// Dropping the DELETE converter case must not turn a host tombstone into an unknown lifecycle.
+// Literal wire/domain values pin DELETE's identity independently of the generated enum symbols.
+func TestLifecycleDeleteRoundTrip(t *testing.T) {
+	want := api.Event{
+		Kind: api.EventLifecycle, Timestamp: ts, SchemaVersion: 1,
+		Lifecycle: &api.Lifecycle{Kind: api.LifecycleKind("DELETE")},
+	}
+	fromWire := &v1.Event{
+		Kind: v1.EventKind_EVENT_LIFECYCLE,
+		Body: &v1.Event_Lifecycle{Lifecycle: &v1.Lifecycle{Kind: v1.Lifecycle_Kind(6)}},
+	}
+	if got := wire.EventFromProto(fromWire).Lifecycle.Kind; got != api.LifecycleKind("DELETE") {
+		t.Errorf("wire DELETE kind = %q, want DELETE", got)
+	}
+	encoded := wire.EventToProto(want)
+	if got := encoded.GetLifecycle().GetKind(); got != v1.Lifecycle_Kind(6) {
+		t.Errorf("domain DELETE wire kind = %d, want 6", got)
+	}
+	blob, err := proto.Marshal(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded v1.Event
+	if err := proto.Unmarshal(blob, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if got := wire.EventFromProto(&decoded); !reflect.DeepEqual(got, want) {
+		t.Fatalf("DELETE round-trip = %#v (lifecycle %#v), want %#v", got, got.Lifecycle, want)
+	}
+}
+
 func TestEventRoundTrip(t *testing.T) {
 	actor := api.IdentityRef{Principal: "agent://a", Issuer: "entra", Subject: "sub-1"}
 	cases := map[string]api.Event{
@@ -313,5 +344,44 @@ func TestToolChoiceRejectsUnknownMode(t *testing.T) {
 	}
 	if _, err := wire.ToolChoiceToProto(&api.ToolChoice{Mode: "ANY"}); err == nil {
 		t.Fatal("ToolChoiceToProto accepted an unknown mode")
+	}
+}
+
+// A bytes source set to empty bytes decodes to nil, as the encoders treat empty bytes as no source.
+// The journal stores and hashes the encoded form, so a non-nil empty slice would make the decoded
+// message differ from the one read back from the journal.
+func TestEmptyBytesSourceDecodesToNil(t *testing.T) {
+	pb := &v1.Event{Kind: v1.EventKind_EVENT_INPUT, Body: &v1.Event_Message{Message: &v1.Message{
+		Role: "user",
+		Parts: []*v1.Part{
+			{Part: &v1.Part_File{File: &v1.FilePart{Name: "empty.txt", Source: &v1.FilePart_Bytes{Bytes: []byte{}}}}},
+			{Part: &v1.Part_Reasoning{Reasoning: &v1.ReasoningPart{
+				Provider: "p", Opaque: &v1.ReasoningPart_OpaqueBytes{OpaqueBytes: []byte{}},
+			}}},
+		},
+	}}}
+	// Decode the encoded bytes, not the struct: that is how the journal and a peer read it, and
+	// it is where protobuf-go yields a non-nil empty slice for a present bytes field.
+	data, err := proto.Marshal(pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := &v1.Event{}
+	if err := proto.Unmarshal(data, decoded); err != nil {
+		t.Fatal(err)
+	}
+	if b := decoded.GetMessage().GetParts()[0].GetFile().GetBytes(); b == nil {
+		t.Fatal("precondition: protobuf-go decoded the empty bytes source as nil")
+	}
+
+	ev := wire.EventFromProto(decoded)
+	if got := ev.Message.Parts[0].File.Bytes; got != nil {
+		t.Errorf("file part Bytes = %#v, want nil", got)
+	}
+	if got := ev.Message.Parts[1].Reasoning.Opaque; got != nil {
+		t.Errorf("reasoning part Opaque = %#v, want nil", got)
+	}
+	if again := wire.EventFromProto(wire.EventToProto(ev)); !reflect.DeepEqual(ev, again) {
+		t.Fatalf("event changed across a wire round trip:\n%#v\n%#v", ev.Message.Parts, again.Message.Parts)
 	}
 }

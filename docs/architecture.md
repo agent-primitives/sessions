@@ -6,6 +6,14 @@ the core knows about none of them specifically.
 
 ```mermaid
 flowchart TB
+  accTitle: agentsessions architecture
+  accDescr {
+    A producer adapter calls the controller over Sessions gRPC. In the neutral core the
+    controller writes the event log and uses the Placer. The controller drives an
+    out-of-process harness over the Harness.Connect stream, and the Placer provisions compute
+    through the Runtime SPI: runtime/local without memory snapshots, or runtime/substrate with
+    them.
+  }
   prod[Producer adapter<br/>issue tracker / chat / app] -->|Sessions gRPC| ctrl
   subgraph core[Neutral core]
     ctrl[Controller<br/>single-writer, event-sourced] --> log[(Event log<br/>CAS + fence + hash chain)]
@@ -72,9 +80,9 @@ companion determinism contract, exercised by `conformance/`):
   `MODEL_CALL` costs one provider call when the child resumes. This applies to journals with execution IDs; a v0.1.2 journal
   without them is not re-driven and `Resume` still fails with "recorded completion missing".
 - **I4 — memory-restore is not replay.** When a memory snapshot is restored the harness already holds its state
-  in RAM, so `Start.History` is empty and the journal is **not** replayed into it (replaying would
-  double-apply). The `REQUIRES_MEMORY_SNAPSHOT` harness carries this on its side by never reconstructing
-  state from `History`.
+  in RAM, so the journal is **not** replayed into it (replaying would double-apply). The host still
+  sends the full prior log as `Start.History`; the `REQUIRES_MEMORY_SNAPSHOT` harness carries this
+  rule on its side by never reconstructing state from `History`.
 - **I5 — byte-identical replay.** Replay reproduces the recorded events byte-for-byte (checked against the
   canonical hash), not merely equivalent output.
 
@@ -101,8 +109,9 @@ The `Placer` wires Sessions to the `Runtime` SPI and owns the incarnation lifecy
   Before a stateful fork checkpoints its parent the Placer closes the parent's open harness streams,
   because substrate waits for an actor's in-flight requests to drain before it snapshots; `Suspend`
   instead refuses a session whose turn is still running.
-- **Lifecycle map** — session `Suspend → Runtime.Snapshot`, `Resume → Runtime.Restore`, session-end
-  `→ Runtime.Stop`.
+- **Lifecycle map** — session `Suspend → Runtime.Snapshot` checkpoints compute and `Resume →
+  Runtime.Restore` restores it. Execution `END` does not automatically call `Runtime.Stop`.
+  `DeleteSession` records permanent `PENDING` intent without releasing actors, pins or snapshots.
 - **Fork** — capability-driven. A `STATELESS_REPLAY` session replay-forks (the child cold-boots and
   the copied journal reconstructs it, parent untouched). A `REQUIRES_MEMORY_SNAPSHOT` session holds
   live state the journal cannot rebuild (I4), so the Placer checkpoints the parent via
@@ -152,6 +161,12 @@ form of the spec's proto3-JSON, the same canonical form the journal hashes.
 
 ```mermaid
 stateDiagram-v2
+  accTitle: Harness registration lifecycle
+  accDescr {
+    Register creates an ACTIVE registration, and registering the same spec again leaves it
+    unchanged. Retire moves it to RETIRED; retiring again keeps the first time and reason.
+    Registering the same spec on a RETIRED registration reactivates it.
+  }
   [*] --> ACTIVE: Register (CREATED)
   ACTIVE --> ACTIVE: Register same spec (UNCHANGED)
   ACTIVE --> RETIRED: Retire
@@ -199,8 +214,10 @@ stateDiagram-v2
   placement still gates every turn on the live `Describe`. `descriptor_id` is not checked at
   registration, only when a call places the harness, and like the capability check it is not bound
   to the turn's `Connect` stream (see [security.md](security.md)). A registration made by another
-  process sharing the database is served after this host restarts. There is no delete, because
-  `DeleteSession` does not exist yet and a harness with sessions must stay resolvable.
+  process sharing the database is served after this host restarts. Harness-registry deletion is not
+  implemented: `DeleteSession` tombstones a session but retains its metadata and audit log, so its
+  recorded harness identity remains relevant. Session deletion returns `PENDING` without stopping
+  resources; ownership and cleanup-target persistence and teardown belong to #88.
 
 The registry is an admin API. `agentsessionsd` loads stored registrations on every start, even
 without the operator listener: existing sessions on retired harnesses still route to their backend

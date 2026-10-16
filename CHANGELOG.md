@@ -65,9 +65,30 @@ not provide.
   execution IDs that are in this state recover on the next `Resume`; their earlier `ERROR` events
   remain as audit records. A v0.1.2 journal without execution IDs is not re-driven and still fails
   with "recorded completion missing". No journal or wire schema change.
+- The `Start` comment in `harness.proto`, `api.Start.History`, the API reference, and the harness
+  authoring guide said `Start.history` is empty after a memory restore. The host sends every event
+  before the execution's start on every turn, including after a restore; `Exec` has done so since
+  v0.1.0. A harness must not treat an empty history as a sign that it was restored. Documentation
+  only.
+- `wire` decodes a file part's `bytes` source or a reasoning part's `opaque_bytes` that is set to
+  empty bytes as no bytes (nil), the same as the encoders, which never send an empty source.
+  Previously it decoded to a non-nil empty slice, while the journal stores the encoded form without
+  it, so an `Exec` input carrying such a part (an empty file) gave the live turn a different model
+  input hash (I0) from the one recomputed on the journal's copy. For a harness running in the host
+  that sends its inputs to the model (`chatagent`), the turn ran, but `Replay` of it once completed,
+  or a `Resume` of it cut after its model call was recorded, failed with "model input hash
+  mismatch". New turns replay; a turn journaled before this change still fails those checks, because
+  its recorded hash covers the empty value. No journal or wire schema change. The hash algorithms
+  and the hashes of existing records are unchanged; a new turn with such a part records a different
+  model input hash than it would have before, and so a different `content_hash` on that record and
+  every later one in the chain.
 
 ### Added
 
+- Optional `ResumeRequest.expected_last_seq` rejects a moved journal head before re-driving a turn.
+- Go SDK `Client.DeleteSession(ctx, uid)` and `agentctl delete --session <uid>` request permanent
+  soft deletion. Get/delete CLI report deletion state and requested time; PENDING output explicitly
+  says durable intent only, with compute and fork pins retained.
 - Controller `InspectApproval` and decision-only `Approve` validate durable request/decision/receipt
   evidence, including exact retries and session-owned versus inherited effects. The internal
   approval engine supports captured-head repair and correlated denial/executor-error receipts.
@@ -80,8 +101,8 @@ not provide.
   A transport park alone is not a successful public Session pause.
 - `Sessions.Approve` and `client.Client.Approve` commit only a decision; call Resume separately.
   CLI `approve` and `deny` commit then Resume, explicitly preserving the committed decision on
-  recovery failure. Identity is recorded provenance, not authorization. Cancel/DeleteSession
-  remain `UNIMPLEMENTED`; unresolved requests and retained snapshots have no expiry.
+  recovery failure. Identity is recorded provenance, not authorization. Cancel remains
+  `UNIMPLEMENTED`; unresolved requests and retained snapshots have no expiry.
 - Every Session reply and initial/final approval Exec frame uses captured metadata/cursor and
   the storage projection. Pending owned requests report AWAITING with `pending_approval`;
   clearing a reference after a decision does not prove a receipt or completion. SDK Exec retains
@@ -131,10 +152,48 @@ not provide.
 
 ### Compatibility
 
+- Breaking for turns journaled from a remote harness that sent an empty bytes source. A remote
+  harness model request whose file part sets `bytes`, or whose reasoning part sets `opaque_bytes`,
+  to empty bytes now hashes the same as one with no source. A turn such a harness journaled before
+  this change recorded its model input hash (I0) over the empty value. `Replay` of that turn once
+  completed now fails with "model input hash mismatch", as does a `Resume` of such a turn cut after
+  its model call was recorded; `Resume` of a completed turn is a no-op and does not check. The
+  reverse also holds: such a turn journaled after this change fails the same checks on a host
+  without it. No known harness sends an empty source: `harnesswire` omits it, so only a harness that
+  builds the request proto itself could. There is no migration for such a turn.
+- Optional `ResumeRequest.expected_last_seq` checks the journal head under the session guard
+  before inspection, after an early fence before restore/approval repair, and after a restored
+  turn's regular writer fence before Run. A mismatch is `ABORTED` with expected/head values;
+  explicit zero requires an empty journal. A late mismatch may already have restored compute,
+  but does not run the harness or append records. This catches other hosts' commits before each
+  acquired fence. Acquiring a fence supersedes older writers even if Resume then refuses: their
+  remaining writes fail with `ErrFenced`, leaving any unanswered tool intent eligible for retry.
+  Fencing cannot cancel effects already in flight or exclude a later writer; this is not an
+  execution lease or exactly-once tool execution. Omission preserves existing behavior.
+- Older servers silently ignore `ResumeRequest.expected_last_seq`; clients must not assume the
+  check ran without operator-confirmed deployment of a supporting server version/build. Sessions
+  exposes no server-version/capability query, so clients need out-of-band deployment provenance;
+  automatic support discovery is follow-up work.
 - The Go module path is now `github.com/agent-primitives/sessions`; v0.1.x remain available at
   `github.com/aramase/agentsessions`. Container images move to `ghcr.io/agent-primitives/sessions`.
   One binary cannot link both module paths: both register the same proto files, and protobuf-go
   panics at init (`file "common.proto" is already registered`). Move every dependency together.
+- <a name="sqlite-v4-rollout"></a>
+  `DeleteSession` permanently retains the UID, metadata and hash-chained journal for audit, hides
+  the session from List and fences further mutations, including historical approval retries and
+  forks. Get and raw Replay remain available; children are independent. PENDING acknowledges only
+  durable intent: no Runtime.Stop, cleanup or resource reclamation is attempted. Actors, snapshots
+  and fork pins remain retained until ownership/cleanup work (#88).
+  SQLite schema v4 adds the tombstone state, timestamps and audit anchor after approval v3 in one
+  transaction without rewriting old events or hashes; existing sessions stay ACTIVE. The
+  `deletion_completed_at` column is reserved for cleanup (#88): this build never reads or writes
+  it, and no completion state or time is exposed in Go or on the wire. Any stored deletion state
+  other than ACTIVE or PENDING is treated as deleted.
+  Older builds refuse v4 at open time only. Already-open older writers can still append, mint
+  fences and update metadata after DELETE because they do not enforce tombstones. Before the
+  first v4 open, stop every older host and embedded `agentctl` process sharing the journal;
+  upgrade all writers before restarting them. Back up before upgrading. The new LIFECYCLE_DELETE
+  hash requires a deletion-aware reader. Cancel remains unimplemented.
 - `Exec` refuses a stateless harness override when the session's served stored harness requires
   memory snapshots (`FAILED_PRECONDITION`, before any fence or journal write). `Resume` and
   no-input Exec recovery also refuse an older interrupted override before compute changes or
@@ -258,8 +317,9 @@ not provide.
 - `Runtime.Snapshot(..., SnapshotExternal)` owns the cold transition: capture state, release dedicated
   compute where applicable, and retain any handle needed by `Restore`. Out-of-tree runtimes that only
   capture state must implement that transition themselves; the Placer no longer calls `Stop` afterward.
-  Suspended actors and fork-child snapshot pins are retained indefinitely: `DeleteSession` is
-  unimplemented and no session teardown calls `Stop`. Operators must reclaim them directly in Substrate.
+  Suspended actors and fork-child snapshot pins are retained indefinitely: `DeleteSession` records
+  durable intent only and no session teardown calls `Stop`. Operators must reclaim them directly
+  in Substrate.
   No signatures or wire formats change, and restoring a snapshot after destructive `Stop` is not
   guaranteed.
 

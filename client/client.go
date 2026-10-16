@@ -101,6 +101,13 @@ func (c *Client) GetSession(ctx context.Context, uid string) (*v1.Session, error
 	return c.stub.GetSession(ctx, &v1.GetSessionRequest{Uid: uid})
 }
 
+// DeleteSession permanently tombstones uid. PENDING acknowledges durable intent only: actors and
+// fork pins remain retained, and GetSession and Replay stay available for audit. It does not stop
+// compute or erase data; callers must inspect the returned deletion state.
+func (c *Client) DeleteSession(ctx context.Context, uid string) (*v1.Session, error) {
+	return c.stub.DeleteSession(ctx, &v1.DeleteSessionRequest{Uid: uid})
+}
+
 // ListSessions returns every session in a project, newest first, walking pagination internally.
 //
 // Walking every page is the default because stopping at the first one silently under-reports, which

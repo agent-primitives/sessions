@@ -75,7 +75,7 @@ The host hands you a `Start` and an `EventSink`.
 ```go
 type Start struct {
     Config        []byte    // opaque per-execution config
-    History       []Event   // replay context; EMPTY if the sandbox was memory-restored
+    History       []Event   // every prior event, also after a memory restore
     Inputs        []Message // invocation inputs, restored from the journal on controller recovery
     Identity      IdentityContext
     ResumeFromSeq int64
@@ -84,9 +84,10 @@ type Start struct {
 
 Two fields carry rules worth internalizing now:
 
-- `History` is your replay context on the `STATELESS_REPLAY` path. It is **empty after a memory
-  restore**, because a memory-snapshot harness already holds its state in RAM. Never rebuild in-RAM
-  state from `History` (invariant I4, [below](#rule-3-choose-resumability-honestly)).
+- `History` is your replay context on the `STATELESS_REPLAY` path. The host sends the full prior log
+  on every turn, **including after a memory restore**. A memory-snapshot harness already holds its
+  state in RAM, so it must never rebuild in-RAM state from `History` (invariant I4,
+  [below](#rule-3-choose-resumability-honestly)).
 - `Inputs` contains the invocation's messages. Controller replay and interrupted recovery restore
   the original `Start.Inputs` from the journal. For a marked invocation, an empty slice is valid only
   when its recorded input count is explicitly zero.
@@ -150,6 +151,12 @@ cancelled turn stops an in-flight completion instead of orphaning it.
 
 ```mermaid
 sequenceDiagram
+  accTitle: Model calls on a live turn and on replay
+  accDescr {
+    On a live turn the harness calls sink.Model, and the host invokes the provider, records
+    MODEL_CALL and OUTPUT, and returns the completion. On replay the same call is answered from
+    the record and the model provider is not called.
+  }
   participant H as Your harness (Run)
   participant Host as Host / controller
   participant M as Model provider
@@ -224,8 +231,9 @@ model did not produce through the mediated call (for example progress text you g
 - If your harness keeps **in-process state the log cannot rebuild** (a REPL, a browser, a warm process),
   declare `REQUIRES_MEMORY_SNAPSHOT`. The host schedules you only on memory-capable compute and restores
   your RAM on resume and on fork — a forked child is a clone of the parent's snapshot, not a replay. In
-  this mode `Start.History` is empty after a restore, and you must **never** reconstruct state from it
-  (I4). Doing so would reset or double-apply the very state the snapshot preserved.
+  this mode `Start.History` still carries the full prior log after a restore, and you must **never**
+  reconstruct state from it (I4). Doing so would reset or double-apply the very state the snapshot
+  preserved.
 
 Do not declare `REQUIRES_MEMORY_SNAPSHOT` to be safe. It restricts where you can run. Declare it only if
 your state genuinely cannot be replayed.
@@ -350,11 +358,13 @@ catching such an error cannot permit a later live effect or mark the reconstruct
 Ordinary tool/model argument normalization and default mediation remain unchanged; gating does not
 add a general sink-concurrency or tool-validation contract.
 
-Clients discover the pending tuple from Session metadata, commit a decision using RPC/SDK Approve,
-then Resume explicitly. Both CLI `approve` and `deny` do those steps. Identity is provenance only,
-not policy/authentication, and there is no authorization hook, approval timeout or expiry. Snapshots
-and unresolved requests are retained indefinitely; Cancel/DeleteSession remain unavailable. See
-[client examples](interaction-model.md#approval-decisions-and-recovery) and [security.md](security.md).
+Clients discover the pending tuple from Session metadata, commit a decision using RPC/SDK
+Approve, then Resume explicitly. Both CLI `approve` and `deny` do those steps. Identity is
+provenance only, not policy/authentication, and there is no authorization hook, approval timeout
+or expiry. Snapshots and unresolved requests are retained indefinitely; Cancel remains
+unavailable. DeleteSession commits permanent intent without resource cleanup and refuses further
+decisions, including exact retries. See [client
+examples](interaction-model.md#approval-decisions-and-recovery) and [security.md](security.md).
 
 ### Rule 5: pass reasoning parts back verbatim
 

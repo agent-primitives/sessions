@@ -87,7 +87,7 @@ kos:
       org.opencontainers.image.source: https://github.com/agent-primitives/sessions
       org.opencontainers.image.revision: "{{ .FullCommit }}"
       org.opencontainers.image.version: "{{ .Version }}"
-      org.opencontainers.image.licenses: Apache-2.0
+      org.opencontainers.image.licenses: MIT
 
   # The in-sandbox harness, referenced by the substrate ActorTemplates. Publishing it is what lets a
   # deployment apply those manifests without first building and pushing an image of its own.

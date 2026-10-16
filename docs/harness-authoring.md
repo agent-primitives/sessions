@@ -255,14 +255,15 @@ executor is used for live `Exec` and interrupted-turn `Resume`; no Sessions RPC 
 `func(ctx context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error)`.
 `scope.SessionUID` is the nonempty host-bound session identity, not a harness-supplied value.
 The Placer binds the session UID for both paths. Given a backend serving your harness, a model,
-and your host executor:
+and your host executor (these APIs are not in v0.1.x; the `github.com/agent-primitives/sessions`
+import path applies from v0.2.0):
 
 ```go
 import (
-    "github.com/aramase/agentsessions/controller"
-    "github.com/aramase/agentsessions/placement"
-    "github.com/aramase/agentsessions/session"
-    "github.com/aramase/agentsessions/sqlitelog"
+    "github.com/agent-primitives/sessions/controller"
+    "github.com/agent-primitives/sessions/placement"
+    "github.com/agent-primitives/sessions/session"
+    "github.com/agent-primitives/sessions/sqlitelog"
 )
 
 func newToolService(store *sqlitelog.Store, backend placement.Backend,
@@ -480,7 +481,9 @@ messages in prior inputs or current inputs remain in place: this option does not
 them, or establish a trusted instruction boundary.
 
 The Go SDK accepts these bytes through `client.ExecOptions.Config` (`client` is
-`github.com/aramase/agentsessions/client`). `agentctl` has no config flag yet.
+`github.com/agent-primitives/sessions/client`; this field is not in v0.1.x, and the
+`github.com/agent-primitives/sessions` import path applies from v0.2.0). `agentctl` has no config
+flag yet.
 
 ```go
 opts := client.ExecOptions{
@@ -549,7 +552,7 @@ a trusted interface (see [security.md](security.md)).
 One current limitation matters:
 
 - `Session.model` is stored metadata, not effective model selection
-  ([aramase/agentsessions#31](https://github.com/aramase/agentsessions/issues/31)).
+  ([agent-primitives/sessions#31](https://github.com/agent-primitives/sessions/issues/31)).
   The example deliberately omits `agentctl create --model`; `agentsessionsd --model` configures
   the model ID requested by chat for all its sessions.
 

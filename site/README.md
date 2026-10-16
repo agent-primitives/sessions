@@ -1,6 +1,6 @@
 # site
 
-The [agentsessions site](https://anishram.com/agentsessions), built with Astro and
+The [agentsessions site](https://sessions.agent-primitives.dev/), built with Astro and
 Starlight and deployed to GitHub Pages by `.github/workflows/site.yml`.
 
 `../docs` is the source of truth. `hack/sync-docs.mjs` copies those files into

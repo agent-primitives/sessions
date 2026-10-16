@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const docsDir = join(here, "..", "..", "docs");
 const outDir = join(here, "..", "src", "content", "docs");
-const repo = "https://github.com/aramase/agentsessions";
+const repo = "https://github.com/agent-primitives/sessions";
 
 // README.md is the docs index; the Starlight sidebar replaces it, so it is not published.
 const skip = new Set(["README.md"]);
@@ -75,7 +75,7 @@ const meta = {
 function rewriteLinks(markdown) {
   return (
     markdown
-      // A sibling doc becomes a site route: (concepts.md#anchor) -> (/agentsessions/concepts/#anchor).
+      // A sibling doc becomes a site route: (concepts.md#anchor) -> (/concepts/#anchor).
       // In the repository the link text is usually the bare filename, which reads as a broken
       // artifact on a rendered site, so swap it for the page title we already have.
       .replace(
@@ -83,7 +83,7 @@ function rewriteLinks(markdown) {
         (_m, text, name, anchor) => {
           const isFilename = text.replace(/`/g, "") === `${name}.md`;
           const label = isFilename ? (meta[`${name}.md`]?.title ?? text) : text;
-          return `[${label}](/agentsessions/${name}/${anchor ?? ""})`;
+          return `[${label}](/${name}/${anchor ?? ""})`;
         },
       )
       // Anything above docs/ only exists in the repository, so point at GitHub.

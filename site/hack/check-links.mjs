@@ -3,15 +3,16 @@
 // The docs are written for GitHub, where links are relative paths like (concepts.md#anchor).
 // sync-docs.mjs rewrites those into site routes, and a regex rewrite is exactly the kind of thing
 // that breaks quietly: the page still builds, the link just 404s. This runs over dist/ after a
-// build and fails if any internal link has no target, or if a .md link survived the rewrite.
+// build and fails if any internal link has no target, if a root-relative asset (a cast, an image) is
+// not in dist/, or if a .md link survived the rewrite. The site is served from the domain root, so
+// every internal target is root-relative.
 
-import { readdir, readFile } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const dist = join(here, "..", "dist");
-const base = "/agentsessions";
 
 async function walk(dir) {
   const out = [];
@@ -26,11 +27,20 @@ async function walk(dir) {
 const htmlFiles = await walk(dist);
 
 // Every directory holding an index.html is a routable page.
-const routes = new Set([`${base}/`]);
+const routes = new Set(["/"]);
 for (const file of htmlFiles) {
   if (!file.endsWith(`${sep}index.html`)) continue;
   const dir = relative(dist, join(file, ".."));
-  routes.add(dir === "" ? `${base}/` : `${base}/${dir.split(sep).join("/")}/`);
+  routes.add(dir === "" ? "/" : `/${dir.split(sep).join("/")}/`);
+}
+
+async function exists(path) {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const failures = [];
@@ -39,16 +49,24 @@ for (const file of htmlFiles) {
   const html = await readFile(file, "utf8");
   const where = relative(dist, file);
 
-  for (const [, href] of html.matchAll(/href="([^"]+)"/g)) {
+  // data-src carries the cast path the player fetches at runtime, so it is a link like any other.
+  for (const [, attr, href] of html.matchAll(/\b(href|src|data-src)="([^"]+)"/g)) {
     // A .md target means the rewrite missed it. GitHub links are intentional and fine.
-    if (href.includes(".md") && !href.includes("github.com")) {
+    if (attr === "href" && href.includes(".md") && !href.includes("github.com")) {
       failures.push({ where, href, why: "unrewritten .md link" });
       continue;
     }
-    if (!href.startsWith(`${base}/`)) continue;
+    // Root-relative only; "//host/..." is protocol-relative and external.
+    if (!href.startsWith("/") || href.startsWith("//")) continue;
 
-    const target = href.split("#")[0];
-    if (/\.[a-z0-9]{2,5}$/i.test(target)) continue; // asset, emitted by the bundler
+    const target = href.split(/[?#]/)[0];
+    if (/\.[a-z0-9]{2,5}$/i.test(target)) {
+      if (!(await exists(join(dist, decodeURIComponent(target))))) {
+        failures.push({ where, href: target, why: "no such file" });
+      }
+      continue;
+    }
+    if (attr !== "href") continue;
     const normalized = target.endsWith("/") ? target : `${target}/`;
     if (!routes.has(normalized)) {
       failures.push({ where, href: normalized, why: "no such route" });

@@ -88,7 +88,7 @@ determinism guarantees are exercised by a replay-conformance suite (`conformance
 ## Documentation
 
 The same docs are published, rendered and searchable, at
-**[anishram.com/agentsessions](https://anishram.com/agentsessions/)**, along with a walkthrough of
+**[sessions.agent-primitives.dev](https://sessions.agent-primitives.dev/)**, along with a walkthrough of
 how a turn runs and a recording of the full lifecycle on a real cluster.
 
 The sources live in [`docs/`](docs/README.md):

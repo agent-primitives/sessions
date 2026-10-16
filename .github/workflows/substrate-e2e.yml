@@ -41,7 +41,10 @@ on:
     # path-skipped workflow pending, so a PR whose files all match here cannot merge. Do not add a
     # path that ci.yml still runs for (site/**, .github/dependabot.yml, .github/CODEOWNERS): such a
     # PR would wait on this check forever instead of running it. LICENSE is listed because ci.yml
-    # already skips it.
+    # already skips it. cmd/agentui/** and demos/** predate this rule and break it: ci.yml runs for
+    # them, so a PR touching only those paths already waits on this check forever. The fix is a
+    # change-detection gate that still reports the check.
+    # TODO(ci): file the tracking issue and link it here.
     paths-ignore:
       - "docs/**"
       - "**/*.md"

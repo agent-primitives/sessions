@@ -344,12 +344,22 @@ func (s *Service) placerFor(ctx context.Context, uid, override string) (*placeme
 	return p, harness, nil
 }
 
-// checkMemoryOverride refuses a stateless override of a memory-tier session before Exec can
-// mint a fence or write an invocation. Parking only the override would leave the stored harness's
-// memory live while SUSPEND reports the whole session cold and routes later Suspend calls away.
+// checkMemoryOverride refuses a stateless override of a memory-tier session before Exec or Resume
+// can change compute, mint a fence or write records. Parking only the override would leave the
+// stored harness's memory live while SUSPEND reports the whole session cold and routes later
+// Suspend calls away.
 func (s *Service) checkMemoryOverride(ctx context.Context, uid, stored, override string) error {
 	// Older rows may name an unserved built-in; retain their existing explicit-override path.
 	if !s.registry.Has(stored) {
+		return nil
+	}
+	p, err := s.registry.For(stored)
+	if err != nil {
+		return harnessError(err)
+	}
+	// A runtime that cannot hold memory cannot have placed a memory-tier harness. In
+	// particular, a down remote stored harness must not block a stateless override.
+	if !p.RuntimeCapabilities().MemorySnapshot {
 		return nil
 	}
 	describe := func(name string) (api.Descriptor, error) {
@@ -635,6 +645,9 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 			if refused == nil {
 				refused = s.checkResumedHarness(uid, stored, name)
 			}
+			if refused == nil && name != stored {
+				refused = s.checkMemoryOverride(ctx, uid, stored, name)
+			}
 			return refused
 		}
 		operationErr = s.registry.Resume(ctx, log, uid, recoveryInfo.Harness,
@@ -916,10 +929,13 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	}
 	// The registry resolves the pending turn's recorded harness, which can differ from the
 	// session's. Whichever name it picked gets the static-name collision rule, and a name that
-	// differs from the session's gets the pin rule Exec applies to an override.
+	// differs from the session's gets the pin and memory-tier rules Exec applies to an override.
 	var refused error
 	check := func(name string) error {
 		refused = s.checkResumedHarness(uid, stored, name)
+		if refused == nil && name != stored {
+			refused = s.checkMemoryOverride(ctx, uid, stored, name)
+		}
 		return refused
 	}
 	err = s.registry.Resume(ctx, log, uid, info.Harness, placement.WithResolvedHarnessCheck(check))

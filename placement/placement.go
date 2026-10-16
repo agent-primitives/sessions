@@ -275,6 +275,11 @@ func (p *Placer) trySessionLock(sessionUID string) (func(), error) {
 	return p.guard.tryLock(sessionUID)
 }
 
+// RuntimeCapabilities reports the backend's compute capabilities without contacting the harness.
+func (p *Placer) RuntimeCapabilities() api.RuntimeCapabilities {
+	return p.backend.Capabilities()
+}
+
 // Describe asks the placed harness for its descriptor, the same call Exec gates placement on. It
 // provisions nothing.
 func (p *Placer) Describe(ctx context.Context) (api.Descriptor, error) {

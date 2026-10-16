@@ -95,9 +95,12 @@ provide.
 ### Compatibility
 
 - `Exec` refuses a stateless harness override when the session's served stored harness requires
-  memory snapshots (`FAILED_PRECONDITION`, before any fence or journal write). Parking only the
-  override cannot checkpoint the stored harness's live memory. Suspend still checkpoints the
-  stored harness; stateless-to-stateless overrides are unchanged.
+  memory snapshots (`FAILED_PRECONDITION`, before any fence or journal write). `Resume` and
+  no-input Exec recovery also refuse an older interrupted override before compute changes or
+  journal repair; an ordinary interrupted turn can be superseded by a new Exec on the stored
+  harness. Parking only the override cannot checkpoint the stored harness's live memory.
+  Stateless-to-stateless overrides are unchanged: a stored runtime without memory-snapshot
+  support is not contacted for this check, even when its remote harness is down.
 - `Approve` and a stateful `Fork` on the same session now exclude each other through the shared
   checkpoint mark. A refused approval returns `ABORTED` without minting a fence or writing a
   decision; retry after the fork finishes. This coordination covers one Registry/host only.

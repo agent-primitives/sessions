@@ -72,7 +72,9 @@ type SessionsClient interface {
 	// and ordinary sessions use their stored default. An unserved recorded name is
 	// FAILED_PRECONDITION, with no fallback.
 	Suspend(ctx context.Context, in *SuspendRequest, opts ...grpc.CallOption) (*Session, error)
-	// An unresolved owned approval returns its current paused Session without runtime IO.
+	// A recorded STATELESS_REPLAY override of a stored REQUIRES_MEMORY_SNAPSHOT harness is
+	// FAILED_PRECONDITION before compute changes or journal repair, as for Exec admission.
+	// Otherwise an unresolved owned approval returns its current paused Session without runtime IO.
 	// A call-only cut repairs the request; neither outcome proves cold compute. After a decision,
 	// recovery uses the recorded invocation and SnapshotRef. It may park at another gate (without
 	// RESUME), or finish and commit RESUME. A missing executor is FAILED_PRECONDITION and leaves
@@ -257,7 +259,9 @@ type SessionsServer interface {
 	// and ordinary sessions use their stored default. An unserved recorded name is
 	// FAILED_PRECONDITION, with no fallback.
 	Suspend(context.Context, *SuspendRequest) (*Session, error)
-	// An unresolved owned approval returns its current paused Session without runtime IO.
+	// A recorded STATELESS_REPLAY override of a stored REQUIRES_MEMORY_SNAPSHOT harness is
+	// FAILED_PRECONDITION before compute changes or journal repair, as for Exec admission.
+	// Otherwise an unresolved owned approval returns its current paused Session without runtime IO.
 	// A call-only cut repairs the request; neither outcome proves cold compute. After a decision,
 	// recovery uses the recorded invocation and SnapshotRef. It may park at another gate (without
 	// RESUME), or finish and commit RESUME. A missing executor is FAILED_PRECONDITION and leaves

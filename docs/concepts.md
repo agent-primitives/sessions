@@ -194,9 +194,12 @@ identity; an owned approval call blocks new inputs until its receipt commits.
 An override is still per-turn: session metadata is unchanged and a later Exec with no override uses
 the stored default. A session whose served stored harness requires memory snapshots refuses a
 stateless override with `FAILED_PRECONDITION` before any fence or journal write: parking only the
-override would leave the stored harness's live memory uncheckpointed. Suspend still checkpoints
-the stored harness. Completed Resume, ordinary Suspend and Fork retain their existing session-default
-routing. An owned unreceipted approval's Suspend uses its recorded invocation route, including retry
+override would leave the stored harness's live memory uncheckpointed. Resume and no-input Exec
+recovery apply the same refusal to older interrupted overrides before compute changes or journal
+repair. An ordinary interrupted override can be superseded with a new Exec on the stored harness.
+A stored runtime without memory-snapshot support is not contacted for this check, so a down remote
+stored harness does not block a stateless override. Completed Resume, ordinary Suspend and Fork
+retain their existing session-default routing. An owned unreceipted approval's Suspend uses its recorded invocation route, including retry
 after a failed automatic snapshot or append. An inherited approval instead suspends through the
 child's stored default to checkpoint its own compute; Resume still refuses unresolved inherited
 tool intents.

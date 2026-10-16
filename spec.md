@@ -204,7 +204,11 @@ no flattened lifecycle enum.
 | `EVENT_ERROR` | `Error` | host | Best-effort record of a failed execution or recovery. |
 | `EVENT_PARKED` | `ApprovalRef` | harness | Transport only; never journaled (§10.3). |
 
-- `LOG-5`: A store MUST NOT journal `EVENT_PARKED`.
+- `LOG-5`: A host MUST NOT journal `EVENT_PARKED`. The host-side sink has no operation that
+  emits it, and the wire client accepts it only as the park acknowledgement (§10.3) and refuses it
+  as an ordinary harness event.
+- The reference SQLite store also refuses to append `EVENT_PARKED`. The in-memory reference store
+  (`eventlog.Log`) does not check the kind and appends it.
 - `LOG-6`: The reference host writes `EVENT_ERROR`, not `EVENT_END`, when an execution fails. It
   never writes `HarnessEnd.state` values other than `COMPLETED`.
 
@@ -407,7 +411,8 @@ These are named in the reference controller. The numbering is the code's.
 ### 8.6 Recovery (Resume)
 
 - `EXE-20`: Recovery MUST select the latest execution. If the log is empty or that execution is
-  complete, recovery is a no-op and MUST NOT call `Describe`.
+  complete, recovery is a no-op: it performs no harness identity check and no `Describe` of its
+  own. `Resume`'s admission (`RT-1`) still runs before recovery.
 - `EXE-21`: Recovery serves recorded effects as in §8.5 until they are exhausted, then switches to
   the live path for new effects only.
 - `EXE-22`: Model cut rule: if the trailing effect is a `MODEL_CALL` with no `OUTPUT` and the
@@ -470,6 +475,9 @@ These are named in the reference controller. The numbering is the code's.
   without a non-empty session uid.
 - `TOOL-6`: An executor that returns a transport error leaves the intent without a receipt; the
   error is returned to the harness and no `TOOL_RESULT` is written.
+- A reference host with no tool executor configured records `TOOL_CALL`, then fails the call ("no
+  tool executor configured") and the execution ends with `EVENT_ERROR`. The intent stays without a
+  receipt, as in `TOOL-6`.
 - `TOOL-7`: An ordinary receipt MUST NOT carry approval fields, and its code MUST be
   `CODE_UNSPECIFIED` or `EXECUTOR_ERROR`.
 
@@ -599,10 +607,12 @@ These are named in the reference controller. The numbering is the code's.
   `harness` set) and run against it.
 - `OPS-10`: An unknown session is `NOT_FOUND`, except that a non-empty unknown harness override is
   reported first as `INVALID_ARGUMENT`.
-- `OPS-11`: Once the session and placement are resolved, the first stream frame MUST be
-  `ExecUpdate.session` with the session as it was before the turn. Committed records and deltas
-  follow. Errors detected before that point (unknown session or harness, pin, approval block,
-  auto-create failure) end the stream with no frame. A caller MUST read the stream to completion.
+- `OPS-11`: Once the session and its placer are resolved (before admission), the first stream
+  frame MUST be `ExecUpdate.session` with the session as it was before the turn. Committed records
+  and deltas follow. Errors detected before that point (unknown session or harness, pin, approval
+  block, auto-create failure) end the stream with no frame. Admission errors (`Describe`,
+  descriptor id, `CanPlace`: `FAILED_PRECONDITION`, `UNAVAILABLE`, `DEADLINE_EXCEEDED`) arrive
+  after the session frame. A caller MUST read the stream to completion.
 - `OPS-12`: On an approval park or input-less recovery, the host MUST send a final
   `ExecUpdate.session` frame with the latest cursor and `pending_approval` before closing the
   stream with OK. A park is not a terminal `END` or `ERROR`.
@@ -784,9 +794,23 @@ The runtime contract is the Go interface `api.Runtime` in [`api/runtime.go`](api
 is not a wire protocol in this draft.
 
 - `RT-4`: Methods: `Create`, `Snapshot(kind)`, `Restore(ref)`, `Fork(ref)`, `Stop`, `Status`,
-  `Capabilities`. The host identifies an incarnation by the session uid.
+  `Capabilities`. The host identifies an incarnation only by the session uid and keeps no runtime
+  handle between calls.
+- `RT-4a`: A runtime MUST key each incarnation by its session uid. `Create` receives it as
+  `SessionSpec.SessionUID`; `Fork` receives the child's as `ForkOpts.ChildSessionUID`, and a
+  later `Restore` of the child arrives as `{local: child uid}`.
+- `RT-4b`: `Snapshot` and `Stop` receive an `Incarnation` carrying only `ID` (the session uid).
+  The runtime MUST resolve everything it needs from that uid.
+- `RT-4c`: `Restore` receives this session's own latest `SUSPEND` ref, or `{local: uid}` when the
+  session has none (`OPS-19`). A `STATELESS_REPLAY` `Fork` receives `{local: parent uid}`
+  (`OPS-24`).
+- The returned `Incarnation.ID` is used by the reference host only for diagnostics; every in-repo
+  backend sets it to the session uid.
 - `RT-5`: `Snapshot(EXTERNAL)` MUST make compute cold while returning a `SnapshotRef` that a later
-  `Restore` can use. `memory = true` only if process memory was captured. The host stores the ref
+  `Restore` can use, and its `local` MUST equal the session uid. Resume ignores a `SUSPEND` ref
+  whose `local` names another session (it treats it as inherited from a fork parent, `OPS-19`)
+  and restores `{local: uid}` instead, so a runtime that puts its own handle in `local` loses the
+  captured state. `memory = true` only if process memory was captured. The host stores the ref
   on the `LIFECYCLE_SUSPEND` record (`snapshot_local`, `snapshot_external_uri`, `snapshot_memory`,
   `snapshot_sealed`); there is no side table.
 - `RT-6`: `Fork` MUST tear down a partially created child on failure, and MUST return an error
@@ -806,7 +830,7 @@ is not a wire protocol in this draft.
 - `runtime/substrate`: `memory_snapshot = true`, driven through its own `ControlClient` interface.
   The adapter that talks to agent-substrate is the separate Go module
   [`integrations/substrate`](integrations/substrate/), an example of the runtime contract. The core
-  module MUST NOT depend on it; CI asserts `go list -deps ./...` contains no `agent-substrate`
+  module does not import it; CI asserts `go list -deps ./...` contains no `agent-substrate`
   import.
 
 ## 14. Harness registry
@@ -857,7 +881,7 @@ involved, and `TestApprovalRawProtocol` uses neither controller nor journal.
 | `TestReplayServesRecordedProviderUsage` | Recorded usage served with the completion | `I0` |
 | `TestResumeCutBeforeUsageJournalsZeroOrNoUsage` | Cut between `OUTPUT` and `USAGE` serves zero usage | `EXE-21` |
 | `TestForkEquivalence` | Child prefix hashes equal the parent's; both chains verify | `CHAIN-8` |
-| `TestSingleWriter` | Stale `expected_last_seq` is rejected | `LOG-7`, `OPS-13` |
+| `TestSingleWriter` | A second controller with a stale cursor (0) is rejected | `LOG-7`, `EXE-2` |
 | `TestIntegrityGoldenVectorCrossImpl` | Python verifier reproduces the Go `content_hash` (skipped without python3) | `CHAIN-11` |
 | `TestCrashMidToolCallAtMostOnce` | Trailing intent re-driven under the same key; one effect, one receipt | `TOOL-10`, `TOOL-11` |
 | `TestControllerMediatedToolRequiresKey` | Keyless call rejected; no `TOOL_CALL` recorded | `TOOL-4` |

@@ -3,6 +3,8 @@ package fuzzcheck
 
 import (
 	"database/sql"
+	"errors"
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -41,13 +43,13 @@ func Allocs(t testing.TB, n int, fn func()) {
 // them the seed corpus for every target that decodes an Event.
 func JournalEvents(tb testing.TB) [][]byte {
 	tb.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		tb.Fatal("fuzzcheck: cannot locate the module root")
+	root, err := moduleRoot()
+	if err != nil {
+		tb.Fatalf("fuzzcheck: %v", err)
 	}
-	paths, err := filepath.Glob(filepath.Join(filepath.Dir(file), "..", "..", "sqlitelog", "testdata", "*.db"))
+	paths, err := filepath.Glob(filepath.Join(root, "sqlitelog", "testdata", "*.db"))
 	if err != nil || len(paths) == 0 {
-		tb.Fatalf("fuzzcheck: no journal fixtures found: %v", err)
+		tb.Fatalf("fuzzcheck: no journal fixtures found under %s: %v", root, err)
 	}
 	var out [][]byte
 	for _, path := range paths {
@@ -74,4 +76,24 @@ func JournalEvents(tb testing.TB) [][]byte {
 		_ = db.Close()
 	}
 	return out
+}
+
+// moduleRoot finds the module root from the working directory, which go test sets to the package
+// being tested. It does not use the source file path (runtime.Caller), which -trimpath rewrites to
+// a module-relative path.
+func moduleRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", errors.New("no go.mod above the working directory")
+		}
+		dir = parent
+	}
 }

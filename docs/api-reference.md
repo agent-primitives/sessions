@@ -1543,6 +1543,7 @@ stable when a session is created mid-pagination; an offset would skip or repeat 
 | ----- | ---- | ----- | ----------- |
 | session | [string](#string) |  |  |
 | boot | [bool](#bool) |  | **Deprecated.** Ignored. The service never reads it; the Runtime backend decides how a resumed session comes back. On substrate that is the actor&#39;s own snapshot, else the template&#39;s golden snapshot, else a cold boot, and substrate has no per-resume boot flag to forward it to. The field stays so existing clients keep encoding; do not reuse its number. |
+| expected_last_seq | [int64](#int64) | optional | Optional recovery precondition: ABORTED with expected/head values on a mismatch. Checked under the session guard before inspection, after an early fence before restore or approval repair, and after a restored turn&#39;s regular writer fence before Run. A late mismatch may already have restored compute, but does not run the harness or append records. These checks catch other hosts&#39; writes committed before each acquired fence. Taking a fence supersedes older writers even on refusal: their remaining writes fail with ErrFenced, leaving any unanswered tool intent eligible for retry on a later Resume. Fencing cannot cancel effects already in flight, and a later writer can still supersede this operation: this is not an execution lease or exactly-once tool guarantee. Explicit zero requires an empty journal; absent skips this precondition. |
 
 
 

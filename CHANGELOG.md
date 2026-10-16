@@ -68,6 +68,7 @@ not provide.
 
 ### Added
 
+- Optional `ResumeRequest.expected_last_seq` rejects a moved journal head before re-driving a turn.
 - Controller `InspectApproval` and decision-only `Approve` validate durable request/decision/receipt
   evidence, including exact retries and session-owned versus inherited effects. The internal
   approval engine supports captured-head repair and correlated denial/executor-error receipts.
@@ -131,6 +132,19 @@ not provide.
 
 ### Compatibility
 
+- Optional `ResumeRequest.expected_last_seq` checks the journal head under the session guard
+  before inspection, after an early fence before restore/approval repair, and after a restored
+  turn's regular writer fence before Run. A mismatch is `ABORTED` with expected/head values;
+  explicit zero requires an empty journal. A late mismatch may already have restored compute,
+  but does not run the harness or append records. This catches other hosts' commits before each
+  acquired fence. Acquiring a fence supersedes older writers even if Resume then refuses: their
+  remaining writes fail with `ErrFenced`, leaving any unanswered tool intent eligible for retry.
+  Fencing cannot cancel effects already in flight or exclude a later writer; this is not an
+  execution lease or exactly-once tool execution. Omission preserves existing behavior.
+- Older servers silently ignore `ResumeRequest.expected_last_seq`; clients must not assume the
+  check ran without operator-confirmed deployment of a supporting server version/build. Sessions
+  exposes no server-version/capability query, so clients need out-of-band deployment provenance;
+  automatic support discovery is follow-up work.
 - The Go module path is now `github.com/agent-primitives/sessions`; v0.1.x remain available at
   `github.com/aramase/agentsessions`. Container images move to `ghcr.io/agent-primitives/sessions`.
   One binary cannot link both module paths: both register the same proto files, and protobuf-go

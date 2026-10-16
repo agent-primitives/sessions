@@ -1180,9 +1180,20 @@ type ResumeRequest struct {
 	// existing clients keep encoding; do not reuse its number.
 	//
 	// Deprecated: Marked as deprecated in session.proto.
-	Boot          bool `protobuf:"varint,2,opt,name=boot,proto3" json:"boot,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Boot bool `protobuf:"varint,2,opt,name=boot,proto3" json:"boot,omitempty"`
+	// Optional recovery precondition: ABORTED with expected/head values on a mismatch.
+	// Checked under the session guard before inspection, after an early fence before restore
+	// or approval repair, and after a restored turn's regular writer fence before Run. A late
+	// mismatch may already have restored compute, but does not run the harness or append records.
+	// These checks catch other hosts' writes committed before each acquired fence. Taking a fence
+	// supersedes older writers even on refusal: their remaining writes fail with ErrFenced, leaving any
+	// unanswered tool intent eligible for retry on a later Resume. Fencing cannot cancel effects
+	// already in flight, and a later writer can still supersede this operation: this is not an
+	// execution lease or exactly-once tool guarantee. Explicit zero requires an empty journal;
+	// absent skips this precondition.
+	ExpectedLastSeq *int64 `protobuf:"varint,3,opt,name=expected_last_seq,json=expectedLastSeq,proto3,oneof" json:"expected_last_seq,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ResumeRequest) Reset() {
@@ -1228,6 +1239,13 @@ func (x *ResumeRequest) GetBoot() bool {
 		return x.Boot
 	}
 	return false
+}
+
+func (x *ResumeRequest) GetExpectedLastSeq() int64 {
+	if x != nil && x.ExpectedLastSeq != nil {
+		return *x.ExpectedLastSeq
+	}
+	return 0
 }
 
 // Children inherit the parent's annotations and origin.
@@ -1711,10 +1729,12 @@ const file_session_proto_rawDesc = "" +
 	"\asession\x18\x01 \x01(\v2\x19.agentsessions.v1.SessionR\asession\x127\n" +
 	"\bdecision\x18\x02 \x01(\v2\x1b.agentsessions.v1.LogRecordR\bdecision\"*\n" +
 	"\x0eSuspendRequest\x12\x18\n" +
-	"\asession\x18\x01 \x01(\tR\asession\"A\n" +
+	"\asession\x18\x01 \x01(\tR\asession\"\x88\x01\n" +
 	"\rResumeRequest\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\x12\x16\n" +
-	"\x04boot\x18\x02 \x01(\bB\x02\x18\x01R\x04boot\"\xae\x02\n" +
+	"\x04boot\x18\x02 \x01(\bB\x02\x18\x01R\x04boot\x12/\n" +
+	"\x11expected_last_seq\x18\x03 \x01(\x03H\x00R\x0fexpectedLastSeq\x88\x01\x01B\x14\n" +
+	"\x12_expected_last_seq\"\xae\x02\n" +
 	"\vForkRequest\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\x12\x15\n" +
 	"\x06at_seq\x18\x02 \x01(\x03R\x05atSeq\x12\x14\n" +
@@ -1883,6 +1903,7 @@ func file_session_proto_init() {
 	file_common_proto_init()
 	file_session_proto_msgTypes[9].OneofWrappers = []any{}
 	file_session_proto_msgTypes[11].OneofWrappers = []any{}
+	file_session_proto_msgTypes[14].OneofWrappers = []any{}
 	file_session_proto_msgTypes[18].OneofWrappers = []any{
 		(*ExecUpdate_Record)(nil),
 		(*ExecUpdate_Delta)(nil),

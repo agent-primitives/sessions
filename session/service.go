@@ -229,9 +229,9 @@ func (s *Service) GetSession(ctx context.Context, req *v1.GetSessionRequest) (se
 	return sessionProto(info)
 }
 
-// ListSessions enumerates sessions in a project, newest first, from the store rather than from any
-// in-memory view — so the listing is complete after a restart and includes sessions that have no
-// events and no compute yet.
+// ListSessions enumerates ACTIVE sessions in a project, newest first, from the store rather than
+// from any in-memory view. The listing survives a restart and includes ACTIVE sessions that have
+// no events and no compute yet; permanently deleted sessions are excluded.
 //
 // Paging is keyset, not offset: the token carries the last (create time, uid) seen, so a session
 // created while a caller is walking pages neither skips nor duplicates a row. An unparseable token

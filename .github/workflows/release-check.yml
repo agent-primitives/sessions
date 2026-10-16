@@ -55,6 +55,9 @@ jobs:
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
 
+      # Images are checked by kos id in dist/artifacts.json, where goreleaser records each image ko
+      # loaded. Counting daemon rows does not work: both kos entries are bare, so they share the
+      # goreleaser.ko.local repository, and ko tags each image by digest and by every configured tag.
       - name: every archive and image was built
         run: |
           for os in linux darwin; do
@@ -62,10 +65,12 @@ jobs:
               ls dist/*_"${os}"_"${arch}".tar.gz
             done
           done
-          images="$(docker image ls --format '{{.Repository}}' | grep -c '^goreleaser.ko.local$' || true)"
-          if [ "$images" -lt 2 ]; then
-            echo "expected the agentsessionsd and harnessnode images in the local daemon, found ${images}"
-            docker image ls
+          # Every image a release publishes. A pull request that adds or drops a kos entry updates
+          # this list too.
+          want="agentsessionsd harnessnode"
+          got="$(jq -r '[.[] | select(.type == "Docker Manifest") | .extra.ID] | unique | join(" ")' dist/artifacts.json)"
+          if [ "$got" != "$want" ]; then
+            echo "expected ko images for kos ids: ${want}; goreleaser built: ${got:-none}"
             exit 1
           fi
 

@@ -54,14 +54,13 @@ type SessionMeta struct {
 
 // SessionInfo captures metadata, cursor and append-transaction projections in one query.
 // PendingApproval is an audit value snapshot, not command authority or a mutable cache.
-// Deletion timestamps are absent (zero time) while ACTIVE.
+// DeletionRequestedAt is absent (zero time) while ACTIVE.
 type SessionInfo struct {
 	SessionMeta
 	LastSeq             int64
 	ComputeState        api.ComputeState
 	DeletionState       api.DeletionState
 	DeletionRequestedAt time.Time
-	DeletionCompletedAt time.Time
 	DeletionSeq         int64 // DELETE anchor; its predecessor is the pre-intent audit head
 	PendingApproval     api.ApprovalRef
 }
@@ -192,7 +191,7 @@ const sessionSelect = `
 SELECT s.session, s.project, s.name, s.harness, s.model, s.parent_uid, s.fork_seq,
        s.compute_state, s.created_at, s.updated_at,
        s.labels, s.annotations, s.origin, s.identity,
-       s.deletion_state, s.deletion_requested_at, s.deletion_completed_at, s.deletion_seq,
+       s.deletion_state, s.deletion_requested_at, s.deletion_seq,
        (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session = s.session),
        CASE WHEN s.last_seq = (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session = s.session)
                  AND s.approval_corrupt = 0 AND s.invalid_approval_executions = 0 AND a.execution_id != ''
@@ -294,13 +293,13 @@ func scanSession(row scanner) (SessionInfo, error) {
 		state                string
 		createdAt, updatedAt int64
 		deletionState        string
-		requested, completed int64
+		requested            int64
 	)
 	if err := row.Scan(
 		&info.UID, &info.Project, &info.Name, &info.Harness, &info.Model,
 		&info.ParentUID, &info.ForkSeq, &state, &createdAt, &updatedAt,
 		&info.Labels, &info.Annotations, &info.Origin, &info.Identity,
-		&deletionState, &requested, &completed, &info.DeletionSeq,
+		&deletionState, &requested, &info.DeletionSeq,
 		&info.LastSeq, &info.PendingApproval.RequestSeq,
 		&info.PendingApproval.ExecutionID, &info.PendingApproval.ToolCallID,
 	); err != nil {
@@ -314,9 +313,6 @@ func scanSession(row scanner) (SessionInfo, error) {
 	info.DeletionState = api.DeletionState(deletionState)
 	if requested != 0 {
 		info.DeletionRequestedAt = time.Unix(0, requested)
-	}
-	if completed != 0 {
-		info.DeletionCompletedAt = time.Unix(0, completed)
 	}
 	info.ComputeState = api.ComputeState(state)
 	if state == "" {

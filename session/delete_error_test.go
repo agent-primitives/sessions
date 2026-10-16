@@ -117,16 +117,16 @@ func TestDeleteDirectServiceContextsAndSQLFaultReleaseGuard(t *testing.T) {
 	}
 }
 
-// DELETE changes neither projection axis, including retained internal COMPLETE fixtures.
-// Internal/unknown states render as UNSPECIFIED and fail closed at admission, not as ACTIVE.
+// DELETE changes neither projection axis, including for unrecognized stored states.
+// Unrecognized states render as UNSPECIFIED and fail closed at admission, not as ACTIVE.
 func TestDeletionRenderingIndependentAxesAndUnknownState(t *testing.T) {
-	requested, completed := time.Unix(12, 34), time.Unix(15, 67)
+	requested := time.Unix(12, 34)
 	for _, tc := range []struct {
-		state               api.DeletionState
-		wire                v1.DeletionState
-		request, completion time.Time
-	}{{api.DeletionActive, v1.DeletionState_DELETION_ACTIVE, time.Time{}, time.Time{}}, {api.DeletionPending, v1.DeletionState_DELETION_PENDING, requested, time.Time{}}, {api.DeletionComplete, v1.DeletionState_DELETION_STATE_UNSPECIFIED, requested, completed}, {api.DeletionState("unknown"), v1.DeletionState_DELETION_STATE_UNSPECIFIED, time.Time{}, time.Time{}}} {
-		info := sqlitelog.SessionInfo{SessionMeta: sqlitelog.SessionMeta{UID: "uid"}, ComputeState: api.ComputeCold, LastSeq: 1, DeletionSeq: 1, DeletionState: tc.state, DeletionRequestedAt: tc.request, DeletionCompletedAt: tc.completion}
+		state   api.DeletionState
+		wire    v1.DeletionState
+		request time.Time
+	}{{api.DeletionActive, v1.DeletionState_DELETION_ACTIVE, time.Time{}}, {api.DeletionPending, v1.DeletionState_DELETION_PENDING, requested}, {api.DeletionState("UNRECOGNIZED"), v1.DeletionState_DELETION_STATE_UNSPECIFIED, requested}, {api.DeletionState("unknown"), v1.DeletionState_DELETION_STATE_UNSPECIFIED, time.Time{}}} {
+		info := sqlitelog.SessionInfo{SessionMeta: sqlitelog.SessionMeta{UID: "uid"}, ComputeState: api.ComputeCold, LastSeq: 1, DeletionSeq: 1, DeletionState: tc.state, DeletionRequestedAt: tc.request}
 		got, err := sessionProto(info)
 		if err != nil {
 			t.Fatal(err)

@@ -718,10 +718,10 @@ invokes no harness and stays a no-op without one.
   the guarded operation (`OPS-1`). A deletion can commit between the two; `OPS-34` covers that
   case. For `Fork` it covers the lookup, and separately the fan-out until it ends, including
   any rollback (`OPS-27`). A deletion can commit after the fan-out ends, while the host records
-  the children's metadata; the fork's children and its response still stand, because the fork
-  completed before the deletion. Lookup phases and `Fork` do not exclude each other or the
-  operations in `OPS-1`. `DeleteSession` neither waits for nor cancels the holder; the caller
-  retries.
+  the children's metadata. The children still stand, because the fan-out completed before the
+  deletion; the fork returns them if those later metadata writes succeed. Lookup phases and
+  `Fork` do not exclude each other or the operations in `OPS-1`. `DeleteSession` neither waits
+  for nor cancels the holder; the caller retries.
 - `OPS-2`: A per-session checkpoint mark MUST be held by `Suspend`, `Approve`, an approval park
   handoff, a cursor-checked `Resume` while it mints each fence and re-reads the head (`OPS-29`),
   and a `REQUIRES_MEMORY_SNAPSHOT` fork from checkpoint until its last child is cloned.

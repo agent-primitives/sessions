@@ -352,11 +352,19 @@ capability on `runtime/local`, accepts on substrate) is `placement`'s `TestNeutr
 ## CI
 
 `.github/workflows/substrate-e2e.yml` runs the whole suite in one cluster, on every PR and nightly
-(heavy — kind + KVM + micro-VM assets — but ~15 min, and the claims it checks are the ones no unit test
-can make). A concurrency group cancels a superseded run so one push does not leave two clusters
+(heavy — kind + KVM + micro-VM assets — but the claims it checks are the ones no unit test can
+make). A concurrency group cancels a superseded run so one push does not leave two clusters
 standing. It copies substrate's own recipe: `create-kind-cluster` + `install-ate-kind`, then
-`run-microvm-demo-kind` before either tier runs (stages the kata + cloud-hypervisor asset cache and
-installs the micro-VM SandboxConfig both templates name).
+`install-microvm-deps.sh --install` before either tier runs (stages the kata + cloud-hypervisor
+asset cache and installs the micro-VM SandboxConfig both templates name). Substrate publishes no
+images, so its binaries are built from source at `SUBSTRATE_REF`; the workflow caches the Go build
+and module caches and the envoy-dataplane image's buildx cache between runs.
+
+Scheduled and manual runs add a canary job, `substrate-conformance (substrate main)`, that runs the
+same suite against agent-substrate's `main` head, with the adapter's client moved to that commit in
+the runner's checkout only. It surfaces upstream drift before a bump; it never runs on a pull
+request and its failure does not fail the run. It is known red until the next substrate bump: `main`
+renamed `cmd/ateom-microvm` to `cmd/ateworker-microvm` and the module to `go.ate.dev/substrate`.
 
 The workflow applies only the namespace and the micro-VM WorkerPools
 (`deploy/substrate/namespace.yaml`, `echo-microvm-workerpool.yaml`,
@@ -383,13 +391,13 @@ The micro-VM class needs a Linux host with `/dev/kvm`; the recipe mirrors the CI
 `ECHO_SANDBOX_CLASS` and `COUNTER_SANDBOX_CLASS`: `microvm` (the default) or `gvisor`. Any other
 value is refused. `KIND_CLUSTER_NAME` selects the cluster for the `hack/` scripts.
 
-On a host without KVM (an arm64 Mac running kind), skip `run-microvm-demo-kind`, install both gVisor
-WorkerPools, and run both tiers with `gvisor`. The block below starts from a host with only Docker,
-kind, kubectl, ko, Go and git installed, and runs from the root of this checkout. It clones
+On a host without KVM (an arm64 Mac running kind), skip `install-microvm-deps.sh`, install both
+gVisor WorkerPools, and run both tiers with `gvisor`. The block below starts from a host with only
+Docker, kind, kubectl, ko, Go and git installed, and runs from the root of this checkout. It clones
 agent-substrate at the commit the workflow pins (`SUBSTRATE_REF`), creates the kind cluster and its
-local registry (`localhost:5001`) with substrate's `hack/` scripts, and installs `ate-system` the way
-CI does. `create-kind-cluster.sh` deletes any existing cluster named `KIND_CLUSTER_NAME` before it
-creates one, so pick a name you do not use for anything else.
+local registry (`localhost:5001`) with substrate's `hack/` scripts, and installs `ate-system` the
+way CI does. `create-kind-cluster.sh` deletes any existing cluster named `KIND_CLUSTER_NAME` before
+it creates one, so pick a name you do not use for anything else.
 
 The pool manifests name the worker image as a `ko://` import path, which the WorkerPool controller
 passes to its Pods unchanged, so the block builds `ateom-gvisor` from the same agent-substrate
@@ -407,8 +415,8 @@ git -C "${SUBSTRATE}" checkout "${SUBSTRATE_REF}"
 
 # Cluster, local registry and ate-system, as the workflow does.
 (cd "${SUBSTRATE}" && hack/create-kind-cluster.sh)
-(cd "${SUBSTRATE}" && ATE_CREDENTIAL_PROVIDER='{"name":"k8s.io"}' ATE_INSTALL_ROLLOUT_TIMEOUT=10m \
-  hack/install-ate-kind.sh --deploy-ate-system)
+(cd "${SUBSTRATE}" && ATE_CREDENTIAL_PROVIDER='{"name":"k8s.io"}' \
+  hack/install-ate-kind.sh --deploy-ate-system --rollout-timeout 10m)
 
 # Images: the conformance test binary, the harness and the gVisor worker.
 E2E_IMAGE=localhost:5001/agentsessions-e2e:local

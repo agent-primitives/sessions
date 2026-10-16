@@ -83,8 +83,8 @@ CREATE INDEX IF NOT EXISTS sessions_project_created
 // SchemaVersion is the schema shape this build writes, stamped into PRAGMA user_version so a
 // build can identify a database without inspecting its columns. Version 1 is what v0.1.0 through
 // v0.1.2 shipped. Version 2 adds the harness registry; version 3 adds approval reporting;
-// version 4 adds permanent deletion intent.
-const SchemaVersion = 4
+// version 4 adds permanent deletion intent; version 5 adds caller ownership and an authorization marker.
+const SchemaVersion = 5
 
 // migrations[i] moves a database from version i+1 to i+2, inside the migration transaction. The
 // array length is tied to SchemaVersion, so bumping one without the other does not compile.
@@ -92,6 +92,7 @@ var migrations = [SchemaVersion - 1]func(*sql.Tx) error{
 	migrateV1ToV2,
 	migrateV2ToV3,
 	migrateV3ToV4,
+	migrateV4ToV5,
 }
 
 // migrateV3ToV4 adds the deletion columns. deletion_completed_at is reserved for resource cleanup
@@ -325,6 +326,10 @@ func Open(path string, opts ...Option) (*Store, error) {
 		return nil, fmt.Errorf("sqlitelog: %q: %w", "PRAGMA synchronous=FULL", err)
 	}
 	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := checkAuthorization(db); err != nil {
 		db.Close()
 		return nil, err
 	}

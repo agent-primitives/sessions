@@ -29,9 +29,8 @@ const (
 	MaxPageSize     = 500
 )
 
-// SessionMeta is the part of a session that the event log cannot reproduce: who it belongs to, what
-// it runs, and where it was forked from. Everything here is supplied at creation and is durable
-// from that moment, which is what makes a session with no events listable.
+// SessionMeta is mutable workload and provenance metadata, separate from verified caller
+// ownership. It is durable before the first event, making empty sessions listable.
 type SessionMeta struct {
 	UID       string
 	Project   string
@@ -57,6 +56,7 @@ type SessionMeta struct {
 // DeletionRequestedAt is absent (zero time) while ACTIVE.
 type SessionInfo struct {
 	SessionMeta
+	Owner               api.CallerIdentity // immutable caller key; zero means unbound, not public
 	LastSeq             int64
 	ComputeState        api.ComputeState
 	DeletionState       api.DeletionState
@@ -70,6 +70,7 @@ type ListOptions struct {
 	Project   string // exact match; empty means DefaultProject, never "all tenants"
 	PageSize  int
 	PageToken string
+	Owner     *api.CallerIdentity // nil leaves listing unchanged; non-nil requires a complete exact pair
 }
 
 // SessionPage is one page of results plus the cursor that continues it.
@@ -190,7 +191,7 @@ func (s *Store) putSession(db execer, m SessionMeta) error {
 const sessionSelect = `
 SELECT s.session, s.project, s.name, s.harness, s.model, s.parent_uid, s.fork_seq,
        s.compute_state, s.created_at, s.updated_at,
-       s.labels, s.annotations, s.origin, s.identity,
+       s.labels, s.annotations, s.origin, s.identity, s.owner_issuer, s.owner_subject,
        s.deletion_state, s.deletion_requested_at, s.deletion_seq,
        (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session = s.session),
        CASE WHEN s.last_seq = (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session = s.session)
@@ -220,7 +221,8 @@ func (s *Store) SessionInfo(uid string) (SessionInfo, error) {
 }
 
 // ListSessions enumerates one project's ACTIVE sessions, newest first. Tombstones are filtered
-// before keyset paging and LIMIT so hidden rows cannot consume page slots.
+// before keyset paging and LIMIT so hidden rows cannot consume page slots. A non-nil
+// Owner also filters before paging; nil preserves the project's full ACTIVE population.
 //
 // Paging is keyset, not offset: the cursor carries the last row's (created_at, uid) and the next
 // page resumes strictly after it. Sessions are created while a client pages through them, and an
@@ -244,6 +246,13 @@ func (s *Store) ListSessions(opts ListOptions) (SessionPage, error) {
 
 	args := []any{project}
 	where := `WHERE s.project = ? AND s.deletion_state = 'ACTIVE'`
+	if opts.Owner != nil {
+		if !opts.Owner.Valid() {
+			return SessionPage{}, api.ErrInvalidCallerIdentity
+		}
+		where += ` AND s.owner_issuer = ? AND s.owner_subject = ?`
+		args = append(args, opts.Owner.Issuer, opts.Owner.Subject)
+	}
 	if opts.PageToken != "" {
 		createdAt, uid, err := decodeCursor(opts.PageToken)
 		if err != nil {
@@ -298,7 +307,7 @@ func scanSession(row scanner) (SessionInfo, error) {
 	if err := row.Scan(
 		&info.UID, &info.Project, &info.Name, &info.Harness, &info.Model,
 		&info.ParentUID, &info.ForkSeq, &state, &createdAt, &updatedAt,
-		&info.Labels, &info.Annotations, &info.Origin, &info.Identity,
+		&info.Labels, &info.Annotations, &info.Origin, &info.Identity, &info.Owner.Issuer, &info.Owner.Subject,
 		&deletionState, &requested, &info.DeletionSeq,
 		&info.LastSeq, &info.PendingApproval.RequestSeq,
 		&info.PendingApproval.ExecutionID, &info.PendingApproval.ToolCallID,

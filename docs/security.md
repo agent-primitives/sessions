@@ -11,7 +11,7 @@ This is the operator's view. For reporting a vulnerability, see [`SECURITY.md`](
 
 Everything below follows from that split. The project makes strong, testable claims about what a
 session log says and whether it can be trusted. It makes no claims at all about who is allowed to
-reach it, because as of this release nothing checks.
+reach it, because Sessions RPCs do not check caller authority.
 
 ## What is protected
 
@@ -57,7 +57,7 @@ name its header with `-model-auth-header`.
 **There is no authentication.** Every gRPC path in the reference implementation uses plaintext
 transport with no credentials. Any process that can reach the port can call every RPC.
 
-**There is no authorization.** `IdentityRef` exists in the contract and is carried on the wire, but
+**Sessions RPCs have no authorization.** `IdentityRef` exists in the contract and is carried on the wire, but
 nothing verifies or enforces it. It is metadata today, not a control. In particular, anyone who can
 reach Sessions can discover an owned pending approval through Get/List and approve or deny it.
 `ApproveRequest.identity` is copied to the decision's `Event.actor` as caller-supplied provenance;
@@ -168,7 +168,7 @@ See [deletion semantics](concepts.md#permanent-soft-deletion).
 
 `REQUIRES_APPROVAL` is supported only for stateless replay. The RPC/SDK commits a decision without
 compute or an executor call; explicit Resume performs recovery. CLI approve/deny do both, and a
-recovery failure leaves the decision committed. There is no authorization hook, policy evaluator,
+recovery failure leaves the decision committed. Sessions has no caller enforcement or policy evaluator,
 approval timeout, expiry, automatic decision or implemented Cancel path. Unresolved
 requests and suspended snapshots/handles are retained indefinitely; operators must manage retained
 resources outside these APIs.
@@ -242,12 +242,23 @@ Given the above, there is one safe shape for this release:
   addresses even with the operator listener off and dials them when observing or placing sessions,
   so a writer can choose where session history goes and whose calls spend the host's model budget.
 
-## What changes later
+## Host-side ownership and authorization contracts
 
-Authentication and authorization are tracked work, not a decision against them. The contract already
-carries the pieces they need: `IdentityRef` is OIDC-shaped (`issuer`, `subject`, `principal`), so
-enforcement is a matter of adding an interceptor that validates a token and checks it, rather than
-reshaping the API.
+`api.CallerIdentity` is an exact verified caller issuer/subject pair, separate from agent
+`IdentityRef` provenance. Trusted Go hosts can atomically create an owned session through
+`sqlitelog.Store.CreateOwnedSession`, including active-harness admission. Existing UIDs cannot be
+claimed, even when unbound or deleted. Metadata updates, fencing and appended/copied history do
+not assign or replace owners. Legacy and RPC-created sessions remain unbound; ownership is not
+inferred from provenance. Owner metadata is not hash-chain attested; database writers are trusted.
 
-Until that lands, this page describes the whole of the security model, and the honest summary is that
-you should not expose a host you do not control the network around.
+The host-side `api.Authorizer` contract has an owner-only implementation. `OwnerAuthorizer` grants
+only ordinary session actions to an exact owner; create, approval decisions, audience minting and
+unknown actions are denied. It does not verify credentials. `ListOptions.Owner` filters an exact
+pair in SQL before paging; nil retains the existing project listing. Its unsigned cursors are not
+caller-bound credentials.
+
+These Go contracts are not wired into Sessions RPCs or the daemon. They provide no authentication,
+TLS or access-control enforcement. SQLite schema v5 carries an off-mode authorization marker;
+this host refuses required, unknown or missing markers even at the same schema version. There is
+no supported switch to enable required mode. Owner identifiers are retained metadata: deletion is
+not erasure. Do not expose a host on an untrusted network.

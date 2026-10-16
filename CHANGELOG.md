@@ -85,6 +85,9 @@ not provide.
 
 ### Added
 
+- Verified-caller ownership scaffolding: `api.CallerIdentity`, `Authorizer` and owner-only
+  `OwnerAuthorizer` contracts, plus insert-only `CreateOwnedSession` and indexed owner-filtered
+  listings. These are trusted-host Go APIs, not RPC authentication or enforcement.
 - Optional `ResumeRequest.expected_last_seq` rejects a moved journal head before re-driving a turn.
 - Go SDK `Client.DeleteSession(ctx, uid)` and `agentctl delete --session <uid>` request permanent
   soft deletion. Get/delete CLI report deletion state and requested time; PENDING output explicitly
@@ -161,6 +164,14 @@ not provide.
   reverse also holds: such a turn journaled after this change fails the same checks on a host
   without it. No known harness sends an empty source: `harnesswire` omits it, so only a harness that
   builds the request proto itself could. There is no migration for such a turn.
+- SQLite schema v5 follows approval v3 and deletion v4, adding indexed exact caller issuer/subject
+  ownership and an off-mode journal authorization marker. Legacy and RPC-created sessions remain
+  unbound; ordinary metadata writes and copied history cannot assign or replace owners. No events
+  or hashes are rewritten, and no wire fields change. Older hosts refuse v5 at open time; this host
+  also refuses required, unknown or missing authorization markers at v5 because it cannot enforce
+  caller access. Stop all older writers before the first v5 open, following the
+  [rollout order](#sqlite-v4-rollout). Back up first. Sessions RPCs remain unauthenticated and
+  unenforced.
 - Optional `ResumeRequest.expected_last_seq` checks the journal head under the session guard
   before inspection, after an early fence before restore/approval repair, and after a restored
   turn's regular writer fence before Run. A mismatch is `ABORTED` with expected/head values;

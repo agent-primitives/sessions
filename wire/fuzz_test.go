@@ -14,7 +14,9 @@ import (
 // FuzzEventFromProto decodes arbitrary Events the way the host reads a journal record or a peer's
 // event. Decoding and conversion must not panic or allocate out of proportion to the input, and
 // conversion must be stable: converting the decoded event back to the wire and decoding it again
-// yields the same event, so a record survives being re-sent (Replay, a fork copy) unchanged.
+// yields the same event, so a record survives being re-sent (Replay, a fork copy) unchanged. The
+// comparison is reflect.DeepEqual on purpose: it tells a nil slice from an empty one, and so does
+// the controller's model input hash (I0), which is computed over the decoded domain value.
 func FuzzEventFromProto(f *testing.F) {
 	for _, blob := range fuzzcheck.JournalEvents(f) {
 		f.Add(blob)

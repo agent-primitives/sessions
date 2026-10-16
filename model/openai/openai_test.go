@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -613,5 +614,92 @@ func TestStreamModelAccumulatesReasoningSeparately(t *testing.T) {
 	}
 	if reasoning == nil || string(reasoning.Opaque) != "think" {
 		t.Fatalf("reasoning part = %v, want the accumulated reasoning", reasoning)
+	}
+}
+
+// A base URL may carry a query (an api-version, a tenant) and even a fragment. The completions path
+// is joined to the base URL's path, the base query is sent ahead of the path's own, and the fragment
+// is dropped, rather than the path landing inside the query or fragment of a concatenated string.
+func TestBaseURLWithAQueryOrFragmentKeepsTheCompletionsPath(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		base      string // appended to the test server's URL
+		opts      []openai.Option
+		wantPath  string
+		wantQuery string
+	}{
+		{name: "query and fragment", base: "/v1?api-version=2&tenant=a#b", wantPath: "/v1/chat/completions", wantQuery: "api-version=2&tenant=a"},
+		{name: "query only", base: "/v1?api-version=2", wantPath: "/v1/chat/completions", wantQuery: "api-version=2"},
+		{name: "fragment only", base: "/v1#frag", wantPath: "/v1/chat/completions"},
+		{name: "trailing slash before the query", base: "/v1/?k=v", wantPath: "/v1/chat/completions", wantQuery: "k=v"},
+		{name: "both queries", base: "/openai?tenant=a",
+			opts:     []openai.Option{openai.WithPath("/deployments/d/chat/completions?api-version=2024-10-21")},
+			wantPath: "/openai/deployments/d/chat/completions", wantQuery: "tenant=a&api-version=2024-10-21"},
+		{name: "escaped path segment", base: "/a%2Fb", wantPath: "/a/b/chat/completions"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath, gotRawPath, gotQuery string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath, gotRawPath, gotQuery = r.URL.Path, r.URL.RawPath, r.URL.RawQuery
+				_, _ = io.WriteString(w, completion("ok"))
+			}))
+			t.Cleanup(srv.Close)
+			opts := append([]openai.Option{openai.WithBaseURL(srv.URL + tc.base), openai.WithModel("test-model")}, tc.opts...)
+			c, err := openai.New(opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.Model(t.Context(), api.ModelRequest{Messages: []api.Message{*api.TextMessage("user", "q")}}); err != nil {
+				t.Fatal(err)
+			}
+			if gotPath != tc.wantPath || gotQuery != tc.wantQuery {
+				t.Fatalf("request path=%q query=%q, want path=%q query=%q", gotPath, gotQuery, tc.wantPath, tc.wantQuery)
+			}
+			if tc.name == "escaped path segment" && gotRawPath != "/a%2Fb/chat/completions" {
+				t.Fatalf("raw path = %q, want the base URL's escaping kept", gotRawPath)
+			}
+		})
+	}
+}
+
+// A parameter set in both the base URL's query and the path's query would be sent twice, and
+// servers differ in which copy they read, so New refuses it. The error names the parameter and
+// never a value, which may be a secret. Different parameters in the two queries are still joined.
+func TestNewRefusesAQueryParameterInBothBaseURLAndPath(t *testing.T) {
+	for _, tc := range []struct {
+		name, base, path, wantKey string
+	}{
+		{name: "same key", base: "https://h/openai?api-version=2", path: "/chat/completions?api-version=3", wantKey: "api-version"},
+		{name: "same key and value", base: "https://h/openai?api-version=2", path: "/chat/completions?api-version=2", wantKey: "api-version"},
+		{name: "second key of several", base: "https://h/openai?tenant=a&sig=s3cr3t", path: "/chat/completions?x=1&sig=other", wantKey: "sig"},
+		{name: "escaped name", base: "https://h/openai?api%2Dversion=2", path: "/chat/completions?api-version=3", wantKey: "api-version"},
+		{name: "key without a value", base: "https://h/openai?flag", path: "/chat/completions?flag=1", wantKey: "flag"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := openai.New(openai.WithBaseURL(tc.base), openai.WithPath(tc.path), openai.WithModel("m"))
+			if err == nil {
+				t.Fatalf("New(base %q, path %q) succeeded, want a duplicate-parameter error", tc.base, tc.path)
+			}
+			if !strings.Contains(err.Error(), strconv.Quote(tc.wantKey)) {
+				t.Fatalf("err = %v, want it to name %q", err, tc.wantKey)
+			}
+			for _, secret := range []string{"s3cr3t", "other", "=2", "=3"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("err = %v, must not quote a query value", err)
+				}
+			}
+		})
+	}
+	if _, err := openai.New(openai.WithBaseURL("https://h/openai?tenant=a"), openai.WithPath("/chat/completions?api-version=2"), openai.WithModel("m")); err != nil {
+		t.Fatalf("distinct parameters in the two queries: %v", err)
+	}
+}
+
+// A base URL that is not absolute cannot be requested; New refuses it instead of failing every turn.
+func TestNewRefusesABaseURLThatIsNotAbsolute(t *testing.T) {
+	for _, base := range []string{"llm.example/v1", "/v1", "http://[::1", "https:///v1"} {
+		if _, err := openai.New(openai.WithBaseURL(base), openai.WithModel("m")); err == nil {
+			t.Errorf("New(WithBaseURL(%q)) succeeded, want an error", base)
+		}
 	}
 }

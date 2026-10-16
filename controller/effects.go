@@ -274,7 +274,27 @@ func (s *replaySink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 		msg = *out.Message
 		s.outputs = append(s.outputs, out.Message.Text())
 	}
-	return api.ModelResponse{Message: msg}, nil
+	return api.ModelResponse{Message: msg, Usage: s.recordedUsage()}, nil
+}
+
+// recordedUsage is the usage a replayed completion carries: the USAGE event recorded directly after
+// its OUTPUT, if any. Live, the provider's usage rides in the ModelResponse and a harness that
+// reports it records that USAGE next; serving it here gives the harness the same value on replay,
+// so its Usage call matches the record. The event is not consumed: the harness's Usage call does.
+// v0.1.2 effect streams carry no usage, so legacy replay serves none.
+func (s *replaySink) recordedUsage() api.Usage {
+	if s.legacy {
+		return api.Usage{}
+	}
+	return usageAt(s.stream, s.i)
+}
+
+// usageAt returns the usage of stream[i] when it is a USAGE event, and zero otherwise.
+func usageAt(stream []api.Event, i int) api.Usage {
+	if i < len(stream) && stream[i].Kind == api.EventUsage && stream[i].Usage != nil {
+		return *stream[i].Usage
+	}
+	return api.Usage{}
 }
 
 func (s *replaySink) Output(ctx context.Context, delta string) error {

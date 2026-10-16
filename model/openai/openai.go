@@ -57,17 +57,20 @@ var ErrUnsupportedPart = errors.New("openai: unsupported content part")
 
 // Client calls an OpenAI-compatible Chat Completions endpoint.
 type Client struct {
-	baseURL string
-	path    string
-	headers map[string]string
-	model   string
-	http    *http.Client
+	baseURL  string
+	path     string
+	endpoint string // baseURL joined with path by New
+	headers  map[string]string
+	model    string
+	http     *http.Client
 }
 
 // Option configures a Client.
 type Option func(*Client)
 
-// WithBaseURL points the client at a compatible endpoint other than the default.
+// WithBaseURL points the client at a compatible endpoint other than the default. It must be an
+// absolute URL. Its query string is kept and sent with every request, ahead of any query the path
+// carries; a fragment is dropped, as HTTP never sends one.
 func WithBaseURL(u string) Option {
 	return func(c *Client) {
 		if u != "" {
@@ -106,7 +109,8 @@ func WithHeader(name, value string) Option {
 }
 
 // WithPath overrides the path appended to the base URL. It may carry a query string, which is what
-// an endpoint that pins an API version needs.
+// an endpoint that pins an API version needs; New refuses a query parameter that the base URL's
+// query also sets.
 func WithPath(p string) Option {
 	return func(c *Client) {
 		if p != "" {
@@ -140,7 +144,8 @@ func WithHTTPClient(h *http.Client) Option {
 
 // New builds a Client. A default model is required: the model id ends up on every recorded
 // MODEL_CALL event, so a client that cannot name one would write a journal that does not say what
-// produced the completion.
+// produced the completion. A base URL that is not absolute, a path that does not parse, or a query
+// parameter set in both the base URL and the path is an error.
 func New(opts ...Option) (*Client, error) {
 	c := &Client{
 		baseURL: DefaultBaseURL,
@@ -154,8 +159,73 @@ func New(opts ...Option) (*Client, error) {
 	if c.model == "" {
 		return nil, errors.New("openai: a default model is required (WithModel)")
 	}
+	endpoint, err := joinEndpoint(c.baseURL, c.path)
+	if err != nil {
+		return nil, err
+	}
+	c.endpoint = endpoint
 	c.http = sameOriginClient(c.http)
 	return c, nil
+}
+
+// Endpoint returns the URL every completions request is sent to: the base URL's path joined with
+// the path, the base URL's query ahead of the path's, and no fragment. It carries whatever userinfo
+// and query the base URL has, so redact it (url.URL.Redacted) before logging.
+func (c *Client) Endpoint() string { return c.endpoint }
+
+// joinEndpoint appends path to base's path and keeps both query strings, base's first. Joining the
+// strings instead would put the path after a query or fragment in base, sending
+// https://h/v1?api-version=2#x/chat/completions to /v1 with the path lost in the fragment.
+//
+// A parameter both queries set is refused rather than sent twice: which copy an endpoint reads
+// differs between servers, so an api-version in both could select a version neither one names.
+// Only names are compared, and the error quotes the name alone, since a value may be a secret.
+func joinEndpoint(base, path string) (string, error) {
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("openai: base URL: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("openai: base URL %q is not absolute (want scheme://host[/path])", base)
+	}
+	p, err := url.Parse(path)
+	if err != nil {
+		return "", fmt.Errorf("openai: path: %w", err)
+	}
+	if key := sharedQueryKey(u.RawQuery, p.RawQuery); key != "" {
+		return "", fmt.Errorf("openai: query parameter %q is set in both the base URL and the path; set it in one of them", key)
+	}
+	joined := *u
+	joined.Path = strings.TrimSuffix(u.Path, "/") + p.Path
+	joined.RawPath = strings.TrimSuffix(u.EscapedPath(), "/") + p.EscapedPath()
+	switch {
+	case u.RawQuery == "":
+		joined.RawQuery = p.RawQuery
+	case p.RawQuery != "":
+		joined.RawQuery = u.RawQuery + "&" + p.RawQuery
+	}
+	joined.ForceQuery = false
+	joined.Fragment, joined.RawFragment = "", ""
+	return joined.String(), nil
+}
+
+// sharedQueryKey returns the first parameter name, in a's order, that both raw queries set, or "".
+// Names are compared after decoding, so api-version and api%2Dversion are the same parameter. A
+// pair that does not decode is compared as far as it parses; the query is still sent as given.
+func sharedQueryKey(a, b string) string {
+	if a == "" || b == "" {
+		return ""
+	}
+	bq, _ := url.ParseQuery(b)
+	for _, pair := range strings.Split(a, "&") {
+		name, _, _ := strings.Cut(pair, "=")
+		if name, err := url.QueryUnescape(name); err == nil && name != "" {
+			if _, ok := bq[name]; ok {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 // maxRedirects is net/http's default redirect limit, which setting CheckRedirect replaces.
@@ -355,7 +425,7 @@ func (c *Client) buildRequest(req api.ModelRequest, stream bool) (string, []byte
 
 // post sends the encoded body with the configured path and headers.
 func (c *Client) post(ctx context.Context, body []byte) (*http.Response, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+c.path, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("openai: build request: %w", err)
 	}

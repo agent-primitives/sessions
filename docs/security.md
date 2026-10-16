@@ -37,6 +37,21 @@ outcomes — and never message contents, event payloads, or fence values.
 **Model credentials stay out of argv.** `agentsessionsd` reads the model key from the environment
 and never accepts it as a flag, so it does not appear in the process list or shell history.
 
+**A model key is not sent over plain `http`, except to loopback or a trusted service name.** With a key set, `agentsessionsd`
+refuses to start when `-model-base-url` is `http` to a host other than a loopback address,
+`localhost`, or a name ending in `.svc` or `.svc.cluster.local`. The service-name allowance is a
+trusted-network exception, not a guarantee: it checks the name only, nothing proves the name
+resolves to a cluster service, and the key and prompts cross the pod network unencrypted. Use
+`https` unless you trust that network. With `HTTP_PROXY` set, Go sends a plain-`http` request to a
+`.svc` name through that proxy, key and prompts included, and the proxy is usually outside the
+network you trusted; loopback and `localhost` are never proxied. Add `.svc,.svc.cluster.local` to
+`NO_PROXY` (a leading dot matches every name under it).
+
+**Model credentials belong in a header, not the URL.** `agentsessionsd` logs the model endpoint at
+startup, including the query of `-model-base-url` and of `-model-path`; only a userinfo password is
+masked. Do not put a key, signature or token in either query: set the key in `MODEL_API_KEY` and
+name its header with `-model-auth-header`.
+
 ## What is not protected
 
 **There is no authentication.** Every gRPC path in the reference implementation uses plaintext

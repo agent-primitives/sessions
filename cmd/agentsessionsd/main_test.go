@@ -54,6 +54,63 @@ func TestModelAPIKey(t *testing.T) {
 	}
 }
 
+// A model API key from either variable makes a plain-http -model-base-url to a remote host a startup
+// error that names the host and never the key. A loopback host or a service name is still accepted,
+// as is any host without a key.
+func TestModelFuncRefusesAKeyOverRemotePlainHTTP(t *testing.T) {
+	const key = "sk-secret-value"
+	for _, env := range []string{"MODEL_API_KEY", "OPENAI_API_KEY"} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv("MODEL_API_KEY", "")
+			t.Setenv("OPENAI_API_KEY", "")
+			t.Setenv(env, key)
+			_, _, _, err := modelFunc("m", "http://llm.example.com:8000/v1", openai.DefaultPath, "api-key")
+			if err == nil || !strings.Contains(err.Error(), `host "llm.example.com"`) || !strings.Contains(err.Error(), "use https") {
+				t.Fatalf("modelFunc error = %v, want a refusal naming the host and asking for https", err)
+			}
+			if strings.Contains(err.Error(), key) {
+				t.Fatalf("modelFunc error = %v repeats the key", err)
+			}
+		})
+	}
+	t.Run("allowed hosts", func(t *testing.T) {
+		for _, tc := range []struct{ baseURL, key string }{
+			{"http://vllm.ns.svc.cluster.local:8000/v1", key},
+			{"http://127.0.0.1:8082/v1", key},
+			{"http://llm.example.com:8000/v1", ""},
+			{"https://llm.example.com/v1", key},
+		} {
+			t.Setenv("MODEL_API_KEY", tc.key)
+			t.Setenv("OPENAI_API_KEY", "")
+			if _, _, _, err := modelFunc("m", tc.baseURL, openai.DefaultPath, "Authorization"); err != nil {
+				t.Errorf("modelFunc(%q, key set %v) = %v, want a model", tc.baseURL, tc.key != "", err)
+			}
+		}
+	})
+}
+
+// The startup log names the endpoint requests actually go to: the path joined to the base URL's
+// path with the base query after it, not the base URL and path concatenated. A userinfo password
+// is masked.
+func TestModelFuncDescribesTheJoinedEndpoint(t *testing.T) {
+	t.Setenv("MODEL_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	for _, tc := range []struct{ baseURL, path, want string }{
+		{"https://h/openai/v1?api-version=2", openai.DefaultPath, "m @ https://h/openai/v1/chat/completions?api-version=2"},
+		{"https://h/openai?tenant=a", "/deployments/d/chat/completions?api-version=2", "m @ https://h/openai/deployments/d/chat/completions?tenant=a&api-version=2"},
+		{"https://h/v1/#frag", openai.DefaultPath, "m @ https://h/v1/chat/completions"},
+		{"https://user:pw-secret@h/v1", openai.DefaultPath, "m @ https://user:xxxxx@h/v1/chat/completions"},
+	} {
+		_, _, desc, err := modelFunc("m", tc.baseURL, tc.path, "Authorization")
+		if err != nil {
+			t.Fatalf("modelFunc(%q, %q): %v", tc.baseURL, tc.path, err)
+		}
+		if desc != tc.want {
+			t.Errorf("modelFunc(%q, %q) desc = %q, want %q", tc.baseURL, tc.path, desc, tc.want)
+		}
+	}
+}
+
 func TestHarnessRegistry(t *testing.T) {
 	for _, tt := range []struct {
 		model string

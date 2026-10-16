@@ -267,7 +267,16 @@ func (s *streamSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 	if m := wire.MessageFromProto(mr.GetMessage()); m != nil {
 		msg = *m
 	}
-	return api.ModelResponse{Message: msg}, nil
+	var usage api.Usage
+	if u := mr.GetUsage(); u != nil {
+		usage = api.Usage{
+			Model:           u.GetModel(),
+			InputTokens:     u.GetInputTokens(),
+			OutputTokens:    u.GetOutputTokens(),
+			ReasoningTokens: u.GetReasoningTokens(),
+		}
+	}
+	return api.ModelResponse{Message: msg, Usage: usage}, nil
 }
 
 func (s *streamSink) Output(ctx context.Context, delta string) error {
@@ -463,6 +472,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 				ExecutionId: start.ExecutionID,
 				Frame: &v1.ControllerFrame_Model{Model: &v1.ModelResult{
 					Message:     wire.MessageToProto(&resp.Message),
+					Usage:       usageResultToProto(resp.Usage),
 					ModelCallId: mc.GetId(),
 				}},
 			}); err != nil {
@@ -739,4 +749,18 @@ func newID() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+// usageResultToProto is the ModelResult usage for a completion: nil when the provider reported
+// none, so a harness sees the zero Usage it would see in process.
+func usageResultToProto(u api.Usage) *v1.Usage {
+	if u == (api.Usage{}) {
+		return nil
+	}
+	return &v1.Usage{
+		Model:           u.Model,
+		InputTokens:     u.InputTokens,
+		OutputTokens:    u.OutputTokens,
+		ReasoningTokens: u.ReasoningTokens,
+	}
 }

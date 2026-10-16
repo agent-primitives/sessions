@@ -494,7 +494,9 @@ func sessionService(store *sqlitelog.Store, registry *placement.Registry, logger
 // The credential is read from MODEL_API_KEY (or OPENAI_API_KEY) rather than taken as a flag,
 // because a flag would put it in the process list and in shell history. An unset key sends no
 // credential header at all, which is what a local endpoint or a gateway that injects its own
-// expects.
+// expects. With a key, modelconfig.New refuses a plain-http base URL to any host but a loopback
+// address, localhost or, as a trusted-network exception, a Kubernetes service name, so the daemon
+// does not start rather than send the key unencrypted across an untrusted network.
 //
 // -model-path and -model-auth-header exist because endpoints differ in envelope while accepting
 // the same request body: some scope the model into the path or pin an API version, and some
@@ -515,7 +517,18 @@ func modelFunc(model, baseURL, path, authHeader string) (controller.ModelFunc, c
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("configure model: %w", err)
 	}
-	return client.Model, client.StreamModel, model + " @ " + baseURL + path, nil
+	return client.Model, client.StreamModel, model + " @ " + loggedEndpoint(client.Endpoint()), nil
+}
+
+// loggedEndpoint is the endpoint as the startup log shows it: the joined URL requests go to, with
+// the query after the path, so a base URL with a query does not log a URL nothing is sent to. A
+// userinfo password is masked; the query is logged as given, so it must not carry a secret.
+func loggedEndpoint(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil { // openai.New built it with url.URL.String, so it parses
+		return "(endpoint not shown)"
+	}
+	return u.Redacted()
 }
 
 // modelAPIKey reads the credential, preferring the endpoint-neutral name. OPENAI_API_KEY is

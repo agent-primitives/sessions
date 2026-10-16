@@ -13,8 +13,34 @@ provide.
   a redirect. net/http copied custom headers such as `api-key` to any redirect target, so a provider
   or proxy answering with a cross-host redirect received the credential. A redirect that changes
   scheme, host or port is now refused; same-origin redirects are followed as before.
+- `agentsessionsd` refuses to start when a model API key is set (`MODEL_API_KEY` or
+  `OPENAI_API_KEY`) and `-model-base-url` is plain `http` to a host other than a loopback address,
+  `localhost`, or a name ending in `.svc` or `.svc.cluster.local` (case-insensitive, port ignored):
+  the key and every prompt would cross the network unencrypted. The service-name allowance is a
+  trusted-network exception: it checks the name only, not that it resolves to a cluster service or
+  that the traffic stays in the cluster, and that traffic is still cleartext on the pod network. The
+  error names the host and asks for `https`; it never prints the key. `https`, and `http` with no
+  key, are unchanged. The check is in `internal/modelconfig.New`.
 
 ### Fixed
+
+- A harness can now journal the usage of a host-mediated model call. `harnesswire` dropped
+  `ModelResponse.Usage` in both directions, so a remote harness always saw zero usage, and Replay
+  and Resume served a recorded completion with no usage, so a harness reporting the usage it was
+  given diverged from its record. The host now sends `ModelResult.usage` (already in the proto) and
+  the harness side reads it; Replay and Resume serve the `USAGE` recorded directly after the
+  completion. A harness built against an older `harnesswire` ignores the field, and an older host
+  sends none, which reads as zero usage. If a turn is cut between its `OUTPUT` and its `USAGE`,
+  Resume serves zero usage and does not re-invoke the model, so that call's usage is journaled as
+  zero (a harness that always reports the usage it was given), or not at all (one that skips zero).
+  v0.1.2 journals replay as before, with no usage served.
+
+- `model/openai` joins the completions path to the base URL's path instead of appending it to the
+  string, so a base URL with a query (`-model-base-url 'https://h/v1?api-version=2'`) reaches
+  `/v1/chat/completions` with the query kept, ahead of any query `-model-path` carries. A fragment
+  is dropped. Before, the path landed inside the query or fragment and every turn went to `/v1`.
+  `agentsessionsd`'s startup log names that joined endpoint (`openai.Client.Endpoint`), with a
+  userinfo password masked, instead of the base URL and path concatenated.
 
 - The substrate adapter (`integrations/substrate`) builds against agent-substrate `96dffb28`, which
   replaced `ActorStatus.external_snapshot` with a `snapshots` list (substrate `f03327bd`) and
@@ -61,6 +87,9 @@ provide.
   transaction. Calls whose `TOOL_CALL` precedes the child's latest `FORK` are excluded, as are
   invalid approval-bearing histories and projections lagging the journal head; the reference
   is not command authority or a runtime/integrity probe.
+- `agentctl replay -v` also prints each record's content hash and previous hash (16 hex), the
+  execution id, a model call's model and input hash, and a usage record's token counts. Without
+  `-v` the output is unchanged.
 - Go SDK callers can pass opaque per-execution config through `client.ExecOptions.Config`.
   Omitting it keeps the existing empty-config behavior. Config is durable journal content exposed
   by Replay; do not include credentials. No wire or journal schema change.
@@ -153,6 +182,14 @@ provide.
   until this host restarts or loads it through `RegisterHarness` with the identical compatible spec.
   For a RETIRED row, restart this host to serve its existing sessions without reactivating it:
   `RegisterHarness` reactivates the row for every host sharing the journal.
+- `openai.New` refuses a base URL that is not absolute (no scheme or host), so `agentsessionsd`
+  exits at startup with `-model-base-url` set to one. Such a URL used to fail every request.
+  It also refuses a query parameter that both the base URL and the path (`WithPath`,
+  `-model-path`) set, such as an `api-version` in each, which was sent twice; set it in one of
+  them. The error names the parameter, never its value.
+- `agentsessionsd` exits at startup with a model API key and a plain-`http` `-model-base-url` to a
+  host that is not loopback, `localhost` or a `.svc` name (see Security). Switch such an
+  endpoint to `https`, or unset the key, before upgrading.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

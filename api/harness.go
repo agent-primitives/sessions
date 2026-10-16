@@ -112,7 +112,9 @@ type EventSink interface {
 	ToolCall(ctx context.Context, tc ToolCall) (ToolResult, error)
 	// Report records the result of a tool the harness executed itself.
 	Report(ctx context.Context, tr ToolResult) error
-	// Usage records token/cost accounting.
+	// Usage records token/cost accounting. To record a model call's usage, pass the
+	// ModelResponse.Usage that Model returned: Replay and Resume serve the recorded usage with
+	// the recorded completion, so the same call matches the record.
 	Usage(ctx context.Context, u Usage) error
 }
 

@@ -7,14 +7,14 @@ before starting anything large.
 
 ```bash
 go build ./...
-go test -race ./...
+go test -race -shuffle=on ./...
 ```
 
 `integrations/substrate` is a separate Go module and is not reached by `./...` from the root. If you
 touch it, test it on its own:
 
 ```bash
-cd integrations/substrate && go test -race ./...
+cd integrations/substrate && go test -race -shuffle=on ./...
 ```
 
 ## What CI checks
@@ -25,7 +25,7 @@ Run these before pushing; they are the same gates the `ci` workflow enforces.
 |---|---|
 | Formatting | `gofmt -l .` must print nothing |
 | Build and vet | `go build ./...`, `go vet ./...` |
-| Tests | `go test -race ./...` |
+| Tests | `go test -race -shuffle=on ./...` (a failure prints the seed; rerun with `-shuffle=<seed>`) |
 | Vendor neutrality | `go list -deps ./... \| grep -c agent-substrate` must be `0` |
 | Provenance self-check | `python3 hack/verify_chain.py --golden` |
 | Cross-language chain audit | `./hack/verify_chain.sh` (also audits every journal in `sqlitelog/testdata`) |

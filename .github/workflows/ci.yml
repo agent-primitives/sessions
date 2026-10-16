@@ -166,8 +166,10 @@ jobs:
         if: needs.changes.outputs.decision != 'skip'
       - run: go vet ./...
         if: needs.changes.outputs.decision != 'skip'
-      # -race guards the single-writer log and the streaming sinks.
-      - run: go test -race ./...
+      # -race guards the single-writer log and the streaming sinks. -shuffle=on randomizes test and
+      # benchmark order so a test that only passes after another one fails here; a failing run
+      # prints its seed, and `go test -shuffle=<seed>` replays that order.
+      - run: go test -race -shuffle=on ./...
         if: needs.changes.outputs.decision != 'skip'
 
       # An unparseable workflow is not reported as a syntax error: GitHub cannot evaluate the `on:`
@@ -264,7 +266,7 @@ jobs:
         if: needs.changes.outputs.decision != 'skip'
       - run: go vet ./...
         if: needs.changes.outputs.decision != 'skip'
-      - run: go test -race ./...
+      - run: go test -race -shuffle=on ./...
         if: needs.changes.outputs.decision != 'skip'
 
       - name: golangci-lint

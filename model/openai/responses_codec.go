@@ -45,7 +45,7 @@ func (c *ResponsesClient) buildResponsesRequest(req api.ModelRequest, stream boo
 			}
 			body[key] = n
 		default:
-			return model, nil, responsesUnsupported("parameter %q", key)
+			return model, nil, responsesUnsupported("unsupported parameter")
 		}
 	}
 	names := map[string]bool{}
@@ -57,7 +57,7 @@ func (c *ResponsesClient) buildResponsesRequest(req api.ModelRequest, stream boo
 		names[tool.Name] = true
 		t := map[string]any{"type": "function", "name": tool.Name, "description": tool.Description, "strict": false}
 		if tool.InputSchema != nil {
-			raw, err := json.Marshal(tool.InputSchema)
+			raw, err := responsesMarshal(tool.InputSchema)
 			if err != nil {
 				return model, nil, responsesUnsupported("tool schema: %v", err)
 			}
@@ -83,7 +83,7 @@ func (c *ResponsesClient) buildResponsesRequest(req api.ModelRequest, stream boo
 			case api.ToolChoiceAuto, api.ToolChoiceNone, api.ToolChoiceRequired:
 				body["tool_choice"] = strings.ToLower(string(choice.Mode))
 			default:
-				return model, nil, responsesUnsupported("tool choice mode %q", choice.Mode)
+				return model, nil, responsesUnsupported("unsupported tool choice mode")
 			}
 		}
 	}
@@ -91,7 +91,7 @@ func (c *ResponsesClient) buildResponsesRequest(req api.ModelRequest, stream boo
 	if err != nil {
 		return model, nil, err
 	}
-	raw, err := json.Marshal(body)
+	raw, err := responsesMarshal(body)
 	if err != nil {
 		return model, nil, responsesUnsupported("encode request: %v", err)
 	}
@@ -122,7 +122,7 @@ func responsesInput(model string, messages []api.Message) ([][]byte, error) {
 	input := [][]byte{}
 	calls, results, reasoningIDs := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	add := func(item any) error {
-		raw, err := json.Marshal(item)
+		raw, err := responsesMarshal(item)
 		if err == nil {
 			input = append(input, raw)
 		}
@@ -139,7 +139,7 @@ func responsesInput(model string, messages []api.Message) ([][]byte, error) {
 				return nil, responsesUnsupported("message %d requires model-facing tool results", mi)
 			}
 		default:
-			return nil, responsesUnsupported("message %d role %q", mi, role)
+			return nil, responsesUnsupported("message %d role is unsupported", mi)
 		}
 		content := []map[string]string{}
 		flush := func() error {
@@ -186,7 +186,7 @@ func responsesInput(model string, messages []api.Message) ([][]byte, error) {
 				if args == nil {
 					args = map[string]any{}
 				}
-				raw, err := json.Marshal(args)
+				raw, err := responsesMarshal(args)
 				if err != nil {
 					return nil, responsesUnsupported("function arguments: %v", err)
 				}
@@ -213,7 +213,7 @@ func responsesInput(model string, messages []api.Message) ([][]byte, error) {
 					return nil, err
 				}
 			default:
-				return nil, responsesUnsupported("message %d part %d is unsupported for role %q", mi, pi, role)
+				return nil, responsesUnsupported("message %d part %d is unsupported for its role", mi, pi)
 			}
 		}
 		if err := flush(); err != nil {
@@ -236,7 +236,7 @@ func responsesArguments(raw string) (map[string]any, error) {
 	dec.UseNumber()
 	var value any
 	if err := dec.Decode(&value); err != nil {
-		return nil, err
+		return nil, responsesJSONError(err)
 	}
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return nil, fmt.Errorf("arguments contain trailing JSON")
@@ -249,7 +249,7 @@ func responsesArguments(raw string) (map[string]any, error) {
 		return nil, err
 	}
 	var out map[string]any
-	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+	if err := responsesUnmarshal([]byte(raw), &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -305,14 +305,14 @@ type responsesItem struct {
 
 func parseResponsesItem(raw []byte) (responsesItem, error) {
 	var item responsesItem
-	err := json.Unmarshal(raw, &item)
+	err := responsesUnmarshal(raw, &item)
 	item.raw = raw
 	return item, err
 }
 
 func responsesKeys(raw []byte, allowed ...string) error {
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
+	if err := responsesUnmarshal(raw, &fields); err != nil {
 		return err
 	}
 	for key := range fields {
@@ -324,7 +324,7 @@ func responsesKeys(raw []byte, allowed ...string) error {
 			}
 		}
 		if !found {
-			return fmt.Errorf("unsupported item/content field %q", key)
+			return fmt.Errorf("unsupported item/content field")
 		}
 	}
 	return nil
@@ -339,7 +339,7 @@ func validateResponsesReasoning(item responsesItem) error {
 			Type string  `json:"type"`
 			Text *string `json:"text"`
 		}
-		if err := json.Unmarshal(raw, &p); err != nil {
+		if err := responsesUnmarshal(raw, &p); err != nil {
 			return err
 		}
 		if p.Type != "summary_text" || p.Text == nil {
@@ -358,7 +358,7 @@ func responsesOutputText(raw []byte, requireText bool) (string, error) {
 		Text        *string           `json:"text"`
 		Annotations []json.RawMessage `json:"annotations"`
 	}
-	if err := json.Unmarshal(raw, &p); err != nil {
+	if err := responsesUnmarshal(raw, &p); err != nil {
 		return "", err
 	}
 	if p.Type != "output_text" || (requireText && p.Text == nil) || len(p.Annotations) > 0 {
@@ -390,12 +390,17 @@ func decodeResponses(model string, raw []byte) (api.ModelResponse, error) {
 			} `json:"output_tokens_details"`
 		} `json:"usage"`
 	}
-	if err := json.Unmarshal(raw, &out); err != nil {
+	if err := responsesUnmarshal(raw, &out); err != nil {
 		return fail(fmt.Errorf("decode response: %w", err))
 	}
 	present := func(r json.RawMessage) bool { return len(r) > 0 && !bytes.Equal(bytes.TrimSpace(r), []byte("null")) }
 	if out.Status != "completed" || out.Output == nil || present(out.Error) || present(out.Incomplete) {
-		return fail(fmt.Errorf("response is not a completed output (status %q)", out.Status))
+		switch out.Status {
+		case "failed", "incomplete", "cancelled", "queued", "in_progress":
+			return fail(fmt.Errorf("response is not a completed output (status %s)", out.Status))
+		default:
+			return fail(fmt.Errorf("response is not a completed output"))
+		}
 	}
 	msg := api.Message{Role: "assistant"}
 	ids, calls := map[string]bool{}, map[string]bool{}
@@ -442,7 +447,7 @@ func decodeResponses(model string, raw []byte) (api.ModelResponse, error) {
 			}
 			msg.Parts = append(msg.Parts, api.Part{Reasoning: &api.ReasoningPart{Provider: "openai", ModelID: model, ItemID: item.ID, Ordinal: int32(index), Opaque: append([]byte(nil), rawItem...)}})
 		default:
-			return fail(fmt.Errorf("unsupported output item type %q", item.Type))
+			return fail(fmt.Errorf("unsupported output item type"))
 		}
 	}
 	if out.Usage.Input < 0 || out.Usage.Output < 0 || out.Usage.Details.Reasoning < 0 {

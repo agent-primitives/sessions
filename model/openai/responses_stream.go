@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"reflect"
 	"strings"
@@ -23,12 +22,11 @@ func (c *ResponsesClient) StreamModel(ctx context.Context, req api.ModelRequest,
 	}
 	resp, err := c.client.post(ctx, body)
 	if err != nil {
-		return api.ModelResponse{}, fmt.Errorf("openai responses: %s: %w", model, err)
+		return api.ModelResponse{}, responsesIOError("request", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return api.ModelResponse{}, statusError(model, resp.StatusCode, raw)
+		return api.ModelResponse{}, fmt.Errorf("openai responses: HTTP status %d", resp.StatusCode)
 	}
 	state := responsesStream{items: map[int]*responsesStreamItem{}}
 	scanner := bufio.NewScanner(resp.Body)
@@ -75,7 +73,7 @@ func (c *ResponsesClient) StreamModel(ctx context.Context, req api.ModelRequest,
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return api.ModelResponse{}, fmt.Errorf("openai responses: read stream: %w", err)
+		return api.ModelResponse{}, responsesIOError("read stream", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return api.ModelResponse{}, err
@@ -147,12 +145,11 @@ type responsesEvent struct {
 	Text         *string         `json:"text"`
 	Arguments    *string         `json:"arguments"`
 	Response     json.RawMessage `json:"response"`
-	Message      string          `json:"message"`
 }
 
 func (s *responsesStream) event(eventName string, raw []byte, onChunk func(string)) ([]byte, error) {
 	var e responsesEvent
-	if err := json.Unmarshal(raw, &e); err != nil {
+	if err := responsesUnmarshal(raw, &e); err != nil {
 		return nil, fmt.Errorf("malformed event: %w", err)
 	}
 	if e.Type == "" || (eventName != "" && eventName != e.Type) {
@@ -168,7 +165,7 @@ func (s *responsesStream) event(eventName string, raw []byte, onChunk func(strin
 		if len(e.Response) == 0 || bytes.Equal(e.Response, []byte("null")) {
 			return nil, fmt.Errorf("missing lifecycle response")
 		}
-		if err := json.Unmarshal(e.Response, &response); err != nil {
+		if err := responsesUnmarshal(e.Response, &response); err != nil {
 			return nil, err
 		}
 		if response.Status != "" && response.Status != "in_progress" {
@@ -179,20 +176,8 @@ func (s *responsesStream) event(eventName string, raw []byte, onChunk func(strin
 		}
 		return nil, nil
 	case "error", "response.failed", "response.incomplete":
-		var detail struct {
-			Error struct {
-				Message string `json:"message"`
-			} `json:"error"`
-			Incomplete struct {
-				Reason string `json:"reason"`
-			} `json:"incomplete_details"`
-		}
-		if len(e.Response) > 0 {
-			if err := json.Unmarshal(e.Response, &detail); err != nil {
-				return nil, fmt.Errorf("malformed terminal %s: %w", e.Type, err)
-			}
-		}
-		return nil, fmt.Errorf("terminal %s: %s", e.Type, strings.Join([]string{e.Message, detail.Error.Message, detail.Incomplete.Reason}, " "))
+		// Only the allowlisted terminal kind is safe to journal; provider messages can echo input.
+		return nil, fmt.Errorf("terminal %s", e.Type)
 	case "response.completed":
 		if err := s.validateFinal(e.Response); err != nil {
 			return nil, err
@@ -236,14 +221,14 @@ func (s *responsesStream) event(eventName string, raw []byte, onChunk func(strin
 			}
 		case "reasoning": // Encrypted content on added events is not replayable state.
 		default:
-			return nil, fmt.Errorf("unsupported added item type %q", item.Type)
+			return nil, fmt.Errorf("unsupported added item type")
 		}
 		s.items[*e.OutputIndex] = &responsesStreamItem{added: item, texts: map[responsesTextKey]*responsesStreamText{}}
 		return nil, nil
 	}
 	// Every semantic event below must refer to a known item and stable index/ID.
 	if e.OutputIndex == nil || *e.OutputIndex < 0 {
-		return nil, fmt.Errorf("missing/invalid output index for %s", e.Type)
+		return nil, fmt.Errorf("missing/invalid output index")
 	}
 	item := s.items[*e.OutputIndex]
 	if item == nil {
@@ -297,7 +282,7 @@ func (s *responsesStream) event(eventName string, raw []byte, onChunk func(strin
 		}
 		return nil, item.textEvent(e, "reasoning", e.ContentIndex, nil)
 	default:
-		return nil, fmt.Errorf("unsupported semantic event %q", e.Type)
+		return nil, fmt.Errorf("unsupported semantic event")
 	}
 }
 
@@ -369,7 +354,7 @@ func responsesStreamPartText(raw []byte, kind string) (string, error) {
 		Type string  `json:"type"`
 		Text *string `json:"text"`
 	}
-	if err := json.Unmarshal(raw, &part); err != nil {
+	if err := responsesUnmarshal(raw, &part); err != nil {
 		return "", err
 	}
 	expected := "summary_text"
@@ -410,7 +395,7 @@ func (s *responsesStream) validateFinal(raw []byte) error {
 		ID     string            `json:"id"`
 		Output []json.RawMessage `json:"output"`
 	}
-	if err := json.Unmarshal(raw, &final); err != nil {
+	if err := responsesUnmarshal(raw, &final); err != nil {
 		return err
 	}
 	if err := s.responseID(final.ID); err != nil {

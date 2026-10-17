@@ -177,8 +177,8 @@ func TestResponsesStreamTerminalDetails(t *testing.T) {
 				_, _ = io.WriteString(w, responseEvent(tc.event, tc.fields))
 			})
 			_, err := c.StreamModel(t.Context(), api.ModelRequest{}, nil)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err=%v, want provider detail %q", err, tc.want)
+			if err == nil || !strings.Contains(err.Error(), "terminal "+tc.event) || strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want terminal category without provider text", err)
 			}
 		})
 	}

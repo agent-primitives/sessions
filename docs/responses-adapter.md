@@ -99,9 +99,14 @@ function-argument, reasoning or indexed-part deltas. The final message retains t
 reasoning and tool parts. It is decoded from `response.completed`, with stream identities and content
 checked against the completed response; usage is taken from that response once.
 
-Nonstreaming responses are limited to 32 MiB. Streaming accepts at most 8 MiB per SSE line and
+Nonstreaming responses are limited to 32 MiB. Streaming accepts less than 8 MiB per SSE line and
 32 MiB per assembled SSE record; a large one-line completed response can therefore exceed the
 streaming limit even when it fits the nonstreaming limit. Oversized responses fail clearly.
+Model-call errors retain stage/category and HTTP status, but omit provider message bodies,
+unsupported field/type values, decoder payloads and transport URLs/details: the host may journal the
+error text. Cancellation and deadline errors remain discoverable with `errors.Is`. Constructor
+configuration errors and explicit `Endpoint()` inspection still require the caller's usual redaction.
+
 EOF without completion, failed/incomplete responses, provider errors, malformed/conflicting events
 and cancellation fail the call. Text already shown to a caller remains provisional on failure; no
 partial executable tool call or successful completion is returned. Deltas are not journaled. The same

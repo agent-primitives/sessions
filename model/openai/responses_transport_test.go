@@ -62,7 +62,7 @@ func TestResponsesRedirectSafety(t *testing.T) {
 			} else {
 				_, err = c.Model(t.Context(), api.ModelRequest{})
 			}
-			if err == nil || !strings.Contains(err.Error(), "refusing redirect") || targetHits.Load() != 0 {
+			if err == nil || !strings.Contains(err.Error(), "request failed") || strings.Contains(err.Error(), target.URL) || targetHits.Load() != 0 {
 				t.Fatalf("err=%v target hits=%d", err, targetHits.Load())
 			}
 		})
@@ -97,7 +97,7 @@ func TestResponsesHTTPErrorsAndDeadline(t *testing.T) {
 				} else {
 					_, err = c.Model(t.Context(), api.ModelRequest{})
 				}
-				if err == nil || !strings.Contains(err.Error(), "429") || !strings.Contains(err.Error(), "provider rejected") {
+				if err == nil || !strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "provider rejected") {
 					t.Fatalf("err=%v", err)
 				}
 			})

@@ -34,18 +34,18 @@ func (c *ResponsesClient) Model(ctx context.Context, req api.ModelRequest) (api.
 	}
 	resp, err := c.client.post(ctx, body)
 	if err != nil {
-		return api.ModelResponse{}, fmt.Errorf("openai responses: %s: %w", model, err)
+		return api.ModelResponse{}, responsesIOError("request", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return api.ModelResponse{}, fmt.Errorf("openai responses: HTTP status %d", resp.StatusCode)
+	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, (32<<20)+1))
 	if err != nil {
-		return api.ModelResponse{}, fmt.Errorf("openai responses: read response: %w", err)
+		return api.ModelResponse{}, responsesIOError("read response", err)
 	}
 	if len(raw) > 32<<20 {
 		return api.ModelResponse{}, fmt.Errorf("openai responses: response exceeds 32 MiB")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return api.ModelResponse{}, statusError(model, resp.StatusCode, raw)
 	}
 	return decodeResponses(model, raw)
 }

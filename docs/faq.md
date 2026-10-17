@@ -85,7 +85,9 @@ It is model-agnostic. The harness selects a model by id and the host mediates th
 provider-specific code. Opaque provider reasoning parts are carried in one neutral `ReasoningPart` type
 and replayed verbatim, which was validated across Anthropic, OpenAI, and Gemini in the reasoning-
 continuity work. Because the harness routes model calls through the sink and not a provider SDK, swapping
-providers does not change the replay path.
+providers does not change the replay path. The bundled protocol clients are Chat Completions
+(`openai.New`) and explicit Responses (`openai.NewResponses`); see the [Responses mapping and
+limits](responses-adapter.md). The daemon/CLI still select Chat Completions.
 
 ## Can I bring my existing agent framework?
 
@@ -158,9 +160,9 @@ Exec frames expose the pending tuple at their captured cursor. A decision clears
 new input stays blocked until its receipt commits. Identity is not authorization; there is no policy
 hook, timeout or expiry. Snapshots and unresolved requests are retained indefinitely, and Cancel
 remains `UNIMPLEMENTED`. DeleteSession commits permanent intent without reclaiming resources.
-Tool calls align with the MCP shape (name plus structured arguments), but the stock daemon has no
-executor and the bundled model adapter does not map tools; this is not a complete MCP/provider
-integration. See
+Tool calls align with the MCP shape (name plus structured arguments), but approval alone is not a
+complete MCP/provider integration. The daemon's default Chat Completions adapter does not map tools;
+Responses tools require an explicitly composed Go host. See
 [approval recovery](interaction-model.md#approval-decisions-and-recovery).
 
 ## How do I list sessions, and can I trust the compute state I get back?

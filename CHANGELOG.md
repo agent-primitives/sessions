@@ -5,6 +5,16 @@ Release notes are generated from commits and published on the
 reader needs to know beyond a commit list: what a release means for compatibility, and what it does
 not provide.
 
+## Unreleased
+
+### Fixed
+
+- Socket executor write/read errors, including journaled approval receipts, no longer expose
+  the Unix socket path.
+- Tool-executor refusal receipts no longer reference an issue number.
+- `agentsessionsd` now logs at Warn for tool-executor routes that cannot dispatch because
+  `durable_dedup` is false or unknown.
+
 ## v0.2.0 - 2026-10-16
 
 ### Compatibility

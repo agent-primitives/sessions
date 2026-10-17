@@ -6,7 +6,7 @@ on:
   # No paths filter: ci, integrations and integrity are required checks, and a workflow a paths
   # filter skips never reports them, so the pull request could not merge. The changes job decides
   # instead (hack/ci-path-filter.sh): when a pull request changes only markdown (other than the
-  # generated API reference) or the license, each job skips its steps and reports success.
+  # generated API reference) or the license, each required job skips its steps and reports success.
   pull_request:
 
 permissions:
@@ -166,8 +166,10 @@ jobs:
         if: needs.changes.outputs.decision != 'skip'
       - run: go vet ./...
         if: needs.changes.outputs.decision != 'skip'
-      # -race guards the single-writer log and the streaming sinks.
-      - run: go test -race ./...
+      # -race guards the single-writer log and the streaming sinks. -shuffle=on randomizes test and
+      # benchmark order so a test that only passes after another one fails here; a failing run
+      # prints its seed, and `go test -shuffle=<seed>` replays that order.
+      - run: go test -race -shuffle=on ./...
         if: needs.changes.outputs.decision != 'skip'
 
       # An unparseable workflow is not reported as a syntax error: GitHub cannot evaluate the `on:`
@@ -264,7 +266,7 @@ jobs:
         if: needs.changes.outputs.decision != 'skip'
       - run: go vet ./...
         if: needs.changes.outputs.decision != 'skip'
-      - run: go test -race ./...
+      - run: go test -race -shuffle=on ./...
         if: needs.changes.outputs.decision != 'skip'
 
       - name: golangci-lint
@@ -277,6 +279,16 @@ jobs:
       - name: govulncheck
         if: needs.changes.outputs.decision != 'skip'
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  # Go native fuzzing, 30s per target, one job per package. The nightly run in fuzz.yml gives each
+  # target longer. Not a required check, so on a `skip` decision the whole job is skipped rather
+  # than reporting success; it also skips when the changes job fails, which fails ci instead.
+  fuzz:
+    needs: changes
+    if: needs.changes.outputs.decision != 'skip'
+    uses: ./.github/workflows/fuzz.yml
+    with:
+      fuzztime: 30s
 
   integrity:
     # Full cross-language provenance audit: record a real journal, have an INDEPENDENT Python

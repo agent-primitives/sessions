@@ -323,6 +323,7 @@ one.
 `agentctl` is a thin shell over the same client package your code can use. One call runs a turn,
 creating the session if you did not name one:
 
+<!-- doccheck: body(ctx context.Context) -->
 ```go
 c, err := client.Dial("127.0.0.1:8080", client.WithProject("acme"))
 if err != nil {
@@ -340,6 +341,7 @@ fmt.Println(turn.Session.GetMetadata().GetUid(), turn.Output)
 Output streams as the model produces it. `OnDelta` receives ephemeral chunks; `OnRecord` receives
 committed records:
 
+<!-- doccheck: body(ctx context.Context, c *client.Client, err error) -->
 ```go
 _, err = c.Exec(ctx, client.ExecOptions{
     Inputs:  []string{"write a haiku"},
@@ -355,6 +357,7 @@ anything streamed.
 `turn.LastSeq` is the cursor for the next turn, so opting into the single-writer check costs no
 extra round trip:
 
+<!-- doccheck: body(ctx context.Context, c *client.Client, turn *client.TurnResult) -->
 ```go
 next, err := c.Exec(ctx, client.ExecOptions{
     Session:         turn.Session.GetMetadata().GetUid(),
@@ -395,6 +398,7 @@ upgrading its schema.
 
 The SDK returns the raw Session; inspect its deletion state rather than interpreting OK as cleanup:
 
+<!-- doccheck: body(ctx context.Context, c *client.Client, turn *client.TurnResult) -->
 ```go
 deleted, err := c.DeleteSession(ctx, turn.Session.GetMetadata().GetUid())
 if err != nil {

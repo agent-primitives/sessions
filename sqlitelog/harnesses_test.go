@@ -227,15 +227,18 @@ func TestMigrationRefusesUndecodableEvent(t *testing.T) {
 
 // A migrated database and a fresh one have the same shape. The base schema is frozen and every
 // change is a rung, so a fresh database runs the same rungs and cannot drift from a migrated one.
+// schema-v4.db (see session/persisted_format_test.go) is the shape the next release writes: a change
+// to a table that ships in it without a rung of its own leaves it behind a fresh database.
 func TestMigratedAndFreshDatabasesMatch(t *testing.T) {
-	migrated := copyFixture(t, v012Fixture)
-	mustOpen(t, migrated).Close()
 	fresh := filepath.Join(t.TempDir(), "fresh.db")
 	mustOpen(t, fresh).Close()
-
-	got, want := schemaOf(t, migrated), schemaOf(t, fresh)
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("migrated schema differs from fresh:\nmigrated %v\nfresh    %v", got, want)
+	want := schemaOf(t, fresh)
+	for _, fixture := range []string{v012Fixture, "testdata/schema-v4.db"} {
+		migrated := copyFixture(t, fixture)
+		mustOpen(t, migrated).Close()
+		if got := schemaOf(t, migrated); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s schema differs from fresh after Open:\nmigrated %v\nfresh    %v", fixture, got, want)
+		}
 	}
 	for _, obj := range [][2]string{{"table", "harnesses"}, {"table", "reserved_harness_names"}, {"index", "sessions_harness"}} {
 		if !hasObject(want, obj[0], obj[1]) {

@@ -31,11 +31,16 @@ backends record external lifecycle calls such as actor creation, resume, suspend
 
 Library components default to a discard logger. The process that assembles them must inject one:
 
+<!-- doccheck: body(harness api.Harness, model controller.ModelFunc, store *sqlitelog.Store) -->
 ```go
 logger := slog.Default()
 backend := local.New(harness, local.WithLogger(logger))
 placer := placement.New(backend, model, placement.WithLogger(logger))
-service := session.NewService(store, placer, session.WithLogger(logger))
+registry, err := placement.NewRegistry("my-agent", map[string]*placement.Placer{"my-agent": placer})
+if err != nil {
+    return err
+}
+service := session.NewService(store, registry, session.WithLogger(logger))
 ```
 
 Use `observability.UnaryServerInterceptor` and `observability.StreamServerInterceptor` on gRPC

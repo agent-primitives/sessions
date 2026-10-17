@@ -114,7 +114,11 @@ func (c *toolExecutorConfig) factory(logger *slog.Logger) ToolExecutorFunc {
 		if r.DurableDedup != nil {
 			declaration = fmt.Sprint(*r.DurableDedup)
 		}
-		logger.Info("configured tool executor", "harness", r.Harness, "tool", r.Tool, "executor", r.Executor, "durable_dedup", declaration)
+		level := slog.LevelInfo
+		if r.DurableDedup == nil || !*r.DurableDedup {
+			level = slog.LevelWarn
+		}
+		logger.Log(context.Background(), level, "configured tool executor", "harness", r.Harness, "tool", r.Tool, "executor", r.Executor, "durable_dedup", declaration)
 	}
 	return func(harness string, _ *client.Client) (controller.ToolFunc, error) {
 		tools := routes[harness]
@@ -127,7 +131,7 @@ func (c *toolExecutorConfig) factory(logger *slog.Logger) ToolExecutorFunc {
 				return api.ToolResult{}, fmt.Errorf("tool executor: harness %q tool %q is not configured", harness, call.Tool)
 			}
 			if r.DurableDedup == nil || !*r.DurableDedup {
-				return api.ToolResult{}, fmt.Errorf("tool executor: harness %q tool %q requires durable_dedup true until #139", harness, call.Tool)
+				return api.ToolResult{}, fmt.Errorf("tool executor: harness %q tool %q requires durable_dedup true", harness, call.Tool)
 			}
 			return executors[r.Executor].execute(ctx, harness, scope, call)
 		}, nil

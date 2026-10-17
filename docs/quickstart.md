@@ -23,8 +23,6 @@ go install github.com/agent-primitives/sessions/cmd/agentctl@v0.2.0
 go install github.com/agent-primitives/sessions/cmd/agentsessionsd@v0.2.0
 ```
 
-v0.1.x stays at the module path `github.com/aramase/agentsessions`.
-
 ```bash
 # Release archive: both binaries, for linux/darwin on amd64/arm64.
 # Checksums and SBOMs are published alongside it.
@@ -41,7 +39,9 @@ Container images are published for the server and the harness node:
 docker run --rm ghcr.io/agent-primitives/sessions/agentsessionsd:v0.2.0 --help
 ```
 
-v0.1.x images stay at `ghcr.io/aramase/agentsessions`.
+The images are multi-arch, built from the tagged source with no Dockerfile. `agentsessionsd` is the
+Sessions server; `harnessnode` is the in-sandbox harness the substrate manifests in
+`deploy/substrate/` reference. The server runs as uid 65532, so mount its journal path writable.
 
 To build from a checkout instead:
 

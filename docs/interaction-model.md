@@ -298,6 +298,10 @@ credential header other than `Authorization`) are reached with `--model-path` an
 scheme is a different protocol: implement `controller.ModelFunc` for those, and every guarantee
 still holds, because the host still owns the call.
 
+For custom Go hosts, `model/openai.NewResponses` explicitly selects the Responses protocol, including
+function tools and stateless reasoning continuity. See [Responses adapter](responses-adapter.md).
+Daemon/CLI protocol selection remains Chat Completions; `--model-path` changes the path, not the codec.
+
 ## What this project does not provide
 
 Being explicit here is part of the contract.

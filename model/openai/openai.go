@@ -1,4 +1,5 @@
-// Package openai is a model provider for OpenAI-compatible Chat Completions endpoints.
+// Package openai provides OpenAI-compatible Chat Completions and Responses protocol clients.
+// New selects Chat Completions; NewResponses explicitly selects stateless Responses.
 //
 // It speaks the HTTP wire protocol directly and depends on no vendor SDK, which is what keeps it
 // in the core module: the protocol is an interoperable format that many endpoints implement, not a

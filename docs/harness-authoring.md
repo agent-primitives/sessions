@@ -398,10 +398,11 @@ The input hash (I0) covers the tools, the tool choice, and every tool part, so o
 request from the recorded completion exactly as you did live. A changed definition, choice, or argument
 fails the I0 check.
 
-The bundled OpenAI-compatible adapter (`model/openai`) does not map tools yet. It refuses a request that
-carries tools, a tool choice, or a tool part instead of sending less than the log records. Approval
-mediation does not add provider tool mapping or a complete application tool loop: a custom harness,
-model adapter and durably deduplicating host executor still supply those parts.
+The explicit Responses adapter (`model/openai.NewResponses`) maps function tools and preserves opaque
+reasoning across tool turns; see [its supported mapping and limits](responses-adapter.md). The Chat
+Completions constructor (`openai.New`) still refuses tools, choices and tool parts. Approval mediation
+does not add a complete application tool loop: a custom harness, model adapter and durably deduplicating
+host executor still supply those parts.
 
 ## Reference harness 1: stateless replay (`harness/echoagent`)
 

@@ -5,6 +5,13 @@ Release notes are generated from commits and published on the
 reader needs to know beyond a commit list: what a release means for compatibility, and what it does
 not provide.
 
+## Unreleased
+
+- `model/openai.NewResponses` adds an explicit stateless Responses client with function tools,
+  opaque encrypted reasoning retention, usage, and text streaming. Existing Chat Completions,
+  daemon/CLI selection, neutral request hashes and journal schemas remain unchanged. Unsupported
+  content and controls refuse rather than being dropped; see [mapping and limits](docs/responses-adapter.md).
+
 ## v0.2.0 - 2026-10-16
 
 ### Compatibility

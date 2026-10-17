@@ -85,7 +85,9 @@ It is model-agnostic. The harness selects a model by id and the host mediates th
 provider-specific code. Opaque provider reasoning parts are carried in one neutral `ReasoningPart` type
 and replayed verbatim, which was validated across Anthropic, OpenAI, and Gemini in the reasoning-
 continuity work. Because the harness routes model calls through the sink and not a provider SDK, swapping
-providers does not change the replay path.
+providers does not change the replay path. The bundled protocol clients are Chat Completions
+(`openai.New`) and explicit Responses (`openai.NewResponses`); see the [Responses mapping and
+limits](responses-adapter.md). The daemon/CLI still select Chat Completions.
 
 ## Can I bring my existing agent framework?
 

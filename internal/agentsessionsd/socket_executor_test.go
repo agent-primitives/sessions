@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -103,7 +104,7 @@ func TestSocketExecutorForwardsIdentityAndResult(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("connections = %d", calls.Load())
 	}
-	if !strings.Contains(logs.String(), `"durable_dedup":"true"`) || !strings.Contains(logs.String(), `"level":"INFO"`) || strings.Contains(logs.String(), "same-key") {
+	if !strings.Contains(logs.String(), `"durable_dedup":"true"`) || !strings.Contains(logs.String(), `"level":"INFO"`) || strings.Contains(logs.String(), `"level":"WARN"`) || strings.Contains(logs.String(), "same-key") {
 		t.Fatalf("operator declarations = %s", logs.String())
 	}
 }
@@ -290,7 +291,7 @@ func TestSocketExecutorDownAndAlreadyCanceled(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			socket, _ := unixToolPeer(t, func(conn net.Conn) {
 				if stage == "read" {
-					// Leave request bytes unread so closing resets the peer's read.
+					// Leave request bytes unread: Linux resets the peer's read; Darwin returns EOF.
 					_, _ = io.ReadFull(conn, make([]byte, 1))
 				}
 			})
@@ -304,10 +305,11 @@ func TestSocketExecutorDownAndAlreadyCanceled(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), " "+stage+": ") || strings.Contains(err.Error(), socket) {
 				t.Fatalf("%s error must preserve stage without path: %v", stage, err)
 			}
-			// Plain EOF would not exercise the address-bearing socket error.
+			// Write failures and Linux read resets have syscall causes. Other systems
+			// may return plain EOF on read; the path/address checks still apply there.
 			var syscallErr *os.SyscallError
-			if !errors.As(err, &syscallErr) {
-				t.Fatalf("%s error must preserve its syscall cause: %v", stage, err)
+			if !errors.As(err, &syscallErr) && (stage != "read" || runtime.GOOS == "linux" || !errors.Is(err, io.EOF)) {
+				t.Fatalf("%s error must preserve its syscall cause (or EOF on non-Linux reads): %v", stage, err)
 			}
 			var op *net.OpError
 			if errors.As(err, &op) {

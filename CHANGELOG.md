@@ -487,11 +487,11 @@ and harness checks. To upgrade from v0.1.x:
 - `agentsessionsd -tool-executors <file>` routes controller-mediated and approval-gated tools of
   static `-harness` entries to operator-run executors on Unix sockets, from a versioned JSON config
   loaded at startup (see [tool-executors.md](docs/tool-executors.md)). Only a route that declares
-  `durable_dedup: true` dispatches; false or unknown refuses before dialing. The default timeout
-  is 30s and frames are limited to 1 MiB. Approved-call executor errors become durable
-  `EXECUTOR_ERROR` receipts. Socket paths longer than 103 bytes are rejected at startup on every
-  platform (macOS's stricter `sun_path` limit, reserving its NUL terminator). Without the flag,
-  behavior is unchanged.
+  `durable_dedup: true` dispatches; false or unknown refuses before dialing. Socket paths longer
+  than 103 bytes are rejected at startup on every platform (macOS's stricter `sun_path` limit,
+  reserving its NUL terminator). Dial errors omit the socket path from harness-visible errors and
+  approval receipts, and oversized replies report the 1 MiB frame limit rather than EOF. Without the
+  flag, behavior is unchanged.
 
 ### Fixed
 

@@ -343,7 +343,7 @@ makes no backward-compatibility guarantee: both the wire contract and the Go SPI
 
 What CI does enforce:
 
-- `buf lint` on every change.
+- `buf lint` on every change to the protos.
 - `buf breaking` against the most recent release tag, which fails the build when the schema breaks
   against that tag.
 - The checked-in generated code and the API reference must match the protos, so the published

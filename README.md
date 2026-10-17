@@ -81,7 +81,8 @@ how a turn runs and a recording of the full lifecycle on a real cluster. Start w
 - [Concepts](docs/concepts.md): sessions, typed events, the log, fences, resumability.
 - [Quickstart](docs/quickstart.md): exec, replay, fork, suspend, resume, and verify, locally.
 - [Writing a harness](docs/harness-authoring.md): plug your agent into the `api.Harness` SPI.
-- [Architecture](docs/architecture.md): how the neutral core is built, and the repository layout.
+- [Architecture](docs/architecture.md): how the neutral core is built, and the
+  [repository layout](docs/architecture.md#repository-layout).
 - [API reference](docs/api-reference.md) and the draft [specification](spec.md).
 
 Every doc, indexed by goal: [`docs/README.md`](docs/README.md).

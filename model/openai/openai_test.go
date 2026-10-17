@@ -160,10 +160,10 @@ func TestModelDoesNotInventReasoning(t *testing.T) {
 // asked for while the journal records the full request, so replay would reproduce the wrong call.
 func TestModelRejectsUnsupportedParts(t *testing.T) {
 	for name, part := range map[string]api.Part{
-		"file":        {File: &api.FilePart{MIME: "image/png", Bytes: []byte{1}}},
-		"data":        {Data: map[string]any{"k": "v"}},
-		"tool call":   {ToolCall: &api.ToolCall{ID: "c1", Tool: "get_weather", Args: map[string]any{"city": "Paris"}}},
-		"tool result": {ToolResult: &api.ToolResult{ID: "c1", Content: []api.Part{{Text: &api.TextPart{Text: "sunny"}}}}},
+		"file":                     {File: &api.FilePart{MIME: "image/png", Bytes: []byte{1}}},
+		"data":                     {Data: map[string]any{"k": "v"}},
+		"tool call in user role":   {ToolCall: &api.ToolCall{ID: "c1", Tool: "get_weather", Args: map[string]any{"city": "Paris"}}},
+		"tool result in user role": {ToolResult: &api.ToolResult{ID: "c1", Content: []api.Part{{Text: &api.TextPart{Text: "sunny"}}}}},
 		// A part with no known content is what a newer peer's part kind decodes to on the wire.
 		"unknown": {},
 	} {
@@ -186,12 +186,37 @@ func TestModelRejectsUnsupportedParts(t *testing.T) {
 	}
 }
 
-// Tools offered to the model are refused until this adapter maps them. Sending the call without them
-// would let the model answer a request the harness never made while the I0 hash covers the tools.
-func TestModelRejectsTools(t *testing.T) {
+// Refuse unsupported semantics before HTTP; never silently empty a result or ignore a choice.
+func TestModelRejectsUnmappedToolSemantics(t *testing.T) {
+	result := func(r api.ToolResult) api.ModelRequest {
+		r.ID = "c1"
+		return api.ModelRequest{Messages: []api.Message{{Role: "tool", Parts: []api.Part{{ToolResult: &r}}}}}
+	}
 	for name, req := range map[string]api.ModelRequest{
-		"tools":       {Tools: []api.ToolDefinition{{Name: "get_weather", InputSchema: map[string]any{"type": "object"}}}},
-		"tool choice": {ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceNone}},
+		"unnamed tool":      {Tools: []api.ToolDefinition{{InputSchema: map[string]any{}}}},
+		"schema":            {Tools: []api.ToolDefinition{{Name: "weather", InputSchema: map[string]any{"bad": make(chan int)}}}},
+		"choice":            {ToolChoice: &api.ToolChoice{Mode: "NEW_MODE"}},
+		"name default":      {ToolChoice: &api.ToolChoice{Name: "weather"}},
+		"name auto":         {ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceAuto, Name: "weather"}},
+		"name none":         {ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceNone, Name: "weather"}},
+		"params":            {Params: map[string]string{"unmapped": "true"}},
+		"output":            result(api.ToolResult{Output: map[string]any{}}),
+		"URI":               result(api.ToolResult{OutputURI: "file://result"}),
+		"digest":            result(api.ToolResult{OutputDigest: "sha256:digest"}),
+		"error flag":        result(api.ToolResult{IsError: true}),
+		"error":             result(api.ToolResult{Error: "failed"}),
+		"code":              result(api.ToolResult{Code: api.ToolResultCodeApprovalDenied}),
+		"request seq":       result(api.ToolResult{ApprovalRequestSeq: 1}),
+		"decision seq":      result(api.ToolResult{ApprovalDecisionSeq: 2}),
+		"nested file":       result(api.ToolResult{Content: []api.Part{{File: &api.FilePart{MIME: "image/png"}}}}),
+		"mixed part":        {Messages: []api.Message{{Parts: []api.Part{{Text: &api.TextPart{Text: "x"}, File: &api.FilePart{}}}}}},
+		"args":              {Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{ID: "c1", Tool: "weather", Args: map[string]any{"bad": make(chan int)}}}}}}},
+		"interleaved text":  {Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{ID: "c1", Tool: "weather"}}, {Text: &api.TextPart{Text: "late"}}}}}},
+		"multiple results":  {Messages: []api.Message{{Role: "tool", Parts: []api.Part{{ToolResult: &api.ToolResult{ID: "c1"}}, {ToolResult: &api.ToolResult{ID: "c2"}}}}}},
+		"missing result ID": {Messages: []api.Message{{Role: "tool", Parts: []api.Part{{ToolResult: &api.ToolResult{}}}}}},
+		"call metadata": {Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{
+			ID: "c1", Tool: "weather", Mediation: api.MediationControllerMediated, IdempotencyKey: "key",
+		}}}}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var called atomic.Bool
@@ -199,7 +224,9 @@ func TestModelRejectsTools(t *testing.T) {
 				called.Store(true)
 				_, _ = io.WriteString(w, completion("x"))
 			})
-			req.Messages = []api.Message{*api.TextMessage("user", "weather?")}
+			if req.Messages == nil {
+				req.Messages = []api.Message{*api.TextMessage("user", "weather?")}
+			}
 			for _, stream := range []bool{false, true} {
 				var err error
 				if stream {
@@ -207,12 +234,12 @@ func TestModelRejectsTools(t *testing.T) {
 				} else {
 					_, err = c.Model(t.Context(), req)
 				}
-				if !errors.Is(err, openai.ErrUnsupportedPart) || !strings.Contains(err.Error(), "tool") {
-					t.Fatalf("stream=%v: err = %v, want ErrUnsupportedPart naming tools", stream, err)
+				if !errors.Is(err, openai.ErrUnsupportedPart) {
+					t.Fatalf("stream=%v: err = %v, want ErrUnsupportedPart", stream, err)
 				}
 			}
 			if called.Load() {
-				t.Fatal("sent a request despite tools it cannot represent")
+				t.Fatal("sent a request despite unmapped semantics")
 			}
 		})
 	}

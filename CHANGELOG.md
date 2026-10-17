@@ -5,6 +5,25 @@ Release notes are generated from commits and published on the
 reader needs to know beyond a commit list: what a release means for compatibility, and what it does
 not provide.
 
+## Unreleased
+
+### Compatibility
+
+- SQLite schema v5 follows approval v3 and deletion v4, adding indexed exact caller issuer/subject
+  ownership and an off-mode journal authorization marker. Legacy and RPC-created sessions remain
+  unbound; ordinary metadata writes and copied history cannot assign or replace owners. No events
+  or hashes are rewritten, and no wire fields change. Older hosts refuse v5 at open time; this host
+  also refuses required, unknown or missing authorization markers at v5 because it cannot enforce
+  caller access. Stop all older writers before the first v5 open, following the
+  [rollout order](#sqlite-v4-rollout). Back up first. Sessions RPCs remain unauthenticated and
+  unenforced.
+
+### Added
+
+- Verified-caller ownership scaffolding: `api.CallerIdentity`, `Authorizer` and owner-only
+  `OwnerAuthorizer` contracts, plus insert-only `CreateOwnedSession` and indexed owner-filtered
+  listings. These are trusted-host Go APIs, not RPC authentication or enforcement.
+
 ## v0.2.0 - 2026-10-16
 
 ### Compatibility

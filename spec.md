@@ -1336,10 +1336,14 @@ The reference implementation protects the integrity of the record, not access to
     execution (`EXE-29`), so `Resume` no longer re-runs that turn. A legacy harness invocation
     (reconstruction, or recovery of an unfinished legacy execution) needs a session uid; `Resume`
     of a complete legacy execution is a no-op without one.
-  - The reference SQLite store versions its schema with `PRAGMA user_version` (currently 4),
+  - The reference SQLite store versions its schema with `PRAGMA user_version` (currently 5),
     migrates forward in one transaction without rewriting events or hashes, and refuses a newer or
     negative version. Version 4 adds the deletion state; migrated sessions are
-    `DELETION_ACTIVE`.
+    `DELETION_ACTIVE`. Version 5 adds exact caller ownership and an off-mode authorization marker.
+    Legacy and RPC-created sessions remain unbound; these host-side contracts add no RPC enforcement.
+    This host refuses required, unknown or missing authorization markers, even at version 5.
+    Stop every older writer sharing a journal and back it up before its first version 5 open;
+    an already-open older writer does not check the marker.
   - An older binary refuses a version 4 journal when it opens it, but one that already had the
     journal open does not enforce deletion (`OPS-36`): it can still append, mint fences, and
     update metadata after a `LIFECYCLE_DELETE`. Every older host and embedded `agentctl` sharing

@@ -47,10 +47,14 @@ func Caller(ctx context.Context) (api.CallerIdentity, bool) {
 	return c, ok && c.Valid()
 }
 
-var unauthenticated = status.Error(codes.Unauthenticated, "authentication required")
+var (
+	unauthenticated  = status.Error(codes.Unauthenticated, "authentication required")
+	errCallerExpired = errors.New("authn: caller expired")
+)
 
 // NewInterceptors constructs authentication for every RPC on a gRPC server,
-// without method exemptions. Required needs a verifier; invalid modes fail here.
+// without method exemptions. Install them outermost, before interceptors that
+// disclose data or perform effects. Required needs a verifier; invalid modes fail here.
 // Authentication alone is not isolation: handlers still need authorization and
 // operators must assemble a trusted transport. Stream expiry is cooperative;
 // it cannot undo effects or interrupt transport I/O already in progress.
@@ -96,7 +100,7 @@ func NewInterceptors(mode Mode, verifier CallerVerifier) (grpc.UnaryServerInterc
 		if mode == Off {
 			return handler(srv, &callerStream{ServerStream: ss, ctx: ctx})
 		}
-		ctx, cancel := context.WithDeadlineCause(ctx, expiry, unauthenticated)
+		ctx, cancel := context.WithDeadlineCause(ctx, expiry, errCallerExpired)
 		defer cancel()
 		wrapped := &callerStream{ServerStream: ss, ctx: ctx}
 		err = handler(srv, wrapped)
@@ -119,7 +123,7 @@ func (s *callerStream) contextError() error {
 	if s.ctx.Err() == nil {
 		return nil
 	}
-	if errors.Is(context.Cause(s.ctx), unauthenticated) {
+	if errors.Is(context.Cause(s.ctx), errCallerExpired) {
 		return unauthenticated
 	}
 	return status.FromContextError(s.ctx.Err()).Err()

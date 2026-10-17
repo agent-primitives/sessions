@@ -272,6 +272,7 @@ not erasure. Do not expose a host on an untrusted network.
 ## Optional Go caller authentication
 
 Custom hosts can install both interceptors returned by `authn.NewInterceptors` on a gRPC server.
+Install them outermost, before any interceptor that discloses data or performs effects.
 `authn.Required` requires a `CallerVerifier`; `authn.Off` skips verification and installs no caller.
 The verifier reads incoming metadata or verified TLS peer information and returns only an exact
 issuer/subject pair and a future credential expiry, never credentials. Adapters must reject missing,
@@ -283,7 +284,8 @@ The interceptors validate identity/expiry and return generic `UNAUTHENTICATED` o
 failure, without anonymous fallback or method exemptions. `authn.Caller(ctx)` exposes the verified
 pair; request identity and forwarded headers do not establish it. Streams get the earlier caller
 deadline or verified expiry; expiry reports `UNAUTHENTICATED`, while caller cancellation/deadlines
-retain their codes. Handlers must cooperate with cancellation. There is no in-stream refresh,
+retain their codes. Expiry overrides even a successful handler return; effects may already have
+completed. Handlers must cooperate with cancellation. There is no in-stream refresh,
 interruption of transport I/O already in progress, or rollback of an in-flight effect.
 
 Authentication alone is not isolation. Hosts still need authorization before disclosure/effects,

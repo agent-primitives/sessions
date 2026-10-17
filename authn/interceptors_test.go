@@ -77,10 +77,12 @@ func assertCode(t *testing.T, err error, want codes.Code) {
 
 type testStream struct {
 	grpc.ServerStream
-	ctx context.Context
+	ctx  context.Context
+	recv func() error
 }
 
 func (s *testStream) Context() context.Context { return s.ctx }
+func (s *testStream) RecvMsg(any) error        { return s.recv() }
 
 func TestOff(t *testing.T) {
 	u, s, err := NewInterceptors(Off, verifierFunc(func(context.Context) (VerifiedCaller, error) {
@@ -102,10 +104,12 @@ func TestOff(t *testing.T) {
 }
 
 func TestStreamLifetime(t *testing.T) {
-	for _, kind := range []string{"expiry", "caller deadline", "caller cancellation"} {
+	for _, kind := range []string{"expiry", "caller deadline", "caller cancellation", "caller status cause"} {
 		t.Run(kind, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			ctx, cancelCause := context.WithCancelCause(ctx)
+			defer cancelCause(nil)
 			expiry := time.Now().Add(time.Hour)
 			want := codes.Canceled
 			if kind == "caller deadline" {
@@ -130,6 +134,9 @@ func TestStreamLifetime(t *testing.T) {
 				if kind == "caller cancellation" {
 					cancel()
 				}
+				if kind == "caller status cause" {
+					cancelCause(status.Error(codes.Unauthenticated, "authentication required"))
+				}
 				<-ss.Context().Done()
 				// Expired operations must not reach the underlying stream.
 				assertCode(t, ss.SendMsg(nil), want)
@@ -139,6 +146,22 @@ func TestStreamLifetime(t *testing.T) {
 			assertCode(t, err, want)
 		})
 	}
+}
+
+func TestReceiveReturningAfterExpiry(t *testing.T) {
+	_, s, err := NewInterceptors(Required, verifierFunc(func(context.Context) (VerifiedCaller, error) {
+		return VerifiedCaller{testIdentity, time.Now().Add(10 * time.Millisecond)}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := &testStream{ctx: context.Background()}
+	err = s(nil, inner, nil, func(_ any, ss grpc.ServerStream) error {
+		inner.recv = func() error { <-ss.Context().Done(); return nil }
+		assertCode(t, ss.RecvMsg(nil), codes.Unauthenticated)
+		return nil
+	})
+	assertCode(t, err, codes.Unauthenticated)
 }
 
 func TestUnaryCancellationDuringHandler(t *testing.T) {

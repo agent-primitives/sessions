@@ -61,7 +61,10 @@ type SessionInfo struct {
 	ComputeState        api.ComputeState
 	DeletionState       api.DeletionState
 	DeletionRequestedAt time.Time
-	DeletionSeq         int64 // DELETE anchor; its predecessor is the pre-intent audit head
+	DeletionCompletedAt time.Time
+	InventoryComplete   bool   // internal cleanup coverage, not inferred from the ledger
+	CleanupError        string // bounded internal retry diagnostic
+	DeletionSeq         int64  // DELETE anchor; its predecessor is the pre-intent audit head
 	PendingApproval     api.ApprovalRef
 }
 
@@ -192,6 +195,7 @@ SELECT s.session, s.project, s.name, s.harness, s.model, s.parent_uid, s.fork_se
        s.compute_state, s.created_at, s.updated_at,
        s.labels, s.annotations, s.origin, s.identity,
        s.deletion_state, s.deletion_requested_at, s.deletion_seq,
+       s.deletion_completed_at, s.inventory_complete, s.cleanup_error,
        (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session = s.session),
        CASE WHEN s.last_seq = (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session = s.session)
                  AND s.approval_corrupt = 0 AND s.invalid_approval_executions = 0 AND a.execution_id != ''
@@ -204,11 +208,16 @@ SELECT s.session, s.project, s.name, s.harness, s.model, s.parent_uid, s.fork_se
 FROM sessions s LEFT JOIN approval_executions a
   ON a.session = s.session AND a.execution_id = s.latest_execution`
 
+// publishedSession admits ordinary rows, published children and aborted tombstones, but hides
+// PREPARING children before paging, even if already deleted. Unknown batch states fail closed.
+const publishedSession = `(s.fork_batch = '' OR EXISTS
+    (SELECT 1 FROM fork_batches b WHERE b.id = s.fork_batch AND b.status IN ('COMMITTED','ABORTED')))`
+
 // SessionInfo returns one session's metadata together with its derived log cursor and compute
 // state.
 func (s *Store) SessionInfo(uid string) (SessionInfo, error) {
 	row := s.db.QueryRow(sessionSelect+`
-		WHERE s.session = ?`, uid)
+		WHERE s.session = ? AND `+publishedSession, uid)
 	info, err := scanSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SessionInfo{}, fmt.Errorf("%w: %s", ErrSessionNotFound, uid)
@@ -243,7 +252,7 @@ func (s *Store) ListSessions(opts ListOptions) (SessionPage, error) {
 	}
 
 	args := []any{project}
-	where := `WHERE s.project = ? AND s.deletion_state = 'ACTIVE'`
+	where := `WHERE s.project = ? AND s.deletion_state = 'ACTIVE' AND ` + publishedSession
 	if opts.PageToken != "" {
 		createdAt, uid, err := decodeCursor(opts.PageToken)
 		if err != nil {
@@ -293,13 +302,14 @@ func scanSession(row scanner) (SessionInfo, error) {
 		state                string
 		createdAt, updatedAt int64
 		deletionState        string
-		requested            int64
+		requested, completed int64
 	)
 	if err := row.Scan(
 		&info.UID, &info.Project, &info.Name, &info.Harness, &info.Model,
 		&info.ParentUID, &info.ForkSeq, &state, &createdAt, &updatedAt,
 		&info.Labels, &info.Annotations, &info.Origin, &info.Identity,
 		&deletionState, &requested, &info.DeletionSeq,
+		&completed, &info.InventoryComplete, &info.CleanupError,
 		&info.LastSeq, &info.PendingApproval.RequestSeq,
 		&info.PendingApproval.ExecutionID, &info.PendingApproval.ToolCallID,
 	); err != nil {
@@ -313,6 +323,9 @@ func scanSession(row scanner) (SessionInfo, error) {
 	info.DeletionState = api.DeletionState(deletionState)
 	if requested != 0 {
 		info.DeletionRequestedAt = time.Unix(0, requested)
+	}
+	if completed != 0 {
+		info.DeletionCompletedAt = time.Unix(0, completed)
 	}
 	info.ComputeState = api.ComputeState(state)
 	if state == "" {

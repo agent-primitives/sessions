@@ -369,12 +369,13 @@ next, err := c.Exec(ctx, client.ExecOptions{
 `ListSessions` walks pagination for you, `Replay` and `Fork` return slices, and `c.Sessions()`
 returns the generated stub for anything the SDK does not model.
 
-## 10. Permanently tombstone a session (no cleanup)
+## 10. Permanently tombstone a session
 
 DeleteSession needs v0.2.0 or later; v0.1.x binaries do not have it.
 Use a fresh journal here, leaving `/tmp/qs.db` from the earlier examples untouched.
-Deletion is irreversible for the UID. To upgrade a journal written by v0.1.x, see the
-[schema v4 rollout note](../CHANGELOG.md#sqlite-v4-rollout) first.
+Deletion is irreversible for the UID. This build migrates journals to schema v5, with no downgrade
+to v0.2.0. Stop all older writers and back up before opening an existing journal; see the
+[schema v5 and inventory requirements](concepts.md#schema-v5-and-operator-inventory-certification).
 
 ```bash
 DELETE_JOURNAL=$(mktemp /tmp/qs-delete.XXXXXX)
@@ -386,11 +387,14 @@ agentctl replay --journal "$DELETE_JOURNAL" --session "$DELETE_SID"
 agentctl list   --journal "$DELETE_JOURNAL" --project default
 ```
 
-Delete/Get report `deletion=PENDING` and the committed RFC3339 request time. PENDING means durable
-intent only until #88 supplies ownership and cleanup: actors, snapshots and fork-child pins remain
-retained indefinitely. No Stop or reclamation is attempted. List hides the UID, but Get and raw
-Replay retain metadata and the full audit chain, including DELETE. Retry returns the original
-timestamps; use Get/retry after a lost response. Exec, historical Fork, Resume, Suspend and Approve
+These embedded commands do not start a reaper: Delete/Get report `deletion=PENDING` and the committed
+RFC3339 request time. Delete itself makes no runtime IO. The daemon starts an asynchronous reaper;
+embedders must explicitly start it before requests and stop/join on shutdown. Only local/remote
+no-dedicated-resource cleanup is supported; Substrate allocations remain PENDING. Completion reports
+COMPLETE, completion time and compute TERMINATED, not erasure or physical GC. List hides the UID,
+but Get and raw Replay retain metadata and the full audit chain, including DELETE. Retry returns
+the current stored snapshot without writes; independent reaper progress may change cleanup fields.
+Use Get/retry after a lost response. Exec, historical Fork, Resume, Suspend and Approve
 (including exact retries) now return `FAILED_PRECONDITION`. Existing children remain usable. There
 is no cascade, UID reuse or data erasure; UID, metadata and journal remain forever. See [deletion
 and admission limits](concepts.md#permanent-soft-deletion) before sharing a journal between hosts or

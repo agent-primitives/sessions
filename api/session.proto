@@ -35,12 +35,13 @@ enum ComputeState {
 
 // DeletionState is independent of the execution and compute axes. PENDING is a permanent
 // UID tombstone and durable deletion intent, not confirmation that resources were reclaimed.
-// Until ownership and cleanup are implemented (#88), deletion emits PENDING only: actors,
-// fork-child pins and snapshots remain retained, and no Runtime.Stop is attempted.
+// COMPLETE confirms that the host has a complete ownership inventory and has released all its
+// owned allocations. It does not promise physical storage GC or erase the retained journal.
 enum DeletionState {
   DELETION_STATE_UNSPECIFIED = 0;
   DELETION_ACTIVE = 1;
   DELETION_PENDING = 2;
+  DELETION_COMPLETE = 3;
 }
 
 // SnapshotRef is the session-STATUS ref carried in ComputeRef below. Its shape mirrors the canonical
@@ -98,6 +99,9 @@ message Session {
   DeletionState deletion_state = 16; // independent permanent-deletion axis
   // Absent for ACTIVE; set once when the host commits the durable PENDING tombstone.
   google.protobuf.Timestamp deletion_requested_time = 17;
+  // Set once when cleanup completes; absent while ACTIVE or PENDING. Completion does not append
+  // to the retained journal or change last_seq, deletion_requested_time or metadata.update_time.
+  google.protobuf.Timestamp deletion_completed_time = 18;
   int64 last_seq = 5;              // event-log cursor
 
   string parent_uid = 6; // fork lineage
@@ -310,19 +314,23 @@ service Sessions {
   // data erasure is promised. ListSessions hides the UID; GetSession and raw Sessions.Replay remain
   // read-only audit access, without reconstructing or running a harness.
   //
-  // Valid mutation requests against PENDING fail with FAILED_PRECONDITION before routing,
+  // Valid mutation requests against PENDING or COMPLETE fail with FAILED_PRECONDITION before routing,
   // recovery or compute effects: Exec, Fork (including historical at_seq), Resume, Suspend and
   // Approve are refused, including exact historical decision retries. Pending approval metadata
   // grants no permission.
   //
-  // Until ownership and cleanup land (#88), OK + PENDING acknowledges durable intent only. No
-  // Runtime.Stop, actor/pin release, physical snapshot GC or TERMINATED transition is attempted
-  // or promised. Execution and compute reporting stay independent. The retained journal
-  // is audit evidence, not a complete or authoritative cleanup-target inventory; the allocation
-  // ownership and cleanup-target schema belong to #88, not an inferred default harness or owner.
-  // Repeated PENDING deletion returns the identical Session: no timestamp, update_time, journal,
-  // fence or compute-projection changes. Clients must inspect deletion_state, not infer reclamation
-  // from an OK status.
+  // OK + PENDING acknowledges durable intent only. DeleteSession makes no runtime call. A
+  // separately started single-host reaper releases allocations through explicitly supported safe
+  // cleanup backends. Local and remote shared harness servers are not stopped; Substrate and
+  // other unsupported backends remain PENDING. Legacy inventories require explicit operator
+  // reconciliation; neither an empty ledger nor the retained journal proves resource absence.
+  // Once the inventory is complete and every owned allocation is released, the host records
+  // COMPLETE, deletion_completed_time and COMPUTE_TERMINATED, without appending an event or
+  // changing last_seq, update_time, the DELETE time or execution projection. Completion is not
+  // physical storage GC. Both PENDING and COMPLETE permanently refuse mutation.
+  // Repeated deletion returns the current stored Session without writes; only independent reaper
+  // progress can change its cleanup fields. Inspect deletion_state rather than inferring
+  // reclamation from an OK status.
   //
   // Empty uid is INVALID_ARGUMENT; an unknown nonempty uid is NOT_FOUND without creating a row.
   // Overlap with a mutation in the same Registry/host is ABORTED before mutation, without canceling

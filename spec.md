@@ -90,7 +90,7 @@ This draft does not specify:
 - authentication, authorization, transport security, or tenancy isolation (see §17);
 - a storage schema for the event log; the SQLite layout in [`sqlitelog/`](sqlitelog/) is an
   implementation detail;
-- erasure of a session's journal or metadata, or reclamation of its compute on deletion:
+- erasure of a session's journal or metadata, or physical storage GC on deletion:
   `DeleteSession` records durable intent only (§11.8);
 - in-flight cancellation (`Cancel` is declared and returns `UNIMPLEMENTED`);
 - an HTTP/JSON mapping of the API; the only transport is gRPC;
@@ -132,7 +132,8 @@ flowchart LR
   `uid` as opaque.
 - `SES-2`: `CreateSession` stores only `project`, `name`, `harness`, `model`, `labels`,
   `annotations`, `origin`, and `identity`. Output-only fields in the request (`exec_state`,
-  `compute_state`, `pending_approval`, `deletion_state`, `deletion_requested_time`, `last_seq`,
+  `compute_state`, `pending_approval`, `deletion_state`, `deletion_requested_time`,
+  `deletion_completed_time`, `last_seq`,
   `parent_uid`, `fork_seq`, `compute`) MUST be ignored.
 - `SES-3`: An empty `project` MUST be replaced by the host's default project. An empty `harness`
   MUST be replaced by the host's default harness.
@@ -171,7 +172,8 @@ no flattened lifecycle enum.
   - `LIFECYCLE_BASELINE`, `LIFECYCLE_CANCEL`, `LIFECYCLE_DELETE`, and approval events leave it
     unchanged;
   - a session with no events reports `COMPUTE_NONE`.
-- The reference host never reports `COMPUTE_WARM` or `COMPUTE_TERMINATED`.
+- The reference host never reports `COMPUTE_WARM`; cleanup completion reports
+  `COMPUTE_TERMINATED` (`OPS-35`).
 
 ### 5.3 Listing
 
@@ -188,13 +190,15 @@ no flattened lifecycle enum.
 `deletion_state` is a third axis, independent of `exec_state` and `compute_state`.
 
 - `SES-12`: A session MUST report `DELETION_ACTIVE` until `DeleteSession` commits (§11.8), and
-  `DELETION_PENDING` from then on. `deletion_requested_time` is unset while `ACTIVE` and, while
-  `PENDING`, is the time the host recorded in the deletion transaction (`OPS-31`). A `PENDING`
-  session MUST NOT report `pending_approval`.
-- `SES-13`: `PENDING` is a permanent tombstone and durable intent, not a report that compute or
-  snapshots were reclaimed (`OPS-35`). No transition leaves it. The reference host never reports
-  `DELETION_STATE_UNSPECIFIED`; the internal completion state reserved for cleanup has no wire
-  value and is never written.
+  `DELETION_PENDING` until cleanup completes (`OPS-35`), then `DELETION_COMPLETE` (wire value 3).
+  `deletion_requested_time` is unset while `ACTIVE` and otherwise remains the time recorded in the
+  deletion transaction (`OPS-31`). Every non-ACTIVE session MUST NOT report `pending_approval`.
+- `SES-13`: `PENDING` and `COMPLETE` are permanent tombstones; neither returns to ACTIVE. PENDING
+  acknowledges intent only. COMPLETE requires a complete inventory and confirmed release of all
+  tracked allocations (`OPS-35`), not physical storage GC. `deletion_completed_time` (Session field
+  18) is set once on completion, absent while ACTIVE or PENDING. Completion sets compute to
+  `COMPUTE_TERMINATED` without changing the execution projection. The reference host never reports
+  `DELETION_STATE_UNSPECIFIED`.
 - `SES-14`: `GetSession` MUST keep returning a deleted session, with its metadata, lineage,
   `last_seq` (which counts the `LIFECYCLE_DELETE` record), and `update_time` (equal to
   `deletion_requested_time` in the reference host).
@@ -716,10 +720,8 @@ invokes no harness and stays a no-op without one.
   writing. In the reference host the exclusion is per `Registry` (one host). For `Exec`,
   `Resume`, `Suspend`, and `Approve` it covers two phases: the session lookup and routing, and
   the guarded operation (`OPS-1`). A deletion can commit between the two; `OPS-34` covers that
-  case. For `Fork` it covers the lookup, and separately the fan-out until it ends, including
-  any rollback (`OPS-27`). A deletion can commit after the fan-out ends, while the host records
-  the children's metadata. The children still stand, because the fan-out completed before the
-  deletion; the fork returns them if those later metadata writes succeed. Lookup phases and
+  case. For `Fork` it covers the lookup, and separately preparation, fan-out and atomic publication
+  or durable abort (`OPS-27`), including all child metadata. Lookup phases and
   `Fork` do not exclude each other or the operations in `OPS-1`. `DeleteSession` neither waits
   for nor cancels the holder; the caller retries.
 - `OPS-2`: A per-session checkpoint mark MUST be held by `Suspend`, `Approve`, an approval park
@@ -883,11 +885,16 @@ invokes no harness and stays a no-op without one.
 - `OPS-26`: Children inherit `project`, `harness`, `model`, `annotations`, and `origin`. `labels`
   come from the request only (never merged). `name` is `child_names[i]` or empty. `identity` is
   unset. `parent_uid` and `fork_seq` record lineage. Children are returned in creation order.
-- `OPS-27`: If the fan-out fails, the host MUST call `Runtime.Stop` best-effort on each child it
-  provisioned and return the mapped error.
-- TODO(spike): A failed fork can leave child journal rows that list in the default project, and a
-  stateless fork with `at_seq` above the head records the requested `fork_seq` while copying only
-  to the head. Should fork be all-or-nothing in the journal, and should `at_seq > head` be refused?
+- `OPS-27`: The reference SQLite-backed service MUST reserve child UIDs and metadata in a
+  PREPARING batch before runtime effects. PREPARING children are hidden from public Get/List/Replay
+  and refuse admission; the trusted builder may copy their logs. After successful clones and
+  copies, COMMITTED atomically publishes all children with all metadata before returning success.
+  Failure MUST durably mark ABORTED and tombstone all children, retaining journals and allocation
+  attempts, then return the mapped error. Startup recovery aborts only PREPARING batches; a
+  COMMITTED batch survives a lost reply. Aborted UIDs are never reused. Tracked placement fan-out
+  MUST NOT invoke generic `Runtime.Stop`; cleanup uses `OPS-35`. Standalone untracked logs retain
+  legacy best-effort Stop rollback. Backend-internal rollback of a failed `Runtime.Fork`, including
+  Substrate's existing rollback, is unchanged. `at_seq > head` MUST be FAILED_PRECONDITION.
 
 ### 11.8 Delete and Cancel
 
@@ -903,8 +910,9 @@ does not erase data or reclaim compute.
   The record's `ts` and `deletion_requested_time` are the same instant (`LOG-4`).
 - `OPS-32`: `DeleteSession` on a session that is already deleted MUST return the stored session
   and write nothing: no record, and no change to the fence, timestamps, `update_time`, or the
-  compute projection. A caller whose reply was lost after the commit learns the outcome this way
-  or from `GetSession`; the commit cannot be undone.
+  compute projection by this call. This is the current stored snapshot, not necessarily the
+  original PENDING reply: independent reaper progress may have completed cleanup. A caller whose
+  reply was lost learns the outcome this way or from `GetSession`; the commit cannot be undone.
 - `OPS-33`: Deletion is permanent. The `uid`, its metadata, and its journal are retained, no
   operation returns the session to `DELETION_ACTIVE`, and the `uid` is not reused (`SES-1`).
   `GetSession` (`SES-14`) and `Replay` (§6.6) keep working; `ListSessions` omits the session
@@ -921,11 +929,32 @@ does not erase data or reclaim compute.
   deletion that commits after the lookup also fails `FAILED_PRECONDITION` (on `Exec`, after the
   first frame; on `Approve`, after its checkpoint mark, `OPS-2`). The store's refusal (`LOG-19`)
   backs both checks.
-- `OPS-35`: `DELETION_PENDING` acknowledges intent only. The host MUST NOT report deletion as
-  reclamation. The reference host calls no runtime method for it (no `Stop`, `RT-7`), releases
-  no actor, snapshot, or fork-child pin, and never reports `COMPUTE_TERMINATED` or a completed
-  deletion. Retained compute has to be reclaimed in the backend by the operator. Ownership and
-  cleanup are future work (#88).
+- `OPS-35`: `DELETION_PENDING` acknowledges intent only. `DeleteSession` MUST make no runtime IO.
+  A separately started single-host reaper records COMPLETE and `deletion_completed_time` only when
+  inventory is complete, all tracked allocations are released and no owned fork batch is unfinished.
+  Completion MUST set `COMPUTE_TERMINATED` without appending an event or changing `last_seq`, fence,
+  deletion request time, metadata update time or execution projection. It confirms safe release,
+  not physical storage GC. Both PENDING and COMPLETE refuse mutation.
+  - SQLite-backed placement durably records every Create/Restore/Fork attempt before the effect,
+    even when the call fails or its acknowledgement is lost. Cleanup routes by exact persisted
+    backend configuration key without Describe, placement, recovery or fallback to generic Stop.
+  - Only no-dedicated-resource local/remote runtimes implement optional `api.CleanupRuntime` in
+    this slice. Release is idempotent even for unconfirmed attempts and does not stop shared
+    harness servers or close shared connections. Unsupported/Substrate allocations and missing
+    cleanup routes remain diagnostic PENDING; their old Stop is never called by the reaper.
+  - Every migrated v4 inventory is incomplete. Completion requires explicit operator reconciliation
+    across all historical namespaces, overrides and failed-fork allocations followed by
+    `Store.CertifyInventory(ctx, uid, evidence)` with nonempty evidence. The store trusts this
+    attestation: it asserts the complete inventory contains every actual owned resource or proves
+    those resources absent. Never blindly certify allocated legacy sessions; an empty ledger is
+    not proof of absence, and a false certificate can allow COMPLETE while resources remain.
+    This slice provides no automatic legacy-resource adoption tooling.
+  - The daemon starts its asynchronous reaper before serving requests and stops/joins it before
+    closing resources. Embedders explicitly call `StartReaper` (waits for startup recovery and
+    returns stop/join) or own `RunReaper` startup, cancellation and join; NewService starts none.
+    The interval must be positive. Recovery runs once before requests, followed by immediate and
+    periodic bounded cleanup attempts with logged retries. Never run concurrent RunReaper workers
+    across hosts sharing a store: recovery would abort another host's live PREPARING fan-out.
 - `OPS-36`: The exclusion in `OPS-30` and the checks in `OPS-34` are per host. Durable refusal
   (`LOG-19`) stops later writes from any host that enforces it, but a host that does not (an
   older binary that already has the journal open, §18) keeps writing, and another host can
@@ -1159,12 +1188,15 @@ The reference host takes it as `placement.Backend` in
   host, and the reference session service reports it as `INTERNAL`. A backend that does not check
   the parent (`runtime/local`, `runtime/remote`, and `runtime/substrate`'s replay fork) never
   returns the error.
-- `RT-7`: `Stop` is destructive teardown and is not part of suspension. The reference host calls it
-  only to roll back a failed fork fan-out (`OPS-27`), never for `DeleteSession` (`OPS-35`). It does
-  not call `Stop` when a later step of `Exec` or `Resume` fails after `Create` or `Restore`
-  succeeded (the dial, the `RT-3` check, the fence, or the run). The host keeps no handle to that
-  incarnation; a later `Exec` reaches it through `Create` (`RT-4e`) and a `Suspend` through
-  `Snapshot`.
+- `RT-7`: `Stop` is destructive teardown and is not part of suspension. Only untracked standalone
+  placement retains generic Stop rollback on failed fan-out (`OPS-27`); tracked placement defers
+  cleanup to `OPS-35`. Backend-internal failed-Fork rollback is unchanged. Delete and its reaper
+  never fall back to generic Stop. Optional `api.CleanupRuntime` exposes `CleanupKey() string` and
+  `ReleaseSession(context.Context, string) error` only for runtimes with no dedicated per-session
+  resources. Equal keys MUST identify interchangeable release behavior across restarts; resource-
+  owning backends need a stronger identity-aware contract, not name-only destructive Stop.
+  Later Exec/Resume failures after Create/Restore do not call Stop, but tracked logs retain those
+  attempts for cleanup; a later Exec reaches compute through Create (`RT-4e`).
 - `RT-8`: `Capabilities` reports `memory_snapshot`, `cow_fork`, `attest`, and `gpu_state`. Only
   `memory_snapshot` affects placement (`RT-2`, `OPS-7`).
 - The reference host does not call `Status`.
@@ -1336,14 +1368,16 @@ The reference implementation protects the integrity of the record, not access to
     execution (`EXE-29`), so `Resume` no longer re-runs that turn. A legacy harness invocation
     (reconstruction, or recovery of an unfinished legacy execution) needs a session uid; `Resume`
     of a complete legacy execution is a no-op without one.
-  - The reference SQLite store versions its schema with `PRAGMA user_version` (currently 4),
+  - The reference SQLite store versions its schema with `PRAGMA user_version` (currently 5),
     migrates forward in one transaction without rewriting events or hashes, and refuses a newer or
-    negative version. Version 4 adds the deletion state; migrated sessions are
-    `DELETION_ACTIVE`.
-  - An older binary refuses a version 4 journal when it opens it, but one that already had the
-    journal open does not enforce deletion (`OPS-36`): it can still append, mint fences, and
-    update metadata after a `LIFECYCLE_DELETE`. Every older host and embedded `agentctl` sharing
-    a journal has to be stopped before the first version 4 open.
+    negative version. Version 4 adds deletion state; v5 adds allocation tracking, inventory evidence
+    and fork publication. Every migrated v4 session starts inventory-incomplete (`OPS-35`), with
+    existing deletion states preserved.
+  - There is no downgrade to v0.2.0: older binaries refuse schema v5 on open. Already-open older
+    writers can still append, mint fences and update metadata without the new barriers/ledger.
+    Stop every older host and embedded agentctl process sharing the journal before the first v5
+    open; back up the database and any WAL first. Rollback requires restoring that backup and
+    loses writes made since.
   - A verifier whose schema lacks `LIFECYCLE_DELETE` cannot reproduce that record's hash:
     `CHAIN-1` hashes enum names, and proto3-JSON writes an unknown enum value as a number.
 
@@ -1360,7 +1394,6 @@ Each item is also marked inline where it applies.
 - TODO(spike): Compare re-reported `IN_HARNESS_REPORTED` results on reconstruction (§9.3).
 - TODO(spike): Approval repair during a checkpoint (§11.1).
 - TODO(spike): Repeated `Suspend` and `Resume` without `Suspend` (§11.5).
-- TODO(spike): Fork journal atomicity and `at_seq > head` (§11.7).
 - TODO(spike): Unknown `Resumability` numbers read as `STATELESS_REPLAY` (§12.1).
 - TODO(spike): Stream close without `EVENT_END` and ignored harness event kinds (§12.2).
 - TODO(spike): Session check and stickiness for model reply correlation failures (§12.2).

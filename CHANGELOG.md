@@ -5,6 +5,35 @@ Release notes are generated from commits and published on the
 reader needs to know beyond a commit list: what a release means for compatibility, and what it does
 not provide.
 
+## Unreleased
+
+### Added
+
+- Single-host asynchronous deletion reaper with explicit embedder startup and stop/join ownership.
+  `DELETION_COMPLETE = 3` and Session `deletion_completed_time` (field 18) report safe cleanup
+  completion; completion changes projections only, never the retained journal or cursor.
+- Durable allocation-attempt tracking and atomic PREPARING/COMMITTED/ABORTED fork publication.
+  Aborted children retain permanent tombstones and audit logs. Optional `api.CleanupRuntime` is
+  supported only for no-dedicated-resource local/remote backends; shared servers remain running.
+
+### Compatibility
+
+- SQLite schema v5 migrates v4 in place without rewriting events or hashes. No downgrade to v0.2.0:
+  stop all older writers (including already-open processes) and back up the database and any WAL
+  before upgrading. Rollback requires restoring the backup and loses subsequent writes.
+- PENDING is no longer necessarily the final deletion state. Delete remains runtime-IO-free and
+  repeated deletion returns the current stored snapshot without writes. Reaper completion sets
+  COMPLETE, completion time and compute TERMINATED without changing the fence, request/update times
+  or execution projection. Both tombstone states refuse mutation; completion is not physical GC.
+- Every migrated v4 inventory is incomplete. Explicit operator reconciliation across historical
+  namespaces, overrides and failed forks must precede `Store.CertifyInventory(ctx, uid, evidence)`.
+  The certificate is trusted, not verified: never blindly certify allocated legacy sessions. No
+  automatic legacy-resource adoption tooling is included. See [operator inventory requirements](docs/concepts.md#schema-v5-and-operator-inventory-certification).
+- Embedders must start `StartReaper`/`RunReaper` before admitting requests and stop/join before closing
+  resources. This is single-host only; never run reapers concurrently across hosts sharing a store.
+  Unsupported/Substrate allocations remain PENDING; the reaper never calls their existing Stop.
+  Substrate deletion teardown has not been implemented or verified by this slice.
+
 ## v0.2.0 - 2026-10-16
 
 ### Compatibility

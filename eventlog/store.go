@@ -1,6 +1,10 @@
 package eventlog
 
-import "github.com/agent-primitives/sessions/api"
+import (
+	"errors"
+
+	"github.com/agent-primitives/sessions/api"
+)
 
 // Store is the error-returning event-log contract the controller depends on, so it can run
 // against either the in-memory Log (via AsStore) or the persistent sqlitelog.Log interchangeably.
@@ -29,6 +33,29 @@ func CheckWritable(log Store) error {
 		return writable.CheckWritable()
 	}
 	return nil
+}
+
+// CheckAdmissible performs the optional publication and deletion preflight before external
+// lifecycle operations. Trusted fork copies use CheckWritable instead so PREPARING children
+// can be built. Wrappers must forward CheckAdmissible to preserve the publication barrier.
+func CheckAdmissible(log Store) error {
+	if admissible, ok := log.(interface{ CheckAdmissible() error }); ok {
+		return admissible.CheckAdmissible()
+	}
+	return CheckWritable(log)
+}
+
+// CheckPublished withholds unfinished fork prefixes from audit/replay without refusing
+// permanent tombstones. Wrappers should forward the publication or admission preflight.
+func CheckPublished(log Store) error {
+	if published, ok := log.(interface{ CheckPublished() error }); ok {
+		return published.CheckPublished()
+	}
+	err := CheckAdmissible(log)
+	if errors.Is(err, ErrDeleted) {
+		return nil
+	}
+	return err
 }
 
 // AsStore adapts the in-memory Log (whose reads cannot fail) to the error-returning Store.

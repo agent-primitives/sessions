@@ -126,8 +126,8 @@ func TestDeletionMigrationAddsActiveRows(t *testing.T) {
 			}
 			setUserVersion(t, path, version)
 			s := mustOpen(t, path)
-			if got := readUserVersion(t, path); got != 4 {
-				t.Fatalf("stamp = %d, want 4", got)
+			if got := readUserVersion(t, path); got != sqlitelog.SchemaVersion {
+				t.Fatalf("stamp = %d, want %d", got, sqlitelog.SchemaVersion)
 			}
 			rows, err := db.Query(`SELECT session, fence, compute_state, created_at, updated_at,
 				deletion_state, deletion_requested_at, deletion_completed_at, deletion_seq FROM sessions ORDER BY session`)
@@ -171,7 +171,7 @@ func TestDeletionMigrationAddsActiveRows(t *testing.T) {
 			if got, want := schemaOf(t, path), schemaOf(t, fresh); !reflect.DeepEqual(got, want) {
 				t.Fatalf("legacy/fresh schema drift: %v != %v", got, want)
 			}
-			if got, want := queryValues(t, db, `PRAGMA table_info(sessions)`), queryValues(t, rawDB(t, fresh), `PRAGMA table_info(sessions)`); !reflect.DeepEqual(got, want) || len(got) != 24 {
+			if got, want := queryValues(t, db, `PRAGMA table_info(sessions)`), queryValues(t, rawDB(t, fresh), `PRAGMA table_info(sessions)`); !reflect.DeepEqual(got, want) || len(got) != 28 {
 				t.Fatalf("legacy/fresh columns drift: %v != %v", got, want)
 			}
 		})
@@ -207,8 +207,8 @@ func TestDeletionMigrationRetainsReleaseFixtureBytesAndRegistry(t *testing.T) {
 				reserved = queryValues(t, db, `SELECT * FROM reserved_harness_names ORDER BY name`)
 			}
 			s := mustOpen(t, path)
-			if got := readUserVersion(t, path); got != 4 {
-				t.Fatalf("migration stamp = %d, want 4", got)
+			if got := readUserVersion(t, path); got != sqlitelog.SchemaVersion {
+				t.Fatalf("migration stamp = %d, want %d", got, sqlitelog.SchemaVersion)
 			}
 			if !reflect.DeepEqual(queryValues(t, db, oldSessionQuery), metadata) || !reflect.DeepEqual(queryValues(t, db, oldEventQuery), events) {
 				t.Fatal("migration changed release metadata/fence/blob/hash bytes")
@@ -282,8 +282,8 @@ func TestDeletionMigrationFailureRollsBackColumnsAndStamp(t *testing.T) {
 	}
 }
 
-// deletion_completed_at stays in the v4 shape, reserved for cleanup: a v4 database keeps opening
-// without a migration, and this build neither reads nor writes the column.
+// deletion_completed_at entered the v4 shape as a reserved column. The latest schema retains
+// its value across reopen and DELETE; only successful cleanup completion owns writing it.
 func TestDeletionV4ReservedCompletionColumn(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v4.db")
 	s := mustOpen(t, path)
@@ -301,27 +301,27 @@ func TestDeletionV4ReservedCompletionColumn(t *testing.T) {
 	if got, want := queryValues(t, db, reserved), [][]any{{"deleted", int64(0)}, {"seeded", int64(0)}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("DeleteSession wrote the reserved column: %v", got)
 	}
-	// A nonzero value stands in for one this build did not write; it must be ignored and kept.
+	// A nonzero value stands in for one this build did not write; it must be read and kept.
 	if _, err := db.Exec(`UPDATE sessions SET deletion_completed_at = 42 WHERE session = 'seeded'`); err != nil {
 		t.Fatal(err)
 	}
-	if got := readUserVersion(t, path); got != 4 {
-		t.Fatalf("stamp = %d, want 4", got)
+	if got := readUserVersion(t, path); got != sqlitelog.SchemaVersion {
+		t.Fatalf("stamp = %d, want %d", got, sqlitelog.SchemaVersion)
 	}
 	schema := schemaOf(t, path)
 
 	s = mustOpen(t, path)
-	if got := readUserVersion(t, path); got != 4 {
-		t.Fatalf("reopen stamp = %d, want 4", got)
+	if got := readUserVersion(t, path); got != sqlitelog.SchemaVersion {
+		t.Fatalf("reopen stamp = %d, want %d", got, sqlitelog.SchemaVersion)
 	}
 	if got := schemaOf(t, path); !reflect.DeepEqual(got, schema) {
-		t.Fatalf("reopen changed the v4 schema: %v != %v", got, schema)
+		t.Fatalf("reopen changed the current schema: %v != %v", got, schema)
 	}
 	if info, err := s.SessionInfo("deleted"); err != nil || info.DeletionState != api.DeletionPending || info.DeletionRequestedAt.IsZero() {
 		t.Fatalf("reopened deleted session = %+v, %v", info, err)
 	}
 	seeded, err := s.SessionInfo("seeded")
-	if err != nil || seeded.DeletionState != api.DeletionActive || !seeded.DeletionRequestedAt.IsZero() {
+	if err != nil || seeded.DeletionState != api.DeletionActive || !seeded.DeletionRequestedAt.IsZero() || seeded.DeletionCompletedAt.UnixNano() != 42 {
 		t.Fatalf("reopened seeded session = %+v, %v", seeded, err)
 	}
 	if deleted, err := s.DeleteSession(context.Background(), "seeded"); err != nil || deleted.DeletionState != api.DeletionPending || deleted.DeletionSeq != seeded.LastSeq+1 {

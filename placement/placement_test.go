@@ -842,8 +842,22 @@ func TestForkAbortsWhenParentAdvancesUnderIt(t *testing.T) {
 	}
 }
 
-// A fan-out that fails partway must not strand the children it already provisioned: their UIDs are
-// never returned to the caller, so an un-rolled-back actor is unreachable and unstoppable.
+// legacyForkLog intentionally omits allocation tracking to exercise standalone rollback.
+// Forward admission so the wrapper does not weaken a durable store's deletion/publication gate.
+type legacyForkLog struct{ eventlog.Store }
+
+func (l legacyForkLog) CheckWritable() error   { return eventlog.CheckWritable(l.Store) }
+func (l legacyForkLog) CheckAdmissible() error { return eventlog.CheckAdmissible(l.Store) }
+
+func untrackedForkChildren(children []placement.ForkChild) []placement.ForkChild {
+	for i := range children {
+		children[i].Log = legacyForkLog{children[i].Log}
+	}
+	return children
+}
+
+// A legacy untracked fan-out that fails partway must not strand children it already provisioned:
+// unlike durable tracked abort, a standalone caller has no ledger/reaper to own their release.
 func TestForkFanOutRollsBackProvisionedChildren(t *testing.T) {
 	store, err := sqlitelog.Open(":memory:")
 	if err != nil {
@@ -866,6 +880,7 @@ func TestForkFanOutRollsBackProvisionedChildren(t *testing.T) {
 		{UID: "c2", Log: store.Session("c2")},
 	}
 	ctl := &cloningControl{snapshot: "snap-parent-1", failCloneOf: "c2"}
+	children = untrackedForkChildren(children)
 	if err := memorySubstratePlacer(ctl).Fork(context.Background(), parent, "parent", children, head); err == nil {
 		t.Fatal("expected the fan-out to fail")
 	}
@@ -914,6 +929,7 @@ func TestForkRollbackSurvivesACancelledCaller(t *testing.T) {
 		{UID: "c1", Log: store.Session("c1")},
 		{UID: "c2", Log: store.Session("c2")},
 	}
+	children = untrackedForkChildren(children)
 	if err := memorySubstratePlacer(ctl).Fork(ctx, parent, "parent", children, head); err == nil {
 		t.Fatal("expected the fan-out to fail")
 	}
@@ -955,6 +971,7 @@ func TestForkRollbackBudgetsEachChildSeparately(t *testing.T) {
 		{UID: "boom", Log: store.Session("boom")},
 	}
 	ctl := &cloningControl{snapshot: "snap-parent-1", failCloneOf: "boom", suspendCost: cost}
+	children = untrackedForkChildren(children)
 	if err := memorySubstratePlacer(ctl).Fork(context.Background(), parent, "parent", children, head); err == nil {
 		t.Fatal("expected the fan-out to fail")
 	}

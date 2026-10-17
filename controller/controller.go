@@ -201,6 +201,9 @@ func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, erro
 	if c.logger == nil {
 		c.logger = slog.New(slog.DiscardHandler)
 	}
+	if err := eventlog.CheckPublished(log); err != nil {
+		return nil, err
+	}
 	// Fences are >= 1, so a zero fence means no WithFence was supplied: mint one from the log.
 	if c.fence == 0 {
 		fence, err := log.NewFence()
@@ -240,7 +243,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 	}()
 
 	// A retained controller or supplied fence must not bypass durable admission.
-	if err := eventlog.CheckWritable(c.log); err != nil {
+	if err := eventlog.CheckAdmissible(c.log); err != nil {
 		return err
 	}
 
@@ -362,6 +365,9 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 		)
 	}()
 
+	if err := eventlog.CheckPublished(c.log); err != nil {
+		return nil, err
+	}
 	recs, err := c.log.Read(1)
 	if err != nil {
 		return nil, err
@@ -535,7 +541,7 @@ func (c *Controller) invokeModel(ctx context.Context, executionID string, req ap
 // LIFECYCLE_FORK marker as the child's first new event, whose prev_hash links to parent@atSeq —
 // turning the hash-chain into a hash-tree. child must be an empty log.
 func Fork(parent, child eventlog.Store, atSeq int64) error {
-	if err := eventlog.CheckWritable(parent); err != nil {
+	if err := eventlog.CheckAdmissible(parent); err != nil {
 		return err
 	}
 	if err := eventlog.CheckWritable(child); err != nil {

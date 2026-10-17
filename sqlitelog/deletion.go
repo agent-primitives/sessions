@@ -13,7 +13,7 @@ import (
 
 // DeleteSession commits permanent deletion intent, not runtime cleanup. The retained journal
 // anchors audit evidence; its predecessor remains the pre-delete head, independent of compute.
-// A retry against PENDING returns the original snapshot without any writes; an unrecognized
+// A retry against PENDING or COMPLETE returns the stored snapshot without writes; an unrecognized
 // state fails closed with eventlog.ErrDeleted.
 func (s *Store) DeleteSession(ctx context.Context, uid string) (SessionInfo, error) {
 	if uid == "" {
@@ -32,12 +32,31 @@ func (s *Store) DeleteSession(ctx context.Context, uid string) (SessionInfo, err
 		return fail("begin", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	out, err := txDelete(ctx, tx, uid)
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return fail("commit intent", err)
+	}
+	return out, nil
+}
+
+// txDelete retains the DELETE record and fence in the caller's transaction, allowing an entire
+// failed fan-out to become permanent tombstones atomically. It never commits independently.
+func txDelete(ctx context.Context, tx *sql.Tx, uid string) (SessionInfo, error) {
+	fail := func(phase string, err error) (SessionInfo, error) {
+		if cause := ctx.Err(); cause != nil && !errors.Is(err, cause) {
+			err = errors.Join(err, cause)
+		}
+		return SessionInfo{}, fmt.Errorf("sqlitelog: delete session %q: %s: %w", uid, phase, err)
+	}
 	info, err := txSessionInfo(ctx, tx, uid)
 	if err != nil {
 		return fail("read", err)
 	}
 	switch info.DeletionState {
-	case api.DeletionPending:
+	case api.DeletionPending, api.DeletionComplete:
 		return info, nil
 	case api.DeletionActive:
 	default:
@@ -70,9 +89,6 @@ func (s *Store) DeleteSession(ctx context.Context, uid string) (SessionInfo, err
 	if err != nil {
 		return fail("read intent", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return fail("commit intent", err)
-	}
 	return out, nil
 }
 
@@ -82,6 +98,37 @@ func txSessionInfo(ctx context.Context, tx *sql.Tx, uid string) (SessionInfo, er
 		return SessionInfo{}, fmt.Errorf("%w: %s", ErrSessionNotFound, uid)
 	}
 	return info, err
+}
+
+// CheckAdmissible is the public runtime admission barrier. Unlike CheckWritable, it refuses
+// unpublished children; trusted fork builders may still append their copies while PREPARING.
+func (l *Log) CheckAdmissible() error { return checkAdmissible(l.store.db, l.session) }
+
+func checkAdmissible(q queryRower, uid string) error {
+	if err := checkPublished(q, uid); err != nil {
+		return err
+	}
+	return checkWritable(q, uid)
+}
+
+// CheckPublished permits committed and aborted audit logs, but never an unfinished prefix.
+// Unknown UIDs retain the raw audit API's empty-stream behavior.
+func (l *Log) CheckPublished() error { return checkPublished(l.store.db, l.session) }
+
+func checkPublished(q queryRower, uid string) error {
+	var batch, status string
+	err := q.QueryRow(`SELECT s.fork_batch, COALESCE(b.status,'') FROM sessions s
+		LEFT JOIN fork_batches b ON b.id=s.fork_batch WHERE s.session=?`, uid).Scan(&batch, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("sqlitelog: check admission %q: %w", uid, err)
+	}
+	if batch != "" && status != "COMMITTED" && status != "ABORTED" {
+		return fmt.Errorf("sqlitelog: session %q: %w", uid, eventlog.ErrUnpublished)
+	}
+	return nil
 }
 
 // CheckWritable is a read-only preflight. Unknown logs stay writable for direct implicit creation.

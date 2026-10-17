@@ -40,6 +40,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/resolver"
@@ -261,6 +262,14 @@ func Run(args []string, opts ...Option) error {
 	}
 	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Recover unfinished fan-outs before accepting requests. Join cleanup before deferred
+	// registry/backend/store shutdown, including when serving fails before a signal arrives.
+	stopReaper, err := svc.StartReaper(ctx, time.Minute)
+	if err != nil {
+		return fmt.Errorf("start session cleanup: %w", err)
+	}
+	defer stopReaper()
 
 	serveErr := make(chan error, 2)
 	go func() { serveErr <- srv.Serve(lis) }()

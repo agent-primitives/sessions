@@ -39,7 +39,7 @@ stateDiagram-v2
   accTitle: Session lifecycle states
   accDescr {
     A new session starts PENDING and becomes RUNNING on exec. From RUNNING it can be suspended
-    to SUSPENDED and resumed, forked through FORKING and back, ended as TERMINATED with its log
+    to SUSPENDED and resumed, forked through FORKING and back, ended as COMPLETED with its log
     kept, or fail as FAILED.
   }
   [*] --> PENDING
@@ -48,12 +48,13 @@ stateDiagram-v2
   SUSPENDED --> RUNNING: resume
   RUNNING --> FORKING: fork
   FORKING --> RUNNING
-  RUNNING --> TERMINATED: end (log retained, replayable)
+  RUNNING --> COMPLETED: execution end (compute may remain live)
   RUNNING --> FAILED
 ```
 
-`SUSPENDED` is cold: the snapshot is written to storage and the worker is freed. `TERMINATED` still
-keeps the log, so a finished session stays replayable.
+`SUSPENDED` is cold: the snapshot is written to storage and the worker is freed. Execution completion
+does not stop compute. The separate deletion axis is described below: safe cleanup completion sets
+compute `TERMINATED` while keeping the log replayable.
 
 There is no warm pause. The state model reserves a warm tier, but no `Runtime` backend implements a
 node-local warm checkpoint, so nothing can currently move a session into it and there is no operation
@@ -148,14 +149,24 @@ authorization (see [security posture](security.md)).
 
 `DeleteSession` atomically appends one session-scoped `DELETE` lifecycle record, advances the fence
 and permanently tombstones the UID. `deletion_state` is independent of execution and compute:
-`ACTIVE` has no deletion request time; `PENDING` has the committed request time.
-Delete preserves the recorded compute state, not a claim that a running actor has stopped.
+`ACTIVE` has no deletion request time; `PENDING` has the committed request time. A separate
+single-host reaper can advance `PENDING` to `COMPLETE` (`DELETION_COMPLETE = 3`) and set
+`deletion_completed_time` (Session field 18). Both are permanent tombstones.
 
-`PENDING` acknowledges durable intent only. Until ownership and cleanup are implemented in #88,
-actors, snapshots and fork-child pins remain retained indefinitely: Delete does not call
-`Runtime.Stop`, reclaim resources or report cleanup completion. Metadata and the immutable journal
-preserve route, lineage and snapshot evidence for audit, not an authoritative cleanup-target
-inventory; #88 owns that schema. Do not infer cleanup from gRPC OK.
+`DeleteSession` itself makes no runtime IO and initially preserves the recorded compute state.
+`PENDING` acknowledges durable intent only, not resource release. Completion requires a complete
+ownership inventory, every tracked allocation released, and no unfinished fork batch. It sets the
+compute projection to `TERMINATED`, not a physical storage-GC guarantee. Completion is projection-only:
+it appends no event and changes neither cursor, fence, request time, metadata update time nor
+execution projection. Do not infer cleanup from gRPC OK.
+
+SQLite records each tracked `Create`, `Restore` and `Fork` attempt before runtime IO, including
+failed calls and lost acknowledgements. Cleanup resolves the recorded backend configuration key,
+not a default harness or snapshot URI copied into the journal. Only local and remote backends opt
+into the optional `api.CleanupRuntime` contract in this slice: they have no dedicated per-session
+resources, and release does not stop their shared harness servers or close shared connections.
+Substrate and other unsupported allocations remain diagnostic `PENDING`; the reaper never calls
+their existing `Stop`. Missing cleanup routes also leave deletion pending.
 
 List hides tombstones before pagination. Get and raw `Sessions.Replay` remain audit reads, including
 `DELETE`; UID, metadata and journal are retained forever. There is no UID reuse, cascade or erasure.
@@ -163,10 +174,10 @@ Existing children and grandchildren retain independent copied prefixes and can c
 Exec, Fork (even at a historical sequence), Resume, Suspend and Approve (including exact historical
 decision retries) refuse a deleted UID with
 `FAILED_PRECONDITION`; neither a new Exec nor restoring a harness can reactivate it. Retrying Delete
-returns the same PENDING snapshot, timestamps, fence, journal and compute projection. DELETE
-advances `last_seq` while preserving captured approval evidence and the execution axis; an empty
-deleted session remains `PENDING`, and a parked request remains `AWAITING` without an actionable
-reference.
+returns the current stored snapshot without writes; independent reaper progress can change cleanup
+state, completion time and compute reporting between retries. DELETE advances `last_seq` while
+preserving captured approval evidence and the execution axis; an empty deleted session retains
+`EXEC_PENDING`, and a parked request retains `EXEC_AWAITING` without an actionable reference.
 
 An empty UID is `INVALID_ARGUMENT`, an unknown UID is `NOT_FOUND` without creation, and local
 overlap is `ABORTED` before mutation. Retry busy calls after the holder finishes; use Get or
@@ -174,15 +185,49 @@ retry after a lost response to learn whether intent committed. One Registry seri
 Exec, Fork, Resume, Suspend and Approve across its Placers. This is not cross-host compute
 exclusion: an independent host can provision before its first durable fence. This build's
 writers reject subsequent durable writes to tombstones; already-open older writers do not.
-Follow the [v4 rollout order](../CHANGELOG.md#sqlite-v4-rollout) before the first upgraded open.
-Direct durable-log wrappers must forward the optional `CheckWritable` preflight to refuse before
-compute; this build's storage write barriers still enforce the permanent tombstone.
+Direct durable-log wrappers must forward the optional `CheckAdmissible` preflight (including
+hidden fork children), not only `CheckWritable`; trusted fork builders may write PREPARING logs.
+Storage write barriers still enforce the permanent tombstone.
 
-Opening an older SQLite journal migrates it transactionally through approval-reporting v3 to
-schema v4, with old sessions ACTIVE and deletion times absent. Existing metadata, projections,
-records and hashes are preserved. Older binaries refuse the newer schema at open time; stop all
-older writers as described in the rollout note and back up before upgrading if rollback is required.
-Old verifiers cannot verify new `LIFECYCLE_DELETE` enum-name hashes; use a descriptor with DELETE.
+#### Reaper lifecycle and fork publication
+
+`agentsessionsd` starts the asynchronous reaper before serving requests and stops/joins it before
+closing the store or backends. `NewService` does not start a worker for embedders. At exclusive
+single-host startup, call `Service.StartReaper(ctx, interval)` with a positive interval before
+admitting requests; it waits for unfinished-fork recovery and returns an idempotent stop-and-join
+function. Alternatively own `RunReaper(ctx, interval)` and its startup ordering, cancellation and
+join explicitly. It recovers once, then attempts cleanup immediately and periodically, logging and
+retrying failures with bounded per-session work. Never run concurrent `RunReaper` workers across
+hosts sharing a store: recovery cannot distinguish a live host's PREPARING fork from a crashed one.
+
+Fork reserves all child UIDs and metadata as PREPARING before effects. Those children are hidden
+from public Get/List/Replay and refuse admission. COMMITTED atomically publishes the whole batch
+with all metadata after journal copies and clones succeed. Failure or startup recovery makes the
+batch ABORTED and permanently tombstones its children, retaining journals and allocation attempts
+for audit and cleanup. A committed batch survives a lost reply. Tracked placement fan-out does not
+call generic `Stop` on abort; standalone untracked logs retain legacy best-effort rollback. The
+Substrate backend's internal rollback of its own failed `Fork` remains unchanged; this is not
+verified deletion teardown.
+
+#### Schema v5 and operator inventory certification
+
+Opening an older SQLite journal migrates it transactionally to schema v5 without rewriting event
+bytes or hashes. Version 5 adds the allocation ledger, inventory evidence and fork publication.
+Every session migrated from v4 starts inventory-incomplete, including empty or never-observed logs;
+an empty ledger is not proof that no runtime resource exists. Older deletion states are preserved.
+There is no downgrade to v0.2.0. Stop every older writer, including already-open hosts and embedded
+CLI processes, and back up the database and any WAL before the first upgraded open. Rollback
+requires restoring that backup, losing subsequent writes. Old verifiers cannot verify new
+`LIFECYCLE_DELETE` enum-name hashes; use a descriptor with DELETE.
+
+Legacy completion requires explicit operator reconciliation across **all historical backend
+namespaces, configuration overrides and failed-fork allocations**, followed by
+`Store.CertifyInventory(ctx, uid, evidence)` with nonempty evidence. This is a trusted operator
+attestation, not discovery or proof checked by the store. It asserts that the complete inventory
+contains every actual owned resource, or that those resources have been proved absent. Never
+blindly certify an allocated legacy session: an empty ledger plus a false certificate can allow
+COMPLETE while real resources remain. This slice has no automatic legacy-resource adoption tooling;
+if ownership or absence cannot be established, leave inventory incomplete and deletion PENDING.
 
 ## Event and the typed log
 

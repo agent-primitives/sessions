@@ -46,7 +46,7 @@ func InspectApproval(log eventlog.Store, throughSeq int64) (*ApprovalState, erro
 // external writers advancing the journal between validation and append.
 func Approve(log eventlog.Store, decision api.ApprovalDecision) (eventlog.Record, error) {
 	// Durable deletion authority applies even to read-only historical retries.
-	if err := eventlog.CheckWritable(log); err != nil {
+	if err := eventlog.CheckAdmissible(log); err != nil {
 		return eventlog.Record{}, err
 	}
 	if decision.ExecutionID == "" || decision.ToolCallID == "" || decision.RequestSeq <= 0 {

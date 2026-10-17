@@ -17,6 +17,7 @@ func TestDeletionStateConversion(t *testing.T) {
 	}{
 		{"active", "ACTIVE", 1},
 		{"pending", "PENDING", 2},
+		{"complete", "COMPLETE", 3},
 		{"unspecified", "", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -33,7 +34,7 @@ func TestDeletionStateConversion(t *testing.T) {
 			t.Errorf("unknown domain %q = %v, want UNSPECIFIED", unknown, got)
 		}
 	}
-	for _, unknown := range []v1.DeletionState{-1, 3, 99} {
+	for _, unknown := range []v1.DeletionState{-1, 4, 99} {
 		if got := wire.DeletionStateFromProto(unknown); got != "" {
 			t.Errorf("unknown wire %d = %q, want empty", unknown, got)
 		}

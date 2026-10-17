@@ -83,8 +83,8 @@ CREATE INDEX IF NOT EXISTS sessions_project_created
 // SchemaVersion is the schema shape this build writes, stamped into PRAGMA user_version so a
 // build can identify a database without inspecting its columns. Version 1 is what v0.1.0 through
 // v0.1.2 shipped. Version 2 adds the harness registry; version 3 adds approval reporting;
-// version 4 adds permanent deletion intent.
-const SchemaVersion = 4
+// version 4 adds permanent deletion intent; version 5 adds cleanup inventory and fork publication.
+const SchemaVersion = 5
 
 // migrations[i] moves a database from version i+1 to i+2, inside the migration transaction. The
 // array length is tied to SchemaVersion, so bumping one without the other does not compile.
@@ -92,12 +92,12 @@ var migrations = [SchemaVersion - 1]func(*sql.Tx) error{
 	migrateV1ToV2,
 	migrateV2ToV3,
 	migrateV3ToV4,
+	migrateV4ToV5,
 }
 
-// migrateV3ToV4 adds the deletion columns. deletion_completed_at is reserved for resource cleanup
-// (#88): it defaults to 0, and this build never reads or writes it, so values a later build wrote are
-// left as is. It stays in the v4 shape so databases already at v4 keep opening unchanged; cleanup
-// defines its meaning when it lands.
+// migrateV3ToV4 adds the deletion columns. The v4 release reserved deletion_completed_at for
+// resource cleanup, defaulting it to 0 without reading or writing it. Version 5 defines completion
+// without changing this historical migration or clearing values already stored in the column.
 func migrateV3ToV4(tx *sql.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE sessions ADD COLUMN deletion_state TEXT NOT NULL DEFAULT 'ACTIVE';
 		ALTER TABLE sessions ADD COLUMN deletion_requested_at INTEGER NOT NULL DEFAULT 0;

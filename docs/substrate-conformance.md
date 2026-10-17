@@ -118,10 +118,12 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   `FailedPrecondition` instead of pairing an old prefix with present-day RAM.
 - A control client without the Tag APIs does not satisfy the optional `SnapshotCloner` interface; a
   stateful fork there fails loudly rather than degrading to a lossy replay-fork.
-- The child fan-out is all-or-nothing. If a child fails to provision, the ones already created are
-  torn down and their tags released before the error returns, since their UIDs are never handed to
-  the caller and an orphan would be unreachable. Teardown runs on a context detached from the
-  caller's, because the likeliest cause of a mid-fan-out failure is the caller's deadline expiring.
+- SQLite-backed service fan-out publishes children atomically: PREPARING children are hidden from
+  Get/List/Replay and inadmissible; COMMITTED publishes all metadata, while ABORTED retains permanent
+  tombstones, journals and allocation attempts. Tracked placement does not call generic Stop on
+  fan-out failure, so successfully provisioned Substrate children may remain allocated. The
+  Substrate backend's own internal failed-Fork rollback is unchanged. Standalone untracked logs
+  retain legacy best-effort Stop rollback under a context detached from the caller.
 - The parent checkpoint is not part of that rollback, because it cannot be. Once a stateful fork
   reaches the point of snapshotting, the parent is cold with a SUSPEND event on its chain whether or
   not the children go on to provision. That is a recoverable state (`Resume` brings the parent back),
@@ -131,10 +133,10 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   that is *refused* takes the fence path not at all: a request that changes nothing must not
   supersede a turn in flight on the parent. A stateful fork that proceeds does supersede it,
   closing its harness stream before checkpointing; Suspend instead refuses overlap with a turn.
-  Fork holds shared deletion admission through checkpoint, fan-out and rollback, so Delete is
-  refused until it returns. Failed fan-out releases the checkpoint before rollback, allowing new
-  parent turns while the failed children are stopped. Independent Registries or hosts are outside
-  this local admission. A fork that mints its fence and then aborts on the re-check still supersedes
+  Fork holds shared deletion admission through checkpoint, fan-out and publication or durable
+  abort, so Delete is refused until it returns. Failed fan-out releases the checkpoint before
+  legacy rollback; tracked children instead retain cleanup evidence. Independent Registries or hosts
+  are outside this local admission. A fork that mints its fence and then aborts on the re-check still supersedes
   the writer that beat it even though it gives up. Closing that needs a read-only fence
   accessor on `eventlog.Store` (`NewFence` is currently the only way to obtain one, and it mutates),
   which is a wider API change than this path warrants.
@@ -488,14 +490,18 @@ RESUME marker. These tests prove orchestration and retention behavior, not real 
 
 - **Fork tag lifecycle.** A fork tags the parent (`fork-<child-uid>`) so `CreateActor` can seed
   the child from it, and each tag owns a full copy of the parent's snapshot. The tag name is
-  derived from the child session UID, so `Stop` deletes it after the child and a failed fork
-  deletes it on the way out. `DeleteSession` permanently tombstones the UID and returns
-  `PENDING`: durable deletion intent only, without calling `Stop` or reclaiming resources.
-  Suspended actors and fork tags remain retained indefinitely. Ownership and cleanup-target
-  persistence, retryable teardown and completion belong to #88; until that lands, operators must
-  reconcile and reclaim actors and fork tags directly in Substrate. There is no automatic
-  retention deadline. One tag per fan-out instead of per child would save N-1 copies, but a
-  shared tag can only be deleted once every child has suspended at least once.
+  derived from the child session UID, so explicit backend `Stop` deletes it after the child;
+  the backend's internal failed-Fork rollback remains unchanged. Tracked placement fan-out abort
+  does not call generic Stop, and may retain successfully created children. `DeleteSession`
+  itself makes no runtime IO. The new single-host reaper supports only no-dedicated-resource
+  local/remote release, not Substrate actor/tag cleanup: tracked Substrate allocations remain
+  PENDING and their old Stop is never called by the reaper. Operators must reconcile actors and
+  fork tags directly in Substrate. Legacy inventory certification requires evidence across all
+  historical namespaces, overrides and failed forks, never a blind assertion from an empty ledger.
+  No automatic legacy-resource adoption or retention deadline is provided, and this slice does
+  not implement or verify Substrate deletion teardown. One tag per fan-out instead of per child
+  would save N-1 copies, but a shared tag can only be deleted once every child has suspended at
+  least once.
 - **I4 is harness-side.** `controller.Exec` sends the full journal as `Start.History` on every turn,
   including the post-restore turn ([spec](../spec.md) `EXE-7`). A `REQUIRES_MEMORY_SNAPSHOT` harness
   must not rebuild state from it; the counter's increment-only `Run` carries this.

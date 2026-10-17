@@ -319,7 +319,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}
 	defer release()
 
-	if err := eventlog.CheckWritable(log); err != nil {
+	if err := eventlog.CheckAdmissible(log); err != nil {
 		return api.Incarnation{}, err
 	}
 	state, err := controller.InspectApproval(log, 0)
@@ -339,7 +339,9 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		return api.Incarnation{}, err
 	}
 	createFinished := observability.StartDebug(ctx, p.logger, "placement", "create_compute", "session_uid", sessionUID)
-	inc, err = p.backend.Create(ctx, &api.SessionSpec{SessionUID: sessionUID})
+	inc, err = p.allocate(ctx, log, "create", func() (api.Incarnation, error) {
+		return p.backend.Create(ctx, &api.SessionSpec{SessionUID: sessionUID})
+	})
 	if err != nil {
 		createFinished(err, "error_kind", "runtime_create_failed")
 		return inc, err
@@ -875,7 +877,7 @@ type suspendCursor struct {
 
 func (p *Placer) suspend(ctx context.Context, log eventlog.Store, sessionUID string, cursor *suspendCursor) (ref api.SnapshotRef, err error) {
 	// Applies to public, recorded-route and automatic approval snapshots alike.
-	if err := eventlog.CheckWritable(log); err != nil {
+	if err := eventlog.CheckAdmissible(log); err != nil {
 		return api.SnapshotRef{}, err
 	}
 	inc := api.Incarnation{ID: sessionUID}
@@ -1004,7 +1006,7 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		finish(err, "error_kind", placementErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
 
-	if err := eventlog.CheckWritable(log); err != nil {
+	if err := eventlog.CheckAdmissible(log); err != nil {
 		return err
 	}
 	state, err := controller.InspectApproval(log, 0)
@@ -1036,7 +1038,9 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 			return err
 		}
 	}
-	inc, err = p.backend.Restore(ctx, ref)
+	inc, err = p.allocate(ctx, log, "restore", func() (api.Incarnation, error) {
+		return p.backend.Restore(ctx, ref)
+	})
 	if err != nil {
 		return err
 	}
@@ -1179,7 +1183,7 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 		return err
 	}
 	defer guardRelease()
-	if err := eventlog.CheckWritable(parent); err != nil {
+	if err := eventlog.CheckAdmissible(parent); err != nil {
 		return err
 	}
 	// Validate the entire fan-out before checkpointing or provisioning. A refused target
@@ -1194,9 +1198,9 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 		return err
 	}
 	defer release()
-	// A failed fan-out must not strand compute. The child UIDs are minted per request and returned
-	// only on success, so anything provisioned before the failure would otherwise be unreachable —
-	// unstoppable workers nobody can name.
+	// Untracked standalone logs need legacy best-effort rollback. Tracked children instead retain
+	// every attempt for durable service abort/reaper cleanup; generic Stop is not safe ownership
+	// proof and must not run before the service has tombstoned the unfinished fan-out.
 	created := make([]string, 0, len(children))
 	abort := func(err error) error {
 		// Release the parent first. Nothing in the teardown reads it, and holding the mark through
@@ -1206,10 +1210,14 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 		return err
 	}
 	for _, child := range children {
-		if _, err := p.backend.Fork(ctx, ref, api.ForkOpts{ChildSessionUID: child.UID}); err != nil {
+		if _, err := p.allocate(ctx, child.Log, "fork", func() (api.Incarnation, error) {
+			return p.backend.Fork(ctx, ref, api.ForkOpts{ChildSessionUID: child.UID})
+		}); err != nil {
 			return abort(err)
 		}
-		created = append(created, child.UID)
+		if _, tracked := child.Log.(allocationRecorder); !tracked {
+			created = append(created, child.UID)
+		}
 		copyFinished := observability.StartDebug(ctx, p.logger, "placement", "copy_fork_log",
 			"parent_session_uid", parentUID,
 			"child_session_uid", child.UID,

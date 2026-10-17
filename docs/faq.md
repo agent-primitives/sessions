@@ -160,9 +160,9 @@ Exec frames expose the pending tuple at their captured cursor. A decision clears
 new input stays blocked until its receipt commits. Identity is not authorization; there is no policy
 hook, timeout or expiry. Snapshots and unresolved requests are retained indefinitely, and Cancel
 remains `UNIMPLEMENTED`. DeleteSession commits permanent intent without reclaiming resources.
-Tool calls align with the MCP shape (name plus structured arguments), but the stock daemon has no
-executor and the bundled model adapter does not map tools; this is not a complete MCP/provider
-integration. See
+Tool calls align with the MCP shape (name plus structured arguments), but approval alone is not a
+complete MCP/provider integration. The daemon's default Chat Completions adapter does not map tools;
+Responses tools require an explicitly composed Go host. See
 [approval recovery](interaction-model.md#approval-decisions-and-recovery).
 
 ## How do I list sessions, and can I trust the compute state I get back?

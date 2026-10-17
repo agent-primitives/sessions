@@ -42,7 +42,8 @@ client has a two-minute timeout. There are no automatic retries or model/protoco
 
 ## Supported content and controls
 
-- Ordered system/user/assistant text. An empty role uses `user`; unsupported roles refuse.
+- Ordered system/user/assistant text using the easy-input message shape with `input_text` content,
+  including assistant history. An empty role uses `user`; unsupported roles refuse.
 - Function definitions and AUTO/NONE/REQUIRED choices, including a named REQUIRED choice. Schemas
   are passed through within the neutral JSON domain, with `strict:false` so Responses does not
   silently tighten them. Nil schema is omitted; an explicit empty schema remains `{}`.
@@ -50,7 +51,8 @@ client has a two-minute timeout. There are no automatic retries or model/protoco
   output-item `id`. Arguments must be JSON objects. Integer arguments beyond the exactly representable
   ±2^53 domain refuse rather than silently rounding; neutral structured values use float64.
 - Tool-result text from `ToolResult.Content`, joined in order and correlated by result ID. Empty
-  text is supported, but absent content is not replaced by receipt metadata, `Output`, `Error` or a URI.
+  text is supported, but empty tool messages and absent result content refuse; they are not replaced
+  by receipt metadata, `Output`, `Error` or a URI.
 - Opaque completed Responses reasoning items, as described below.
 - Usage maps input/output/reasoning tokens directly; reasoning tokens are already included in output
   tokens, not added again. Missing usage produces zero counts, not an estimate.
@@ -97,6 +99,9 @@ function-argument, reasoning or indexed-part deltas. The final message retains t
 reasoning and tool parts. It is decoded from `response.completed`, with stream identities and content
 checked against the completed response; usage is taken from that response once.
 
+Nonstreaming responses are limited to 32 MiB. Streaming accepts at most 8 MiB per SSE line and
+32 MiB per assembled SSE record; a large one-line completed response can therefore exceed the
+streaming limit even when it fits the nonstreaming limit. Oversized responses fail clearly.
 EOF without completion, failed/incomplete responses, provider errors, malformed/conflicting events
 and cancellation fail the call. Text already shown to a caller remains provisional on failure; no
 partial executable tool call or successful completion is returned. Deltas are not journaled. The same

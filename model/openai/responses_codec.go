@@ -135,6 +135,9 @@ func responsesInput(model string, messages []api.Message) ([][]byte, error) {
 		}
 		switch role {
 		case "system", "user", "assistant", "tool":
+			if role == "tool" && len(m.Parts) == 0 {
+				return nil, responsesUnsupported("message %d requires model-facing tool results", mi)
+			}
 		default:
 			return nil, responsesUnsupported("message %d role %q", mi, role)
 		}
@@ -153,11 +156,8 @@ func responsesInput(model string, messages []api.Message) ([][]byte, error) {
 				return nil, responsesUnsupported("message %d part %d must have exactly one kind", mi, pi)
 			}
 			if p.Text != nil && role != "tool" {
-				kind := "input_text"
-				if role == "assistant" {
-					kind = "output_text"
-				}
-				content = append(content, map[string]string{"type": kind, "text": p.Text.Text})
+				// All neutral text uses the easy-input message shape, including assistant history.
+				content = append(content, map[string]string{"type": "input_text", "text": p.Text.Text})
 				continue
 			}
 			if err := flush(); err != nil {

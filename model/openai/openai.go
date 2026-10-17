@@ -11,9 +11,8 @@
 // scopes the model into its path, pins an API version with a query string, or authenticates with
 // something other than a bearer token is reached by configuration rather than by code.
 //
-// The limit is the request body. An endpoint that accepts the chat-completions body works here; one
-// with its own body or signing scheme (a native messages API, or a cloud that signs requests) is a
-// different protocol, and the seam for those is controller.ModelFunc, which this type satisfies.
+// Client accepts the Chat Completions body; ResponsesClient implements the separate Responses body.
+// Other native APIs or signing schemes use controller.ModelFunc, which both clients satisfy.
 //
 // Client.Model satisfies controller.ModelFunc, so it plugs straight into placement.New.
 //

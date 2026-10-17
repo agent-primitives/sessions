@@ -10,8 +10,9 @@ not provide.
 - `model/openai.NewResponses` adds an explicit stateless Responses client with function tools,
   opaque encrypted reasoning retention, usage, and text streaming. Existing Chat Completions,
   daemon/CLI selection, neutral request hashes and journal schemas remain unchanged. Unsupported
-  content and controls refuse rather than being dropped. Model-call diagnostics retain categories and
-  HTTP status, not payloads, provider messages or transport URLs/details; see
+  content and controls refuse rather than being dropped. Assistant text history uses `output_text`;
+  system/user text uses `input_text`. Model-call diagnostics retain categories, HTTP status and bounded
+  provider `error.code`/`error.param` identifiers, not messages or transport URLs/details; see
   [mapping and limits](docs/responses-adapter.md).
 
 ### Compatibility

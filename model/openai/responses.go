@@ -38,7 +38,7 @@ func (c *ResponsesClient) Model(ctx context.Context, req api.ModelRequest) (api.
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return api.ModelResponse{}, fmt.Errorf("openai responses: HTTP status %d", resp.StatusCode)
+		return api.ModelResponse{}, responsesHTTPError(resp)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, (32<<20)+1))
 	if err != nil {

@@ -101,7 +101,7 @@ func (h responsesHarness) Run(ctx context.Context, start *api.Start, sink api.Ev
 }
 
 func responsesFixture(followup bool) string {
-	output := `[` + responsesReasoning + `,{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"city\":\"Paris\"}","status":"completed"}]`
+	output := `[` + responsesReasoning + `,{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Checking weather","annotations":[]}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"city\":\"Paris\"}","status":"completed"}]`
 	if followup {
 		output = `[{"type":"message","id":"msg_2","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Paris is sunny","annotations":[]}]}]`
 	}
@@ -147,7 +147,8 @@ func writeResponsesStream(w http.ResponseWriter, fixture string) {
 		case "message":
 			content := item["content"].([]any)[0].(map[string]any)
 			emit("response.content_part.added", map[string]any{"output_index": index, "item_id": item["id"], "content_index": 0, "part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}})
-			for _, fragment := range []string{"Paris is ", "sunny"} {
+			text := content["text"].(string)
+			for _, fragment := range []string{text[:5], text[5:]} {
 				emit("response.output_text.delta", map[string]any{"output_index": index, "item_id": item["id"], "content_index": 0, "delta": fragment})
 			}
 			emit("response.output_text.done", map[string]any{"output_index": index, "item_id": item["id"], "content_index": 0, "text": content["text"]})
@@ -259,6 +260,25 @@ func TestResponsesWireRecoveryAndReplay(t *testing.T) {
 						t.Error(err)
 					}
 					bodies <- body
+					// Enforce the service's role/content contract, not just JSON validity.
+					for _, raw := range body["input"].([]any) {
+						item := raw.(map[string]any)
+						if item["type"] != "message" {
+							continue
+						}
+						want := "input_text"
+						if item["role"] == "assistant" {
+							want = "output_text"
+						}
+						for _, rawPart := range item["content"].([]any) {
+							part := rawPart.(map[string]any)
+							if part["type"] != want {
+								t.Errorf("provider rejected role=%v content type=%v; want %s", item["role"], part["type"], want)
+								http.Error(w, `{"error":{"code":"invalid_value","param":"input"}}`, http.StatusBadRequest)
+								return
+							}
+						}
+					}
 					followup := body["tool_choice"] == "none"
 					fixture := responsesFixture(followup)
 					if streaming {
@@ -295,9 +315,10 @@ func TestResponsesWireRecoveryAndReplay(t *testing.T) {
 					t.Fatalf("responses = %#v", live.responses)
 				}
 				first := live.responses[0]
-				equal(len(first.Message.Parts), 2)
+				equal(len(first.Message.Parts), 3)
 				equal(first.Message.Parts[0].Reasoning, &api.ReasoningPart{Provider: "openai", ModelID: "responses-model", Opaque: []byte(responsesReasoning), ItemID: "rs_1"})
-				equal(first.Message.Parts[1].ToolCall, &api.ToolCall{ID: "call_1", Tool: "lookup", Args: map[string]any{"city": "Paris"}})
+				equal(first.Message.Parts[1].Text, &api.TextPart{Text: "Checking weather"})
+				equal(first.Message.Parts[2].ToolCall, &api.ToolCall{ID: "call_1", Tool: "lookup", Args: map[string]any{"city": "Paris"}})
 				equal(live.responses[1].Message, *api.TextMessage("assistant", "Paris is sunny"))
 				for _, response := range live.responses {
 					equal(response.Usage, api.Usage{Model: "responses-model", InputTokens: 7, OutputTokens: 3, ReasoningTokens: 1})
@@ -316,21 +337,22 @@ func TestResponsesWireRecoveryAndReplay(t *testing.T) {
 					equal(tool["strict"], false)
 					if i == 1 {
 						items := body["input"].([]any)
-						equal(len(items), 4)
+						equal(len(items), 5)
 						var reasoning map[string]any
 						check(json.Unmarshal([]byte(responsesReasoning), &reasoning))
 						equal(items[1], reasoning)
-						call := items[2].(map[string]any)
+						equal(items[2], map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "Checking weather"}}})
+						call := items[3].(map[string]any)
 						equal(call["type"], "function_call")
 						equal(call["call_id"], "call_1")
-						equal(items[3], map[string]any{"type": "function_call_output", "call_id": "call_1", "output": "sunny"})
+						equal(items[4], map[string]any{"type": "function_call_output", "call_id": "call_1", "output": "sunny"})
 					}
 					if _, exists := body["previous_response_id"]; exists {
 						t.Fatal("adapter used provider-stored state")
 					}
 				}
 				if streaming {
-					equal(chunks.String(), "Paris is sunny")
+					equal(chunks.String(), "Checking weatherParis is sunny")
 				} else {
 					equal(chunks.String(), "")
 				}
@@ -409,6 +431,9 @@ func TestResponsesWireRecoveryAndReplay(t *testing.T) {
 				finalized = append(finalized, live.responses)
 			})
 		}
+	}
+	if len(finalized) == 0 {
+		return // Subtests already reported the failed live executions.
 	}
 	for _, responses := range finalized[1:] {
 		if !reflect.DeepEqual(responses, finalized[0]) {

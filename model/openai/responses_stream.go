@@ -6,8 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/agent-primitives/sessions/api"
@@ -26,7 +28,7 @@ func (c *ResponsesClient) StreamModel(ctx context.Context, req api.ModelRequest,
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return api.ModelResponse{}, fmt.Errorf("openai responses: HTTP status %d", resp.StatusCode)
+		return api.ModelResponse{}, responsesHTTPError(resp)
 	}
 	state := responsesStream{items: map[int]*responsesStreamItem{}}
 	scanner := bufio.NewScanner(resp.Body)
@@ -401,7 +403,8 @@ func (s *responsesStream) validateFinal(raw []byte) error {
 	if err := s.responseID(final.ID); err != nil {
 		return err
 	}
-	for index, observed := range s.items {
+	for _, index := range slices.Sorted(maps.Keys(s.items)) {
+		observed := s.items[index]
 		if index >= len(final.Output) {
 			return fmt.Errorf("observed item absent from final output")
 		}

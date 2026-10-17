@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -26,7 +28,8 @@ func (c *ResponsesClient) buildResponsesRequest(req api.ModelRequest, stream boo
 	if stream {
 		body["stream"] = true
 	}
-	for key, value := range req.Params {
+	for _, key := range slices.Sorted(maps.Keys(req.Params)) {
+		value := req.Params[key]
 		switch key {
 		case "reasoning_effort":
 			switch value {
@@ -156,8 +159,11 @@ func responsesInput(model string, messages []api.Message) ([][]byte, error) {
 				return nil, responsesUnsupported("message %d part %d must have exactly one kind", mi, pi)
 			}
 			if p.Text != nil && role != "tool" {
-				// All neutral text uses the easy-input message shape, including assistant history.
-				content = append(content, map[string]string{"type": "input_text", "text": p.Text.Text})
+				kind := "input_text"
+				if role == "assistant" {
+					kind = "output_text"
+				}
+				content = append(content, map[string]string{"type": kind, "text": p.Text.Text})
 				continue
 			}
 			if err := flush(); err != nil {

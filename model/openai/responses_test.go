@@ -120,7 +120,7 @@ func TestResponsesOrderedToolsAndReasoning(t *testing.T) {
 	if !strings.Contains(string(posted), reasoning) {
 		t.Fatalf("raw reasoning not verbatim: %s", posted)
 	}
-	assertJSON(t, posted, []byte(`{"model":"explicit","store":false,"include":["reasoning.encrypted_content"],"tools":[{"type":"function","name":"lookup","description":"Lookup","parameters":{},"strict":false},{"type":"function","name":"other","description":"","strict":false}],"tool_choice":{"type":"function","name":"lookup"},"input":[{"type":"message","role":"assistant","content":[{"type":"input_text","text":"before"}]},`+reasoning+`,{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"n\":2}"},{"type":"message","role":"assistant","content":[{"type":"input_text","text":"done"}]},{"type":"function_call_output","call_id":"call_1","output":"result text"}]}`))
+	assertJSON(t, posted, []byte(`{"model":"explicit","store":false,"include":["reasoning.encrypted_content"],"tools":[{"type":"function","name":"lookup","description":"Lookup","parameters":{},"strict":false},{"type":"function","name":"other","description":"","strict":false}],"tool_choice":{"type":"function","name":"lookup"},"input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"before"}]},`+reasoning+`,{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"n\":2}"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]},{"type":"function_call_output","call_id":"call_1","output":"result text"}]}`))
 }
 
 // Every refusal must happen before HTTP, including mixed-kind parts and missing model-facing results.

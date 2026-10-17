@@ -42,8 +42,8 @@ client has a two-minute timeout. There are no automatic retries or model/protoco
 
 ## Supported content and controls
 
-- Ordered system/user/assistant text using the easy-input message shape with `input_text` content,
-  including assistant history. An empty role uses `user`; unsupported roles refuse.
+- Ordered text messages with `input_text` content for system/user roles and `output_text` for
+  assistant history. An empty role uses `user`; unsupported roles refuse.
 - Function definitions and AUTO/NONE/REQUIRED choices, including a named REQUIRED choice. Schemas
   are passed through within the neutral JSON domain, with `strict:false` so Responses does not
   silently tighten them. Nil schema is omitted; an explicit empty schema remains `{}`.
@@ -102,9 +102,14 @@ checked against the completed response; usage is taken from that response once.
 Nonstreaming responses are limited to 32 MiB. Streaming accepts less than 8 MiB per SSE line and
 32 MiB per assembled SSE record; a large one-line completed response can therefore exceed the
 streaming limit even when it fits the nonstreaming limit. Oversized responses fail clearly.
-Model-call errors retain stage/category and HTTP status, but omit provider message bodies,
-unsupported field/type values, decoder payloads and transport URLs/details: the host may journal the
-error text. Cancellation and deadline errors remain discoverable with `errors.Is`. Constructor
+Model-call errors retain stage/category and HTTP status, but omit provider messages, unsupported
+field/type values, decoder payloads and transport URLs/details: the host may journal the error text.
+For non-200 responses, an error envelope of at most 16 KiB may also supply `error.code` (1–64 ASCII
+letters/digits/underscores) and `error.param` (1–128 of those characters plus `.`, `[` and `]`). Invalid
+fields are omitted independently, never truncated; malformed, oversized or unreadable envelopes retain
+only the status. These are provider-controlled identifiers, not arbitrary message content; `param` may
+reflect user-chosen key names, so do not use sensitive names in request structure. Cancellation and
+deadline errors from transport/success-body processing remain discoverable with `errors.Is`. Constructor
 configuration errors and explicit `Endpoint()` inspection still require the caller's usual redaction.
 
 EOF without completion, failed/incomplete responses, provider errors, malformed/conflicting events

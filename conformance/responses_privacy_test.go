@@ -56,6 +56,9 @@ func TestResponsesDiagnosticPrivacy(t *testing.T) {
 		{name: "unknown content field", body: `{"status":"completed","output":[{"type":"message","id":"m","role":"assistant","content":[{"type":"output_text","text":"fictional","` + marker + `":true}]}]}`, want: "unsupported item/content field"},
 		{name: "HTTP JSON body", body: `{"error":{"message":"` + marker + `"}}`, status: 503, want: "HTTP status 503"},
 		{name: "HTTP raw body", body: marker, status: 429, want: "HTTP status 429"},
+		{name: "HTTP bounded identifiers", body: `{"error":{"code":"invalid_value","param":"input[1].content[0].type","message":"` + marker + `"}}`, status: 400, want: "HTTP status 400 (code=invalid_value, param=input[1].content[0].type)"},
+		{name: "HTTP unsafe identifiers", body: `{"error":{"code":"` + marker + `","param":"https://private.invalid/` + marker + `"}}`, status: 400, want: "HTTP status 400"},
+		{name: "HTTP oversized identifiers", body: `{"error":{"code":"` + strings.Repeat("x", 65) + `","param":"` + strings.Repeat("y", 129) + `","message":"` + marker + `"}}`, status: 400, want: "HTTP status 400"},
 		{name: "failed message", body: "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"" + marker + "\"}}}\n\n", streamOnly: true, want: "terminal response.failed"},
 		{name: "incomplete reason", body: "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"" + marker + "\"}}}\n\n", streamOnly: true, want: "terminal response.incomplete"},
 		{name: "provider error event", body: "data: {\"type\":\"error\",\"message\":\"" + marker + "\"}\n\n", streamOnly: true, want: "terminal error"},
@@ -138,6 +141,9 @@ func TestResponsesDiagnosticPrivacy(t *testing.T) {
 					case api.EventError:
 						errorCount++
 						checkPrivate(record.Event.Err.Description)
+						if !strings.Contains(record.Event.Err.Description, tc.want) {
+							t.Fatalf("journal error lost diagnostic category: %s", record.Event.Err.Description)
+						}
 					case api.EventOutput, api.EventToolCall, api.EventToolResult, api.EventEnd:
 						t.Fatalf("failed call recorded %s", record.Event.Kind)
 					}

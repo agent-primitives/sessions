@@ -29,6 +29,9 @@ func (s *Service) DeleteSession(ctx context.Context, req *v1.DeleteSessionReques
 	var info sqlitelog.SessionInfo
 	// The callback calls only the atomic store primitive, never a guarded Placer method.
 	err = s.registry.WithSessionGuard(uid, func() error {
+		if _, err := s.store.SessionInfo(uid); err != nil {
+			return err
+		}
 		var err error
 		info, err = s.store.DeleteSession(ctx, uid)
 		return err

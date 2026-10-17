@@ -335,7 +335,7 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 	}
 	defer release()
 
-	if err := eventlog.CheckWritable(log); err != nil {
+	if err := eventlog.CheckAdmissible(log); err != nil {
 		return err
 	}
 	if err := checkResumeHead(log, cfg.expectedLastSeq); err != nil {
@@ -406,6 +406,9 @@ func (r *Registry) Approve(ctx context.Context, log eventlog.Store, sessionUID s
 		return eventlog.Record{}, err
 	}
 	defer r.sessions.endCheckpoint(sessionUID)
+	if err := eventlog.CheckAdmissible(log); err != nil {
+		return eventlog.Record{}, err
+	}
 	return controller.Approve(log, decision)
 }
 
@@ -422,7 +425,7 @@ func (r *Registry) Suspend(ctx context.Context, log eventlog.Store, sessionUID, 
 		return api.SnapshotRef{}, err
 	}
 	defer release()
-	if err := eventlog.CheckWritable(log); err != nil {
+	if err := eventlog.CheckAdmissible(log); err != nil {
 		return api.SnapshotRef{}, err
 	}
 	state, err := controller.InspectApproval(log, 0)

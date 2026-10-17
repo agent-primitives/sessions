@@ -89,7 +89,7 @@ func TestForkRefusesAParentTurnUntilTheLastChildIsCloned(t *testing.T) {
 	}
 }
 
-// A fan-out that fails partway tears its children down, one Stop at a time with a budget each.
+// An untracked standalone fan-out that fails partway tears its children down, one Stop at a time.
 // Nothing in the teardown reads the parent, so the parent is released first rather than refused for
 // the length of the teardown.
 func TestForkReleasesTheParentBeforeStoppingTheChildren(t *testing.T) {
@@ -112,7 +112,11 @@ func TestForkReleasesTheParentBeforeStoppingTheChildren(t *testing.T) {
 			execErr = execAtHead(p, log, "s1")
 		}
 	}
-	if err := forkChildren(t, p, log, "s1", 2); !errors.Is(err, cloneErr) {
+	children := untrackedForkChildren([]placement.ForkChild{
+		{UID: "s1-child-1", Log: store.Session("s1-child-1")},
+		{UID: "s1-child-2", Log: store.Session("s1-child-2")},
+	})
+	if err := p.Fork(context.Background(), log, "s1", children, 0); !errors.Is(err, cloneErr) {
 		t.Fatalf("fork returned %v, want the clone error", err)
 	}
 	if stops != 1 {

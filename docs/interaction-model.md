@@ -80,14 +80,16 @@ The `Sessions` service. You implement none of it.
 | `Fork` | branch a session into one or more children | available |
 | `Suspend` / `Resume` | free and restore compute, or recover an approval-bearing turn | available |
 | `Approve` | commit an explicit approval or denial; no implicit Resume | available, stateless replay only |
-| `DeleteSession` | permanently tombstone a UID while retaining metadata and journal audit access | available; returns **PENDING**, durable intent only, without stopping resources |
+| `DeleteSession` | permanently tombstone a UID while retaining metadata and journal audit access | available; commits **PENDING** without runtime IO; reaper may advance to **COMPLETE** |
 | `Cancel` | — | declared, **not implemented** |
 
 Treat `Cancel` as unavailable regardless of what a generated client offers. `DeleteSession`
-hides the session from ordinary listings and refuses further mutation, but does not reclaim
-actors or pins. Ownership and cleanup-target persistence and retryable teardown belong to #88;
-until then, `PENDING` means the irreversible tombstone committed, not that resources were
-released.
+hides the session from ordinary listings and refuses further mutation in both PENDING and COMPLETE.
+PENDING means durable intent, not resource release. A separately started single-host reaper supports
+only no-dedicated-resource local/remote cleanup; unsupported/Substrate allocations remain PENDING.
+COMPLETE sets completion time and compute TERMINATED without changing the journal or execution
+projection. Embedders own startup and stop/join; legacy inventories require operator certification.
+See [deletion and inventory requirements](concepts.md#permanent-soft-deletion).
 
 ### Run a turn
 

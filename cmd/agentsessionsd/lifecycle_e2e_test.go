@@ -78,13 +78,13 @@ func TestSessionLifecycleRealBinaries(t *testing.T) {
 	expect(list, `^`+child+`\tlast_seq=\d+\tcompute=\w+\tharness=echo\tname=smoke-child$`)
 
 	// Delete the child. It is a permanent tombstone: the reply carries PENDING and the committed
-	// request time, a retry returns that same time, Get and Replay still serve the UID with Replay
+	// request time, a retry preserves that time while cleanup can advance to COMPLETE, and Get/Replay serve the UID with Replay
 	// ending in the DELETE lifecycle record, List hides it, and a new turn is refused.
 	requested := expect(ctl("delete", "--session", child), `^session `+child+` deletion=PENDING deletion_requested=(\S+)$`)[1]
 	if _, err := time.Parse(time.RFC3339Nano, requested); err != nil {
 		t.Fatalf("delete printed deletion_requested=%q, want an RFC 3339 time: %v", requested, err)
 	}
-	tombstone := ` deletion=PENDING deletion_requested=` + regexp.QuoteMeta(requested) + `$`
+	tombstone := ` deletion=(?:PENDING|COMPLETE) deletion_requested=` + regexp.QuoteMeta(requested) + `$`
 	expect(ctl("delete", "--session", child), `^session `+child+tombstone)
 	expect(ctl("get", "--session", child), `^session `+child+` project=smoke name=smoke-child harness=echo last_seq=\d+ compute=\w+`+tombstone)
 	before := replay
@@ -104,7 +104,20 @@ func TestSessionLifecycleRealBinaries(t *testing.T) {
 	daemon.stop(t)
 	startServer(t, bin, addr, "-journal", journalPath)
 	expect(ctl("get", "--session", uid), `^session `+uid+` project=smoke name=smoke-parent harness=echo last_seq=12 compute=\w+ deletion=ACTIVE deletion_requested=unset$`)
-	expect(ctl("get", "--session", child), `^session `+child+` .*`+tombstone)
+	// Startup cleanup runs asynchronously after recovery. Wait on the reported state, not a
+	// fixed sleep, to prove that a new daemon actually reclaims the local allocation ledger.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out := ctl("get", "--session", child)
+		expect(out, `^session `+child+` .*`+tombstone)
+		if strings.Contains(out, " compute=TERMINATED deletion=COMPLETE ") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("startup cleanup did not complete: %s", out)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if again := ctl("replay", "--session", child); again != replay {
 		t.Fatalf("child replay changed across a restart:\nbefore\n%s\nafter\n%s", replay, again)
 	}

@@ -151,10 +151,24 @@ id is what the harness says about itself, so it does not authenticate the harnes
 ## Deletion is not erasure or containment
 
 Any caller that can reach Sessions can permanently tombstone a known UID: Delete has no additional
-authorization. `PENDING` acknowledges durable intent only until #88 provides authoritative ownership
-and cleanup. Actors, snapshots and fork-child pins remain retained indefinitely; Delete does not
-call Stop, reclaim resources or stop an actor's independent external activity. The retained metadata
-and journal are audit evidence, not a complete inventory of resources to clean up.
+authorization. `DeleteSession` itself makes no runtime IO and does not stop an actor's independent
+external activity. PENDING acknowledges intent only. A separate single-host reaper can report COMPLETE
+after safe release, not physical GC or containment. Only no-dedicated-resource local/remote cleanup
+is supported; unsupported/Substrate allocations remain PENDING and their old Stop is never called
+by the reaper. Retained metadata and journal are audit evidence, not a complete cleanup inventory.
+
+Every migrated v4 inventory is incomplete. `Store.CertifyInventory(ctx, uid, evidence)` trusts an
+operator's explicit reconciliation across all historical namespaces, overrides and failed forks;
+it does not verify evidence or discover/adopt resources. Certification asserts that the complete
+inventory contains every actual owned resource or proves those resources absent. Never blindly
+certify an allocated legacy session: false certification plus an empty ledger can report COMPLETE
+while compute and snapshots remain. No automatic legacy-resource adoption tooling is included.
+Restrict this store-level capability to trusted operators and retain meaningful reconciliation
+evidence. Leave inventory incomplete when ownership or absence cannot be established.
+
+Reaper recovery must run at exclusive single-host startup before requests, never concurrently
+across hosts sharing a store: it can abort another host's live PREPARING fork. Embedders must
+explicitly start and stop/join the worker before closing store/backends.
 
 UID, metadata and journal remain forever and are available through Get and raw Replay even when
 List hides them. Deletion is neither data erasure nor access revocation; it does not cascade to

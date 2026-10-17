@@ -87,10 +87,12 @@ determinism guarantees are exercised by a replay-conformance suite (`conformance
 - **Permanent soft deletion:** `DeleteSession` / `agentctl delete --session <uid>` hides the UID
   from List and refuses Exec, Fork (including historical forks), Resume, Suspend and Approve
   (including exact retries). Get and raw Replay remain audit reads; UID, metadata and journal
-  are retained forever, without cascade or erasure. `PENDING` acknowledges durable intent only:
-  actors, snapshots and fork-child pins remain retained indefinitely. No Stop or cleanup is
-  attempted; ownership and reclamation belong to #88. See [deletion semantics and admission
-  limits](docs/concepts.md#permanent-soft-deletion).
+  are retained forever, without cascade or erasure. Delete itself makes no runtime IO. A separately
+  started single-host reaper can advance `PENDING` intent to `COMPLETE` after safe release, with a
+  completion timestamp and `TERMINATED` compute projection. Only no-dedicated-resource local/remote
+  cleanup is supported; Substrate allocations remain PENDING. Embedders explicitly start and join
+  the reaper; legacy inventories require operator reconciliation and certification. Schema v5 has
+  no downgrade to v0.2.0. See [deletion semantics and rollout limits](docs/concepts.md#permanent-soft-deletion).
 
 ## Documentation
 

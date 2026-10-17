@@ -53,19 +53,23 @@ type SessionsClient interface {
 	// data erasure is promised. ListSessions hides the UID; GetSession and raw Sessions.Replay remain
 	// read-only audit access, without reconstructing or running a harness.
 	//
-	// Valid mutation requests against PENDING fail with FAILED_PRECONDITION before routing,
+	// Valid mutation requests against PENDING or COMPLETE fail with FAILED_PRECONDITION before routing,
 	// recovery or compute effects: Exec, Fork (including historical at_seq), Resume, Suspend and
 	// Approve are refused, including exact historical decision retries. Pending approval metadata
 	// grants no permission.
 	//
-	// Until ownership and cleanup land (#88), OK + PENDING acknowledges durable intent only. No
-	// Runtime.Stop, actor/pin release, physical snapshot GC or TERMINATED transition is attempted
-	// or promised. Execution and compute reporting stay independent. The retained journal
-	// is audit evidence, not a complete or authoritative cleanup-target inventory; the allocation
-	// ownership and cleanup-target schema belong to #88, not an inferred default harness or owner.
-	// Repeated PENDING deletion returns the identical Session: no timestamp, update_time, journal,
-	// fence or compute-projection changes. Clients must inspect deletion_state, not infer reclamation
-	// from an OK status.
+	// OK + PENDING acknowledges durable intent only. DeleteSession makes no runtime call. A
+	// separately started single-host reaper releases allocations through explicitly supported safe
+	// cleanup backends. Local and remote shared harness servers are not stopped; Substrate and
+	// other unsupported backends remain PENDING. Legacy inventories require explicit operator
+	// reconciliation; neither an empty ledger nor the retained journal proves resource absence.
+	// Once the inventory is complete and every owned allocation is released, the host records
+	// COMPLETE, deletion_completed_time and COMPUTE_TERMINATED, without appending an event or
+	// changing last_seq, update_time, the DELETE time or execution projection. Completion is not
+	// physical storage GC. Both PENDING and COMPLETE permanently refuse mutation.
+	// Repeated deletion returns the current stored Session without writes; only independent reaper
+	// progress can change its cleanup fields. Inspect deletion_state rather than inferring
+	// reclamation from an OK status.
 	//
 	// Empty uid is INVALID_ARGUMENT; an unknown nonempty uid is NOT_FOUND without creating a row.
 	// Overlap with a mutation in the same Registry/host is ABORTED before mutation, without canceling
@@ -273,19 +277,23 @@ type SessionsServer interface {
 	// data erasure is promised. ListSessions hides the UID; GetSession and raw Sessions.Replay remain
 	// read-only audit access, without reconstructing or running a harness.
 	//
-	// Valid mutation requests against PENDING fail with FAILED_PRECONDITION before routing,
+	// Valid mutation requests against PENDING or COMPLETE fail with FAILED_PRECONDITION before routing,
 	// recovery or compute effects: Exec, Fork (including historical at_seq), Resume, Suspend and
 	// Approve are refused, including exact historical decision retries. Pending approval metadata
 	// grants no permission.
 	//
-	// Until ownership and cleanup land (#88), OK + PENDING acknowledges durable intent only. No
-	// Runtime.Stop, actor/pin release, physical snapshot GC or TERMINATED transition is attempted
-	// or promised. Execution and compute reporting stay independent. The retained journal
-	// is audit evidence, not a complete or authoritative cleanup-target inventory; the allocation
-	// ownership and cleanup-target schema belong to #88, not an inferred default harness or owner.
-	// Repeated PENDING deletion returns the identical Session: no timestamp, update_time, journal,
-	// fence or compute-projection changes. Clients must inspect deletion_state, not infer reclamation
-	// from an OK status.
+	// OK + PENDING acknowledges durable intent only. DeleteSession makes no runtime call. A
+	// separately started single-host reaper releases allocations through explicitly supported safe
+	// cleanup backends. Local and remote shared harness servers are not stopped; Substrate and
+	// other unsupported backends remain PENDING. Legacy inventories require explicit operator
+	// reconciliation; neither an empty ledger nor the retained journal proves resource absence.
+	// Once the inventory is complete and every owned allocation is released, the host records
+	// COMPLETE, deletion_completed_time and COMPUTE_TERMINATED, without appending an event or
+	// changing last_seq, update_time, the DELETE time or execution projection. Completion is not
+	// physical storage GC. Both PENDING and COMPLETE permanently refuse mutation.
+	// Repeated deletion returns the current stored Session without writes; only independent reaper
+	// progress can change its cleanup fields. Inspect deletion_state rather than inferring
+	// reclamation from an OK status.
 	//
 	// Empty uid is INVALID_ARGUMENT; an unknown nonempty uid is NOT_FOUND without creating a row.
 	// Overlap with a mutation in the same Registry/host is ABORTED before mutation, without canceling

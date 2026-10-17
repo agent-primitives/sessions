@@ -55,6 +55,20 @@ type Runtime interface {
 	Capabilities() RuntimeCapabilities
 }
 
+// CleanupRuntime optionally opts a Runtime into durable session release. This contract is
+// only safe for backends with NO dedicated per-session resources (currently local and remote).
+// Identity-bearing resource cleanup requires a separate, stronger ownership contract; it must
+// never be retrofitted by calling a destructive name-only Stop.
+//
+// CleanupKey identifies the backend configuration across host restarts, not a harness alias.
+// Equal keys must mean interchangeable release behavior, including across local harnesses.
+// ReleaseSession is idempotent and safe even when an allocation response was never confirmed;
+// it must not stop a shared harness server or close a shared connection.
+type CleanupRuntime interface {
+	CleanupKey() string
+	ReleaseSession(ctx context.Context, sessionUID string) error
+}
+
 // SnapshotKind selects local (warm/pause) vs external (cold/suspend) storage.
 type SnapshotKind string
 

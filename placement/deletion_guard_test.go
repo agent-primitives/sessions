@@ -98,7 +98,8 @@ func TestForkSharedGuardCoversRollbackAndDrainsEveryReturn(t *testing.T) {
 						release()
 					}
 				}
-				children := []ForkChild{{UID: "one", Log: s.Session("one")}, {UID: "two", Log: s.Session("two")}}
+				// Explicitly untracked logs retain legacy rollback, including its deletion exclusion.
+				children := []ForkChild{{UID: "one", Log: legacyForkLog{s.Session("one")}}, {UID: "two", Log: legacyForkLog{s.Session("two")}}}
 				if phase == "NewFence" || phase == "Append" {
 					children[1].Log = deletionForkFaultLog{Store: children[1].Log, phase: phase, cause: cause}
 				}

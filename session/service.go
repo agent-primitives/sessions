@@ -119,6 +119,9 @@ func sessionProto(info sqlitelog.SessionInfo) (*v1.Session, error) {
 	if !info.DeletionRequestedAt.IsZero() {
 		out.DeletionRequestedTime = timestamppb.New(info.DeletionRequestedAt)
 	}
+	if info.DeletionState == api.DeletionComplete && !info.DeletionCompletedAt.IsZero() {
+		out.DeletionCompletedTime = timestamppb.New(info.DeletionCompletedAt)
+	}
 	if ref := info.PendingApproval; ref.RequestSeq > 0 && info.DeletionState == api.DeletionActive {
 		out.PendingApproval = &v1.ApprovalRef{ExecutionId: ref.ExecutionID, ToolCallId: ref.ToolCallID, RequestSeq: ref.RequestSeq}
 	}
@@ -780,6 +783,14 @@ func (s *Service) Replay(req *v1.ReplayRequest, stream v1.Sessions_ReplayServer)
 		finish(err, "error_kind", serviceErrorKind(err), "records_sent", recordsSent)
 	}()
 
+	// A fork prefix is not public until its entire fan-out commits. Tombstones still expose
+	// their retained audit records; unknown UIDs retain the existing empty-stream behavior.
+	if err := s.store.Session(req.GetSession()).CheckPublished(); err != nil {
+		if errors.Is(err, eventlog.ErrUnpublished) {
+			return status.Error(codes.NotFound, "session is not published")
+		}
+		return status.Errorf(codes.Internal, "replay publication: %v", err)
+	}
 	from := req.GetFromSeq()
 	if from <= 0 {
 		from = 1
@@ -853,67 +864,11 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	if len(childNames) != 0 && len(childNames) != count {
 		return nil, status.Errorf(codes.InvalidArgument, "child_names has %d entries, want 0 or exactly count (%d)", len(childNames), count)
 	}
-	children := make([]placement.ForkChild, 0, count)
-	for i := 0; i < count; i++ {
-		uid := newUID()
-		children = append(children, placement.ForkChild{UID: uid, Log: s.store.Session(uid)})
+	response, err = s.forkChildren(ctx, req, placer, parent, atSeq, count)
+	if err == nil {
+		childrenCreated = len(response.Children)
 	}
-	// The fan-out is all-or-nothing: Placer.Fork rolls back everything it provisioned on failure,
-	// so children_created stays 0 rather than reporting compute that no longer exists.
-	if err := placer.Fork(ctx, parent, req.GetSession(), children, atSeq); err != nil {
-		return nil, forkError(err)
-	}
-	childrenCreated = len(children)
-	// Child metadata is written only after the fan-out commits. Placer.forkSource refuses an
-	// unplaceable fork with no side effects at all, and registering children first would turn that
-	// into a listing full of phantom sessions the caller was never given UIDs for and cannot
-	// delete. Children inherit the parent's project, harness, and model: a fork is the same
-	// workload branched, so it must stay in the tenant that owns the parent rather than landing in
-	// the service default that copying the log would otherwise give it. The name is deliberately
-	// not inherited; see child_names in the proto.
-	parentInfo, err := s.store.SessionInfo(req.GetSession())
-	if err != nil {
-		return nil, sessionStoreError(err, req.GetSession())
-	}
-	childLabels, err := encodeMap(req.GetLabels())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "fork labels: %v", err)
-	}
-	out := make([]*v1.Session, 0, len(children))
-	for i, child := range children {
-		var name string
-		if len(childNames) != 0 {
-			name = childNames[i]
-		}
-		if err := s.store.PutSession(sqlitelog.SessionMeta{
-			UID:       child.UID,
-			Project:   parentInfo.Project,
-			Name:      name,
-			Harness:   parentInfo.Harness,
-			Model:     parentInfo.Model,
-			ParentUID: req.GetSession(),
-			ForkSeq:   atSeq,
-			// A child inherits the parent's annotations and origin, because it is the same
-			// workload branched and its external context did not change. Labels come from the
-			// request instead, so callers can distinguish branches. Identity is not inherited;
-			// per-child principals are unsupported and rejected before placement.
-			Annotations: parentInfo.Annotations,
-			Origin:      parentInfo.Origin,
-			Labels:      childLabels,
-		}); err != nil {
-			return nil, status.Errorf(codes.Internal, "fork: record child %q: %v", child.UID, err)
-		}
-		info, err := s.store.SessionInfo(child.UID)
-		if err != nil {
-			return nil, sessionStoreError(err, child.UID)
-		}
-		childProto, err := sessionProto(info)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, childProto)
-	}
-	return &v1.ForkResponse{Children: out}, nil
+	return response, err
 }
 
 // forkError surfaces a refused fork as FailedPrecondition rather than Internal. A fork is refused
@@ -937,6 +892,10 @@ func forkError(err error) error {
 	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing),
 		errors.Is(err, api.ErrSnapshotSuperseded):
 		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, context.Canceled):
+		return withStatusCause(codes.Canceled, err)
+	case errors.Is(err, context.DeadlineExceeded):
+		return withStatusCause(codes.DeadlineExceeded, err)
 	default:
 		return status.Errorf(codes.Internal, "fork: %v", err)
 	}

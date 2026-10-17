@@ -16,13 +16,14 @@ const (
 )
 
 // DeletionState is the permanent-deletion axis, independent of execution and compute.
-// Pending acknowledges durable intent only; retained resources have not been reclaimed.
-// Any other value is unrecognized and fails closed: it is treated as deleted, never as ACTIVE.
+// Pending acknowledges durable intent only; Complete confirms release of every inventoried
+// allocation. Both remain permanent tombstones. Unrecognized values fail closed as deleted.
 type DeletionState string
 
 const (
-	DeletionActive  DeletionState = "ACTIVE"
-	DeletionPending DeletionState = "PENDING"
+	DeletionActive   DeletionState = "ACTIVE"
+	DeletionPending  DeletionState = "PENDING"
+	DeletionComplete DeletionState = "COMPLETE"
 )
 
 // ComputeState is the incarnation (compute/sandbox) axis of a session's lifecycle.

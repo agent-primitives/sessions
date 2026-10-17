@@ -130,9 +130,9 @@ func TestRunAcceptsToolConfigWithoutDialingAtStartup(t *testing.T) {
 				data = strings.Replace(validToolConfig, `,"durable_dedup":true`, "", 1)
 			}
 			ctx, cancel := context.WithCancel(t.Context())
-			cancel()
+			defer cancel()
 			served := false
-			err := Run([]string{"-tool-executors", writeToolConfig(t, data), "-journal", filepath.Join(t.TempDir(), "j.db"), "-addr", "127.0.0.1:0", "-model", "m", "-harness", "h=127.0.0.1:9000"}, withContext(ctx), withListening(func(string) { served = true }))
+			err := Run([]string{"-tool-executors", writeToolConfig(t, data), "-journal", filepath.Join(t.TempDir(), "j.db"), "-addr", "127.0.0.1:0", "-model", "m", "-harness", "h=127.0.0.1:9000"}, withContext(ctx), withListening(func(string) { served = true; cancel() }))
 			if err != nil || !served {
 				t.Fatalf("valid config must start without dialing: %v, served=%v", err, served)
 			}

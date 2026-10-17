@@ -337,9 +337,20 @@ Real today, and worth knowing before you build on it:
 
 ## Stability
 
-`agentsessions.v1` is a proto namespace, not a stability promise. The Go module is pre-1.0 and makes
-no backward-compatibility guarantee. See the README's API stability section for what CI enforces,
-including the compatibility gate that runs against the most recent release tag.
+`agentsessions.v1` is a proto namespace, not a stability promise. The `v1` names the schema, the
+way `k8s.io/api/core/v1` does; it does not mean the schema is finished. The Go module is pre-1.0 and
+makes no backward-compatibility guarantee: both the wire contract and the Go SPI may change.
+
+What CI does enforce:
+
+- `buf lint` on every change.
+- `buf breaking` against the most recent release tag, which fails the build when the schema breaks
+  against that tag.
+- The checked-in generated code and the API reference must match the protos, so the published
+  contract cannot drift from the schema.
+
+Breaking changes are called out in [`CHANGELOG.md`](../CHANGELOG.md). The contract is still pre-1.0,
+so it can break between releases; what the gate buys you is that it cannot break silently.
 
 ## Where next
 

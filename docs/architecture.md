@@ -250,3 +250,25 @@ nondeterministic* output, multi-turn resume-then-continue across incarnations, c
 re-drive, fork equivalence (hash-tree), single-writer CAS, the cross-implementation integrity golden
 vector, and the mediated-tool idempotency + rejection paths — in-process and over the `harnesswire` gRPC
 transport. Passing this suite is the neutrality/leadership deliverable.
+
+## Repository layout
+
+| Path | What |
+|---|---|
+| `api/` | The wire proto (`*.proto`) + Go SPI (`*.go`): Sessions, Harness, Runtime, Event. |
+| `controller/` | Single-writer, event-sourced core: drives one session, mediates the model, enforces the determinism invariants. |
+| `eventlog/`, `sqlitelog/` | The durable event log: CAS + fencing token + hash chain (in-memory reference + sqlite backend). |
+| `canon/` | Language-neutral canonical serialization (RFC 8785 JCS) for the hash chain. |
+| `observability/` | Structured operation logging and gRPC request-correlation helpers. |
+| `harnesswire/` | Bridges the in-process `api.Harness` SPI and the out-of-process `Harness.Connect` gRPC stream. |
+| `placement/` | The `Placer`: wires Sessions to the `Runtime` SPI, mints/binds fences, gates via `CanPlace`. The `Registry` routes a session to the harness it names. |
+| `runtime/local`, `runtime/remote`, `runtime/substrate` | `Runtime` backends: a filesystem-only local backend, an attach-by-address backend for a harness you run yourself, and agent-substrate. |
+| `harness/echoagent`, `harness/counteragent`, `harness/chatagent` | Reference harnesses: `STATELESS_REPLAY` echo, `REQUIRES_MEMORY_SNAPSHOT` counter, and a history-aware chat harness. |
+| `model/openai` | Model provider for OpenAI-compatible endpoints; no vendor SDK, so any compatible service works. |
+| `session/` | The `Sessions` gRPC service: the client-facing seam over the log and the Placer. |
+| `client/` | Go client SDK: dialing, the session frame, pagination, and stream draining. |
+| `cmd/agentsessionsd` | The Sessions server: a TCP entry point over the journal and the harness registry. |
+| `cmd/agentctl` | Client CLI (create / list / get / exec / replay / fork / suspend / resume / approve / deny / delete). |
+| `conformance/` | The replay-conformance suite (the neutral determinism checks). |
+| `integrations/substrate/` | The substrate `ControlClient` adapter — a **separate module** so the core stays substrate-free. |
+| `deploy/substrate/`, `.github/workflows/substrate-e2e.yml` | Manifests + CI for the real-substrate conformance. |

@@ -222,8 +222,8 @@ func TestStatefulForkOverSnapshotsList(t *testing.T) {
 	}
 }
 
-// A suspend whose durable copy has not completed yields no handle, so the stateful fork refuses with
-// ErrNoSnapshotToClone before it tags anything, instead of cloning a snapshot it cannot name.
+// A suspend whose durable copy has not completed refuses a memory checkpoint. A direct fork with
+// no handle also refuses before tagging anything, instead of cloning a snapshot it cannot name.
 func TestStatefulForkWithoutCompletedSnapshotRefuses(t *testing.T) {
 	ctx := context.Background()
 	ctl := newLifecycleControl()
@@ -235,13 +235,10 @@ func TestStatefulForkWithoutCompletedSnapshotRefuses(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap, err := b.Snapshot(ctx, parent, api.SnapshotExternal)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || snap != (api.SnapshotRef{}) {
+		t.Fatalf("pending durable copy: ref=%+v err=%v, want a checkpoint refusal", snap, err)
 	}
-	if snap.ExternalURI != "" {
-		t.Fatalf("snapshot uri=%q want empty for a pending durable copy", snap.ExternalURI)
-	}
-	_, err = b.Fork(ctx, snap, api.ForkOpts{ChildSessionUID: "child"})
+	_, err = b.Fork(ctx, api.SnapshotRef{Local: "parent"}, api.ForkOpts{ChildSessionUID: "child"})
 	if !errors.Is(err, substrate.ErrNoSnapshotToClone) {
 		t.Fatalf("fork err=%v want ErrNoSnapshotToClone", err)
 	}

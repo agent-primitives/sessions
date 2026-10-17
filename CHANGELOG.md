@@ -25,6 +25,18 @@ not provide.
 
 #### Substrate backend
 
+- `runtime/substrate` now reports `SnapshotRef.Memory` from the completed snapshot's observed
+  fidelity instead of always reporting true. The adapter carries the selected generation's URI
+  and fidelity together in `ActorInfo.Snapshot` and the new `ActorInfo.SnapshotFidelity`. ROOTFS
+  and VOLUMES report false; missing or unrecognized fidelity remains accepted as false for default
+  stateless replay, which is not proof of files-only capture. `WithVolumesOnly()` requires observed
+  VOLUMES plus a nonempty durable URI and disables memory-snapshot admission. A memory-required
+  descriptor or recorded compute instance instead requires observed MEMORY plus a nonempty URI;
+  custom control clients must report that evidence or Suspend and stateful Fork now refuse before
+  recording a checkpoint. Combining VOLUMES-only with a memory requirement refuses direct Snapshot
+  calls too. The option validates results, not template configuration: explicitly configure VOLUMES,
+  mount durable directories and disable golden snapshots for files-only recovery. No wire or journal
+  format changes are required.
 - `runtime/substrate` no longer cold-creates an actor for a `REQUIRES_MEMORY_SNAPSHOT` session that
   has a started turn on that harness (completed, failed or interrupted) but no actor (deleted out of
   band, or a host restarted with another atespace). `Exec` fails with

@@ -42,9 +42,10 @@ type mockControl struct {
 	created int
 	// suspendErr fails SuspendActor; getNoUID and suspendNoUID make GetActor and SuspendActor report
 	// no UID, as a ControlClient that breaks its contract would.
-	suspendErr   error
-	getNoUID     bool
-	suspendNoUID bool
+	suspendErr        error
+	getNoUID          bool
+	suspendNoUID      bool
+	suspendNoSnapshot bool
 }
 
 // exists records an actor at a status, so GetActor reports it as already placed.
@@ -98,12 +99,15 @@ func (m *mockControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (s
 	}
 	m.exists(a.Name, substrate.StatusSuspended)
 	snap := "gs://snap/" + a.Name
+	if m.suspendNoSnapshot {
+		snap = ""
+	}
 	m.holds(a.Name, snap)
 	uid := m.uid(a.Name)
 	if m.suspendNoUID {
 		uid = ""
 	}
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: m.info.Worker, Snapshot: snap, UID: uid}, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: m.info.Worker, Snapshot: snap, SnapshotFidelity: m.info.SnapshotFidelity, UID: uid}, nil
 }
 
 // holds records the external snapshot an actor currently holds.
@@ -135,17 +139,17 @@ func (m *mockControl) GetActor(ctx context.Context, a substrate.ActorRef) (subst
 		if m.getNoUID {
 			uid = ""
 		}
-		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], UID: uid}, nil
+		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: m.info.SnapshotFidelity, UID: uid}, nil
 	}
 	if m.status != substrate.StatusUnknown { // canned state for the suspend/restore cases
-		return substrate.ActorInfo{Status: m.status, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], UID: m.uid(a.Name)}, nil
+		return substrate.ActorInfo{Status: m.status, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: m.info.SnapshotFidelity, UID: m.uid(a.Name)}, nil
 	}
 	return substrate.ActorInfo{}, substrate.ErrActorNotFound
 }
 
 // running is what a successful ResumeActor reports: the actor on a worker.
 func running(worker string) substrate.ActorInfo {
-	return substrate.ActorInfo{Status: substrate.StatusRunning, Worker: worker}
+	return substrate.ActorInfo{Status: substrate.StatusRunning, Worker: worker, SnapshotFidelity: substrate.SnapshotFidelityMemory}
 }
 
 func newBackend(m *mockControl, opts ...substrate.Option) *substrate.Backend {
@@ -329,26 +333,115 @@ func TestCreateValidatesSessionSpec(t *testing.T) {
 }
 
 func TestSuspendRestoreRoundtrip(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		fidelity    substrate.SnapshotFidelity
+		volumesOnly bool
+		memory      bool
+	}{
+		{name: "memory", fidelity: substrate.SnapshotFidelityMemory, memory: true},
+		{name: "volumes", fidelity: substrate.SnapshotFidelityVolumes, volumesOnly: true},
+		{name: "default volumes", fidelity: substrate.SnapshotFidelityVolumes},
+		{name: "rootfs", fidelity: substrate.SnapshotFidelityRootFS},
+		{name: "unknown", fidelity: substrate.SnapshotFidelityUnknown},
+		{name: "unrecognized", fidelity: substrate.SnapshotFidelity(99)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockControl{info: running("worker-a")}
+			m.info.SnapshotFidelity = tc.fidelity
+			var output bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			opts := []substrate.Option{substrate.WithLogger(logger)}
+			if tc.volumesOnly {
+				opts = append(opts, substrate.WithVolumesOnly())
+			}
+			b := newBackend(m, opts...)
+			ref, err := b.Snapshot(context.Background(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ref.Memory != tc.memory || ref.Local != "sess-x" || ref.ExternalURI != "gs://snap/sess-x" {
+				t.Fatalf("unexpected snapshot ref %+v, want Memory=%v", ref, tc.memory)
+			}
+			if !strings.Contains(output.String(), `"operation":"suspend_actor"`) ||
+				!strings.Contains(output.String(), `"reason":"snapshot"`) {
+				t.Fatalf("snapshot did not log its SuspendActor call: %s", output.String())
+			}
+			if _, err := b.Restore(context.Background(), ref); err != nil {
+				t.Fatal(err)
+			}
+			if want := []string{"suspend:sess-x", "resume:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+				t.Fatalf("suspend/restore calls=%v want %v", m.calls, want)
+			}
+		})
+	}
+}
+
+// A missing or mismatched observation must not become a usable checkpoint in either strict mode.
+func TestSnapshotRequiresObservedFidelity(t *testing.T) {
+	for _, mode := range []string{"volumes", "memory", "recorded memory instance"} {
+		for _, tc := range []struct {
+			name       string
+			fidelity   substrate.SnapshotFidelity
+			noSnapshot bool
+		}{
+			{name: "unknown"},
+			{name: "unrecognized", fidelity: substrate.SnapshotFidelity(99)},
+			{name: "rootfs", fidelity: substrate.SnapshotFidelityRootFS},
+			{name: "memory", fidelity: substrate.SnapshotFidelityMemory},
+			{name: "volumes", fidelity: substrate.SnapshotFidelityVolumes},
+			{name: "missing memory URI", fidelity: substrate.SnapshotFidelityMemory, noSnapshot: true},
+			{name: "missing volumes URI", fidelity: substrate.SnapshotFidelityVolumes, noSnapshot: true},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				m := &mockControl{info: running("worker-a"), suspendNoSnapshot: tc.noSnapshot}
+				m.info.SnapshotFidelity = tc.fidelity
+				b := newBackend(m, substrate.WithVolumesOnly())
+				in := api.Incarnation{ID: "sess-x"}
+				wantFidelity := substrate.SnapshotFidelityVolumes
+				switch mode {
+				case "memory":
+					b = newMemoryBackend(m)
+					wantFidelity = substrate.SnapshotFidelityMemory
+				case "recorded memory instance":
+					b = newBackend(m)
+					m.exists(in.ID, substrate.StatusRunning)
+					in.ComputeInstance = m.uid(in.ID)
+					wantFidelity = substrate.SnapshotFidelityMemory
+				}
+				ref, err := b.Snapshot(context.Background(), in, api.SnapshotExternal)
+				if tc.fidelity == wantFidelity && !tc.noSnapshot {
+					if err != nil || ref.ExternalURI == "" || ref.Memory != (mode != "volumes") {
+						t.Fatalf("matching observation: ref=%+v err=%v", ref, err)
+					}
+				} else if err == nil || ref != (api.SnapshotRef{}) {
+					t.Fatalf("unproven checkpoint: ref=%+v err=%v, want refusal with no ref", ref, err)
+				} else if strings.Contains(err.Error(), "gs://snap/") {
+					t.Fatalf("refusal exposes snapshot URI: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestVolumesOnlyAdmissionAndConflictingDescriptor(t *testing.T) {
+	mem := api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}
+	stateless := api.Capabilities{Resumability: api.ResumabilityStatelessReplay}
 	m := &mockControl{info: running("worker-a")}
-	var output bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	b := newBackend(m, substrate.WithLogger(logger))
-	ref, err := b.Snapshot(context.Background(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
-	if err != nil {
-		t.Fatal(err)
+	b := substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
+		api.Descriptor{ID: "counter", Capabilities: mem}, substrate.WithVolumesOnly())
+	if controller.CanPlace(mem, b.Capabilities()) {
+		t.Fatal("files-only template must refuse memory-required admission")
 	}
-	if !ref.Memory || ref.Local != "sess-x" || ref.ExternalURI != "gs://snap/sess-x" {
-		t.Fatalf("unexpected snapshot ref %+v", ref)
+	if !controller.CanPlace(stateless, b.Capabilities()) {
+		t.Fatal("files-only template must admit stateless replay")
 	}
-	if !strings.Contains(output.String(), `"operation":"suspend_actor"`) ||
-		!strings.Contains(output.String(), `"reason":"snapshot"`) {
-		t.Fatalf("snapshot did not log its SuspendActor call: %s", output.String())
-	}
-	if _, err := b.Restore(context.Background(), ref); err != nil {
-		t.Fatal(err)
-	}
-	if want := []string{"suspend:sess-x", "resume:sess-x"}; !reflect.DeepEqual(m.calls, want) {
-		t.Fatalf("suspend/restore calls=%v want %v", m.calls, want)
+	for _, fidelity := range []substrate.SnapshotFidelity{substrate.SnapshotFidelityVolumes, substrate.SnapshotFidelityMemory} {
+		m.info.SnapshotFidelity = fidelity
+		ref, err := b.Snapshot(context.Background(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+		if err == nil || ref != (api.SnapshotRef{}) {
+			t.Fatalf("conflicting requirements: ref=%+v err=%v", ref, err)
+		}
 	}
 }
 

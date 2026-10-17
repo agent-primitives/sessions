@@ -104,7 +104,7 @@ func (c *actorControl) SuspendActor(_ context.Context, a substrate.ActorRef) (su
 	if c.onSuspend != nil {
 		c.onSuspend(a.Name)
 	}
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: "w", Snapshot: snap, UID: uid}, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: "w", Snapshot: snap, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: uid}, nil
 }
 
 func (c *actorControl) DeleteActor(_ context.Context, a substrate.ActorRef) error {
@@ -127,7 +127,7 @@ func (c *actorControl) GetActor(_ context.Context, a substrate.ActorRef) (substr
 	if !ok {
 		return substrate.ActorInfo{}, substrate.ErrActorNotFound
 	}
-	return substrate.ActorInfo{Status: st, Worker: "w", Snapshot: c.snapshots[a.Name], UID: c.uids[a.Name]}, nil
+	return substrate.ActorInfo{Status: st, Worker: "w", Snapshot: c.snapshots[a.Name], SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: c.uids[a.Name]}, nil
 }
 
 func (c *actorControl) TagActor(_ context.Context, a substrate.ActorRef, _ substrate.SnapshotID) error {

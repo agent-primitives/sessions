@@ -19,6 +19,18 @@ determinism guarantees, and it composes with durable engines: a Durable Task or 
 underneath as an event-log or state store. You do not rewrite your agent to adopt it; you implement a
 thin harness adapter.
 
+## What does it compose with?
+
+`agentsessions` defines the session contract and composes with existing OSS at its seams:
+
+- **Tools:** MCP — `ToolCall` mirrors an MCP tool call
+- **Agent-to-agent:** A2A
+- **Event envelope:** CloudEvents — `Origin` = `source` / `subject`
+- **Durable engine:** Durable Task / Dapr — event-log / state backends
+- **Telemetry:** OpenTelemetry GenAI
+- **Compute backends:** agent-substrate, agent-sandbox, Kata, Cloud Hypervisor, pods
+- **Harnesses:** any agent framework via the `Harness` SPI, or a custom agent
+
 ## Do I need Kubernetes?
 
 No. The default backend (`runtime/local`) is filesystem-only and runs entirely on your machine, which is

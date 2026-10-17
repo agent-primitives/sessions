@@ -54,8 +54,9 @@ name its header with `-model-auth-header`.
 
 ## What is not protected
 
-**There is no authentication.** Every gRPC path in the reference implementation uses plaintext
-transport with no credentials. Any process that can reach the port can call every RPC.
+**The reference daemon has no authentication.** Its gRPC listeners use plaintext transport with
+no credentials. Any process that can reach the port can call every RPC. Optional Go authentication
+interceptors are available for custom hosts (below), but the daemon does not install them.
 
 **Sessions RPCs have no authorization.** `IdentityRef` exists in the contract and is carried on the wire, but
 nothing verifies or enforces it. It is metadata today, not a control. In particular, anyone who can
@@ -262,8 +263,30 @@ unknown actions are denied. It does not verify credentials. `ListOptions.Owner` 
 pair in SQL before paging; nil retains the existing project listing. Its unsigned cursors are not
 caller-bound credentials.
 
-These Go contracts are not wired into Sessions RPCs or the daemon. They provide no authentication,
-TLS or access-control enforcement. SQLite schema v5 carries an off-mode authorization marker;
+These ownership/authorization contracts are not wired into Sessions RPCs or the daemon. They provide
+no authentication, TLS or access-control enforcement. SQLite schema v5 carries an off-mode authorization marker;
 this host refuses required, unknown or missing markers even at the same schema version. There is
 no supported switch to enable required mode. Owner identifiers are retained metadata: deletion is
 not erasure. Do not expose a host on an untrusted network.
+
+## Optional Go caller authentication
+
+Custom hosts can install both interceptors returned by `authn.NewInterceptors` on a gRPC server.
+`authn.Required` requires a `CallerVerifier`; `authn.Off` skips verification and installs no caller.
+The verifier reads incoming metadata or verified TLS peer information and returns only an exact
+issuer/subject pair and a future credential expiry, never credentials. Adapters must reject missing,
+malformed, duplicate and expired credentials, validate signatures, exact allowed issuers,
+per-issuer audiences and explicit claim mappings. Do not discover trust from untrusted issuer URLs.
+No credential format or production verifier is bundled.
+
+The interceptors validate identity/expiry and return generic `UNAUTHENTICATED` on verification
+failure, without anonymous fallback or method exemptions. `authn.Caller(ctx)` exposes the verified
+pair; request identity and forwarded headers do not establish it. Streams get the earlier caller
+deadline or verified expiry; expiry reports `UNAUTHENTICATED`, while caller cancellation/deadlines
+retain their codes. Handlers must cooperate with cancellation. There is no in-stream refresh,
+interruption of transport I/O already in progress, or rollback of an in-flight effect.
+
+Authentication alone is not isolation. Hosts still need authorization before disclosure/effects,
+TLS with server identity validation, and a compatible journal policy. None is assembled by these
+interceptors; the reference daemon has no required-mode switch. This does not secure the harness,
+router or model endpoints.

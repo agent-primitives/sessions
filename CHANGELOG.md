@@ -9,6 +9,9 @@ not provide.
 
 ### Compatibility
 
+- Optional `authn` interceptors reject unverified calls in required mode and expire authenticated
+  streams. The reference daemon remains unauthenticated and unenforced; authentication alone is
+  not isolation, and there is no daemon required-mode switch.
 - SQLite schema v5 follows approval v3 and deletion v4, adding indexed exact caller issuer/subject
   ownership and an off-mode journal authorization marker. Legacy and RPC-created sessions remain
   unbound; ordinary metadata writes and copied history cannot assign or replace owners. No events
@@ -138,6 +141,8 @@ not provide.
 
 ### Added
 
+- `authn.VerifiedCaller`, `CallerVerifier`, `Caller` and opt-in unary/stream `NewInterceptors`
+  with off/required modes. Credential adapters, TLS assembly and authorization are not bundled.
 - Verified-caller ownership scaffolding: `api.CallerIdentity`, `Authorizer` and owner-only
   `OwnerAuthorizer` contracts, plus insert-only `CreateOwnedSession` and indexed owner-filtered
   listings. These are trusted-host Go APIs, not RPC authentication or enforcement.

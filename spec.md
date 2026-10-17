@@ -87,7 +87,8 @@ This draft specifies:
 
 This draft does not specify:
 
-- authentication, authorization, transport security, or tenancy isolation (see §17);
+- a credential format, authorization policy, transport assembly, or tenancy isolation (see §17
+  for the optional Go authentication interceptors);
 - a storage schema for the event log; the SQLite layout in [`sqlitelog/`](sqlitelog/) is an
   implementation detail;
 - erasure of a session's journal or metadata, or reclamation of its compute on deletion:
@@ -1338,9 +1339,20 @@ CI also runs `python3 hack/verify_chain.py --golden` and `hack/verify_chain.sh` 
 The reference implementation protects the integrity of the record, not access to the system. See
 [docs/security.md](docs/security.md) for deployment guidance.
 
-- No RPC is authenticated or authorized, and no hop uses TLS. Any caller that reaches the Sessions
-  port can call every RPC, including `Approve`. A deployment that needs these controls provides
-  them outside the host.
+- The reference daemon authenticates and authorizes no RPC, and no hop it assembles uses TLS.
+  Any caller that reaches its Sessions port can call every RPC, including `Approve`.
+- Go hosts can opt into `authn.NewInterceptors` for all unary and stream RPCs on a server, with
+  no method exemptions. `off` skips verification and installs no identity. `required` needs a
+  `CallerVerifier`; unknown modes or a nil required verifier fail construction. The verifier owns
+  credential parsing and trust validation, including rejection of missing, malformed, duplicate
+  and expired credentials. It returns an exact `api.CallerIdentity` and a future `ValidUntil`.
+  Invalid identities/expiry or verifier errors return generic `UNAUTHENTICATED`, never an
+  anonymous fallback. Only the interceptors install the private context read by `authn.Caller`.
+- Authenticated stream contexts end at the earlier caller deadline or credential expiry. Expiry
+  returns `UNAUTHENTICATED`; caller cancellation/deadlines retain their status codes. Cancellation
+  is cooperative: no in-stream refresh, interruption of transport I/O already in progress, or undo
+  of in-flight effects is promised. Authentication alone is not isolation: these interceptors
+  provide neither per-RPC authorization nor TLS, and the daemon has no required-mode switch.
 - `IdentityRef` (session identity, `Event.actor`, `ApproveRequest.identity`) is caller-supplied
   provenance. It MUST NOT be read as authenticated identity.
 - `project` is a listing filter, not a tenancy boundary.

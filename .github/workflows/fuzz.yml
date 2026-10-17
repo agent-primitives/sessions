@@ -1,0 +1,70 @@
+name: fuzz
+
+# Go native fuzzing of the decoders and the canonical encoding: canon, wire, harnesswire and the
+# sqlite journal read path. ci calls this with a short budget on every push to main and every pull
+# request its path filter does not skip (one that changes only markdown or the license); the nightly
+# run gives each target longer. A failing input is uploaded as an artifact; to reproduce, copy it
+# into <package>/testdata/fuzz/<Target>/ and run `go test ./<package> -run <Target>`.
+on:
+  workflow_call:
+    inputs:
+      fuzztime:
+        description: time per fuzz target
+        type: string
+        default: 30s
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: time per fuzz target
+        type: string
+        default: 10m
+  schedule:
+    - cron: "41 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  targets:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.list.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        run: echo "packages=$(./hack/fuzz.sh --packages)" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    needs: targets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.targets.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: fuzz ${{ matrix.package }}
+        run: ./hack/fuzz.sh "$PACKAGE" "$FUZZTIME"
+        env:
+          PACKAGE: ${{ matrix.package }}
+          # A scheduled run has no inputs.
+          FUZZTIME: ${{ inputs.fuzztime || '10m' }}
+
+      - name: name the failing-input artifact
+        id: artifact
+        if: failure()
+        run: echo "name=fuzz-failures-$(echo "$PACKAGE" | tr '/' '-')" >> "$GITHUB_OUTPUT"
+        env:
+          PACKAGE: ${{ matrix.package }}
+
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ matrix.package }}/testdata/fuzz/
+          if-no-files-found: ignore

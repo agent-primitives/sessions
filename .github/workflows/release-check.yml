@@ -1,0 +1,95 @@
+name: release-check
+
+# The release workflow runs only when a tag is pushed, so a change that breaks goreleaser, a cross
+# build or an image would otherwise surface at tag time, after the tag is public. This builds the same
+# artifacts on the pull request that could break them, and publishes nothing.
+on:
+  pull_request:
+    paths:
+      - "**.go"
+      - go.mod
+      - go.sum
+      - Dockerfile
+      # Every release archive packs these; goreleaser fails when one is missing.
+      - LICENSE
+      - README.md
+      - .goreleaser.yaml
+      - .ko.yaml
+      - .github/workflows/release.yml
+      - .github/workflows/release-check.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # As in release.yml: goreleaser drives ko for the images and needs only the binary on PATH.
+      - name: install ko
+        run: go install github.com/google/ko@latest
+
+      - name: goreleaser check
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: check
+
+      # --snapshot builds every binary and archive for linux and darwin on amd64 and arm64, and has ko
+      # load the images into the runner's Docker daemon (goreleaser.ko.local) instead of pushing.
+      # SBOMs are skipped: they need syft, which only the release job installs.
+      - name: snapshot build (no publish)
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean --skip=sbom
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      # Images are checked by kos id in dist/artifacts.json, where goreleaser records each image ko
+      # loaded. Counting daemon rows does not work: both kos entries are bare, so they share the
+      # goreleaser.ko.local repository, and ko tags each image by digest and by every configured tag.
+      - name: every archive and image was built
+        run: |
+          for os in linux darwin; do
+            for arch in amd64 arm64; do
+              ls dist/*_"${os}"_"${arch}".tar.gz
+            done
+          done
+          # Every image a release publishes. A pull request that adds or drops a kos entry updates
+          # this list too.
+          want="agentsessionsd harnessnode"
+          got="$(jq -r '[.[] | select(.type == "Docker Manifest") | .extra.ID] | unique | join(" ")' dist/artifacts.json)"
+          if [ "$got" != "$want" ]; then
+            echo "expected ko images for kos ids: ${want}; goreleaser built: ${got:-none}"
+            exit 1
+          fi
+
+  dockerfile:
+    # The Dockerfile packages agentnode for the pod-resume demo (hack/demo.sh), which builds the
+    # binary on the host first.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: build agentnode as hack/demo.sh does
+        run: CGO_ENABLED=0 GOOS=linux go build -trimpath -o agentnode ./cmd/agentnode
+
+      - name: docker build (no push)
+        run: docker build -t agentnode:release-check .

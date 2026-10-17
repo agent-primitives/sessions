@@ -11,6 +11,7 @@ This page is the whole picture: what you write, what you call, and what is delib
 
 Your agent. Two methods.
 
+<!-- doccheck: skip excerpt of api.Harness; the real definition is in api/harness.go -->
 ```go
 type Harness interface {
     // Describe returns the static contract, used to match the harness to a Runtime.
@@ -24,6 +25,7 @@ type Harness interface {
 
 Here is a complete one. This is `harness/echoagent`, not a sketch:
 
+<!-- doccheck: decls -->
 ```go
 type Harness struct{}
 
@@ -91,6 +93,7 @@ released.
 
 One call. It creates the session if you do not name one, and appends at the current head:
 
+<!-- doccheck: body(ctx context.Context) -->
 ```go
 c, err := client.Dial("127.0.0.1:8080", client.WithProject("acme"))
 if err != nil {
@@ -124,6 +127,7 @@ It is optional, because the guarantee should be opt-in rather than the price of 
 nil and the turn appends at the head. Set it and you get the strict check, with `turn.LastSeq`
 carrying the cursor forward so it costs no extra round trip:
 
+<!-- doccheck: body(ctx context.Context, c *client.Client, turn *client.TurnResult) -->
 ```go
 next, err := c.Exec(ctx, client.ExecOptions{
     Session:         turn.Session.GetMetadata().GetUid(),
@@ -187,6 +191,7 @@ Missing fields fail `INVALID_ARGUMENT`, unknown UIDs `NOT_FOUND`, and local over
 
 The Go SDK takes an `api.ApprovalDecision` value, so approved presence is always supplied:
 
+<!-- doccheck: body(ctx context.Context, c *client.Client, uid string) -->
 ```go
 sess, err := c.GetSession(ctx, uid)
 if err != nil { return err }

@@ -7,14 +7,14 @@ before starting anything large.
 
 ```bash
 go build ./...
-go test -race ./...
+go test -race -shuffle=on ./...
 ```
 
 `integrations/substrate` is a separate Go module and is not reached by `./...` from the root. If you
 touch it, test it on its own:
 
 ```bash
-cd integrations/substrate && go test -race ./...
+cd integrations/substrate && go test -race -shuffle=on ./...
 ```
 
 ## What CI checks
@@ -25,10 +25,16 @@ Run these before pushing; they are the same gates the `ci` workflow enforces.
 |---|---|
 | Formatting | `gofmt -l .` must print nothing |
 | Build and vet | `go build ./...`, `go vet ./...` |
-| Tests | `go test -race ./...` |
+| Tests | `go test -race -shuffle=on ./...` (a failure prints the seed; rerun with `-shuffle=<seed>`) |
 | Vendor neutrality | `go list -deps ./... \| grep -c agent-substrate` must be `0` |
 | Provenance self-check | `python3 hack/verify_chain.py --golden` |
+| Cross-language chain audit | `./hack/verify_chain.sh` (also audits every journal in `sqlitelog/testdata`) |
+| Daemon smoke test (local runtime, no substrate) | `go test ./cmd/agentsessionsd -run TestSessionLifecycleRealBinaries` (part of Tests) |
+| Persisted-format compatibility | `go test ./session ./sqlitelog -run 'SchemaV4Fixture\|MigratedAndFresh'` (part of Tests) |
 | Proto lint | `buf lint` |
+| Go blocks in docs (`docs` workflow, every pull request) | `go run ./hack/doccheck` |
+| Release build (`release-check`, on changes to Go, `Dockerfile`, `LICENSE`, `README.md`, `.goreleaser.yaml`, `.ko.yaml`) | `goreleaser check`, then `goreleaser release --snapshot --clean --skip=sbom` (needs `ko`; publishes nothing) and a check that `dist/artifacts.json` lists the `agentsessionsd` and `harnessnode` ko images; `docker build` of `Dockerfile` after `CGO_ENABLED=0 GOOS=linux go build -o agentnode ./cmd/agentnode` |
+| Fuzzing (30s per target; nightly longer) | `./hack/fuzz.sh <dir> 30s` for each `<dir>` in `./hack/fuzz.sh --packages` |
 
 Two gates catch stale generated files, and both fail the build rather than regenerating for you:
 
@@ -49,7 +55,10 @@ Run both after any change to `api/*.proto`.
   root module. Concrete backends live in their own modules or repositories, which is what the vendor
   neutrality gate enforces.
 - **Go examples in docs get compile-checked** before merging. A snippet that does not build is worse
-  than no snippet, and several already sit directly on top of SPIs that are still changing.
+  than no snippet, and several already sit directly on top of SPIs that are still changing. Every
+  fenced block tagged `go` needs a `<!-- doccheck: ... -->` marker on the line before it that says
+  how `hack/doccheck` checks it (`decls`, `file`, `body(PARAMS)`, or `skip REASON` for an excerpt);
+  see the comment at the top of `hack/doccheck/main.go`.
 - **Docs land with the code they describe**, not ahead of it. If a change alters an interface that a
   document shows, update the document in the same pull request.
 

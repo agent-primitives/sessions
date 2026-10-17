@@ -148,7 +148,13 @@ func toolCallParts(calls []chatToolCall) ([]api.Part, error) {
 		}
 		var args map[string]any
 		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-			return nil, fmt.Errorf("%w: decode tool arguments: %w", ErrUnsupportedPart, err)
+			// Decoder errors can contain argument values and become durable ERRORs.
+			// Preserve a useful category, not the provider-controlled text or cause.
+			detail := "JSON value has the wrong type or is out of range"
+			if _, syntax := err.(*json.SyntaxError); syntax {
+				detail = "invalid JSON syntax"
+			}
+			return nil, fmt.Errorf("%w: decode tool arguments: %s", ErrUnsupportedPart, detail)
 		}
 		if args == nil {
 			return nil, fmt.Errorf("%w: tool arguments must be a JSON object", ErrUnsupportedPart)
@@ -160,8 +166,14 @@ func toolCallParts(calls []chatToolCall) ([]api.Part, error) {
 }
 
 // Only accept a finalized tool completion, never a truncated-but-parseable call or empty intent.
-func checkToolFinish(reason string, count int) error {
-	if reason == "function_call" || (reason == "tool_calls") != (count > 0) {
+func checkToolFinish(reason string, calls []chatToolCall, choice *api.ToolChoice) error {
+	// Named forced calls can use stop on compatible endpoints. Keep this exception
+	// request-aware and singular; toolCallParts still validates identity and arguments.
+	if reason == "stop" && choice != nil && choice.Mode == api.ToolChoiceRequired &&
+		choice.Name != "" && len(calls) == 1 && calls[0].Function.Name == choice.Name {
+		return nil
+	}
+	if reason == "function_call" || (reason == "tool_calls") != (len(calls) > 0) {
 		return fmt.Errorf("%w: incomplete or unsupported tool completion", ErrUnsupportedPart)
 	}
 	return nil

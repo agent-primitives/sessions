@@ -19,7 +19,13 @@ not provide.
 - `model/openai` now refuses nonempty `ModelRequest.Params`, previously silently ignored. Unmapped
   parts/choices and malformed or incomplete tool calls fail closed. Tool results require explicit
   text Content when receipt data is populated; the adapter does not guess text from Output/error
-  metadata or fetch external URIs. It does not register/execute tools or add executor deduplication.
+  metadata or fetch external URIs. A named REQUIRED choice also accepts `stop` for exactly one
+  complete matching function call; AUTO and unnamed REQUIRED still require `tool_calls`.
+  Streaming validates and freezes a completion after processing the finish-bearing frame's own
+  delta, refusing later semantic deltas or contradictory finish reasons while allowing trailing usage.
+  Text-only missing-finish responses and EOF without `[DONE]` remain supported. Argument decode
+  errors retain only syntax or type/range diagnostics, never raw argument values.
+  It does not register/execute tools or add executor deduplication.
 
 ## v0.2.0 - 2026-10-16
 

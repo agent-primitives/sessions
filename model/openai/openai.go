@@ -314,7 +314,7 @@ func (c *Client) Model(ctx context.Context, req api.ModelRequest) (api.ModelResp
 		return api.ModelResponse{}, fmt.Errorf("openai: %s returned no choices", model)
 	}
 	choice := out.Choices[0]
-	if err := checkToolFinish(choice.FinishReason, len(choice.Message.ToolCalls)); err != nil {
+	if err := checkToolFinish(choice.FinishReason, choice.Message.ToolCalls, req.ToolChoice); err != nil {
 		return api.ModelResponse{}, err
 	}
 	return toModelResponse(model, choice.Message, out.Usage.toAPI(model))
@@ -345,7 +345,25 @@ func (c *Client) StreamModel(ctx context.Context, req api.ModelRequest, onChunk 
 	var text, reasoning strings.Builder
 	calls := map[int]*toolDeltaBuffer{}
 	var finishReason string
+	var finalized api.ModelResponse
 	usage := api.Usage{Model: model}
+	finalize := func(reason string) (api.ModelResponse, error) {
+		message := chatCompletionMessage{Content: text.String(), ReasoningContent: reasoning.String()}
+		// Never allocate a slice from a provider-controlled maximum index.
+		for i := 0; i < len(calls); i++ {
+			call := calls[i]
+			if call == nil {
+				return api.ModelResponse{}, fmt.Errorf("%w: noncontiguous tool call indexes", ErrUnsupportedPart)
+			}
+			wire := chatToolCall{ID: call.id, Type: call.kind}
+			wire.Function.Name, wire.Function.Arguments = call.name, call.args.String()
+			message.ToolCalls = append(message.ToolCalls, wire)
+		}
+		if err := checkToolFinish(reason, message.ToolCalls, req.ToolChoice); err != nil {
+			return api.ModelResponse{}, err
+		}
+		return toModelResponse(model, message, usage)
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	// A single event can exceed the default 64KB line budget on a long completion, which would
@@ -371,10 +389,19 @@ func (c *Client) StreamModel(ctx context.Context, req api.ModelRequest, onChunk 
 		if len(chunk.Choices) == 0 {
 			continue // usage-only frames carry no choice
 		}
-		if reason := chunk.Choices[0].FinishReason; reason != "" {
-			finishReason = reason
+		choice := chunk.Choices[0]
+		d := choice.Delta
+		if finishReason != "" {
+			// A terminal choice freezes semantic output, but not trailing usage.
+			// Refuse before appending fragments or exposing text to the callback.
+			if d.Content != "" || d.ReasoningContent != "" || len(d.ToolCalls) != 0 || legacyFunctionCall(d.FunctionCall) {
+				return api.ModelResponse{}, fmt.Errorf("%w: semantic delta after completion finish", ErrUnsupportedPart)
+			}
+			if choice.FinishReason != "" && choice.FinishReason != finishReason {
+				return api.ModelResponse{}, fmt.Errorf("%w: contradictory completion finish reason", ErrUnsupportedPart)
+			}
+			continue
 		}
-		d := chunk.Choices[0].Delta
 		if legacyFunctionCall(d.FunctionCall) {
 			return api.ModelResponse{}, fmt.Errorf("%w: legacy function_call is not supported", ErrUnsupportedPart)
 		}
@@ -390,26 +417,28 @@ func (c *Client) StreamModel(ctx context.Context, req api.ModelRequest, onChunk 
 				onChunk(d.Content)
 			}
 		}
+		if choice.FinishReason != "" {
+			// The finish-bearing frame can carry the final argument suffix itself.
+			finalized, err = finalize(choice.FinishReason)
+			if err != nil {
+				return api.ModelResponse{}, err
+			}
+			finishReason = choice.FinishReason
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return api.ModelResponse{}, fmt.Errorf("openai: read stream: %w", err)
 	}
 
-	if err := checkToolFinish(finishReason, len(calls)); err != nil {
-		return api.ModelResponse{}, err
-	}
-	message := chatCompletionMessage{Content: text.String(), ReasoningContent: reasoning.String()}
-	// Indexes must be contiguous; never allocate a slice from a provider-controlled maximum index.
-	for i := 0; i < len(calls); i++ {
-		call := calls[i]
-		if call == nil {
-			return api.ModelResponse{}, fmt.Errorf("%w: noncontiguous tool call indexes", ErrUnsupportedPart)
+	if finishReason == "" {
+		// Preserve text-only streams without a finish reason; tool calls still require one.
+		finalized, err = finalize("")
+		if err != nil {
+			return api.ModelResponse{}, err
 		}
-		wire := chatToolCall{ID: call.id, Type: call.kind}
-		wire.Function.Name, wire.Function.Arguments = call.name, call.args.String()
-		message.ToolCalls = append(message.ToolCalls, wire)
 	}
-	return toModelResponse(model, message, usage)
+	finalized.Usage = usage
+	return finalized, nil
 }
 
 // buildRequest resolves the model and encodes the body. Both call paths share it so a streamed turn

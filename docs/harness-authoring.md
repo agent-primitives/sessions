@@ -402,7 +402,11 @@ The bundled Chat Completions adapter (`model/openai`) maps tool definitions to f
 AUTO/NONE/REQUIRED choices (including a named REQUIRED choice), assistant text followed by tool calls,
 and one `ToolResult` per `tool` message. Schemas are sent unchanged: nil omits `parameters`, while an
 explicit empty schema sends `{}`. Function arguments are JSON objects normalized to the API's
-JSON-native map/float64 domain; malformed, null, scalar or array arguments are refused.
+JSON-native map/float64 domain; malformed, null, scalar or array arguments are refused. Argument
+decoder errors report only a syntax or type/range category, not raw argument values.
+Calls normally require a `tool_calls` finish reason. A named REQUIRED choice also accepts `stop`
+for exactly one complete function call matching that name; AUTO and unnamed REQUIRED do not.
+Truncated, filtered or missing-finish tool completions are still refused.
 
 Set `ToolResult.Content` explicitly to text parts: this is the model-facing result, concatenated into
 the tool message's content. Receipt fields such as `Output`, URI/digest, error and approval status
@@ -414,7 +418,11 @@ is not resent, as before. No tool schema rewriting or implicit tool execution is
 
 Streaming assembles argument fragments by tool-call index, preserves stable call IDs/names and
 returns the same finalized parts and usage as nonstreaming. The public callback still carries only
-text, never tool JSON. The journal retains the original neutral request hash and finalized responses,
+text, never tool JSON. A finish-bearing frame's own delta is processed before the completion is
+validated and frozen. Later semantic deltas or a contradictory finish reason refuse the completion;
+trailing usage, role-only/empty deltas and repeated identical finish reasons remain allowed.
+EOF without `[DONE]` remains supported, as do text-only responses without a finish reason.
+The journal retains the original neutral request hash and finalized responses,
 not HTTP payloads or deltas. Pure replay and recovery of completed recorded effects use those parts
 and usage without provider calls; an unanswered model intent retains its existing recovery policy.
 A custom harness and host executor still supply the application loop and durable deduplication.

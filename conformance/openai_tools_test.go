@@ -64,6 +64,100 @@ func (h openaiToolHarness) Run(ctx context.Context, start *api.Start, sink api.E
 	return nil
 }
 
+// A rejected provider completion must not become a journaled output or a host effect.
+// Exercise Harness.Connect too: adapter errors are copied into durable ERROR descriptions.
+func assertOpenAICompletionRefused(t *testing.T, streaming bool, body, private string) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, body)
+	}))
+	defer server.Close()
+	client, err := openai.New(openai.WithBaseURL(server.URL), openai.WithModel("test-model"), openai.WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var toolCalls atomic.Int64
+	opts := []controller.Option{controller.WithSessionUID("refused"), controller.WithToolExecutor(func(_ context.Context, _ controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+		toolCalls.Add(1)
+		return api.ToolResult{ID: call.ID}, nil
+	})}
+	if streaming {
+		opts = append(opts, controller.WithStreamingModel(client.StreamModel))
+	}
+	h := openaiToolHarness{reports: make(chan openaiToolReport, 1)}
+	har := wireHarnessFrom(t, h)
+	store, _ := openFile(t)
+	defer store.Close()
+	journal := store.Session("refused")
+	c, err := controller.New(journal, client.Model, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.Exec(t.Context(), har, []api.Message{*api.TextMessage("user", "weather?")}, 0)
+	if err == nil || !strings.Contains(err.Error(), openai.ErrUnsupportedPart.Error()) {
+		t.Errorf("err=%v, want refused completion", err)
+	}
+	if private != "" && err != nil && strings.Contains(err.Error(), private) {
+		t.Errorf("argument payload leaked into returned error: %v", err)
+	}
+	if report := <-h.reports; len(report.responses) != 0 {
+		t.Errorf("harness received rejected completion: %+v", report.responses)
+	}
+	if toolCalls.Load() != 0 {
+		t.Errorf("executor called %d times for rejected completion", toolCalls.Load())
+	}
+	records, err := journal.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var errorsRecorded int
+	for _, record := range records {
+		switch record.Event.Kind {
+		case api.EventOutput, api.EventToolCall, api.EventToolResult:
+			t.Errorf("rejected completion produced %s", record.Event.Kind)
+		case api.EventError:
+			errorsRecorded++
+			if record.Event.Err == nil {
+				t.Error("ERROR has no description")
+			} else if private != "" && strings.Contains(record.Event.Err.Description, private) {
+				t.Errorf("argument payload leaked into journal ERROR: %s", record.Event.Err.Description)
+			}
+		}
+	}
+	if errorsRecorded == 0 {
+		t.Error("missing durable ERROR for refused completion")
+	}
+	if err := journal.Verify(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIToolArgumentErrorPrivacy(t *testing.T) {
+	const private = "987654321098765432109876543210e10000"
+	const message = `{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\"private\":987654321098765432109876543210e10000}"}}]}`
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", streaming), func(t *testing.T) {
+			body := fmt.Sprintf(`{"choices":[{"message":%s,"finish_reason":"tool_calls"}]}`, message)
+			if streaming {
+				body = fmt.Sprintf("data: {\"choices\":[{\"delta\":%s,\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n", message)
+			}
+			assertOpenAICompletionRefused(t, streaming, body, private)
+		})
+	}
+}
+
+func TestOpenAIRefusesToolCallsCompletedAfterFinish(t *testing.T) {
+	const finish = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+	for _, tc := range []struct{ name, body string }{
+		{"entire call after finish", finish + `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}` + "\n\n"},
+		{"argument suffix after finish", `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\"n\":"}}]}}]}` + "\n\n" + finish + `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}` + "\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertOpenAICompletionRefused(t, true, tc.body+"data: [DONE]\n\n", "")
+		})
+	}
+}
+
 // Exercise the real HTTP adapter through Harness.Connect, durable recovery, and replay.
 func TestOpenAIToolsWireRecoveryAndReplay(t *testing.T) {
 	var finalized [][]api.ModelResponse

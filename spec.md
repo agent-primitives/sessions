@@ -1320,8 +1320,7 @@ The reference implementation protects the integrity of the record, not access to
   Go SPI, or this specification. Breaking changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 - `agentsessions.v1` is a proto package name, not a stability promise.
 - CI runs `buf lint` on every change and `buf breaking` (`FILE` rules) against the most recent `v*`
-  release tag. The gate armed at the first tag (v0.1.0) and is active now. `FILE_SAME_GO_PACKAGE`
-  is excepted until v0.2.0 is tagged, because the Go module path moved.
+  release tag. The gate armed at the first tag (v0.1.0) and is active now.
 - Generated Go stubs and `docs/api-reference.md` MUST match the protos; CI fails on drift.
 - A server built before `ResumeRequest.expected_last_seq` (`OPS-29`) ignores the field, and the
   API has no capability query. A client cannot learn from the API that the check ran; it needs to

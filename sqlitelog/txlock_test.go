@@ -28,8 +28,9 @@ func isBusy(err error) bool {
 //
 // Under BEGIN IMMEDIATE each waits for the write lock at BEGIN, so neither may return while the
 // lock is held; after the holder commits, the two serialize and both succeed. The 250ms window only
-// bounds how long the test looks for an early return: a slow scheduler can let a regression pass,
-// but cannot fail a correct implementation.
+// bounds how long the test looks for an early return. It does not guarantee either operation has
+// reached BEGIN by then, so a slow scheduler can let a regression pass. It cannot fail a correct
+// implementation unless the holder's commit is delayed past the 5s busy timeout.
 //
 // The caller-supplied _txlock=deferred row is the control. It shows Open keeps a _txlock the caller
 // chose, and that this scenario produces SQLITE_BUSY without IMMEDIATE. Under BEGIN DEFERRED each
@@ -123,8 +124,8 @@ func TestOpenSerializesWritersForEveryDSNForm(t *testing.T) {
 				return
 			}
 
-			// Both must wait for the lock, not fail on it. Long enough for both to have reached their
-			// first statement.
+			// Neither may return while the lock is held; the header explains what this 250ms window can
+			// and cannot show.
 			select {
 			case err := <-appended:
 				t.Fatalf("Append returned while the write lock was held: %v", err)

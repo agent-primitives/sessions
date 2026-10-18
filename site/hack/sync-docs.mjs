@@ -68,6 +68,11 @@ const meta = {
     description:
       "Exec a turn, replay it with zero model calls, fork it, suspend and resume it, and verify the provenance chain.",
   },
+  "responses-adapter.md": {
+    title: "Responses model adapter",
+    description:
+      "Explicit stateless Responses calls with function tools, opaque reasoning continuity, usage, and text streaming.",
+  },
   "security.md": {
     title: "Security posture",
     description:

@@ -268,7 +268,7 @@ transport. Passing this suite is the neutrality/leadership deliverable.
 | `placement/` | The `Placer`: wires Sessions to the `Runtime` SPI, mints/binds fences, gates via `CanPlace`. The `Registry` routes a session to the harness it names. |
 | `runtime/local`, `runtime/remote`, `runtime/substrate` | `Runtime` backends: a filesystem-only local backend, an attach-by-address backend for a harness you run yourself, and agent-substrate. |
 | `harness/echoagent`, `harness/counteragent`, `harness/chatagent` | Reference harnesses: `STATELESS_REPLAY` echo, `REQUIRES_MEMORY_SNAPSHOT` counter, and a history-aware chat harness. |
-| `model/openai` | Model provider for OpenAI-compatible endpoints; no vendor SDK, so any compatible service works. |
+| `model/openai` | Chat Completions and explicit [Responses](responses-adapter.md) protocol clients; no vendor SDK. |
 | `session/` | The `Sessions` gRPC service: the client-facing seam over the log and the Placer. |
 | `client/` | Go client SDK: dialing, the session frame, pagination, and stream draining. |
 | `cmd/agentsessionsd` | The Sessions server: a TCP entry point over the journal and the harness registry. |

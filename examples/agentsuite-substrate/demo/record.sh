@@ -96,7 +96,8 @@ setup() {
 	if [[ "${REMOTE}" == hq ]]; then
 		ssh -o BatchMode=yes "${DEMO_HOST}" "docker build -q -t ${IMAGE} -" <"${DEMO}/Dockerfile.tools"
 	fi
-	rm -f "${LOGS}/setup.log"
+	# A reset.log is only ever from a reset after the current setup (record notes it as such).
+	rm -f "${LOGS}/setup.log" "${LOGS}/reset.log"
 	driver setup 3000
 	if ! grep -q '^SMOKE OK' "${LOGS}/setup.log" || ! grep -q '^SETUP OK' "${LOGS}/setup.log"; then
 		echo "setup did not finish with SMOKE OK and SETUP OK; see ${LOGS}/setup.log" >&2
@@ -150,6 +151,11 @@ record() {
 	dirty="$(git -C "${ROOT}" status --porcelain | wc -l | tr -d ' ')"
 	if ((dirty == 0)); then echo "commit ${base}"; else echo "a working tree based on ${base} (${dirty} files changed or new)"; fi >"${OUT}/source.txt"
 	(cd "${DEMO}" && sha256 "${DEMO_FILES[@]}") >"${OUT}/source.sha256"
+	# Whether driver.sh reset ran on this cluster since setup, taken now, before the recording: the
+	# README says so only when logs/reset.log is there.
+	mkdir -p "${OUT}/logs"
+	rm -f "${OUT}/logs/reset.log"
+	if grep -q '^RESET OK' "${LOGS}/reset.log" 2>/dev/null; then cp "${LOGS}/reset.log" "${OUT}/logs/"; fi
 	local tmp="${OUT}/.recording"
 	rm -rf "${tmp}" "${OUT}/demo.mp4"
 	mkdir -p "${tmp}"
@@ -184,7 +190,6 @@ collect() {
 	mkdir -p "${OUT}/logs" "${OUT}/frames" "${OUT}/scripts"
 	rm -rf "${OUT}"/logs/ch-*.log "${OUT}/logs/trace"
 	cp "${LOGS}"/setup.log "${LOGS}"/show.log "${LOGS}"/ch-*.log "${LOGS}/timeline.tsv" "${OUT}/logs/"
-	[[ ! -f "${LOGS}/reset.log" ]] || cp "${LOGS}/reset.log" "${OUT}/logs/"
 	(cd "${DEMO}" && cp "${DEMO_FILES[@]}" "${OUT}/scripts/")
 	# Each demo file as recorded against the same file at this commit.
 	local same=0 changed=()
@@ -285,8 +290,12 @@ collect() {
 		echo "  the suite against kaimahi 9c5c993, the harness image, the memory tier's ActorTemplate (the"
 		echo "  stateless one is only rendered: chapter 3 creates it), a model token from the VM's managed"
 		echo "  identity (only its size and expiry are logged), both agentsessionsd Deployments, and the"
-		echo "  harness binary copied out of the harness image. A dry run of \`driver.sh show\` and"
-		echo "  \`driver.sh reset\` (logs/reset.log) came before the recording."
+		echo "  harness binary copied out of the harness image."
+		if [[ -f "${OUT}/logs/reset.log" ]]; then
+			echo "  \`driver.sh reset\` (logs/reset.log) ran after setup and before the recording."
+		else
+			echo "  No \`driver.sh reset\` ran between setup and the recording."
+		fi
 		echo "  \`$(grep -m1 '^SMOKE OK' "${LOGS}/setup.log")\`; \`$(grep -m1 '^SETUP OK' "${LOGS}/setup.log")\`."
 		echo "- On camera (\`record.sh record\`): \`driver.sh show\` on the VM through \`hq remote-test\`, rendered by"
 		echo "  vhs here. Each command on screen is the command line that runs; the driver stops on any claim"

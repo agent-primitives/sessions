@@ -1,15 +1,17 @@
 // Package agentsessionsd is the agentsessionsd server: it serves the Sessions API over TCP.
 // cmd/agentsessionsd calls Main; an in-tree daemon build that hosts more than the stock daemon
-// (tool executors, for one) calls it with Options. The package is internal to this module and is
-// not an API for programs outside it. With -registry-addr it also serves HarnessRegistry on a
-// separate literal-loopback operator listener. The admin API is never registered on the Sessions
-// port; neither listener provides authentication or TLS.
+// calls it with Options: WithToolExecutors for host tool executors, and WithHarnessBackends for
+// harnesses served on a backend this module does not link, which keeps that backend's flags and
+// client setup in the build's own module. The package is internal to this module and is not an API
+// for programs outside it. With -registry-addr it also serves HarnessRegistry on a separate
+// literal-loopback operator listener. The admin API is never registered on the Sessions port;
+// neither listener provides authentication or TLS.
 //
 // This binary serves the reference echo harness by default and adds the conversational chat harness
 // when -model is set, each on its own filesystem-only local backend. -harness name=address registers
 // a STATELESS_REPLAY harness running elsewhere without rebuilding; it requires -model, so a remote
 // harness's model calls never fall through to the built-in echo stub. A REQUIRES_MEMORY_SNAPSHOT
-// harness needs a backend that owns its sandbox, which means building a server around such a backend.
+// harness needs a backend that owns its sandbox, which a build adds with WithHarnessBackends.
 // Unknown harnesses are refused rather than substituted.
 //
 // With -model set it drives a real OpenAI-compatible endpoint; without one it uses the built-in
@@ -28,6 +30,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"net/url"
@@ -69,6 +72,7 @@ type Option func(*options)
 
 type options struct {
 	executors ToolExecutorFunc
+	backends  HarnessBackends
 	// output receives command-line errors and the usage; nil is os.Stderr. Tests set it.
 	output io.Writer
 	// ctx, when set, is the parent of Run's signal context, so a test can stop Run; listening is
@@ -111,10 +115,43 @@ func WithToolExecutors(f ToolExecutorFunc) Option {
 	return func(o *options) { o.executors = f }
 }
 
+// HarnessBackends lets a daemon build serve static harnesses on a backend this module does not
+// link, such as a sandbox or cloud backend; integrations/substrate/cmd/agentsessionsd is one. The
+// build owns that backend's flags and client setup, so they stay in its own module.
+//
+// Run calls RegisterFlags before it parses the command line and Harnesses after. When Harnesses
+// names any harness, Run checks the names the way it checks -harness ones (each needs -model, and
+// none may be a built-in or -harness name), then calls Backends, all before it opens the journal.
+// The harnesses are static entries, reserved in the journal like the built-in ones, and get no host
+// tool executor.
+type HarnessBackends interface {
+	// RegisterFlags adds the build's flags to Run's flag set. A flag that does not parse is a usage
+	// error, as for Run's own flags.
+	RegisterFlags(fs *flag.FlagSet)
+	// Harnesses checks the parsed flags and returns the names of the harnesses they configure, or
+	// none. It must have no side effect: an error refuses the start before anything is dialed or
+	// opened.
+	Harnesses() ([]string, error)
+	// Backends builds one backend for each name Harnesses returned. Run calls closeBackends, when
+	// it is not nil, once: after the server stops or when a later startup step fails.
+	Backends(logger *slog.Logger) (backends map[string]placement.Backend, closeBackends func(), err error)
+}
+
+// WithHarnessBackends adds the harnesses h configures. Without it the daemon serves only the
+// built-in harnesses, -harness entries and registered ones.
+func WithHarnessBackends(h HarnessBackends) Option {
+	return func(o *options) { o.backends = h }
+}
+
+// CheckDialAddress refuses an address the daemon's gRPC dialers cannot reach, with the rules
+// -harness addresses follow. A HarnessBackends build uses it for its own address flags.
+func CheckDialAddress(addr string) error { return checkHarnessAddress(addr) }
+
 // Run parses args (without the program name) and serves until SIGINT or SIGTERM. -h returns
-// flag.ErrHelp. A flag that does not parse wraps ErrUsage. A configuration check after parsing (a
-// -harness with no -model, a -registry-addr that is not a literal loopback address, and the like)
-// returns a plain error, which Main prints and reports with status 1.
+// flag.ErrHelp. A flag that does not parse and positional arguments wrap ErrUsage. A configuration
+// check after parsing (a -harness with no -model, a -registry-addr that is not a literal loopback
+// address, a HarnessBackends refusal, and the like) returns a plain error, which Main prints and
+// reports with status 1.
 func Run(args []string, opts ...Option) error {
 	var o options
 	for _, opt := range opts {
@@ -135,12 +172,22 @@ func Run(args []string, opts ...Option) error {
 	modelAuthHeader := fs.String("model-auth-header", "Authorization", "header carrying the credential from MODEL_API_KEY")
 	remotes := remoteHarnesses{}
 	fs.Var(remotes, "harness", "register a harness already running elsewhere, as name=address; repeatable")
+	if o.backends != nil {
+		o.backends.RegisterFlags(fs)
+	}
 	showVersion := fs.Bool("version", false, "print the build version and exit")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return err
 		}
 		return fmt.Errorf("%w: %w", ErrUsage, err)
+	}
+	if fs.NArg() > 0 {
+		// The flag package reports its own parse errors before the usage; this one is ours, so print
+		// it the same way. Parsing stops at the first non-flag, so every later flag is in fs.Args too.
+		_, _ = fmt.Fprintf(fs.Output(), "unexpected arguments %q: every argument must be a flag\n", fs.Args())
+		fs.Usage()
+		return fmt.Errorf("%w: unexpected arguments %q", ErrUsage, fs.Args())
 	}
 
 	if *showVersion {
@@ -152,6 +199,18 @@ func Run(args []string, opts ...Option) error {
 	// already checked by remoteHarnesses.Set during flag parsing.
 	if err := checkRemotes(*model, remotes); err != nil {
 		return err
+	}
+	var backendNames []string
+	if o.backends != nil {
+		names, err := o.backends.Harnesses()
+		if err != nil {
+			return err
+		}
+		// Sorted, so a startup with two colliding names reports the same one every time.
+		backendNames = slices.Sorted(slices.Values(names))
+		if err := checkBackendHarnesses(*model, remotes, backendNames); err != nil {
+			return err
+		}
 	}
 	if *registryAddr != "" {
 		port, err := checkRegistryAddress(*registryAddr)
@@ -204,18 +263,33 @@ func Run(args []string, opts ...Option) error {
 		}
 	}
 
+	modelFn, streamFn, modelDesc, err := modelFunc(*model, *modelBaseURL, *modelPath, *modelAuthHeader)
+	if err != nil {
+		return err
+	}
+
+	var extraBackends map[string]placement.Backend
+	if len(backendNames) > 0 {
+		backends, closeExtra, err := o.backends.Backends(logger)
+		if err != nil {
+			return err
+		}
+		if closeExtra != nil {
+			defer closeExtra()
+		}
+		if got := slices.Sorted(maps.Keys(backends)); !slices.Equal(got, backendNames) {
+			return fmt.Errorf("harness backends: built %q, want %q", got, backendNames)
+		}
+		extraBackends = backends
+	}
+
 	store, err := sqlitelog.Open(*journal, sqlitelog.WithDefaultProject(*project))
 	if err != nil {
 		return fmt.Errorf("open journal %s: %w", *journal, err)
 	}
 	defer func() { _ = store.Close() }()
 
-	modelFn, streamFn, modelDesc, err := modelFunc(*model, *modelBaseURL, *modelPath, *modelAuthHeader)
-	if err != nil {
-		return err
-	}
-
-	registry, closeBackends, err := harnessRegistry(*model, remotes, modelFn, streamFn, logger, executors)
+	registry, closeBackends, err := harnessRegistry(*model, remotes, modelFn, streamFn, logger, executors, extraBackends)
 	if err != nil {
 		return err
 	}
@@ -334,8 +408,8 @@ func loopbackDialAddr(a *net.TCPAddr) string {
 }
 
 // Main runs the server with os.Args and exits with the conventional status: 0 on success or -h, 2
-// when a flag cannot be parsed (see Run's ErrUsage), and 1 otherwise, including a configuration
-// error in flags that parsed.
+// when the arguments cannot be parsed (an unknown or malformed flag, a positional argument; see
+// Run's ErrUsage), and 1 otherwise, including a configuration error in flags that parsed.
 func Main(opts ...Option) {
 	err := Run(os.Args[1:], opts...)
 	switch {
@@ -566,6 +640,33 @@ func checkRemotes(model string, remotes remoteHarnesses) error {
 	return nil
 }
 
+// checkBackendHarnesses runs the checks checkRemotes runs, for the names a HarnessBackends build
+// configures, sorted, before Run builds anything. harnessRegistry repeats the model and name checks
+// as a backstop.
+func checkBackendHarnesses(model string, remotes remoteHarnesses, names []string) error {
+	for i, name := range names {
+		if name == "" {
+			return errors.New("harness backends: a harness has no name")
+		}
+		if i > 0 && names[i-1] == name {
+			return fmt.Errorf("harness backends: harness %q is configured twice", name)
+		}
+	}
+	if len(names) > 0 && model == "" {
+		return fmt.Errorf("harness %s requires -model: this host answers the harness's model calls, and without -model they would go to the built-in echo stub", strings.Join(names, ","))
+	}
+	builtin := builtinHarnesses(model)
+	for _, name := range names {
+		if slices.Contains(builtin, name) {
+			return errNameTaken(name)
+		}
+		if _, ok := remotes[name]; ok {
+			return fmt.Errorf("harness %q is given with -harness and is also configured by this build's flags; pick another name", name)
+		}
+	}
+	return nil
+}
+
 func errNameTaken(name string) error {
 	return fmt.Errorf("harness %q is already served by this binary; pick another name", name)
 }
@@ -590,8 +691,9 @@ func toolExecutors(remotes remoteHarnesses, f ToolExecutorFunc, sessions *client
 // all of them. Echo remains the default; chat requires an explicitly configured model.
 //
 // executors holds the host tool executor for each -harness name that has one; the built-in
-// harnesses call no host-mediated tools and get none.
-func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.ModelFunc, streamFn controller.StreamFunc, logger *slog.Logger, executors map[string]ToolExecutor) (*placement.Registry, func(), error) {
+// harnesses and the HarnessBackends ones get none. extra holds the HarnessBackends backends by
+// name, already built, whose names checkBackendHarnesses checked; the caller closes them.
+func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.ModelFunc, streamFn controller.StreamFunc, logger *slog.Logger, executors map[string]ToolExecutor, extra map[string]placement.Backend) (*placement.Registry, func(), error) {
 	echo := local.New(echoagent.Harness{}, local.WithLogger(logger))
 	backends := []*local.Backend{echo}
 	var remoteBackends []*remote.Backend
@@ -642,8 +744,19 @@ func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.M
 		remoteBackends = append(remoteBackends, backend)
 		placers[name] = placement.New(backend, modelFn, optsFor(name)...)
 	}
-	// The -harness names are static entries, so ReserveStaticHarnessNames reserves them along with
-	// the built-in ones.
+	if len(extra) > 0 && model == "" {
+		closeBackends()
+		return nil, nil, errors.New("harness backends require -model: this host answers their model calls")
+	}
+	for _, name := range slices.Sorted(maps.Keys(extra)) {
+		if _, taken := placers[name]; taken {
+			closeBackends()
+			return nil, nil, errNameTaken(name)
+		}
+		placers[name] = placement.New(extra[name], modelFn, opts...)
+	}
+	// The -harness and HarnessBackends names are static entries, so ReserveStaticHarnessNames
+	// reserves them along with the built-in ones.
 	registry, err := placement.NewRegistry("echo", placers, placement.WithReservedNames(reservedHarnesses...))
 	if err != nil {
 		closeBackends()

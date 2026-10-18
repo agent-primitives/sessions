@@ -99,11 +99,16 @@ not provide.
   afterwards (about 23 us per 1.2 KB record on an Apple M1 Pro), so a turn on a long session costs
   one more pass over its journal.
 
+#### agentsessionsd
+
+- `agentsessionsd` now refuses positional arguments, naming them, and exits with status 2. It used
+  to ignore them, along with every flag after the first one, since flag parsing stops there.
+
 #### Substrate backend
 
 - `runtime/substrate` no longer cold-creates an actor for a `REQUIRES_MEMORY_SNAPSHOT` session that
   has a started turn on that harness (completed, failed or interrupted) but no actor (deleted out of
-  band, or a host restarted with another atespace). `Exec` fails with
+  band, or the daemon restarted with another `-substrate-atespace`). `Exec` fails with
   `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and nothing is created, where it used to continue
   the journal on a fresh harness that had lost the session's RAM state. `Runtime.Create` gets a
   journal counter in the new `api.SessionSpec.StartedTurns`, which `runtime/substrate` calls only
@@ -111,8 +116,9 @@ not provide.
   backends ignore it. The count is per harness: a turn an `ExecRequest.harness` override ran
   elsewhere does not count, while a turn with no recorded harness name, or one this host does not
   serve, does. Two substrate backends on one atespace share each session's actor, so the count
-  misses the turns the other one ran there: hosts sharing a journal and an atespace must serve the
-  same substrate harness, and a program that builds its own registry must use one. `Sessions.Resume` of any
+  misses the turns the other one ran there; `agentsessionsd` allows one substrate harness for this
+  reason, but the rule is per daemon, so hosts sharing a journal and an atespace must serve the same
+  one, and a program that builds its own registry must do the same. `Sessions.Resume` of any
   memory-tier session whose actor is gone, whatever its journal records, is `FAILED_PRECONDITION`
   (`api.ErrMemoryStateLost`) too, where it used to be `INTERNAL`; a stateless session's `Resume`
   keeps its error.
@@ -208,6 +214,19 @@ not provide.
 - Verified-caller ownership scaffolding: `api.CallerIdentity`, `Authorizer` and owner-only
   `OwnerAuthorizer` contracts, plus insert-only `CreateOwnedSession` and indexed owner-filtered
   listings. These are trusted-host Go APIs, not RPC authentication or enforcement.
+- `integrations/substrate/cmd/agentsessionsd` is `agentsessionsd` with the substrate backend linked
+  in. `-substrate-harness name=atespace/template[,memory]` serves a harness as one actor per session
+  in `-substrate-atespace`, controlled over the ate-api (`-ateapi-addr`, TLS, with
+  `-ateapi-token-file` re-read on every call, `-ateapi-ca-file` or `-ateapi-insecure-skip-verify`)
+  and reached through `-atenet-router`. It requires `-model`, and refuses the other substrate flags
+  without a `-substrate-harness`. It takes one `-substrate-harness` and exits with status 2 on a
+  second: actors are named by session UID in the one atespace, so two substrate harnesses would
+  share a session's actor. The rule is per daemon: two hosts sharing a journal and an atespace with
+  different `-substrate-harness` names share it too (see `docs/substrate-conformance.md`). The
+  neutral `cmd/agentsessionsd` does not offer these flags. Both binaries run the same
+  `internal/agentsessionsd` server, which the substrate build extends through a neutral
+  `WithHarnessBackends` hook, so the substrate flags and the ate-api client stay in
+  `integrations/substrate` and the daemon in the root module links no substrate package.
 
 ## v0.2.0 - 2026-10-16
 

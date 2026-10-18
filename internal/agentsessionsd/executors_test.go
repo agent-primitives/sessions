@@ -67,7 +67,7 @@ func TestHarnessRegistryInstallsExecutorsByName(t *testing.T) {
 	if _, ok := executors["without"]; ok || len(executors) != 1 {
 		t.Fatalf("executors = %v, want only the harness that has one", executors)
 	}
-	registry, closeBackends, err := harnessRegistry("test-model", remotes, echoagent.Model, nil, nil, executors)
+	registry, closeBackends, err := harnessRegistry("test-model", remotes, echoagent.Model, nil, nil, executors, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestHarnessRegistryPassesDurableDedupDeclarations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, closeBackends, err := harnessRegistry("test-model", remotes, echoagent.Model, nil, nil, executors)
+	registry, closeBackends, err := harnessRegistry("test-model", remotes, echoagent.Model, nil, nil, executors, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

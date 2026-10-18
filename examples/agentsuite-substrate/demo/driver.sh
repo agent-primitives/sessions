@@ -158,6 +158,9 @@ template_name() { cat "${STATE}/render/template-name"; }
 # ================================================================================================
 setup() {
 	local v
+	# A reset.log is from a reset after an earlier setup: record.sh would read it as one after this
+	# one. With DEMO_REMOTE=hq the logs stay on the VM between runs, so it is removed here.
+	rm -f "${LOGS}/reset.log"
 	for v in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH AZURE_MI_CLIENT_ID; do
 		[[ -n "${!v:-}" ]] || fail "${v} is not set"
 	done

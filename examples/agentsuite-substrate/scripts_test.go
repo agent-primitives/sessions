@@ -704,6 +704,25 @@ func TestDriverSetupDeletesOnlyTheClusterItCreated(t *testing.T) {
 	}
 }
 
+// driver.sh setup removes a reset.log from an earlier run before anything else, even a setup that
+// fails at once: with DEMO_REMOTE=hq the logs stay on the VM between runs and record.sh fetches the
+// whole directory, so a stale one would be read as a reset after this setup.
+func TestDriverSetupRemovesAnEarlierResetLog(t *testing.T) {
+	s := newStubs(t)
+	logs := t.TempDir()
+	reset := filepath.Join(logs, "reset.log")
+	if err := os.WriteFile(reset, []byte("RESET OK: no session actors\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, calls := s.runArgs(t, "demo/driver.sh", []string{"setup"}, "DEMO_LOGS="+logs)
+	if code == 0 || !strings.Contains(out, "AGENTSUITE_MODEL_BASE_URL is not set") {
+		t.Fatalf("driver.sh setup exit %d, want a failure on the unset model\noutput:\n%s\ncalls:\n%s", code, out, calls)
+	}
+	if _, err := os.Stat(reset); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("reset.log after driver.sh setup: %v, want it removed", err)
+	}
+}
+
 // driver.sh reset deletes the session actors (sess-…) in the demo's atespace, leaves the golden
 // actors, and prints RESET OK only once none is left; a session actor still listed after its wait
 // fails the reset.

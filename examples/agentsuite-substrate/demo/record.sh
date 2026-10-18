@@ -96,7 +96,8 @@ setup() {
 	if [[ "${REMOTE}" == hq ]]; then
 		ssh -o BatchMode=yes "${DEMO_HOST}" "docker build -q -t ${IMAGE} -" <"${DEMO}/Dockerfile.tools"
 	fi
-	# A reset.log is only ever from a reset after the current setup (record notes it as such).
+	# A reset.log is only ever from a reset after the current setup (record notes it as such);
+	# driver.sh setup removes the one in DEMO_LOGS, this the local copy.
 	rm -f "${LOGS}/setup.log" "${LOGS}/reset.log"
 	driver setup 3000
 	if ! grep -q '^SMOKE OK' "${LOGS}/setup.log" || ! grep -q '^SETUP OK' "${LOGS}/setup.log"; then
@@ -151,8 +152,8 @@ record() {
 	dirty="$(git -C "${ROOT}" status --porcelain | wc -l | tr -d ' ')"
 	if ((dirty == 0)); then echo "commit ${base}"; else echo "a working tree based on ${base} (${dirty} files changed or new)"; fi >"${OUT}/source.txt"
 	(cd "${DEMO}" && sha256 "${DEMO_FILES[@]}") >"${OUT}/source.sha256"
-	# Whether driver.sh reset ran on this cluster since setup, taken now, before the recording: the
-	# README says so only when logs/reset.log is there.
+	# Whether a driver.sh reset succeeded on this cluster since setup, taken now, before the
+	# recording: the README says so only when logs/reset.log is there.
 	mkdir -p "${OUT}/logs"
 	rm -f "${OUT}/logs/reset.log"
 	if grep -q '^RESET OK' "${LOGS}/reset.log" 2>/dev/null; then cp "${LOGS}/reset.log" "${OUT}/logs/"; fi
@@ -294,7 +295,7 @@ collect() {
 		if [[ -f "${OUT}/logs/reset.log" ]]; then
 			echo "  \`driver.sh reset\` (logs/reset.log) ran after setup and before the recording."
 		else
-			echo "  No \`driver.sh reset\` ran between setup and the recording."
+			echo "  No successful \`driver.sh reset\` ran between setup and the recording."
 		fi
 		echo "  \`$(grep -m1 '^SMOKE OK' "${LOGS}/setup.log")\`; \`$(grep -m1 '^SETUP OK' "${LOGS}/setup.log")\`."
 		echo "- On camera (\`record.sh record\`): \`driver.sh show\` on the VM through \`hq remote-test\`, rendered by"

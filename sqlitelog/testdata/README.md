@@ -14,7 +14,7 @@ before opening, so the files here never change during a test run.
 
 ## schema-v4.db
 
-The format the next release writes. It holds:
+The frozen schema version 4 format. It holds:
 
 - `parent` on `echo`: two turns, Suspend and Resume, with identity, origin, labels and annotations.
 - `child`: a fork of `parent` at its head, plus one turn of its own.
@@ -32,6 +32,6 @@ turn, and that a new turn on a live session appends. `TestMigratedAndFreshDataba
 that, after `Open`, its schema is the schema a fresh database gets.
 
 A failure means this build changed how it stores or encodes something a journal already holds. Fix
-the change, or add a migration rung and keep reading the old form. Regenerate with
-`./hack/gen-journal-fixture.sh` only for an intentional change to a format no release has written
-yet. Once a release ships schema version 4, freeze this file and add a fixture for the next version.
+the change, or add a migration rung and keep reading the old form. The generator
+`./hack/gen-journal-fixture.sh` refuses to overwrite this fixture from a newer-schema checkout;
+a newer format needs a fixture of its own.

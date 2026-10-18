@@ -264,7 +264,20 @@ func (s *Store) PutSessionOnActiveHarness(m SessionMeta, registered bool) error 
 	if err := checkWritable(tx, m.UID); err != nil {
 		return err
 	}
-	rec, err := harnessByName(tx, m.Harness)
+	if err := checkActiveHarness(tx, m.Harness, registered); err != nil {
+		return err
+	}
+	if err := s.putSession(tx, m); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqlitelog: put session %q: %w", m.UID, err)
+	}
+	return nil
+}
+
+func checkActiveHarness(tx *sql.Tx, name string, registered bool) error {
+	rec, err := harnessByName(tx, name)
 	switch {
 	case errors.Is(err, ErrHarnessNotFound):
 		if registered {
@@ -273,15 +286,9 @@ func (s *Store) PutSessionOnActiveHarness(m SessionMeta, registered bool) error 
 	case err != nil:
 		return err
 	case !registered:
-		return fmt.Errorf("%w: %q", ErrHarnessNameCollision, m.Harness)
+		return fmt.Errorf("%w: %q", ErrHarnessNameCollision, name)
 	case rec.State != HarnessActive:
-		return fmt.Errorf("%w: %q", ErrHarnessRetired, m.Harness)
-	}
-	if err := s.putSession(tx, m); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("sqlitelog: put session %q: %w", m.UID, err)
+		return fmt.Errorf("%w: %q", ErrHarnessRetired, name)
 	}
 	return nil
 }

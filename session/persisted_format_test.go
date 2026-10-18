@@ -177,11 +177,14 @@ func fixtureSpec() *v1.HarnessSpec {
 	}
 }
 
-// TestWriteSchemaV4Fixture regenerates the fixture. It runs only when WRITE_JOURNAL_FIXTURE=1; use
-// hack/gen-journal-fixture.sh.
+// TestWriteSchemaV4Fixture regenerates the fixture only from a schema v4 checkout.
+// It runs only when WRITE_JOURNAL_FIXTURE=1; use hack/gen-journal-fixture.sh.
 func TestWriteSchemaV4Fixture(t *testing.T) {
 	if os.Getenv("WRITE_JOURNAL_FIXTURE") != "1" {
 		t.Skip("set WRITE_JOURNAL_FIXTURE=1 to regenerate " + schemaV4Fixture)
+	}
+	if sqlitelog.SchemaVersion != 4 {
+		t.Fatal("schema-v4.db is frozen; regenerate only from a schema v4 checkout")
 	}
 	path := filepath.Join(t.TempDir(), "journal.db")
 	store, err := sqlitelog.Open(path, sqlitelog.WithDefaultProject(fixtureProject))

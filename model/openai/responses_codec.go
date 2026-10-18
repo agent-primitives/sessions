@@ -280,8 +280,8 @@ func responsesNumbers(value any) error {
 			}
 		}
 	case map[string]any:
-		for _, x := range v {
-			if err := responsesNumbers(x); err != nil {
+		for _, key := range slices.Sorted(maps.Keys(v)) {
+			if err := responsesNumbers(v[key]); err != nil {
 				return err
 			}
 		}

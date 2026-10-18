@@ -27,6 +27,7 @@ not provide.
 
 - `agentsessionsd` now logs at Warn for tool-executor routes that cannot dispatch because
   `durable_dedup` is false or unknown.
+
 ### Compatibility
 
 #### Sessions API

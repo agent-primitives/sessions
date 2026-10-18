@@ -3,6 +3,7 @@ package openai
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -456,7 +457,13 @@ func (s *responsesStream) validateFinal(raw []byte) error {
 				return fmt.Errorf("added summary conflicts with final output")
 			}
 		}
-		for key, text := range observed.texts {
+		for _, key := range slices.SortedFunc(maps.Keys(observed.texts), func(a, b responsesTextKey) int {
+			if order := cmp.Compare(a.kind, b.kind); order != 0 {
+				return order
+			}
+			return cmp.Compare(a.index, b.index)
+		}) {
+			text := observed.texts[key]
 			parts := item.Content
 			if key.kind == "summary" {
 				parts = item.Summary

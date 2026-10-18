@@ -36,6 +36,65 @@ func TestResponsesDeterministicErrors(t *testing.T) {
 			}
 		}
 	})
+	t.Run("text keys", func(t *testing.T) {
+		for _, tc := range []struct{ name, fixture, want string }{
+			{
+				"content indexes",
+				responseEvent("response.output_item.added", `,"output_index":0,"item":{"type":"message","id":"m","role":"assistant","content":[]}`) +
+					responseEvent("response.output_text.delta", `,"output_index":0,"item_id":"m","content_index":1,"delta":"absent"`) +
+					responseEvent("response.output_text.delta", `,"output_index":0,"item_id":"m","content_index":0,"delta":"conflict"`) +
+					responseEvent("response.completed", `,"response":{"status":"completed","output":[{"type":"message","id":"m","role":"assistant","content":[{"type":"output_text","text":"final"}]}]}`),
+				"streamed text/arguments conflict with final output",
+			},
+			{
+				"kind before index",
+				responseEvent("response.output_item.added", `,"output_index":0,"item":{"type":"reasoning","id":"r","summary":[]}`) +
+					responseEvent("response.reasoning_summary_text.delta", `,"output_index":0,"item_id":"r","summary_index":0,"delta":"conflict"`) +
+					responseEvent("response.reasoning_text.delta", `,"output_index":0,"item_id":"r","content_index":1,"delta":"absent"`) +
+					responseEvent("response.completed", `,"response":{"status":"completed","output":[{"type":"reasoning","id":"r","encrypted_content":"cipher","summary":[{"type":"summary_text","text":"final"}]}]}`),
+				"observed content absent from final output",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				c := newResponses(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, tc.fixture) })
+				for i := 0; i < 100; i++ {
+					_, err := c.StreamModel(t.Context(), api.ModelRequest{}, nil)
+					if err == nil || err.Error() != "openai responses: stream: "+tc.want {
+						t.Fatalf("iteration %d: text error was not sorted by kind/index: %v", i, err)
+					}
+				}
+			})
+		}
+	})
+	t.Run("argument numbers", func(t *testing.T) {
+		for _, args := range []string{
+			`{"a":9007199254740993,"b":1e400}`,
+			`{"nested":{"a":9007199254740993,"b":1e400}}`,
+			`{"nested":[{"a":9007199254740993,"b":1e400}]}`,
+			`{"nested":[9007199254740993,1e400]}`,
+		} {
+			for _, streaming := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/stream=%t", args, streaming), func(t *testing.T) {
+					body := fmt.Sprintf(`{"status":"completed","output":[{"type":"function_call","id":"f","call_id":"c","name":"f","arguments":%q}]}`, args)
+					if streaming {
+						body = responseEvent("response.completed", `,"response":`+body)
+					}
+					c := newResponses(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) })
+					for i := 0; i < 100; i++ {
+						var err error
+						if streaming {
+							_, err = c.StreamModel(t.Context(), api.ModelRequest{}, nil)
+						} else {
+							_, err = c.Model(t.Context(), api.ModelRequest{})
+						}
+						if err == nil || !strings.HasSuffix(err.Error(), "function arguments: integer outside exactly representable +/-2^53 domain") {
+							t.Fatalf("iteration %d: first invalid number was not in key/array order: %v", i, err)
+						}
+					}
+				})
+			}
+		}
+	})
 }
 
 func TestResponsesHTTPDiagnosticReadFailure(t *testing.T) {

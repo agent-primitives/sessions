@@ -78,6 +78,9 @@ model ID, item ID and ordinal. The adapter resends the complete opaque item in i
 summary text is not a substitute for encrypted state. This format is not interchangeable with Chat
 Completions `reasoning_content`, foreign providers, cross-model state or externalized reasoning URIs.
 The adapter refuses a present malformed reasoning part or one missing replayable encrypted content.
+A session with reasoning history cannot move between `openai.New` and `NewResponses`: Responses
+refuses Chat Completions reasoning without an item ID, while Chat Completions drops Responses
+reasoning.
 
 **The harness owns complete-history retention.** Append the entire returned assistant message to the
 next request, not just `Message.Text()` or its function calls, then append the model-facing tool results.

@@ -7,6 +7,17 @@ not provide.
 
 ## Unreleased
 
+### Fixed
+
+- Socket executor write/read errors, including journaled approval receipts, no longer expose
+  the Unix socket path.
+- Tool-executor refusal receipts no longer reference an issue number.
+
+### Changed
+
+- `agentsessionsd` now logs at Warn for tool-executor routes that cannot dispatch because
+  `durable_dedup` is false or unknown.
+
 ### Compatibility
 
 - SQLite schema v5 follows approval v3 and deletion v4, adding indexed exact caller issuer/subject

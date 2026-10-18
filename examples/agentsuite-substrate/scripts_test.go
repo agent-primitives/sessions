@@ -704,6 +704,64 @@ func TestDriverSetupDeletesOnlyTheClusterItCreated(t *testing.T) {
 	}
 }
 
+// driver.sh reset deletes the session actors (sess-…) in the demo's atespace, leaves the golden
+// actors, and prints RESET OK only once none is left; a session actor still listed after its wait
+// fails the reset.
+func TestDriverResetChecksTheSessionActorsAreGone(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		env      []string
+		wantCode int
+		wantOut  string
+	}{
+		{name: "the actors go", wantOut: "RESET OK: no session actors, no ActorTemplate tmpl-1"},
+		{name: "an actor stays", env: []string{"STUB_ACTORS_STAY=1"}, wantCode: 1, wantOut: "DEMO FAILED: session actors are still there: sess-a sess-b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStubs(t)
+			render := filepath.Join(s.work, "cluster-"+cluster, "render")
+			if err := os.MkdirAll(render, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(render, "template-name"), []byte("tmpl-1\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// get actors lists two session actors and a golden one until a delete is logged (or
+			// always, with STUB_ACTORS_STAY); the stateless template does not exist.
+			stub(t, filepath.Join(s.work, "bin"), "kubectl-ate", `echo "kubectl-ate $*" >>"$STUB_DIR/calls"
+case " $* " in
+*" get actors "*)
+	if [ -n "${STUB_ACTORS_STAY:-}" ] || ! grep -q "delete actor" "$STUB_DIR/calls"; then
+		echo '{"actors": [{"metadata": {"name": "sess-a"}}, {"metadata": {"name": "golden-1"}}, {"metadata": {"name": "sess-b"}}]}'
+	else
+		echo '{"actors": [{"metadata": {"name": "golden-1"}}]}'
+	fi
+	;;
+*" get actor-template "*) exit 1 ;;
+esac
+`)
+			code, out, calls := s.runArgs(t, "demo/driver.sh", []string{"reset"}, tc.env...)
+			if code != tc.wantCode {
+				t.Fatalf("driver.sh reset exit %d, want %d\noutput:\n%s\ncalls:\n%s", code, tc.wantCode, out, calls)
+			}
+			if !strings.Contains(out, tc.wantOut) {
+				t.Errorf("output does not contain %q:\n%s", tc.wantOut, out)
+			}
+			if tc.wantCode != 0 && strings.Contains(out, "RESET OK") {
+				t.Errorf("a failed reset printed RESET OK:\n%s", out)
+			}
+			for _, n := range []string{"sess-a", "sess-b"} {
+				if !strings.Contains(calls, "delete actor "+n+" ") {
+					t.Errorf("reset did not delete %s:\n%s", n, calls)
+				}
+			}
+			if strings.Contains(calls, "delete actor golden-1") {
+				t.Errorf("reset deleted the golden actor:\n%s", calls)
+			}
+		})
+	}
+}
+
 // up.sh refuses inputs it cannot deploy before it runs anything that touches the cluster (or even
 // lists it), so a misconfigured rerun leaves the cluster, the deployment and the
 // agentsessionsd-model Secret as they were.

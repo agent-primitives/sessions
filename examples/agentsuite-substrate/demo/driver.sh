@@ -297,6 +297,15 @@ wait_apis() {
 	return 1
 }
 
+# session_actors: the names of the session actors (sess-…) in the demo's atespace, space-separated.
+session_actors() {
+	"${ATE[@]}" get actors -a "${ATESPACE}" -o json | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+items = d if isinstance(d, list) else d.get("actors", d.get("items", []))
+print(" ".join(a["metadata"]["name"] for a in items if a["metadata"]["name"].startswith("sess-")))'
+}
+
 # ================================================================================================
 # reset: what show created on the cluster, removed, so show can run again: every session's actor
 # (named sess-…; the templates' golden actors are left alone) and the stateless tier's ActorTemplate.
@@ -304,22 +313,16 @@ wait_apis() {
 # ================================================================================================
 reset() {
 	local names n t
-	names="$("${ATE[@]}" get actors -a "${ATESPACE}" -o json | python3 -c '
-import json, sys
-d = json.load(sys.stdin)
-items = d if isinstance(d, list) else d.get("actors", d.get("items", []))
-print(" ".join(a["metadata"]["name"] for a in items if a["metadata"]["name"].startswith("sess-")))')"
+	names="$(session_actors)"
 	for n in ${names}; do
 		"${ATE[@]}" delete actor "${n}" -a "${ATESPACE}" --any-state 2>&1 | tee -a "${STEP_LOG}"
 	done
 	for _ in $(seq 60); do
-		[[ -z "$("${ATE[@]}" get actors -a "${ATESPACE}" -o json | python3 -c '
-import json, sys
-d = json.load(sys.stdin)
-items = d if isinstance(d, list) else d.get("actors", d.get("items", []))
-print(" ".join(a["metadata"]["name"] for a in items if a["metadata"]["name"].startswith("sess-")))')" ]] && break
+		[[ -z "$(session_actors)" ]] && break
 		sleep 2
 	done
+	names="$(session_actors)"
+	if [[ -n "${names}" ]]; then fail "session actors are still there: ${names}"; fi
 	t="$(template_name)"
 	if "${ATE[@]}" get actor-template "${t}" -a "${ATESPACE}" >/dev/null 2>&1; then
 		"${ATE[@]}" delete actor-template "${t}" -a "${ATESPACE}" 2>&1 | tee -a "${STEP_LOG}"

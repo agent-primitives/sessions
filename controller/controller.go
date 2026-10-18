@@ -144,8 +144,8 @@ func WithToolExecutor(tool ToolFunc) Option { return func(c *Controller) { c.too
 // tool durably by (scope.SessionUID, call.IdempotencyKey), or that repeating the call is harmless
 // (a read-only or naturally idempotent tool). Resume consults declared with the recorded call's
 // tool name only when an interrupted execution's last recorded effect is a TOOL_CALL that is not
-// approval-gated and has no TOOL_RESULT: true re-runs that call under its recorded key; false, or no
-// WithDurableDedup at all, makes Resume return ErrUnansweredToolCall. First attempts, recorded
+// approval-gated and has no TOOL_RESULT: true re-runs that call under its recorded key; false, or
+// no WithDurableDedup at all, makes Resume return ErrUnansweredToolCall. First attempts, recorded
 // results and approved REQUIRES_APPROVAL calls never consult it. declared must not block.
 func WithDurableDedup(declared func(tool string) bool) Option {
 	return func(c *Controller) { c.durableDedup = declared }

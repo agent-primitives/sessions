@@ -662,17 +662,17 @@ invokes no harness and stays a no-op without one.
 - `TOOL-10`: A trailing host-executed `TOOL_CALL` without a receipt, other than an approval-gated
   call (§10.4), MUST be re-driven on recovery with the recorded call (same `idempotency_key`) and
   the same session uid only when the executor declares durable dedup for that tool (`TOOL-11`).
-  Otherwise recovery MUST refuse it (`ErrUnansweredToolCall`, `FAILED_PRECONDITION`: "tool call
-  has no recorded result; repeating it could repeat the action") after `EXE-26` and before
-  `Describe`, run, or any append, so a later recovery with a declaring executor can still re-drive
-  it. The reference host declares per tool name (`controller.WithDurableDedup`,
-  `placement.WithDurableDedup`); the stock daemon declares its `durable_dedup: true` routes and
-  the tools it refuses before dialing ([tool executors](docs/tool-executors.md)). With no executor configured it does not refuse: the
-  re-issued call fails as on the live path (§9.2). A non-trailing `TOOL_CALL` without a receipt
-  MUST NOT be re-executed: the re-issued call returns an error to the harness, which is not
-  divergence. The execution fails only if the harness does not handle that error; an in-process
-  harness that handled it originally can continue and complete. Over `Harness.Connect` the
-  execution fails (`EXE-33`).
+  Otherwise recovery MUST refuse it (`ErrUnansweredToolCall`, `FAILED_PRECONDITION`: "tool call has
+  no recorded result; repeating it could repeat the action") after `EXE-26` and before `Describe`,
+  run, or any append, so a later recovery with a declaring executor can still re-drive it. The
+  reference host declares per tool name (`controller.WithDurableDedup`,
+  `placement.WithDurableDedup`); the stock daemon declares its `durable_dedup: true` routes and the
+  tools it refuses before dialing ([tool executors](docs/tool-executors.md)). With no executor
+  configured it does not refuse: the re-issued call fails as on the live path (§9.2). A non-trailing
+  `TOOL_CALL` without a receipt MUST NOT be re-executed: the re-issued call returns an error to the
+  harness, which is not divergence. The execution fails only if the harness does not handle that
+  error; an in-process harness that handled it originally can continue and complete. Over
+  `Harness.Connect` the execution fails (`EXE-33`).
 - `TOOL-11`: An executor that declares durable dedup for a tool MUST deduplicate its calls on
   (session uid, `idempotency_key`) and MUST NOT repeat the external effect for a key it has already
   applied, or the tool MUST be safe to repeat (read-only or naturally idempotent). The host

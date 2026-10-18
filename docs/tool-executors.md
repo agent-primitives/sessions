@@ -144,13 +144,13 @@ cancellation, malformed/truncated/oversized replies and version/correlation erro
 transport/protocol Go errors, distinct from a valid executor `is_error` response. The
 adapter includes route/stage context, not raw request/reply bytes, and never retries itself.
 
-Ordinary controller-mediated transport errors leave unresolved intent. Resume can redrive
-it with the same identity, relying on the executor's true declaration. For a false/unknown
-route or an unconfigured tool, Resume re-sends the call to the same refusal without dialing and
-the turn fails again; Exec a new turn to continue. Completed journal
-receipts are replayed without dialing. Approved calls instead turn executor errors into
-**durable EXECUTOR_ERROR receipts**, including false/unknown/unconfigured-tool refusals.
-Changing configuration afterward does not retry such a receipted failure.
+Ordinary controller-mediated transport errors leave unresolved intent. Resume can redrive it
+with the same identity, relying on the executor's true declaration. For a false/unknown
+route or an unconfigured tool, Resume re-sends the call to the same refusal without dialing
+and the turn fails again; Exec a new turn to continue. Completed journal receipts are
+replayed without dialing. Approved calls instead turn executor errors into **durable
+EXECUTOR_ERROR receipts**, including false/unknown/unconfigured-tool refusals. Changing
+configuration afterward does not retry such a receipted failure.
 
 Cancelling Resume while an approved call is in flight closes its socket connection. If the
 controller commits the resulting error receipt, that **EXECUTOR_ERROR is permanent**, even

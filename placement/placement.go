@@ -281,7 +281,8 @@ func WithToolExecutor(fn controller.ToolFunc) Option { return func(p *Placer) { 
 
 // WithDurableDedup declares which tools the WithToolExecutor executor durably deduplicates, as
 // controller.WithDurableDedup. Without it, Resume refuses a trailing call that is not
-// approval-gated and has no recorded result with controller.ErrUnansweredToolCall rather than re-running it.
+// approval-gated and has no recorded result with controller.ErrUnansweredToolCall rather than
+// re-running it.
 func WithDurableDedup(declared func(tool string) bool) Option {
 	return func(p *Placer) { p.durableDedup = declared }
 }

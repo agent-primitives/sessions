@@ -11,7 +11,8 @@ This is the operator's view. For reporting a vulnerability, see [`SECURITY.md`](
 
 Everything below follows from that split. The project makes strong, testable claims about what a
 session log says and whether it can be trusted. It makes no claims at all about who is allowed to
-reach it, because Sessions RPCs do not check caller authority.
+reach the reference daemon, which does not check caller authority. Custom Go hosts can opt into
+per-RPC checks, but complete required-mode deployment is not available (below).
 
 ## What is protected
 
@@ -64,10 +65,11 @@ name its header with `-model-auth-header`.
 no credentials. Any process that can reach the port can call every RPC. Optional Go authentication
 interceptors are available for custom hosts (below), but the daemon does not install them.
 
-**Sessions RPCs have no authorization.** `IdentityRef` exists in the contract and is carried on the wire, but
-nothing verifies or enforces it. It is metadata today, not a control. In particular, anyone who can
-reach Sessions can discover an owned pending approval through Get/List and approve or deny it.
-`ApproveRequest.identity` is copied to the decision's `Event.actor` as caller-supplied provenance;
+**The default Sessions service has no authorization.** Custom hosts must explicitly install
+`WithAuthorization` (below); the daemon does not. `IdentityRef` is metadata, not a control.
+Anyone who can reach the default service can discover a pending approval through Get/List and
+approve or deny it. By default, `ApproveRequest.identity` is copied to the decision's `Event.actor`
+as caller-supplied provenance;
 `--actor`, issuer and subject flags are not credentials or permission checks. The durable gate
 controls event ordering and effect recovery, not who is entitled to decide.
 
@@ -157,8 +159,8 @@ id is what the harness says about itself, so it does not authenticate the harnes
 
 ## Deletion is not erasure or containment
 
-Any caller that can reach Sessions can permanently tombstone a known UID: Delete has no additional
-authorization. `PENDING` acknowledges durable intent only until #88 provides authoritative ownership
+Any caller that can reach the default Sessions service can permanently tombstone a known UID:
+Delete has no additional authorization unless the host installs `WithAuthorization`. `PENDING` acknowledges durable intent only until #88 provides authoritative ownership
 and cleanup. Actors, snapshots and fork-child pins remain retained indefinitely; Delete does not
 call Stop, reclaim resources or stop an actor's independent external activity. The retained metadata
 and journal are audit evidence, not a complete inventory of resources to clean up.
@@ -175,8 +177,9 @@ See [deletion semantics](concepts.md#permanent-soft-deletion).
 
 `REQUIRES_APPROVAL` is supported only for stateless replay. The RPC/SDK commits a decision without
 compute or an executor call; explicit Resume performs recovery. CLI approve/deny do both, and a
-recovery failure leaves the decision committed. Sessions has no caller enforcement or policy evaluator,
-approval timeout, expiry, automatic decision or implemented Cancel path. Unresolved
+recovery failure leaves the decision committed. The default Sessions service has no caller enforcement;
+custom hosts can require an independent approve permission (below). There is no tool/resource policy
+evaluator, approval timeout, expiry, automatic decision or implemented Cancel path. Unresolved
 requests and suspended snapshots/handles are retained indefinitely; operators must manage retained
 resources outside these APIs.
 
@@ -264,8 +267,8 @@ Given the above, there is one safe shape for this release:
 `IdentityRef` provenance. Trusted Go hosts can atomically create an owned session through
 `sqlitelog.Store.CreateOwnedSession`, including active-harness admission. Existing UIDs cannot be
 claimed, even when unbound or deleted. Metadata updates, fencing and appended/copied history do
-not assign or replace owners. Legacy and RPC-created sessions remain unbound; ownership is not
-inferred from provenance. Unbound sessions are denied by `OwnerAuthorizer`, not treated as public.
+not assign or replace owners. Legacy sessions and sessions created by unenforced RPCs remain unbound;
+ownership is not inferred from provenance. Unbound sessions are denied by `OwnerAuthorizer`, not treated as public.
 Owner metadata is not hash-chain attested; database writers are trusted.
 
 The host-side `api.Authorizer` contract has an owner-only implementation. `OwnerAuthorizer` grants
@@ -281,15 +284,68 @@ for enforcement ([#127](https://github.com/agent-primitives/sessions/issues/127)
 `ListOptions.Owner` filters an exact pair in SQL before paging; enforcing callers must always set
 it, since nil retains the full project listing. Its unsigned cursors are not caller-bound credentials.
 
-These ownership/authorization contracts are not wired into Sessions RPCs or the daemon. They provide
-no authentication, TLS or access-control enforcement. SQLite schema v5 carries an off-mode
-authorization marker; this host refuses required, unknown or missing markers even at the same
+The daemon does not install these contracts. Custom hosts can opt into the RPC checks below,
+but that is not a deployable required mode. SQLite schema v5 carries an off-mode authorization marker; this host refuses required, unknown or missing markers even at the same
 schema version. There is
 no supported switch to enable required mode. The marker is checked only at Open. Changing it
 requires stopping every writer, including embedded CLI processes, then restarting all hosts with
 binaries that support the new mode; already-open hosts do not recheck it.
 Owner identifiers are retained metadata: deletion is not erasure. Do not expose a host on an
 untrusted network.
+
+## Optional Go RPC authorization
+
+Custom hosts can pass `session.WithAuthorization(policy)` to `NewService` and
+`session.WithRegistryAuthorization(policy)` to `NewHarnessRegistry`. Each option requires a verified
+`authn.Caller(ctx)` even for direct handler calls: missing caller returns `UNAUTHENTICATED` before
+request validation. A nil policy fails closed with `INTERNAL`, not back to off. Constructors without
+these options retain trusted-network behavior, even if authentication interceptors are installed.
+
+Checks precede runtime IO, fences, stream frames and approval repair:
+
+| RPC | Required actions |
+| --- | --- |
+| GetSession, Replay | `read` |
+| Exec | `exec`; also `resume` when inputless Exec enters approval-recovery Resume |
+| CreateSession | global `create` |
+| Exec with no session | global `create`, then `exec` on the prospective owned UID, before insert |
+| Suspend | `suspend` |
+| Resume | `resume` and `exec` |
+| DeleteSession | `delete` |
+| Approve | `read` and independently `approve` |
+| Cancel | `cancel`, then `UNIMPLEMENTED` |
+| Fork | `fork` on parent and global `create`, then `FAILED_PRECONDITION` (owned publication unavailable) |
+| ListSessions | global `list`, then exact verified-owner SQL filtering before keyset pagination |
+| GetHarness (including observe), ListHarnesses, RegisterHarness, RetireHarness | global `registry.read`, `registry.list`, `registry.register`, `registry.retire`, respectively |
+
+Global actions use empty UID/owner. Create and auto-create insert the verified caller as immutable
+owner; they never claim existing rows. The service passes stored owners, not request provenance,
+to the policy. Unknown and unbound UIDs and owner-policy refusals all return the same generic
+`PERMISSION_DENIED`. Only `errors.Is(err, api.ErrPermissionDenied)` is a policy denial; unexpected
+policy/store failures and required-mode `INTERNAL` diagnostics are sanitized. Caller cancellation
+and deadlines retain their codes. Custom policies own any additional sharing rules; listing remains
+owner-only, not a list of arbitrary grants.
+
+`api.OwnerAllowlistAuthorizer` delegates ordinary session actions to `OwnerAuthorizer` and adds
+explicit exact issuer/subject allowlists via `Allow map[api.Action][]api.CallerIdentity` for create,
+list, approve and registry actions. Unknown actions and mint stay denied even if allowlisted.
+An owner alone cannot approve: this policy requires an owner who is also on the approve allowlist.
+A separate non-owner approver needs a custom read policy. Configure policies before serving; do not
+mutate their allowlists concurrently.
+
+Enforced Approve ignores request identity and clears the actor before decision/retry comparison.
+It does **not** yet journal a verified caller or distinguish required-mode decisions from anonymous
+off-mode history. Historical decisions with a nonempty actor are not identical retries after this
+normalization. Verified attribution and caller-bound retries require a versioned journal contract.
+
+**This is not cross-host isolation or supported required-mode activation.** Journals remain marked
+`off`, so unenforced hosts and CLI processes can still read/write owned sessions, create unbound rows,
+and bypass these checks. Do not share an enforcement test journal with them. Owned Fork remains
+refused before discovery or effects until ownership can be reserved before the first copied record.
+Complete activation also needs verified approval audit, an immutable journal policy marker and startup
+validation, a daemon required switch, and TLS assembly with server identity validation
+([#127](https://github.com/agent-primitives/sessions/issues/127)). Registry stays on its separate,
+opt-in loopback listener; there is no same-pod/self-dial exemption or implicit credential forwarding.
 
 ## Optional Go caller authentication
 

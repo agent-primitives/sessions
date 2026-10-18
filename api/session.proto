@@ -190,9 +190,10 @@ message ReplayRequest {
 
 // Approve supplies an explicit decision for one unresolved request in a stateless execution.
 // All tuple fields are required and request_seq must be positive. A decision resolves only a
-// request owned by this session, not an inherited parent request. Identity is recorded on the
-// decision's Event.actor as provenance, never checked as authorization. No policy hook, expiry,
-// automatic decision, or Cancel semantics are implied by this API.
+// request owned by this session, not an inherited parent request. By default identity is recorded
+// on the decision's Event.actor as unverified provenance. An opt-in enforcing Go host ignores it,
+// normalizing the actor to empty before append/retry comparison; verified audit is not available.
+// No tool/resource policy hook, expiry, automatic decision, or Cancel semantics are implied.
 message ApproveRequest {
   string session = 1;
   string execution_id = 2;
@@ -299,6 +300,11 @@ message Delta {
   bool done = 4;        // last delta for this part
 }
 
+// Default hosts do not authorize callers. Go hosts may opt into per-RPC authorization, which
+// precedes validation and hides inaccessible sessions as PERMISSION_DENIED (see docs/security.md).
+// Those hosts require independent read+approve permissions, owned creation and owner-filtered
+// listing; owned Fork refuses until owner-before-log publication is available. Required-mode
+// deployment, verified approval audit and transport assembly are not provided by these checks.
 service Sessions {
   rpc CreateSession(CreateSessionRequest) returns (Session);
   // GetSession remains available for audit after deletion, including metadata and deletion intent
@@ -354,7 +360,8 @@ service Sessions {
   // tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created
   // for a non-stateless execution; Approve does not Describe or resolve a harness.
   // ABORTED: local contention, append-CAS conflict or superseded fence; retry
-  // after reading the session. Identity is provenance only; this method provides no authorization,
+  // after reading the session. Identity is unverified provenance, ignored by an enforcing Go host.
+  // Independent read+approve permission checks are opt-in; this method implies no tool/resource
   // policy hook, expiry, implicit Resume, or Cancel behavior.
   rpc Approve(ApproveRequest) returns (ApproveResponse);
 

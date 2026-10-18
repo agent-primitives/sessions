@@ -40,6 +40,12 @@ const (
 // SessionsClient is the client API for Sessions service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// Default hosts do not authorize callers. Go hosts may opt into per-RPC authorization, which
+// precedes validation and hides inaccessible sessions as PERMISSION_DENIED (see docs/security.md).
+// Those hosts require independent read+approve permissions, owned creation and owner-filtered
+// listing; owned Fork refuses until owner-before-log publication is available. Required-mode
+// deployment, verified approval audit and transport assembly are not provided by these checks.
 type SessionsClient interface {
 	CreateSession(ctx context.Context, in *CreateSessionRequest, opts ...grpc.CallOption) (*Session, error)
 	// GetSession remains available for audit after deletion, including metadata and deletion intent
@@ -93,7 +99,8 @@ type SessionsClient interface {
 	// tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created
 	// for a non-stateless execution; Approve does not Describe or resolve a harness.
 	// ABORTED: local contention, append-CAS conflict or superseded fence; retry
-	// after reading the session. Identity is provenance only; this method provides no authorization,
+	// after reading the session. Identity is unverified provenance, ignored by an enforcing Go host.
+	// Independent read+approve permission checks are opt-in; this method implies no tool/resource
 	// policy hook, expiry, implicit Resume, or Cancel behavior.
 	Approve(ctx context.Context, in *ApproveRequest, opts ...grpc.CallOption) (*ApproveResponse, error)
 	// In-flight control: cancel the running execution. Not implemented: the server returns
@@ -260,6 +267,12 @@ func (c *sessionsClient) Fork(ctx context.Context, in *ForkRequest, opts ...grpc
 // SessionsServer is the server API for Sessions service.
 // All implementations must embed UnimplementedSessionsServer
 // for forward compatibility.
+//
+// Default hosts do not authorize callers. Go hosts may opt into per-RPC authorization, which
+// precedes validation and hides inaccessible sessions as PERMISSION_DENIED (see docs/security.md).
+// Those hosts require independent read+approve permissions, owned creation and owner-filtered
+// listing; owned Fork refuses until owner-before-log publication is available. Required-mode
+// deployment, verified approval audit and transport assembly are not provided by these checks.
 type SessionsServer interface {
 	CreateSession(context.Context, *CreateSessionRequest) (*Session, error)
 	// GetSession remains available for audit after deletion, including metadata and deletion intent
@@ -313,7 +326,8 @@ type SessionsServer interface {
 	// tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created
 	// for a non-stateless execution; Approve does not Describe or resolve a harness.
 	// ABORTED: local contention, append-CAS conflict or superseded fence; retry
-	// after reading the session. Identity is provenance only; this method provides no authorization,
+	// after reading the session. Identity is unverified provenance, ignored by an enforcing Go host.
+	// Independent read+approve permission checks are opt-in; this method implies no tool/resource
 	// policy hook, expiry, implicit Resume, or Cancel behavior.
 	Approve(context.Context, *ApproveRequest) (*ApproveResponse, error)
 	// In-flight control: cancel the running execution. Not implemented: the server returns

@@ -19,6 +19,10 @@ import (
 // DeleteSession acknowledges permanent durable intent only. It does not resolve a harness or
 // contact runtime resources; the retained compute projection is not a cleanup claim.
 func (s *Service) DeleteSession(ctx context.Context, req *v1.DeleteSessionRequest) (session *v1.Session, err error) {
+	defer s.auth.internalError(&err)
+	if err := s.authorize(ctx, req.GetUid(), api.ActionDelete); err != nil {
+		return nil, err
+	}
 	ctx = observability.EnsureRequestID(ctx)
 	uid := req.GetUid()
 	finish := observability.Start(ctx, s.logger, "session", "delete", "session_uid", uid)

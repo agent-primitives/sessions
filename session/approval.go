@@ -19,6 +19,10 @@ import (
 // Approve commits only the supplied decision. It deliberately does not resolve a harness:
 // decisions remain available while compute is unavailable or the recorded route is unserved.
 func (s *Service) Approve(ctx context.Context, req *v1.ApproveRequest) (response *v1.ApproveResponse, err error) {
+	defer s.auth.internalError(&err)
+	if err := s.authorize(ctx, req.GetSession(), api.ActionRead, api.ActionApprove); err != nil {
+		return nil, err
+	}
 	ctx = observability.EnsureRequestID(ctx)
 	finish := observability.Start(ctx, s.logger, "session", "approve", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
@@ -39,9 +43,15 @@ func (s *Service) Approve(ctx context.Context, req *v1.ApproveRequest) (response
 		}
 		return nil, err
 	}
+	actor := wire.EventFromProto(&v1.Event{Actor: req.GetIdentity()}).Actor
+	if s.auth != nil {
+		// Request provenance is not a verified audit identity. Normalize it before
+		// comparison too; verified journal attribution needs a versioned contract.
+		actor = api.IdentityRef{}
+	}
 	decision, err := s.registry.Approve(ctx, s.store.Session(uid), uid, api.ApprovalDecision{
 		ExecutionID: req.GetExecutionId(), ToolCallID: req.GetToolCallId(), RequestSeq: req.GetRequestSeq(),
-		Approved: req.GetApproved(), Reason: req.GetReason(), Identity: wire.EventFromProto(&v1.Event{Actor: req.GetIdentity()}).Actor,
+		Approved: req.GetApproved(), Reason: req.GetReason(), Identity: actor,
 	})
 	if err != nil {
 		return nil, approvalError(err)

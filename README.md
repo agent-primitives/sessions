@@ -97,7 +97,8 @@ capability tiers all run today. See the
 cover, and [how it behaves](docs/interaction-model.md) for approvals, recovery, and known limits.
 
 The reference daemon has no authentication, authorization, or transport security. Custom Go hosts
-can opt into [caller authentication](docs/security.md#optional-go-caller-authentication), not isolation.
+can opt into [caller authentication](docs/security.md#optional-go-caller-authentication) and
+[RPC authorization](docs/security.md#optional-go-rpc-authorization), not complete required-mode isolation.
 A managed control plane, enterprise identity and provenance, and confidential or GPU snapshots are
 not built. Read [`docs/security.md`](docs/security.md) before exposing a host.
 

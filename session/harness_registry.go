@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/canon"
 	"github.com/agent-primitives/sessions/harnesswire"
@@ -50,13 +51,15 @@ type PlacerFactory func(name string, spec *v1.HarnessSpec) (p *placement.Placer,
 //
 // It is an admin surface: whoever can call RegisterHarness decides where the host sends session
 // history and whose credential pays for model calls. agentsessionsd serves it only on an optional
-// separate literal-loopback listener; neither that listener nor Sessions authenticates callers.
-// Hosts that embed it must keep it off the Sessions listener and protect its reachability.
+// separate literal-loopback listener; neither default service authenticates callers. Embedders
+// can opt into WithRegistryAuthorization and authn interceptors, but must still keep the service
+// off the Sessions listener and protect its reachability and transport.
 type HarnessRegistry struct {
 	v1.UnimplementedHarnessRegistryServer
 	store    *sqlitelog.Store
 	registry *placement.Registry
 	factory  PlacerFactory
+	auth     *authorization
 
 	// mu serializes RegisterHarness, so building a Placer, storing the row and adding the Placer
 	// happen as one step per name within this process.
@@ -73,7 +76,7 @@ type HarnessRegistry struct {
 //
 // Registrations are loaded at startup. A registration another process makes in a shared database
 // is served after this host restarts, or if RegisterHarness loads its identical compatible spec.
-func NewHarnessRegistry(store *sqlitelog.Store, registry *placement.Registry, factory PlacerFactory) (*HarnessRegistry, error) {
+func NewHarnessRegistry(store *sqlitelog.Store, registry *placement.Registry, factory PlacerFactory, opts ...HarnessRegistryOption) (*HarnessRegistry, error) {
 	if store == nil || registry == nil || factory == nil {
 		return nil, errors.New("session: NewHarnessRegistry needs a store, a registry and a factory")
 	}
@@ -81,6 +84,9 @@ func NewHarnessRegistry(store *sqlitelog.Store, registry *placement.Registry, fa
 		return nil, err
 	}
 	h := &HarnessRegistry{store: store, registry: registry, factory: factory}
+	for _, opt := range opts {
+		opt(h)
+	}
 	if err := forEachRegistration(store, h.load); err != nil {
 		h.Close()
 		return nil, err
@@ -316,7 +322,11 @@ func validName(name string) error {
 }
 
 // RegisterHarness stores a registration and makes it resolvable, or recognizes a repeat of one.
-func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterHarnessRequest) (*v1.RegisterHarnessResponse, error) {
+func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterHarnessRequest) (_ *v1.RegisterHarnessResponse, err error) {
+	defer h.auth.internalError(&err)
+	if err := h.auth.global(ctx, api.ActionRegistryRegister); err != nil {
+		return nil, err
+	}
 	name, spec := req.GetName(), req.GetSpec()
 	if err := validName(name); err != nil {
 		return nil, err
@@ -405,7 +415,11 @@ func registerOutcome(r sqlitelog.RegisterResult) v1.RegisterOutcome {
 }
 
 // GetHarness returns one static or registered harness, optionally with what it reports right now.
-func (h *HarnessRegistry) GetHarness(ctx context.Context, req *v1.GetHarnessRequest) (*v1.HarnessRegistration, error) {
+func (h *HarnessRegistry) GetHarness(ctx context.Context, req *v1.GetHarnessRequest) (_ *v1.HarnessRegistration, err error) {
+	defer h.auth.internalError(&err)
+	if err := h.auth.global(ctx, api.ActionRegistryRead); err != nil {
+		return nil, err
+	}
 	name := req.GetName()
 	if name == "" {
 		return nil, status.Error(codes.InvalidArgument, "name is required")
@@ -454,7 +468,11 @@ func (h *HarnessRegistry) observe(ctx context.Context, out *v1.HarnessRegistrati
 }
 
 // RetireHarness refuses new sessions on a registered harness. Existing sessions keep running.
-func (h *HarnessRegistry) RetireHarness(ctx context.Context, req *v1.RetireHarnessRequest) (*v1.HarnessRegistration, error) {
+func (h *HarnessRegistry) RetireHarness(ctx context.Context, req *v1.RetireHarnessRequest) (_ *v1.HarnessRegistration, err error) {
+	defer h.auth.internalError(&err)
+	if err := h.auth.global(ctx, api.ActionRegistryRetire); err != nil {
+		return nil, err
+	}
 	name := req.GetName()
 	if name == "" {
 		return nil, status.Error(codes.InvalidArgument, "name is required")
@@ -477,7 +495,11 @@ func (h *HarnessRegistry) RetireHarness(ctx context.Context, req *v1.RetireHarne
 
 // ListHarnesses lists static and registered harnesses together in name order. Paging is keyset on
 // the name, so a registration made while a caller pages neither skips nor repeats an entry.
-func (h *HarnessRegistry) ListHarnesses(ctx context.Context, req *v1.ListHarnessesRequest) (*v1.ListHarnessesResponse, error) {
+func (h *HarnessRegistry) ListHarnesses(ctx context.Context, req *v1.ListHarnessesRequest) (_ *v1.ListHarnessesResponse, err error) {
+	defer h.auth.internalError(&err)
+	if err := h.auth.global(ctx, api.ActionRegistryList); err != nil {
+		return nil, err
+	}
 	size := int(req.GetPageSize())
 	switch {
 	case size < 0:

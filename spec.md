@@ -88,7 +88,7 @@ This draft specifies:
 This draft does not specify:
 
 - a credential format, authorization policy, transport assembly, or tenancy isolation (see §17
-  for the optional Go authentication interceptors);
+  for optional Go authentication and embedded RPC authorization);
 - a storage schema for the event log; the SQLite layout in [`sqlitelog/`](sqlitelog/) is an
   implementation detail;
 - erasure of a session's journal or metadata, or reclamation of its compute on deletion:
@@ -710,6 +710,7 @@ invokes no harness and stays a no-op without one.
 
 - `APR-5`: `Approve` MUST be `INVALID_ARGUMENT` when `session`, `execution_id`, or `tool_call_id`
   is empty, `request_seq <= 0`, or `approved` is absent. An unknown session is `NOT_FOUND`.
+  Opt-in authorization (§17) precedes validation and hides inaccessible sessions as `PERMISSION_DENIED`.
 - `APR-6`: A decision MUST target the selected request: the last gated call of the latest
   execution, owned by this session (not copied before a `LIFECYCLE_FORK`), not completed, and
   without a receipt. Otherwise `FAILED_PRECONDITION`.
@@ -718,9 +719,11 @@ invokes no harness and stays a no-op without one.
   deleted (`OPS-34`). A changed decision MUST be `FAILED_PRECONDITION` and never overwrites.
 - `APR-8`: A new decision MUST mint a fence and append `APPROVAL_RESULT{tool_call_id, approved,
   reason, request_seq}` with `Event.actor` set from the request's identity, at the head observed
-  when the request was selected.
+  when the request was selected. An opt-in enforcing Go service (§17) ignores the request actor,
+  normalizing it to empty before append and retry comparison; verified audit is not yet available.
 - `APR-9`: `Approve` MUST NOT resume compute or call the executor. The caller calls `Resume`.
-- No policy hook, expiry, automatic decision, or authorization applies to decisions.
+- No tool/resource policy hook, expiry or automatic decision applies. The default service has no
+  decision authorization; an enforcing Go service requires independent read and approve permissions.
 
 ### 10.3 Wire handshake
 
@@ -1414,10 +1417,37 @@ The reference implementation protects the integrity of the record, not access to
   `ERROR`. Verification runs once per RPC, so revocation before `ValidUntil` is not noticed by an
   admitted unary call or an open stream. Authentication alone is not isolation: these interceptors
   provide neither per-RPC authorization nor TLS, and the daemon has no required-mode switch.
+- Custom Go hosts can opt into `session.WithAuthorization(api.Authorizer)` on `NewService` and
+  `session.WithRegistryAuthorization(api.Authorizer)` on `NewHarnessRegistry`. Missing verified
+  caller MUST be `UNAUTHENTICATED`, including direct handler calls, before validation. Nil policy
+  MUST fail closed. The default service remains unenforced. Checks MUST precede runtime IO, fence
+  minting, first stream frame and approval repair. The action mapping is Get/Replay → read,
+  Exec → exec, Suspend → suspend, Resume → resume+exec, Delete → delete, Cancel → cancel then
+  `UNIMPLEMENTED`, Approve → read+approve. Inputless Exec entering approval-recovery Resume also
+  MUST check resume; ordinary Exec does not. Create MUST check global create before inserting the
+  verified caller as immutable owner; auto-create Exec also checks exec on the prospective UID
+  before insertion. Fork checks parent fork and global create but MUST refuse `FAILED_PRECONDITION`
+  before discovery/effects until owner-before-log child publication is available.
+- ListSessions MUST check global list and filter exact verified owner in SQL before keyset paging.
+  Registry uses distinct global registry.read/list/register/retire actions, including read before
+  observed Describe. Global actions carry empty UID/owner; requests cannot supply ownership.
+  The first `OwnerAllowlistAuthorizer` policy composes ordinary owner checks with exact-caller
+  allowlists for create/list/approve/registry actions. Ownership alone MUST NOT authorize approve;
+  with this policy an approver must also own the session. Unknown actions and mint remain denied.
+- Required RPC checks MUST hide unknown/unbound sessions and owner-policy refusals uniformly as
+  generic `PERMISSION_DENIED`. Only `api.ErrPermissionDenied` (possibly wrapped) is policy denial;
+  unexpected policy/store failures MUST be sanitized `INTERNAL`. Caller cancellation/deadlines
+  retain their codes. Enforced Approve ignores request actor and stores an empty actor, not a
+  verified audit identity. It normalizes before retry comparison; historical nonempty actors are
+  not identical retries. Verified caller audit and caller-bound retries remain unavailable.
+- Embedded enforcement still opens off-marked journals: unenforced hosts and CLI writers can bypass
+  it. It is not cross-host isolation or supported required-mode deployment. Activation still needs
+  owned fork reservation, versioned verified approval audit, journal policy/startup validation,
+  daemon required-mode wiring and TLS assembly. There is no same-pod or self-dial exemption.
 - `IdentityRef` (session identity, `Event.actor`, `ApproveRequest.identity`) is caller-supplied
   provenance. It MUST NOT be read as authenticated identity.
 - `project` is a listing filter, not a tenancy boundary.
-- Any caller can delete any session it can name, irreversibly. Deletion is neither erasure nor
+- On the default service, any caller can delete any session it can name, irreversibly. Deletion is neither erasure nor
   access revocation: the journal, `config`, and metadata stay readable through `GetSession` and
   `Replay` (`OPS-33`), and compute and snapshots are retained until an operator reclaims them
   (`OPS-35`).

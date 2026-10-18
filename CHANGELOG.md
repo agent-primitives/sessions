@@ -9,6 +9,10 @@ not provide.
 
 ### Added
 
+- Opt-in embedded Sessions and registry RPC authorization with verified callers, independent approve
+  permission, exact-caller allowlists, owned creation and SQL owner-filtered pagination. Inputless
+  Exec approval recovery requires resume as well as exec. See the
+  [action mapping and limits](docs/security.md#optional-go-rpc-authorization).
 - `model/openai.NewResponses` adds an explicit stateless Responses client with function tools,
   opaque encrypted reasoning retention, usage, and text streaming. Existing Chat Completions,
   daemon/CLI selection, neutral request hashes and journal schemas remain unchanged. Unsupported
@@ -51,13 +55,18 @@ not provide.
   The reference daemon remains unauthenticated and unenforced; authentication alone is not isolation,
   and there is no daemon required-mode switch.
 - SQLite schema v5 follows approval v3 and deletion v4, adding indexed exact caller issuer/subject
-  ownership and an off-mode journal authorization marker. Legacy and RPC-created sessions remain
+  ownership and an off-mode journal authorization marker. Legacy and unenforced RPC-created sessions remain
   unbound; ordinary metadata writes and copied history cannot assign or replace owners. No events
   or hashes are rewritten, and no wire fields change. Older hosts refuse v5 at open time; this host
   also refuses required, unknown or missing authorization markers at v5 because it cannot enforce
   caller access. Stop all older writers before the first v5 open, following the
-  [rollout order](#sqlite-v4-rollout). Back up first. Sessions RPCs remain unauthenticated and
-  unenforced.
+  [rollout order](#sqlite-v4-rollout). Back up first. The default Sessions service remains
+  unauthenticated and unenforced.
+- The new authorization options do not activate required-mode deployment. Journals still require an
+  off marker and unenforced writers can bypass embedded checks. Enforced Fork refuses before IO;
+  enforced Approve clears request actor without claiming verified audit. Owned fork publication,
+  versioned approval audit, journal policy/startup validation, daemon activation and TLS remain
+  unavailable. No wire fields, canonical event format, schema version or default behavior change.
 - Embedders using `controller.WithToolExecutor` or `placement.WithToolExecutor` must now declare
   durable dedup to keep `Resume` re-driving an interrupted tool call, including a call whose
   executor returned an error the harness did not handle. `Resume` re-runs a turn's trailing

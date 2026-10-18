@@ -18,9 +18,15 @@ reach it, because Sessions RPCs do not check caller authority.
 These are enforced in code and exercised by the conformance suite.
 
 **The log is tamper-evident.** Every record is hash-chained over a canonical form (RFC 8785 JCS over
-proto3-JSON), so altering, removing, or reordering a record breaks verification. The canonicalization
-is language-neutral by design: `hack/verify_chain.py` is an independent Python implementation that
+proto3-JSON), so altering or reordering a record, or removing one that is not at the end, breaks
+verification. Truncating the tail, or replacing the whole log, leaves a chain that verifies;
+detecting it needs an external anchor such as a recorded head hash. The canonicalization is
+language-neutral by design: `hack/verify_chain.py` is an independent Python implementation that
 reproduces the Go hashes, so an auditor does not have to trust the Go binary that wrote the journal.
+The host checks the chain itself before it uses a journal: `Exec`, reconstruction, recovery and
+`Fork` refuse a journal that fails verification (`DATA_LOSS`) before running the harness, calling a
+model or tool, or appending, and `Fork` before checkpointing the parent or provisioning a child, so
+a record changed in storage is not served, extended or copied.
 
 **A superseded writer cannot corrupt a session.** Each incarnation holds a fencing token, and the log
 rejects an append carrying a stale one. A process that was presumed dead and then wakes up cannot
@@ -242,7 +248,9 @@ Given the above, there is one safe shape for this release:
   config in the clear, and anyone who can read it can read every session. Do not put credentials in
   execution config; operational logging omits it, but the durable journal and Replay API expose it.
 - Anyone who can **write** the journal can rewrite history. The chain makes that detectable, not
-  impossible: verification tells you the log was altered, it does not prevent the alteration.
+  impossible: verification tells you the log was altered, it does not prevent the alteration. The
+  chain is also unkeyed, so a writer that recomputes every hash after an edit, or removes records
+  from the end, passes verification, including the host's own check before it uses a journal.
   Journal write access is also as powerful as registry access: the daemon loads stored remote
   addresses even with the operator listener off and dials them when observing or placing sessions,
   so a writer can choose where session history goes and whose calls spend the host's model budget.

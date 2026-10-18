@@ -23,6 +23,18 @@ not provide.
   the Unix socket path.
 - Tool-executor refusal receipts no longer reference an issue number.
 
+### Security
+
+- `Exec`, `Resume` and replay reconstruction (`controller.Controller.Replay`, also `Outputs`) verify
+  the journal's hash chain before using it and refuse one that fails with the new
+  `controller.ErrJournalTampered`; the Sessions API reports `DATA_LOSS`. Before, a record changed in
+  storage without its `content_hash` (disk corruption, a manual edit, a bad migration) was served by
+  replay with no model call, re-driven by `Resume` (the model ran on a changed `INPUT`), extended by
+  `Exec`, and copied by `Fork` into a child whose re-hashed chain then verified. `Resume` of a
+  pending approval (its park and its approval-request repair) and `Fork` (the copied prefix) check
+  the chain too. The chain is unkeyed: this catches corruption and edits that skip rehashing, not a
+  writer that recomputes every hash after its edit, and not records removed from the end.
+
 ### Changed
 
 - `agentsessionsd` now logs at Warn for tool-executor routes that cannot dispatch because
@@ -52,6 +64,21 @@ not provide.
   harness. An override onto a name that aliases the session's own registry entry is not an
   override and still runs. Stateless-to-stateless overrides are unchanged: a stored runtime without
   memory-snapshot support is not contacted for this check, even when its remote harness is down.
+- A journal that fails hash-chain verification is now refused where it used to run: `Exec`, `Resume`
+  (including input-less `Exec` recovery) and `Fork` are `DATA_LOSS` before the harness runs, a model
+  or tool is called, or anything is appended to the session or a child; `Fork` also refuses before a
+  memory-tier parent is checkpointed or any child compute is provisioned. `Resume` of a completed
+  turn on such a journal fails rather than returning as a no-op. Find affected sessions with
+  `python3 hack/verify_chain.py --journal <db>`; nothing is written by the check, so a rollback
+  restores the old behavior. The `Replay` RPC and `Approve` do not check, and `Replay` still returns
+  the stored hashes. `eventlog.ErrTampered` is new and `sqlitelog.ErrTampered` is now the same
+  value, so `errors.Is` against either matches; `sqlitelog` `Verify` messages now begin `eventlog:`,
+  and the in-memory `eventlog.Log.Verify` wraps it too. On the in-memory store, a harness that
+  changes a value the host returned in place (a recorded completion) now fails the session's next
+  `Exec`, `Replay` or `Resume` with `controller.ErrJournalTampered`, where before only `Verify`
+  failed. Each controller recanonicalizes the whole journal on its first read and only new records
+  afterwards (about 23 us per 1.2 KB record on an Apple M1 Pro), so a turn on a long session costs
+  one more pass over its journal.
 
 #### Substrate backend
 

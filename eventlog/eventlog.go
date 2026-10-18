@@ -13,7 +13,7 @@ package eventlog
 
 import (
 	"errors"
-	"strconv"
+	"fmt"
 	"sync"
 
 	"github.com/agent-primitives/sessions/api"
@@ -27,6 +27,15 @@ var ErrConflict = errors.New("eventlog: seq conflict (single-writer compare-and-
 // ErrFenced is returned when Append is called with a fencing token older than the
 // current one — a superseded (zombie) incarnation trying to write.
 var ErrFenced = errors.New("eventlog: stale fencing token (incarnation superseded)")
+
+// ErrTampered reports a hash chain that failed verification: a record's prev_hash is not the
+// previous record's content_hash, or its stored content_hash is not the one canon re-derives from
+// its event. It is distinct from a canonicalization failure, which is returned without it.
+//
+// The chain is unkeyed: it detects corruption and edits that do not recompute the hashes, not a
+// writer that rewrites the events and recomputes every hash after them, and not removal of
+// records from the end of the log.
+var ErrTampered = errors.New("eventlog: hash-chain verification failed (tamper-evident)")
 
 // ErrDeleted refuses writes to a permanently tombstoned session, independent of its fence or head.
 var ErrDeleted = errors.New("eventlog: session is permanently deleted")
@@ -133,21 +142,30 @@ func (l *Log) Read(fromSeq int64) []Record {
 // Snapshot returns a copy of the full record slice (used to seed a fork).
 func (l *Log) Snapshot() []Record { return l.Read(1) }
 
-// Verify walks the chain and returns an error if any link is broken.
+// Verify walks the chain and reports the first integrity violation. A broken link or content_hash
+// wraps ErrTampered.
 func (l *Log) Verify() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	prev := ""
-	for i, r := range l.records {
+	return VerifyChain("", l.records)
+}
+
+// VerifyChain checks that recs, in order, continue a chain whose last record has content_hash
+// prevHash ("" when recs starts at seq 1): each record's prev_hash must be the content_hash before
+// it, and its content_hash must be the one canon re-derives from its seq, prev_hash and event. A
+// mismatch wraps ErrTampered and names the seq; a canonicalization failure does not.
+func VerifyChain(prevHash string, recs []Record) error {
+	prev := prevHash
+	for _, r := range recs {
 		if r.PrevHash != prev {
-			return errors.New("eventlog: broken chain at index " + strconv.Itoa(i) + " (prev_hash mismatch)")
+			return fmt.Errorf("%w: prev_hash mismatch at seq %d", ErrTampered, r.Seq)
 		}
 		want, err := canon.HashRecord(prev, r.Seq, r.Event)
 		if err != nil {
-			return err
+			return fmt.Errorf("eventlog: canonicalize seq %d: %w", r.Seq, err)
 		}
 		if r.Hash != want {
-			return errors.New("eventlog: content hash mismatch at index " + strconv.Itoa(i))
+			return fmt.Errorf("%w: content_hash mismatch at seq %d", ErrTampered, r.Seq)
 		}
 		prev = r.Hash
 	}

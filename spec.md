@@ -360,6 +360,34 @@ no flattened lifecycle enum.
   each record's `prev_hash` equals the expected value, recompute `content_hash` per `CHAIN-2`, and
   report a mismatch of either as tampering.
 - `CHAIN-10`: A verifier MUST recompute hashes from the event content, not trust stored hashes.
+- `CHAIN-12`: A host MUST verify a session's records per `CHAIN-9` and `CHAIN-10` before
+  reconstruction (§8.5) serves them, recovery (§8.6) re-drives them, `Exec` (§11.4) appends a new
+  execution after them, an approval-request repair (`APR-13`) appends to them, or `Fork` (§11.7)
+  copies them into a child. On a mismatch it MUST refuse before the harness runs, before any model
+  or tool call, and before the operation appends anything (for `Fork`, also before the parent is
+  checkpointed and before any child is provisioned, fenced or written: copying re-hashes the prefix,
+  so an unchecked copy would turn a changed record into a child chain that verifies); the session
+  service reports `DATA_LOSS`. Recovery refuses even when its no-op case (`EXE-20`) would apply.
+- The reference controller (`controller.ErrJournalTampered`, wrapping `eventlog.ErrTampered`, which
+  is `sqlitelog.ErrTampered`) verifies the whole journal on its first read and afterwards only the
+  records appended since, after checking that the last verified record still has the same seq and
+  `content_hash`. A record below that point whose event changes later in the same controller's life
+  is not re-checked.
+- In the reference host the check runs in the controller, in placement before it answers an owned
+  gate with no decision (`APR-13`: the park and the request repair both refuse, so a tampered parked
+  journal is `DATA_LOSS` on `Resume` and input-less `Exec`), and at the start of `Fork`. On `Exec`
+  and `Resume` earlier steps still run on unverified records: on `Exec`, approval inspection,
+  admission (`Describe`), runtime `Create` and the fence mint; on `Resume`, approval inspection,
+  recorded-harness routing, admission, `Restore` and the fence mint. A tampered record that makes
+  one of those steps fail is reported with that step's error, not `DATA_LOSS`. `Fork` checks the
+  copied records `1..at_seq` before admission, the memory-tier parent snapshot and `SUSPEND`
+  (`OPS-25`) and any per-child `Runtime.Fork` (`OPS-24`), and the controller checks them again
+  before each child is fenced. `Approve` and the `Replay` RPC (§6.6) do not verify; `Replay` returns
+  the stored hashes so the caller can. `GetSession` and the session frame `Exec` sends before the
+  turn report the stored session row, including `pending_approval`, not journal records, and are not
+  gated.
+- The chain is unkeyed. `CHAIN-12` catches storage corruption and edits that do not recompute the
+  hashes. A journal writer that rewrites an event and recomputes every later hash is not detected.
 - Verification proves internal consistency only. Removing records from the end of a log, or
   replacing the whole log, is not detectable from the log alone; detecting it requires an external
   anchor (for example a recorded head hash), which this draft does not define.
@@ -479,16 +507,17 @@ These are named in the reference controller. The numbering is the code's.
   legacy prefix followed by modern executions is replayed up to its last `END` (not at all if it
   has none; an `ERROR` does not count here, unlike `EXE-29`). `EXE-32` defines how the legacy
   execution is replayed.
-- `EXE-18`: Before running any harness, reconstruction MUST check every selected execution's
-  recorded harness identity (§8.6) and input completeness (§8.6).
+- `EXE-18`: Before running any harness, reconstruction MUST check the chain (`CHAIN-12`) and every
+  selected execution's recorded harness identity (§8.6) and input completeness (§8.6).
 - `EXE-19`: Inputs, config, and `resume_from_seq` MUST come from the journal, not from the caller.
 
 ### 8.6 Recovery (Resume)
 
 - `EXE-20`: Recovery MUST select the latest execution. If the log has no execution (it is empty or
   holds only `LIFECYCLE` records) or that execution is complete (`EXE-6`; for the legacy
-  execution, `EXE-29`), recovery is a no-op: it performs no harness identity check and no
-  `Describe` of its own. `Resume`'s admission (`RT-1`) still runs before recovery.
+  execution, `EXE-29`), recovery is a no-op once the chain verifies (`CHAIN-12`): it performs no
+  harness identity check and no `Describe` of its own. `Resume`'s admission (`RT-1`) still runs
+  before recovery.
 - `EXE-21`: Recovery serves recorded effects as in §8.5 until they are exhausted, then switches to
   the live path for new effects only.
 - `EXE-22`: Model cut rule, outside legacy recovery (`EXE-30`): if the trailing effect is a
@@ -501,10 +530,10 @@ These are named in the reference controller. The numbering is the code's.
   `Harness.Connect` it always fails (`EXE-33`).
 - `EXE-23`: Recovery that fails after the harness has started running appends a best-effort
   `EVENT_ERROR`; recovery that succeeds appends `EVENT_END`. Failures raised before the harness
-  runs (invalid log, incomplete invocation `EXE-24`, harness identity `EXE-25`, inherited intent
-  `EXE-26`, an unfinished legacy execution without a session uid `EXE-30`) append nothing. A run
-  stopped after an approval intent is recorded (a park, or a failure recording the approval
-  request or receipt, §10) appends neither `ERROR` nor `END`.
+  runs (a chain mismatch `CHAIN-12`, invalid log, incomplete invocation `EXE-24`, harness identity
+  `EXE-25`, inherited intent `EXE-26`, an unfinished legacy execution without a session uid
+  `EXE-30`) append nothing. A run stopped after an approval intent is recorded (a park, or a
+  failure recording the approval request or receipt, §10) appends neither `ERROR` nor `END`.
 - `EXE-24`: Input completeness, for an execution that has an `EXECUTION_START`: a missing or
   negative `input_count`, an `EVENT_INPUT` with no message, or a count different from the
   committed `EVENT_INPUT` records is an invalid log for a completed or selected execution. A
@@ -800,8 +829,8 @@ invokes no harness and stays a no-op without one.
     session or harness (`OPS-10`), the pin (`OPS-6`), and the stored harness's half of the
     memory-tier override check (`OPS-7`), which runs `Describe` on the stored harness and can fail
     `UNAVAILABLE`, `FAILED_PRECONDITION`, or with a context error. Placement admission (`RT-1`:
-    `Describe`, descriptor id, `CanPlace`, and the override's half of `OPS-7`),
-    `expected_last_seq` (`OPS-13`), and the run itself fail after the frame.
+    `Describe`, descriptor id, `CanPlace`, and the override's half of `OPS-7`), the chain check
+    (`CHAIN-12`), `expected_last_seq` (`OPS-13`), and the run itself fail after the frame.
   - Input-less approval recovery (`OPS-14`): only the session lookup, the approval inspection,
     the journal head read, and materializing the session for the frame precede it. Routing by the
     recorded harness (`OPS-8`), the pin, the memory-tier override check, the deadline,
@@ -964,6 +993,7 @@ does not erase data or reclaim compute.
 | Any other `Describe` error on those paths, for example a peer `UNIMPLEMENTED` or `INTERNAL`, or a plain error from an in-process harness (during the turn, even one returned after the host's bound expired) | `INTERNAL` |
 | Any `Describe` error in the stored harness's half of the memory-tier override check (`OPS-7`) while the caller's context is live | `UNAVAILABLE` |
 | Caller deadline or cancellation during admission, any `Describe` above, or `DeleteSession` | `DEADLINE_EXCEEDED` or `CANCELLED` |
+| Journal hash chain fails verification on `Exec`, `Resume` (including an `APR-13` park or request repair) or `Fork` (`CHAIN-12`) | `DATA_LOSS` |
 | `Cancel` | `UNIMPLEMENTED` |
 | Any other failure | `INTERNAL` |
 
@@ -1304,6 +1334,7 @@ involved, and `TestApprovalRawProtocol` uses neither controller nor journal.
 | `TestResumeCutBeforeUsageJournalsZeroOrNoUsage` | Cut between `OUTPUT` and `USAGE` serves zero usage | `EXE-21` |
 | `TestForkEquivalence` | Child prefix hashes equal the parent's; both chains verify | `CHAIN-8` |
 | `TestSingleWriter` | A second controller with a stale cursor (0) is rejected | `LOG-7`, `EXE-2` |
+| `TestTamperedJournalRefusedBeforeUse` | A stored `OUTPUT` changed without its hash refuses reconstruction, recovery and `Exec` with 0 model calls and no append | `CHAIN-12` |
 | `TestIntegrityGoldenVectorCrossImpl` | Python verifier reproduces the Go `content_hash` (skipped without python3) | `CHAIN-11` |
 | `TestCrashMidToolCallAtMostOnce` | Trailing intent re-driven under the same key; one effect, one receipt | `TOOL-10`, `TOOL-11` |
 | `TestControllerMediatedToolRequiresKey` | Keyless call rejected; no `TOOL_CALL` recorded | `TOOL-4` |
@@ -1357,7 +1388,9 @@ The reference implementation protects the integrity of the record, not access to
 - `Describe` admission is not bound to the `Connect` stream. `RT-3` repeats it on the turn's own
   connection, which narrows the window but does not close it: a reconnect or a proxy between the
   two calls can route `Connect` to a different harness than the one that answered `Describe`.
-- The chain does not detect tail truncation or whole-log replacement (§7.3).
+- The chain does not detect tail truncation or whole-log replacement (§7.3). It is unkeyed, so a
+  journal writer can also rewrite an event and recompute every later hash; `CHAIN-12` refuses only
+  journals whose stored hashes no longer match their content.
 - `ExecRequest.config` and every journaled payload are durable and readable through `Replay`.
   Credentials MUST NOT be placed in them.
 - At-most-once tool execution depends on executor deduplication (`TOOL-11`). An executor that does

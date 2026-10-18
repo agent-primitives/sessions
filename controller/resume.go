@@ -55,6 +55,9 @@ func ResumeInvocation(log eventlog.Store) (*api.ExecutionStart, error) {
 // Outside a legacy ID-less prefix, ERROR events, including those left by earlier failed Resume
 // attempts, are not effects: they stay in the journal as an audit trail, are skipped when the
 // effect stream is rebuilt, and do not end the execution, so a later Resume still recovers it.
+//
+// A journal whose hash chain fails verification returns ErrJournalTampered before Describe, Run, an
+// approval repair or any append, even when its last turn is complete.
 func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var recordCount, recordedEffectCount int
@@ -72,7 +75,7 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		return false, err
 	}
 
-	recs, err := c.log.Read(1)
+	recs, err := c.readJournal()
 	if err != nil {
 		return false, err
 	}

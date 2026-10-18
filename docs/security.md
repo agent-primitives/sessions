@@ -272,8 +272,9 @@ for enforcement ([#127](https://github.com/agent-primitives/sessions/issues/127)
 it, since nil retains the full project listing. Its unsigned cursors are not caller-bound credentials.
 
 These ownership/authorization contracts are not wired into Sessions RPCs or the daemon. They provide
-no authentication, TLS or access-control enforcement. SQLite schema v5 carries an off-mode authorization marker;
-this host refuses required, unknown or missing markers even at the same schema version. There is
+no authentication, TLS or access-control enforcement. SQLite schema v5 carries an off-mode
+authorization marker; this host refuses required, unknown or missing markers even at the same
+schema version. There is
 no supported switch to enable required mode. The marker is checked only at Open. Changing it
 requires stopping every writer, including embedded CLI processes, then restarting all hosts with
 binaries that support the new mode; already-open hosts do not recheck it.
@@ -283,21 +284,29 @@ untrusted network.
 ## Optional Go caller authentication
 
 Custom hosts can install both interceptors returned by `authn.NewInterceptors` on a gRPC server.
-Install them outermost, before any interceptor that discloses data or performs effects.
+Install them before any interceptor that discloses data or performs effects. A panic-recovery
+interceptor may wrap them; grpc-go does not recover verifier panics.
 `authn.Required` requires a `CallerVerifier`; `authn.Off` skips verification and installs no caller.
 The verifier reads incoming metadata or verified TLS peer information and returns only an exact
 issuer/subject pair and a future credential expiry, never credentials. Adapters must reject missing,
 malformed, duplicate and expired credentials, validate signatures, exact allowed issuers,
 per-issuer audiences and explicit claim mappings. Do not discover trust from untrusted issuer URLs.
-No credential format or production verifier is bundled.
+Adapters also own failure logging and metrics, without credential material. The interceptors
+sanitize verifier errors on the wire and do not log or count them. No credential format or
+production verifier is bundled.
 
 The interceptors validate identity/expiry and return generic `UNAUTHENTICATED` on verification
-failure, without anonymous fallback or method exemptions. `authn.Caller(ctx)` exposes the verified
-pair; request identity and forwarded headers do not establish it. Streams get the earlier caller
-deadline or verified expiry; expiry reports `UNAUTHENTICATED`, while caller cancellation/deadlines
-retain their codes. Expiry overrides even a successful handler return; effects may already have
-completed. Handlers must cooperate with cancellation. There is no in-stream refresh,
-interruption of transport I/O already in progress, or rollback of an in-flight effect.
+failure, without anonymous fallback or method exemptions. Health and reflection on the same server
+also require credentials; kubelet gRPC probes cannot send them. Hosts should serve health and
+reflection on a separate server/listener, with appropriate network access restrictions.
+`authn.Caller(ctx)` exposes the verified pair; request identity and forwarded headers do not establish
+it. Unary calls authenticate once at admission: credential expiry does not add a handler deadline,
+end the call, or remove its verified caller. The caller's own cancellation/deadline still applies.
+Only streams get the earlier caller deadline or verified expiry; expiry reports `UNAUTHENTICATED`,
+while caller cancellation/deadlines retain their codes. Stream expiry overrides even a successful
+handler return; effects may already have completed. Handlers must cooperate with cancellation. There
+is no in-stream refresh, interruption of transport I/O already in progress, or rollback of an
+in-flight effect.
 
 Authentication alone is not isolation. Hosts still need authorization before disclosure/effects,
 TLS with server identity validation, and a compatible journal policy. None is assembled by these

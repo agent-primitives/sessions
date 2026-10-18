@@ -7,6 +7,16 @@ not provide.
 
 ## Unreleased
 
+### Added
+
+- `model/openai.NewResponses` adds an explicit stateless Responses client with function tools,
+  opaque encrypted reasoning retention, usage, and text streaming. Existing Chat Completions,
+  daemon/CLI selection, neutral request hashes and journal schemas remain unchanged. Unsupported
+  content and controls refuse rather than being dropped. Assistant text history uses `output_text`;
+  system/user text uses `input_text`. Model-call diagnostics retain categories, HTTP status and bounded
+  provider `error.code`/`error.param` identifiers, not messages or transport URLs/details; see
+  [mapping and limits](docs/responses-adapter.md).
+
 ### Fixed
 
 - Socket executor write/read errors, including journaled approval receipts, no longer expose
@@ -21,8 +31,9 @@ not provide.
 ### Compatibility
 
 - Optional `authn` interceptors reject unverified calls in required mode and expire authenticated
-  streams. The reference daemon remains unauthenticated and unenforced; authentication alone is
-  not isolation, and there is no daemon required-mode switch.
+  streams. Unary authentication is admission-only; credential expiry does not end an admitted call.
+  The reference daemon remains unauthenticated and unenforced; authentication alone is not isolation,
+  and there is no daemon required-mode switch.
 - SQLite schema v5 follows approval v3 and deletion v4, adding indexed exact caller issuer/subject
   ownership and an off-mode journal authorization marker. Legacy and RPC-created sessions remain
   unbound; ordinary metadata writes and copied history cannot assign or replace owners. No events

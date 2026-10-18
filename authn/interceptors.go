@@ -23,7 +23,9 @@ type VerifiedCaller struct {
 // CallerVerifier verifies incoming credentials from metadata or a verified TLS
 // peer. Implementations must reject missing, malformed, duplicate and expired
 // credentials, validate issuer/audience and signatures, and honor cancellation.
-// Never discover trust configuration from untrusted issuer URLs.
+// Never discover trust configuration from untrusted issuer URLs. Adapters own
+// failure logging and metrics, without credential material; interceptors return
+// generic authentication errors and do not log or count verifier failures.
 type CallerVerifier interface {
 	Verify(context.Context) (VerifiedCaller, error)
 }
@@ -53,10 +55,13 @@ var (
 )
 
 // NewInterceptors constructs authentication for every RPC on a gRPC server,
-// without method exemptions. Install them outermost, before interceptors that
-// disclose data or perform effects. Required needs a verifier; invalid modes fail here.
+// without method exemptions. Install them before interceptors that disclose data
+// or perform effects; a panic-recovery interceptor may wrap them, since grpc-go
+// does not recover verifier panics. Required needs a verifier; invalid modes fail here.
 // Authentication alone is not isolation: handlers still need authorization and
-// operators must assemble a trusted transport. Stream expiry is cooperative;
+// operators must assemble a trusted transport. Unary authentication is admission-only:
+// credential expiry does not end an admitted call or remove its caller identity.
+// Only stream contexts are bounded by credential expiry. Stream expiry is cooperative;
 // it cannot undo effects or interrupt transport I/O already in progress.
 func NewInterceptors(mode Mode, verifier CallerVerifier) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor, error) {
 	if mode != Off && mode != Required {

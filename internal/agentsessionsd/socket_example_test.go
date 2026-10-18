@@ -122,11 +122,15 @@ func TestDocumentedPythonExecutorLogsStorageFailureWithoutPayload(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer db.Close()
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("BEGIN IMMEDIATE"); err != nil {
+	// Readiness means schema initialization has finished. Remove the receipt table
+	// to force a storage error without coupling the response deadline to SQLite's
+	// platform-dependent busy/lock waits.
+	if _, err := db.Exec("DROP TABLE receipts"); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _, _ = db.Exec("ROLLBACK") }()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	conn, err := net.DialTimeout("unix", socket, time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +152,7 @@ func TestDocumentedPythonExecutorLogsStorageFailureWithoutPayload(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(diagnostics), "SQLITE_BUSY") || strings.Contains(string(diagnostics), "TOP_SECRET_DO_NOT_LOG") {
+	if !strings.Contains(string(diagnostics), "executor storage failure: OperationalError SQLITE_ERROR") || strings.Contains(string(diagnostics), "TOP_SECRET_DO_NOT_LOG") {
 		t.Fatalf("missing safe storage diagnostic: %s", diagnostics)
 	}
 }

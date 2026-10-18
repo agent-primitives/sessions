@@ -1348,7 +1348,9 @@ The reference implementation protects the integrity of the record, not access to
   and expired credentials. It returns an exact `api.CallerIdentity` and a future `ValidUntil`.
   Invalid identities/expiry or verifier errors return generic `UNAUTHENTICATED`, never an
   anonymous fallback. Only the interceptors install the private context read by `authn.Caller`.
-- Authenticated stream contexts end at the earlier caller deadline or credential expiry. Expiry
+- Unary calls authenticate once at admission. Credential expiry does not add a handler deadline,
+  end the call, or remove its verified caller; caller cancellation/deadlines still apply.
+  Only authenticated stream contexts end at the earlier caller deadline or credential expiry. Expiry
   returns `UNAUTHENTICATED`; caller cancellation/deadlines retain their status codes. Cancellation
   is cooperative: no in-stream refresh, interruption of transport I/O already in progress, or undo
   of in-flight effects is promised. Authentication alone is not isolation: these interceptors

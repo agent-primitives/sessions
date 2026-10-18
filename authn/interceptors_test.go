@@ -164,6 +164,37 @@ func TestReceiveReturningAfterExpiry(t *testing.T) {
 	assertCode(t, err, codes.Unauthenticated)
 }
 
+func TestUnaryAuthenticationAtAdmission(t *testing.T) {
+	var expiry time.Time
+	u, _, err := NewInterceptors(Required, verifierFunc(func(context.Context) (VerifiedCaller, error) {
+		expiry = time.Now().Add(10 * time.Millisecond)
+		return VerifiedCaller{testIdentity, expiry}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := u(context.Background(), nil, nil, func(ctx context.Context, _ any) (any, error) {
+		if _, ok := ctx.Deadline(); ok {
+			t.Fatal("unary authentication installed a credential deadline")
+		}
+		// Outlive the credential without canceling the admitted call.
+		timer := time.NewTimer(time.Until(expiry))
+		defer timer.Stop()
+		<-timer.C
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("admitted unary context ended: %v", err)
+		}
+		if got, ok := Caller(ctx); !ok || got != testIdentity {
+			t.Fatal("admitted unary call lost its verified identity")
+		}
+		return "completed", nil
+	})
+	assertCode(t, err, codes.OK)
+	if response != "completed" {
+		t.Fatalf("response = %v, want completed", response)
+	}
+}
+
 func TestUnaryCancellationDuringHandler(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

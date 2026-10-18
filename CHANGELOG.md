@@ -7,6 +7,8 @@ not provide.
 
 ## Unreleased
 
+### Added
+
 - `model/openai.NewResponses` adds an explicit stateless Responses client with function tools,
   opaque encrypted reasoning retention, usage, and text streaming. Existing Chat Completions,
   daemon/CLI selection, neutral request hashes and journal schemas remain unchanged. Unsupported
@@ -15,6 +17,16 @@ not provide.
   provider `error.code`/`error.param` identifiers, not messages or transport URLs/details; see
   [mapping and limits](docs/responses-adapter.md).
 
+### Fixed
+
+- Socket executor write/read errors, including journaled approval receipts, no longer expose
+  the Unix socket path.
+- Tool-executor refusal receipts no longer reference an issue number.
+
+### Changed
+
+- `agentsessionsd` now logs at Warn for tool-executor routes that cannot dispatch because
+  `durable_dedup` is false or unknown.
 ### Compatibility
 
 #### Sessions API

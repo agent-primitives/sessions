@@ -82,7 +82,8 @@ requires `name`, `type: "unix"`, and `socket`. Each tool requires `harness`, `to
 silently overrides the other. Startup never probes/dials the socket.
 
 `durable_dedup` is true, false, or null; missing/null means unknown. Each route's declaration
-is surfaced in structured startup logs alongside harness, tool and executor names.
+is surfaced in structured startup logs alongside harness, tool and executor names: true at
+Info, false/unknown at Warn.
 **Only explicit true dispatches today, even for a first attempt.** False/unknown remain
 representable but refuse before dialing until [#139](https://github.com/agent-primitives/sessions/issues/139)
 provides a safe recovery policy. This restriction is deliberate: the current ToolFunc API
@@ -147,6 +148,13 @@ it with the same identity, relying on the executor's true declaration. Completed
 receipts are replayed without dialing. Approved calls instead turn executor errors into
 **durable EXECUTOR_ERROR receipts**, including false/unknown/unconfigured-tool refusals.
 Changing configuration afterward does not retry such a receipted failure.
+
+Cancelling Resume while an approved call is in flight closes its socket connection. If the
+controller commits the resulting error receipt, that **EXECUTOR_ERROR is permanent**, even
+with `durable_dedup: true`; subsequent Resume replays it without dialing. Graceful daemon
+shutdown (`SIGINT`/`SIGTERM`) instead drains in-flight calls with `GracefulStop`, so a call
+can still succeed. A hard crash before the receipt commits leaves the approved call eligible
+for redrive with the original session UID and idempotency key.
 
 **EXECUTOR_ERROR does not prove no effect occurred.** An executor can commit its effect and
 lose the response; approved recovery records an error and will not redial to retrieve the

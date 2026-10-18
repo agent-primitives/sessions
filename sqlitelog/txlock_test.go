@@ -97,7 +97,7 @@ func TestOpenSerializesWritersForEveryDSNForm(t *testing.T) {
 				case <-time.After(250 * time.Millisecond):
 				}
 			} else {
-				// Let both take their read snapshot before the holder's write lands.
+				// Let both take their read snapshot before the holder commits.
 				time.Sleep(250 * time.Millisecond)
 			}
 			if err := tx.Commit(); err != nil {
@@ -131,8 +131,9 @@ func TestOpenSerializesWritersForEveryDSNForm(t *testing.T) {
 	}
 }
 
-// A DSN query the driver cannot use is passed through untouched, so Open fails with the driver's
-// error instead of opening the database with the caller's parameters dropped.
+// A DSN query the driver cannot use makes Open fail with the driver's error instead of opening the
+// database with the caller's parameters dropped. The unknown _txlock row also shows Open keeps the
+// caller's _txlock: replacing it with immediate would let Open succeed.
 func TestOpenRejectsUnusableDSNQuery(t *testing.T) {
 	for name, query := range map[string]string{
 		"malformed escape": "mode=rwc&x=%zz",

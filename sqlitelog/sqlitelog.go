@@ -291,9 +291,11 @@ type Store struct {
 
 // Open opens (creating if needed) the sqlite database at path and migrates it to SchemaVersion.
 // path is a file name, a "file:" URI, or either with a "?" query of modernc.org/sqlite DSN
-// parameters. Use ":memory:" for an ephemeral store. For a file-backed store it uses BEGIN
-// IMMEDIATE (via the _txlock DSN parameter, added unless path already sets one) so
-// cross-process writers take the write lock upfront and serialize cleanly instead of deadlocking on
+// parameters. Use ":memory:" for an ephemeral store. A file name without a query is opened as a
+// "file:" URI, so '#' and "%XX" in it are URI syntax ("/d/a#b.db" opens "/d/a"); to name such a
+// file, pass a "file:" URI with those characters percent-escaped. For a file-backed store it uses
+// BEGIN IMMEDIATE (via the _txlock DSN parameter, added unless path already sets a non-empty one)
+// so cross-process writers take the write lock upfront and serialize cleanly instead of deadlocking on
 // a lock upgrade (SQLITE_BUSY), and synchronous=FULL so every committed transaction is durable
 // across power loss, not just process death.
 //

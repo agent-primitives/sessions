@@ -66,7 +66,7 @@ func (h openaiToolHarness) Run(ctx context.Context, start *api.Start, sink api.E
 
 // A rejected provider completion must not become a journaled output or a host effect.
 // Exercise Harness.Connect too: adapter errors are copied into durable ERROR descriptions.
-func assertOpenAICompletionRefused(t *testing.T, streaming bool, body, private string) {
+func assertOpenAICompletionRefused(t *testing.T, streaming bool, body, private, wantError string) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, body)
@@ -76,8 +76,8 @@ func assertOpenAICompletionRefused(t *testing.T, streaming bool, body, private s
 	if err != nil {
 		t.Fatal(err)
 	}
-	var toolCalls atomic.Int64
-	opts := []controller.Option{controller.WithSessionUID("refused"), controller.WithToolExecutor(func(_ context.Context, _ controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+	var toolCalls, deltas atomic.Int64
+	opts := []controller.Option{controller.WithSessionUID("refused"), controller.WithObserver(controller.Observer{OnDelta: func(api.Delta) { deltas.Add(1) }}), controller.WithToolExecutor(func(_ context.Context, _ controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
 		toolCalls.Add(1)
 		return api.ToolResult{ID: call.ID}, nil
 	})}
@@ -94,17 +94,17 @@ func assertOpenAICompletionRefused(t *testing.T, streaming bool, body, private s
 		t.Fatal(err)
 	}
 	err = c.Exec(t.Context(), har, []api.Message{*api.TextMessage("user", "weather?")}, 0)
-	if err == nil || !strings.Contains(err.Error(), openai.ErrUnsupportedPart.Error()) {
-		t.Errorf("err=%v, want refused completion", err)
+	if err == nil || !strings.Contains(err.Error(), wantError) {
+		t.Errorf("err=%v, want refused completion containing %q", err, wantError)
 	}
 	if private != "" && err != nil && strings.Contains(err.Error(), private) {
-		t.Errorf("argument payload leaked into returned error: %v", err)
+		t.Errorf("payload leaked into returned error: %v", err)
 	}
 	if report := <-h.reports; len(report.responses) != 0 {
 		t.Errorf("harness received rejected completion: %+v", report.responses)
 	}
-	if toolCalls.Load() != 0 {
-		t.Errorf("executor called %d times for rejected completion", toolCalls.Load())
+	if toolCalls.Load() != 0 || deltas.Load() != 0 {
+		t.Errorf("rejected completion produced %d tool effects and %d deltas", toolCalls.Load(), deltas.Load())
 	}
 	records, err := journal.Read(1)
 	if err != nil {
@@ -119,8 +119,13 @@ func assertOpenAICompletionRefused(t *testing.T, streaming bool, body, private s
 			errorsRecorded++
 			if record.Event.Err == nil {
 				t.Error("ERROR has no description")
-			} else if private != "" && strings.Contains(record.Event.Err.Description, private) {
-				t.Errorf("argument payload leaked into journal ERROR: %s", record.Event.Err.Description)
+			} else {
+				if !strings.Contains(record.Event.Err.Description, wantError) {
+					t.Errorf("journal ERROR=%q, want %q", record.Event.Err.Description, wantError)
+				}
+				if private != "" && strings.Contains(record.Event.Err.Description, private) {
+					t.Errorf("payload leaked into journal ERROR: %s", record.Event.Err.Description)
+				}
 			}
 		}
 	}
@@ -141,7 +146,27 @@ func TestOpenAIToolArgumentErrorPrivacy(t *testing.T) {
 			if streaming {
 				body = fmt.Sprintf("data: {\"choices\":[{\"delta\":%s,\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n", message)
 			}
-			assertOpenAICompletionRefused(t, streaming, body, private)
+			assertOpenAICompletionRefused(t, streaming, body, private, openai.ErrUnsupportedPart.Error())
+		})
+	}
+}
+
+func TestOpenAIDecodeErrorPrivacy(t *testing.T) {
+	const private = "987654321098765432109876543210e10000"
+	for _, tc := range []struct {
+		name, body, stage string
+		streaming         bool
+	}{
+		{"tool index", `{"choices":[{"delta":{"content":"must not emit","tool_calls":[{"index":` + private + `}]}}]}`, "decode stream chunk", true},
+		{"stream usage", `{"choices":[],"usage":{"prompt_tokens":` + private + `}}`, "decode stream chunk", true},
+		{"response usage", `{"choices":[{"message":{"content":"must not emit"}}],"usage":{"prompt_tokens":` + private + `}}`, "decode response", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := tc.body
+			if tc.streaming {
+				body = "data: " + body + "\n\ndata: [DONE]\n\n"
+			}
+			assertOpenAICompletionRefused(t, tc.streaming, body, private, tc.stage)
 		})
 	}
 }
@@ -153,7 +178,7 @@ func TestOpenAIRefusesToolCallsCompletedAfterFinish(t *testing.T) {
 		{"argument suffix after finish", `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\"n\":"}}]}}]}` + "\n\n" + finish + `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}` + "\n\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assertOpenAICompletionRefused(t, true, tc.body+"data: [DONE]\n\n", "")
+			assertOpenAICompletionRefused(t, true, tc.body+"data: [DONE]\n\n", "", openai.ErrUnsupportedPart.Error())
 		})
 	}
 }

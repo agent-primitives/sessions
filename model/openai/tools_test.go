@@ -246,6 +246,49 @@ func TestToolArgumentErrorsDoNotExposePayload(t *testing.T) {
 	}
 }
 
+func TestDecodeErrorsDoNotExposePayload(t *testing.T) {
+	const private = "987654321098765432109876543210"
+	for _, tc := range []struct {
+		name, body, want string
+		streaming        bool
+	}{
+		{"index range", `{"choices":[{"delta":{"content":"must not emit","tool_calls":[{"index":` + private + `}]}}]}`, "JSON value has the wrong type or is out of range for field choices.delta.tool_calls.index", true},
+		{"index exponent", `{"choices":[{"delta":{"tool_calls":[{"index":` + private + `e10000}]}}]}`, "JSON value has the wrong type or is out of range for field choices.delta.tool_calls.index", true},
+		{"index type", `{"choices":[{"delta":{"tool_calls":[{"index":"` + private + `"}]}}]}`, "JSON value has the wrong type or is out of range for field choices.delta.tool_calls.index", true},
+		{"stream syntax", `{"choices":[],"` + private + `":}`, "invalid JSON syntax", true},
+		{"response syntax", `{"choices":[],"` + private + `":}`, "invalid JSON syntax", false},
+		{"stream usage", `{"usage":{"prompt_tokens":` + private + `e10000}}`, "JSON value has the wrong type or is out of range for field usage.prompt_tokens", true},
+		{"response usage", `{"usage":{"prompt_tokens":` + private + `e10000}}`, "JSON value has the wrong type or is out of range for field usage.prompt_tokens", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				if tc.streaming {
+					fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", tc.body)
+				} else {
+					fmt.Fprint(w, tc.body)
+				}
+			})
+			var got api.ModelResponse
+			var err error
+			stage := "decode response"
+			if tc.streaming {
+				stage = "decode stream chunk"
+				got, err = c.StreamModel(t.Context(), api.ModelRequest{}, func(string) { t.Error("rejected chunk emitted text") })
+			} else {
+				got, err = c.Model(t.Context(), api.ModelRequest{})
+			}
+			if err == nil || !strings.Contains(err.Error(), stage+": "+tc.want) || len(got.Message.Parts) != 0 {
+				t.Fatalf("response=%+v err=%v, want %s: %s and no completion", got, err, stage, tc.want)
+			}
+			var syntax *json.SyntaxError
+			var typeError *json.UnmarshalTypeError
+			if strings.Contains(err.Error(), private) || errors.As(err, &syntax) || errors.As(err, &typeError) {
+				t.Fatalf("raw decoder diagnostic escaped: %v", err)
+			}
+		})
+	}
+}
+
 func TestModelRefusesMalformedToolCompletions(t *testing.T) {
 	for _, tc := range []struct{ name, id, kind, args, finish string }{
 		{"invalid JSON", "c", "function", "{", "tool_calls"},

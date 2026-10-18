@@ -308,7 +308,7 @@ func (c *Client) Model(ctx context.Context, req api.ModelRequest) (api.ModelResp
 
 	var out chatResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return api.ModelResponse{}, fmt.Errorf("openai: decode response: %w", err)
+		return api.ModelResponse{}, fmt.Errorf("openai: decode response: %s", jsonDecodeDetail(err))
 	}
 	if len(out.Choices) == 0 {
 		return api.ModelResponse{}, fmt.Errorf("openai: %s returned no choices", model)
@@ -381,7 +381,7 @@ func (c *Client) StreamModel(ctx context.Context, req api.ModelRequest, onChunk 
 		}
 		var chunk chatChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			return api.ModelResponse{}, fmt.Errorf("openai: decode stream chunk: %w", err)
+			return api.ModelResponse{}, fmt.Errorf("openai: decode stream chunk: %s", jsonDecodeDetail(err))
 		}
 		if u := chunk.Usage; u != nil {
 			usage = u.toAPI(model)
@@ -439,6 +439,19 @@ func (c *Client) StreamModel(ctx context.Context, req api.ModelRequest, onChunk 
 	}
 	finalized.Usage = usage
 	return finalized, nil
+}
+
+// jsonDecodeDetail keeps decoder errors safe for durable ERROR descriptions. Raw errors can
+// contain provider-controlled values; Field names only the statically declared struct fields.
+func jsonDecodeDetail(err error) string {
+	if _, syntax := err.(*json.SyntaxError); syntax {
+		return "invalid JSON syntax"
+	}
+	detail := "JSON value has the wrong type or is out of range"
+	if typeError, ok := err.(*json.UnmarshalTypeError); ok && typeError.Field != "" {
+		detail += " for field " + typeError.Field
+	}
+	return detail
 }
 
 // buildRequest resolves the model and encodes the body. Both call paths share it so a streamed turn

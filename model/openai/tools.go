@@ -148,13 +148,7 @@ func toolCallParts(calls []chatToolCall) ([]api.Part, error) {
 		}
 		var args map[string]any
 		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-			// Decoder errors can contain argument values and become durable ERRORs.
-			// Preserve a useful category, not the provider-controlled text or cause.
-			detail := "JSON value has the wrong type or is out of range"
-			if _, syntax := err.(*json.SyntaxError); syntax {
-				detail = "invalid JSON syntax"
-			}
-			return nil, fmt.Errorf("%w: decode tool arguments: %s", ErrUnsupportedPart, detail)
+			return nil, fmt.Errorf("%w: decode tool arguments: %s", ErrUnsupportedPart, jsonDecodeDetail(err))
 		}
 		if args == nil {
 			return nil, fmt.Errorf("%w: tool arguments must be a JSON object", ErrUnsupportedPart)

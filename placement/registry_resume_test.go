@@ -59,7 +59,7 @@ func TestRegistryResumeGuardsInvocationSelectionThroughRecovery(t *testing.T) {
 		}
 	}
 	before := toolRecords(t, log)
-	recorded := newLocalPlacer(t, hostToolHarness{key: "original-key"}, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+	recorded := newLocalPlacer(t, hostToolHarness{key: "original-key"}, dedupAllTools, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 		return api.ToolResult{Output: map[string]any{"receipt": "recovered"}}, nil
 	}))
 	override := newPlacer(t)

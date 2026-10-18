@@ -77,15 +77,26 @@ type options struct {
 	listening func(addr string)
 }
 
-// ToolExecutorFunc returns the host tool executor for the named -harness, or nil for none. sessions
-// is a client of this daemon's own Sessions listener, for an executor that drives other sessions (a
-// tool that runs a turn in a child session, say); it connects on first use. sessions is not usable
-// until Run serves; do not call it while building the executor.
+// ToolExecutorFunc returns the host tool executor for the named -harness, or one with a nil Call
+// for none. sessions is a client of this daemon's own Sessions listener, for an executor that
+// drives other sessions (a tool that runs a turn in a child session, say); it connects on first
+// use. sessions is not usable until Run serves; do not call it while building the executor.
 //
 // Run asks for every -harness once, at startup, before it opens the journal. An error stops Run
 // with that error, so an executor that cannot be built (bad configuration, say) fails the start
 // instead of failing later on a call that may already have been approved.
-type ToolExecutorFunc func(harness string, sessions *client.Client) (controller.ToolFunc, error)
+type ToolExecutorFunc func(harness string, sessions *client.Client) (ToolExecutor, error)
+
+// ToolExecutor is one -harness entry's host tool executor.
+type ToolExecutor struct {
+	// Call runs CONTROLLER_MEDIATED and approved REQUIRES_APPROVAL calls. Nil means the harness has
+	// no executor, and DurableDedup is ignored.
+	Call controller.ToolFunc
+	// DurableDedup declares the tools Call durably deduplicates, as controller.WithDurableDedup.
+	// Nil declares none: Resume then refuses an interrupted call that has no recorded result
+	// (controller.ErrUnansweredToolCall) instead of re-running it.
+	DurableDedup func(tool string) bool
+}
 
 // WithToolExecutors installs host tool executors for CONTROLLER_MEDIATED and approved
 // REQUIRES_APPROVAL tool calls. Without it or -tool-executors no harness has one, and such a call
@@ -94,7 +105,8 @@ type ToolExecutorFunc func(harness string, sessions *client.Client) (controller.
 // HarnessRegistry get no executor.
 //
 // The executor runs only after the controller's own gate: a REQUIRES_APPROVAL call still parks the
-// turn until an Approve decision, and a denied call never reaches it.
+// turn until an Approve decision, and a denied call never reaches it. Resume re-drives an
+// interrupted call that is not approval-gated only for tools in ToolExecutor.DurableDedup.
 func WithToolExecutors(f ToolExecutorFunc) Option {
 	return func(o *options) { o.executors = f }
 }
@@ -172,7 +184,7 @@ func Run(args []string, opts ...Option) error {
 	// dialer reads the listener's address, bound below before the server accepts a request. The
 	// executors are built before the journal opens, so one that fails leaves no journal behind.
 	var selfAddr atomic.Pointer[string]
-	var executors map[string]controller.ToolFunc
+	var executors map[string]ToolExecutor
 	if o.executors != nil {
 		self, err := client.Dial("passthrough:///agentsessionsd", client.WithDialOptions(
 			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
@@ -560,14 +572,14 @@ func errNameTaken(name string) error {
 
 // toolExecutors asks f for each -harness name's executor, in sorted order so a start with two
 // failing names reports the same one every time. It keeps only the names that have one.
-func toolExecutors(remotes remoteHarnesses, f ToolExecutorFunc, sessions *client.Client) (map[string]controller.ToolFunc, error) {
-	executors := map[string]controller.ToolFunc{}
+func toolExecutors(remotes remoteHarnesses, f ToolExecutorFunc, sessions *client.Client) (map[string]ToolExecutor, error) {
+	executors := map[string]ToolExecutor{}
 	for _, name := range remotes.names() {
 		tool, err := f(name, sessions)
 		if err != nil {
 			return nil, fmt.Errorf("tool executor for harness %q: %w", name, err)
 		}
-		if tool != nil {
+		if tool.Call != nil {
 			executors[name] = tool
 		}
 	}
@@ -579,7 +591,7 @@ func toolExecutors(remotes remoteHarnesses, f ToolExecutorFunc, sessions *client
 //
 // executors holds the host tool executor for each -harness name that has one; the built-in
 // harnesses call no host-mediated tools and get none.
-func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.ModelFunc, streamFn controller.StreamFunc, logger *slog.Logger, executors map[string]controller.ToolFunc) (*placement.Registry, func(), error) {
+func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.ModelFunc, streamFn controller.StreamFunc, logger *slog.Logger, executors map[string]ToolExecutor) (*placement.Registry, func(), error) {
 	echo := local.New(echoagent.Harness{}, local.WithLogger(logger))
 	backends := []*local.Backend{echo}
 	var remoteBackends []*remote.Backend
@@ -600,10 +612,15 @@ func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.M
 	}
 	// optsFor adds the named harness's host tool executor, if the caller configured one.
 	optsFor := func(name string) []placement.Option {
-		if tool := executors[name]; tool != nil {
-			return append(slices.Clone(opts), placement.WithToolExecutor(tool))
+		tool := executors[name]
+		if tool.Call == nil {
+			return opts
 		}
-		return opts
+		withTool := append(slices.Clone(opts), placement.WithToolExecutor(tool.Call))
+		if tool.DurableDedup != nil {
+			withTool = append(withTool, placement.WithDurableDedup(tool.DurableDedup))
+		}
+		return withTool
 	}
 	if model != "" {
 		chat := local.New(chatagent.Harness{Model: model}, local.WithLogger(logger))

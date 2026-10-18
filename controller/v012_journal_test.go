@@ -592,7 +592,7 @@ func TestV012ToolIntentRedriveRetainsScope(t *testing.T) {
 		}
 	}
 	toolCalls := 0
-	c, err := controller.New(log, echoagent.Model, controller.WithSessionUID("legacy-session"), controller.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, recovered api.ToolCall) (api.ToolResult, error) {
+	c, err := controller.New(log, echoagent.Model, controller.WithSessionUID("legacy-session"), dedupAll, controller.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, recovered api.ToolCall) (api.ToolResult, error) {
 		toolCalls++
 		if scope.SessionUID != "legacy-session" || !reflect.DeepEqual(call, recovered) {
 			t.Fatalf("tool scope/call changed: %#v, %#v", scope, recovered)

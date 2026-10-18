@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/agent-primitives/sessions/client"
-	"github.com/agent-primitives/sessions/controller"
 )
 
 const validToolConfig = `{"version":1,"executors":[{"name":"e","type":"unix","socket":"/run/tool.sock"}],"tools":[{"harness":"h","tool":"publish","executor":"e","durable_dedup":true}]}`
@@ -110,9 +109,9 @@ func TestRunToolConfigConflictsWithProgrammaticExecutors(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	journal := filepath.Join(t.TempDir(), "j.db")
-	err := Run([]string{"-tool-executors", writeToolConfig(t, `{"version":1}`), "-journal", journal}, WithToolExecutors(func(string, *client.Client) (controller.ToolFunc, error) {
+	err := Run([]string{"-tool-executors", writeToolConfig(t, `{"version":1}`), "-journal", journal}, WithToolExecutors(func(string, *client.Client) (ToolExecutor, error) {
 		t.Fatal("must not call conflicting factory")
-		return nil, nil
+		return ToolExecutor{}, nil
 	}), withContext(ctx))
 	if err == nil || errors.Is(err, ErrUsage) {
 		t.Fatalf("want config conflict, got %v", err)

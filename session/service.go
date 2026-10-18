@@ -1090,6 +1090,8 @@ func resumeError(err error) error {
 		return status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
+	case errors.Is(err, controller.ErrUnansweredToolCall):
+		return status.Errorf(codes.FailedPrecondition, "resume: %v; re-driving it needs a host executor that declares durable dedup for the tool, or Exec a new turn", err)
 	case errors.Is(err, controller.ErrInheritedToolIntent):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v; fork at or after the TOOL_RESULT, or Exec a new turn", err)
 	case errors.Is(err, controller.ErrIncompleteInvocation):

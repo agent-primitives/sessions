@@ -21,6 +21,7 @@ import (
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/controller"
+	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 // A real Unix peer catches wrong transport, framing, routing or repeat connections.
@@ -58,6 +59,11 @@ func socketCall() api.ToolCall {
 }
 
 func configExecutor(t *testing.T, socket string, declaration string, harness string, logs io.Writer) controller.ToolFunc {
+	t.Helper()
+	return configToolExecutor(t, socket, declaration, harness, logs).Call
+}
+
+func configToolExecutor(t *testing.T, socket string, declaration string, harness string, logs io.Writer) ToolExecutor {
 	t.Helper()
 	data := strings.Replace(validToolConfig, "/run/tool.sock", socket, 1)
 	data = strings.Replace(data, `"durable_dedup":true`, `"durable_dedup":`+declaration, 1)
@@ -143,6 +149,110 @@ func TestConfiguredRoutesRefuseWithoutDialing(t *testing.T) {
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("refusal dialed %d times", calls.Load())
+	}
+}
+
+// The daemon declares durable dedup for a tool when its route declares true or when Call refuses
+// it without dialing: declared == !dispatches || durable_dedup. Dispatch is observed on a real
+// socket, so the declaration cannot drift from what Call does. Tool names match exactly.
+func TestConfiguredRoutesDeclareDurableDedupUnlessTheyDialUndeclared(t *testing.T) {
+	socket, calls := unixToolPeer(t, func(net.Conn) {})
+	for _, declaration := range []string{"true", "false", "null"} {
+		executor := configToolExecutor(t, socket, declaration, "h", io.Discard)
+		if executor.Call == nil || executor.DurableDedup == nil {
+			t.Fatalf("%s route: executor = %+v, want a call and a declaration", declaration, executor)
+		}
+		for _, tool := range []string{"publish", "Publish", "unconfigured", ""} {
+			call := socketCall()
+			call.Tool = tool
+			before := calls.Load()
+			_, _ = executor.Call(t.Context(), controller.ToolCallContext{SessionUID: "session"}, call)
+			dispatched := calls.Load() != before
+			durableDedup := declaration == "true" && tool == "publish"
+			if dispatched != durableDedup {
+				t.Fatalf("%s route tool %q dispatched = %v, want %v", declaration, tool, dispatched, durableDedup)
+			}
+			if got, want := executor.DurableDedup(tool), !dispatched || durableDedup; got != want {
+				t.Errorf("%s route tool %q declares durable dedup = %v, want %v", declaration, tool, got, want)
+			}
+		}
+	}
+	if executor := configToolExecutor(t, socket, "true", "other", io.Discard); executor.Call != nil || executor.DurableDedup != nil {
+		t.Fatalf("harness without routes got %+v", executor)
+	}
+}
+
+// toolSocketHarness issues socketCall under the given tool name.
+type toolSocketHarness string
+
+func (toolSocketHarness) Describe(context.Context) (api.Descriptor, error) {
+	return fixedSocketHarness{}.Describe(context.Background())
+}
+func (h toolSocketHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	call := socketCall()
+	call.Tool = string(h)
+	_, err := sink.ToolCall(ctx, call)
+	return err
+}
+
+// A call the daemon refuses without dialing (a false/unknown route, or an unconfigured tool on a
+// harness with routes) leaves an unanswered TOOL_CALL. Resume behaves as before declarations
+// existed: it re-sends the call to the same refusal, returns it with resumed true and appends one
+// ERROR, without dialing.
+func TestRefusedRouteResumeRepeatsTheRefusal(t *testing.T) {
+	socket, calls := unixToolPeer(t, func(conn net.Conn) { _, _ = io.Copy(io.Discard, conn) })
+	cases := []struct{ declaration, tool, refusal string }{
+		{"false", "publish", `harness "h" tool "publish" requires durable_dedup true`},
+		{"null", "publish", `harness "h" tool "publish" requires durable_dedup true`},
+		{"true", "unconfigured", `harness "h" tool "unconfigured" is not configured`},
+	}
+	for _, tc := range cases {
+		store, err := sqlitelog.Open(":memory:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		log := store.Session("session")
+		executor := configToolExecutor(t, socket, tc.declaration, "h", io.Discard)
+		opts := []controller.Option{controller.WithSessionUID("session"), controller.WithToolExecutor(executor.Call), controller.WithDurableDedup(executor.DurableDedup)}
+		c, err := controller.New(log, nil, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Exec(t.Context(), toolSocketHarness(tc.tool), nil, 0); err == nil || !strings.Contains(err.Error(), tc.refusal) {
+			t.Fatalf("%s route tool %q Exec = %v, want %q", tc.declaration, tc.tool, err, tc.refusal)
+		}
+		before, err := log.Read(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		last := len(before) - 1
+		for last > 0 && before[last].Event.Kind == api.EventError {
+			last--
+		}
+		if kind := before[last].Event.Kind; kind != api.EventToolCall {
+			t.Fatalf("%s route tool %q Exec left %s as the last effect, want an unanswered TOOL_CALL", tc.declaration, tc.tool, kind)
+		}
+		c, err = controller.New(log, nil, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resumed, err := c.Resume(t.Context(), toolSocketHarness(tc.tool))
+		if !resumed || err == nil || !strings.Contains(err.Error(), tc.refusal) || errors.Is(err, controller.ErrUnansweredToolCall) {
+			t.Fatalf("%s route tool %q Resume = %v, %v; want resumed with %q", tc.declaration, tc.tool, resumed, err, tc.refusal)
+		}
+		after, err := log.Read(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(after) != len(before)+1 || !reflect.DeepEqual(after[:len(before)], before) || after[len(before)].Event.Kind != api.EventError {
+			t.Fatalf("%s route tool %q Resume appended %d records, want one ERROR", tc.declaration, tc.tool, len(after)-len(before))
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("refused routes dialed %d times", calls.Load())
 	}
 }
 

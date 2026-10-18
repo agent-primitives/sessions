@@ -113,6 +113,7 @@ type Placer struct {
 	model        controller.ModelFunc
 	stream       controller.StreamFunc
 	tool         controller.ToolFunc
+	durableDedup func(tool string) bool
 	dial         Dialer
 	logger       *slog.Logger
 	descriptorID string
@@ -254,6 +255,9 @@ func (p *Placer) controllerOpts(fence int64, sessionUID string, observer control
 	if p.tool != nil {
 		opts = append(opts, controller.WithToolExecutor(p.tool))
 	}
+	if p.durableDedup != nil {
+		opts = append(opts, controller.WithDurableDedup(p.durableDedup))
+	}
 	return opts
 }
 
@@ -272,7 +276,15 @@ func WithStreamingModel(fn controller.StreamFunc) Option { return func(p *Placer
 // WithToolExecutor supplies the host executor for controller-mediated tools in Exec and Resume.
 // It receives the session UID bound by the Placer. Without one, tool calls fail closed. The host
 // owns session-scoped authorization and durable deduplication by session UID plus idempotency key.
+// Resume re-drives an interrupted call only for tools declared with WithDurableDedup.
 func WithToolExecutor(fn controller.ToolFunc) Option { return func(p *Placer) { p.tool = fn } }
+
+// WithDurableDedup declares which tools the WithToolExecutor executor durably deduplicates, as
+// controller.WithDurableDedup. Without it, Resume refuses a trailing call that is not
+// approval-gated and has no recorded result with controller.ErrUnansweredToolCall rather than re-running it.
+func WithDurableDedup(declared func(tool string) bool) Option {
+	return func(p *Placer) { p.durableDedup = declared }
+}
 
 // WithLogger enables structured operational logs. Message contents and fence tokens are never logged.
 func WithLogger(logger *slog.Logger) Option { return func(p *Placer) { p.logger = logger } }

@@ -597,14 +597,17 @@ func (h toolHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) 
 	return err
 }
 
-// 7. Crash between a tool's execute and its result-append (I3): the host-mediated tool executor
-// re-drives the recorded TOOL_CALL under the same idempotency key on resume; an idempotent tool
-// runs the external effect AT MOST ONCE. Symmetric to the model re-drive, this closes the tool half
-// of the record-before-effect invariant.
+// dedupAll declares durable dedup for every tool, so Resume may re-drive a trailing intent.
+var dedupAll = controller.WithDurableDedup(func(string) bool { return true })
+
+// 7. Crash between a tool's execute and its result-append (I3): a host-mediated tool executor
+// that declares durable dedup re-drives the recorded TOOL_CALL under the same idempotency key on
+// resume; an idempotent tool runs the external effect AT MOST ONCE. Symmetric to the model
+// re-drive, this closes the tool half of the record-before-effect invariant.
 func TestCrashMidToolCallAtMostOnce(t *testing.T) {
 	s, path := openFile(t)
 	tool := newIdempotentTool()
-	c1, err := controller.New(s.Session("s"), (&countModel{}).call, controller.WithSessionUID("s"), controller.WithToolExecutor(tool.exec))
+	c1, err := controller.New(s.Session("s"), (&countModel{}).call, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(tool.exec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -630,7 +633,7 @@ func TestCrashMidToolCallAtMostOnce(t *testing.T) {
 	log := s2.Session("s")
 	// Same tool instance: its dedup state is the external tool's, which the controller crash does
 	// not erase.
-	c2, err := controller.New(log, (&countModel{}).call, controller.WithSessionUID("s"), controller.WithToolExecutor(tool.exec))
+	c2, err := controller.New(log, (&countModel{}).call, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(tool.exec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,6 +667,54 @@ func TestCrashMidToolCallAtMostOnce(t *testing.T) {
 	}
 }
 
+// 7b. The same crash under an executor that does not declare durable dedup for the tool: Resume
+// refuses the trailing intent (ErrUnansweredToolCall) before the harness runs, without calling the
+// executor or appending anything, so the effect cannot repeat.
+func TestCrashMidToolCallUndeclaredRefused(t *testing.T) {
+	s, path := openFile(t)
+	tool := newIdempotentTool()
+	c1, err := controller.New(s.Session("s"), (&countModel{}).call, controller.WithSessionUID("s"), controller.WithToolExecutor(tool.exec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c1.Exec(context.Background(), toolHarness{key: "k1"}, []api.Message{*api.TextMessage("user", "go")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	truncateFrom(t, path, "s", 4)
+
+	s2, err := sqlitelog.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	log := s2.Session("s")
+	before, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	executor := func(ctx context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+		calls++
+		return tool.exec(ctx, scope, call)
+	}
+	c2, err := controller.New(log, (&countModel{}).call, controller.WithSessionUID("s"), controller.WithToolExecutor(executor))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redrove, err := c2.Resume(context.Background(), toolHarness{key: "k1"})
+	if redrove || !errors.Is(err, controller.ErrUnansweredToolCall) {
+		t.Fatalf("Resume = %v, %v; want ErrUnansweredToolCall", redrove, err)
+	}
+	if calls != 0 || tool.effects[toolKey{"s", "k1"}] != 1 {
+		t.Fatalf("refused Resume called the executor %d times (effects %d)", calls, tool.effects[toolKey{"s", "k1"}])
+	}
+	after, err := log.Read(1)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("refused Resume changed the journal: %v", err)
+	}
+}
+
 // 8. Fail-loud idempotency guard: a CONTROLLER_MEDIATED tool call with no idempotency key is
 // rejected BEFORE the intent is recorded — I3's at-most-once re-drive has nothing to dedup on, so
 // the host must not let the guarantee silently degrade, and must leave no unrecoverable TOOL_CALL.
@@ -671,7 +722,7 @@ func TestControllerMediatedToolRequiresKey(t *testing.T) {
 	s, _ := openFile(t)
 	defer s.Close()
 	log := s.Session("s")
-	c, err := controller.New(log, (&countModel{}).call, controller.WithSessionUID("s"), controller.WithToolExecutor(newIdempotentTool().exec))
+	c, err := controller.New(log, (&countModel{}).call, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(newIdempotentTool().exec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -710,7 +761,7 @@ func TestUnmediatedToolCallRejected(t *testing.T) {
 	s, _ := openFile(t)
 	defer s.Close()
 	log := s.Session("s")
-	c, err := controller.New(log, (&countModel{}).call, controller.WithSessionUID("s"), controller.WithToolExecutor(newIdempotentTool().exec))
+	c, err := controller.New(log, (&countModel{}).call, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(newIdempotentTool().exec))
 	if err != nil {
 		t.Fatal(err)
 	}

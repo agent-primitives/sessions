@@ -180,7 +180,9 @@ requests and suspended snapshots/handles are retained indefinitely; operators mu
 resources outside these APIs.
 
 A custom host executor must authorize tools/resources itself and durably deduplicate by **session UID
-plus idempotency key**, storing the original receipt across host restarts. A hash-chained request or
+plus idempotency key**, storing the original receipt across host restarts. Resume re-drives an
+interrupted ordinary call only for tools declared with `placement.WithDurableDedup`; a false
+declaration is an effect that can repeat. A hash-chained request or
 decision alone does not make delivery exactly once. Two sessions using the same harness-chosen key
 are distinct namespaces. The stock daemon can optionally configure
 [Unix-socket executors](tool-executors.md) for CLI `-harness` entries, dispatching only tools that

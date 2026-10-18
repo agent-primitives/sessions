@@ -55,7 +55,7 @@ func TestPlacerRecordsConnectedVersionAndPerCallHarness(t *testing.T) {
 			backend := local.New(h)
 			t.Cleanup(func() { _ = backend.Close() })
 			p := placement.New(declaredIdentityBackend{backend}, echoModelForIdentity,
-				placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				dedupAllTools, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					return api.ToolResult{Output: map[string]any{"receipt": "receipt"}}, nil
 				}))
 			log := store.Session("identity")
@@ -116,7 +116,7 @@ func TestPlacerResumeIdentityChecksUseConnectedHarness(t *testing.T) {
 			p := placement.New(declaredIdentityBackend{backend}, func(context.Context, api.ModelRequest) (api.ModelResponse, error) {
 				models.Add(1)
 				return api.ModelResponse{}, nil
-			}, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, got api.ToolCall) (api.ToolResult, error) {
+			}, dedupAllTools, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, got api.ToolCall) (api.ToolResult, error) {
 				tools.Add(1)
 				if scope.SessionUID != "identity" || !reflect.DeepEqual(got, call) {
 					return api.ToolResult{}, errors.New("lost recovery scope or original tool key")
@@ -173,7 +173,7 @@ func TestPlacerResumeDoesNotVersionCheckConfiguredMemoryDescriptor(t *testing.T)
 		placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 			return h, func() error { closes.Add(1); return nil }, nil
 		}),
-		placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+		dedupAllTools, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 			tools.Add(1)
 			return api.ToolResult{Output: map[string]any{"receipt": "restored"}}, nil
 		}))

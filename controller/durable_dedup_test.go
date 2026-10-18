@@ -2,14 +2,21 @@ package controller_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/sqlitelog"
+	"github.com/agent-primitives/sessions/wire"
 )
 
 // dedupAll declares durable dedup for every tool, keeping the Resume re-drive that tests written
@@ -203,4 +210,141 @@ func TestResumeWithoutToolExecutorDoesNotRefuseTrailingToolCall(t *testing.T) {
 	if !resumed || err == nil || errors.Is(err, controller.ErrUnansweredToolCall) || !strings.Contains(err.Error(), "no tool executor configured") {
 		t.Fatalf("Resume = %v, %v; want the live missing-executor failure", resumed, err)
 	}
+}
+
+// Resume verifies the journal's hash chain (CHAIN-12) before it decides whether to re-drive a
+// trailing tool intent (TOOL-10): when the unanswered TOOL_CALL changed in storage, a declaring
+// executor is never called with the changed call and an undeclared tool gets ErrJournalTampered
+// rather than ErrUnansweredToolCall, both before Describe, Run or any append. The same journal
+// untampered is re-driven under the declaration and refused without it.
+func TestResumeVerifiesJournalBeforeToolIntentRedrive(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		declared, tampered bool
+		wantErr            error
+		wantEffects        int
+	}{
+		{name: "declared", declared: true, wantEffects: 1},
+		{name: "undeclared", wantErr: controller.ErrUnansweredToolCall},
+		{name: "declared tampered", declared: true, tampered: true, wantErr: controller.ErrJournalTampered},
+		{name: "undeclared tampered", tampered: true, wantErr: controller.ErrJournalTampered},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			records, err := crashBetweenCallAndResult(t, "call-send", map[string]int{}).Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The harness re-issues what the journal now says, as one rebuilding its turn from the
+			// changed History would, so only the chain check stands between the changed call and the
+			// executor.
+			calls := dedupCalls()
+			if tc.tampered {
+				calls[1].Args = map[string]any{"to": "attacker"}
+			}
+			log := sqliteJournal(t, records, func(seq int64, ev *api.Event) {
+				if tc.tampered && seq == records[len(records)-1].Seq {
+					ev.ToolCall.Args = calls[1].Args
+				}
+			})
+			before, err := log.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			effects := 0
+			executor := func(_ context.Context, _ controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+				effects++
+				if call.Args != nil {
+					t.Errorf("executor received args %v, want the call as first recorded", call.Args)
+				}
+				return api.ToolResult{Output: map[string]any{"text": call.Tool}}, nil
+			}
+			opts := []controller.Option{controller.WithSessionUID("s"), controller.WithToolExecutor(executor)}
+			if tc.declared {
+				opts = append(opts, dedupAll)
+			}
+			c, err := controller.New(log, echoModel, opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := &countingCallHarness{callHarness: callHarness{calls: calls}}
+			resumed, err := c.Resume(t.Context(), h)
+			if effects != tc.wantEffects {
+				t.Fatalf("executor ran %d times, want %d", effects, tc.wantEffects)
+			}
+			if tc.wantErr == nil {
+				if !resumed || err != nil {
+					t.Fatalf("Resume = %v, %v; want a completed re-drive", resumed, err)
+				}
+				return
+			}
+			if resumed || !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Resume = %v, %v; want refusal with %v", resumed, err, tc.wantErr)
+			}
+			if h.describes != 0 || h.runs != 0 {
+				t.Fatalf("refusal reached the harness: describes=%d runs=%d", h.describes, h.runs)
+			}
+			after, err := log.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("refusal changed the journal: %d records -> %d", len(before), len(after))
+			}
+		})
+	}
+}
+
+// sqliteJournal copies records into a SQLite journal, applies change to each stored event without
+// touching its stored hashes (as a bad manual edit or a corrupting migration would), and reopens it.
+func sqliteJournal(t *testing.T, records []eventlog.Record, change func(seq int64, ev *api.Event)) eventlog.Store {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "journal.db")
+	store, err := sqlitelog.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := store.Session("session")
+	var fence int64
+	for _, record := range records {
+		for fence < record.Fence {
+			if fence, err = log.NewFence(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := log.Append(record.Seq-1, fence, record.Event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, record := range records {
+		var blob []byte
+		if err := db.QueryRow(`SELECT event FROM events WHERE session = ? AND seq = ?`, "session", record.Seq).Scan(&blob); err != nil {
+			t.Fatal(err)
+		}
+		pb := &v1.Event{}
+		if err := proto.Unmarshal(blob, pb); err != nil {
+			t.Fatal(err)
+		}
+		ev := wire.EventFromProto(pb)
+		change(record.Seq, &ev)
+		if blob, err = proto.Marshal(wire.EventToProto(ev)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE events SET event = ? WHERE session = ? AND seq = ?`, blob, "session", record.Seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err = sqlitelog.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store.Session("session")
 }

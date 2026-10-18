@@ -367,22 +367,25 @@ no flattened lifecycle enum.
   or tool call, and before the operation appends anything (for `Fork`, also before the parent is
   checkpointed and before any child is provisioned, fenced or written: copying re-hashes the prefix,
   so an unchecked copy would turn a changed record into a child chain that verifies); the session
-  service reports `DATA_LOSS`. Recovery refuses even when
-  its no-op case (`EXE-20`) would apply.
+  service reports `DATA_LOSS`. Recovery refuses even when its no-op case (`EXE-20`) would apply.
 - The reference controller (`controller.ErrJournalTampered`, wrapping `eventlog.ErrTampered`, which
   is `sqlitelog.ErrTampered`) verifies the whole journal on its first read and afterwards only the
   records appended since, after checking that the last verified record still has the same seq and
   `content_hash`. A record below that point whose event changes later in the same controller's life
   is not re-checked.
-- In the reference host the check runs in the controller, and in placement before a repair and
-  at the start of `Fork`. On `Exec` and `Resume` earlier steps still run on unverified records: on
-  `Exec`, approval inspection, admission (`Describe`), runtime `Create` and the fence mint; on
-  `Resume`, approval inspection, recorded-harness routing, admission, `Restore` and the fence mint.
-  A tampered record that makes one of those steps fail is reported with that step's error, not
-  `DATA_LOSS`. `Fork` checks the copied records `1..at_seq` before admission, the memory-tier
-  parent snapshot and `SUSPEND` (`OPS-25`) and any per-child `Runtime.Fork` (`OPS-24`), and the
-  controller checks them again before each child is fenced. `Approve` and
-  the `Replay` RPC (§6.6) do not verify; `Replay` returns the stored hashes so the caller can.
+- In the reference host the check runs in the controller, in placement before it answers an owned
+  gate with no decision (`APR-13`: the park and the request repair both refuse, so a tampered parked
+  journal is `DATA_LOSS` on `Resume` and input-less `Exec`), and at the start of `Fork`. On `Exec`
+  and `Resume` earlier steps still run on unverified records: on `Exec`, approval inspection,
+  admission (`Describe`), runtime `Create` and the fence mint; on `Resume`, approval inspection,
+  recorded-harness routing, admission, `Restore` and the fence mint. A tampered record that makes
+  one of those steps fail is reported with that step's error, not `DATA_LOSS`. `Fork` checks the
+  copied records `1..at_seq` before admission, the memory-tier parent snapshot and `SUSPEND`
+  (`OPS-25`) and any per-child `Runtime.Fork` (`OPS-24`), and the controller checks them again
+  before each child is fenced. `Approve` and the `Replay` RPC (§6.6) do not verify; `Replay` returns
+  the stored hashes so the caller can. `GetSession` and the session frame `Exec` sends before the
+  turn report the stored session row, including `pending_approval`, not journal records, and are not
+  gated.
 - The chain is unkeyed. `CHAIN-12` catches storage corruption and edits that do not recompute the
   hashes. A journal writer that rewrites an event and recomputes every later hash is not detected.
 - Verification proves internal consistency only. Removing records from the end of a log, or
@@ -990,7 +993,7 @@ does not erase data or reclaim compute.
 | Any other `Describe` error on those paths, for example a peer `UNIMPLEMENTED` or `INTERNAL`, or a plain error from an in-process harness (during the turn, even one returned after the host's bound expired) | `INTERNAL` |
 | Any `Describe` error in the stored harness's half of the memory-tier override check (`OPS-7`) while the caller's context is live | `UNAVAILABLE` |
 | Caller deadline or cancellation during admission, any `Describe` above, or `DeleteSession` | `DEADLINE_EXCEEDED` or `CANCELLED` |
-| Journal hash chain fails verification on `Exec`, `Resume` (including an approval-request repair) or `Fork` (`CHAIN-12`) | `DATA_LOSS` |
+| Journal hash chain fails verification on `Exec`, `Resume` (including an `APR-13` park or request repair) or `Fork` (`CHAIN-12`) | `DATA_LOSS` |
 | `Cancel` | `UNIMPLEMENTED` |
 | Any other failure | `INTERNAL` |
 

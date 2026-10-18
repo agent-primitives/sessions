@@ -90,35 +90,45 @@ func TestTamperedJournalIsDataLoss(t *testing.T) {
 	}
 }
 
-// The approval-request repair appends without running the controller, so it verifies the chain
-// itself: a call-only cut whose TOOL_CALL changed in storage is DATA_LOSS on Resume and on input-less
-// Exec recovery, with no Describe, compute or repair record.
-func TestTamperedJournalRefusesApprovalRepair(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "journal.db")
-	store := openStore(t, path)
-	db := deletionSQL(t, path)
-	r, b := publicGateRegistry(t, &publicGateHarness{}, nil)
-	c := serveRegistry(t, store, r)
-	uid := mustCreate(t, c)
-	seedPublicGate(t, store.Session(uid), "gate", api.EventToolCall)
-	tamperEvent(t, db, uid, 2, func(ev *api.Event) {
-		if ev.Kind != api.EventToolCall {
-			t.Fatalf("seq 2 is %v, want TOOL_CALL", ev.Kind)
-		}
-		ev.ToolCall.Args = map[string]any{"path": "/etc/passwd"}
-	})
-	before := journalRows(t, db, uid)
-	if _, err := c.Resume(t.Context(), &v1.ResumeRequest{Session: uid}); status.Code(err) != codes.DataLoss {
-		t.Errorf("Resume = %v, want DATA_LOSS", err)
-	}
-	if _, err := collectPublicExec(c, &v1.ExecRequest{Session: uid}); status.Code(err) != codes.DataLoss {
-		t.Errorf("input-less Exec = %v, want DATA_LOSS", err)
-	}
-	if after := journalRows(t, db, uid); !reflect.DeepEqual(after, before) {
-		t.Errorf("journal changed: %d records -> %d", len(before), len(after))
-	}
-	if b.ioCounts() != ([4]int32{}) {
-		t.Errorf("runtime reached: %v", b.ioCounts())
+// A pending approval is parked or repaired without running the controller, so placement verifies
+// the chain itself: a recorded request or a call-only cut whose TOOL_CALL changed in storage is
+// DATA_LOSS on Resume and on input-less Exec recovery, with no pending approval served, no
+// Describe, no compute and no repair record.
+func TestTamperedJournalRefusesApprovalParkAndRepair(t *testing.T) {
+	for _, cut := range []api.EventKind{api.EventToolCall, api.EventApprovalRequest} {
+		t.Run(string(cut), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "journal.db")
+			store := openStore(t, path)
+			db := deletionSQL(t, path)
+			r, b := publicGateRegistry(t, &publicGateHarness{}, nil)
+			c := serveRegistry(t, store, r)
+			uid := mustCreate(t, c)
+			seedPublicGate(t, store.Session(uid), "gate", cut)
+			tamperEvent(t, db, uid, 2, func(ev *api.Event) {
+				if ev.Kind != api.EventToolCall {
+					t.Fatalf("seq 2 is %v, want TOOL_CALL", ev.Kind)
+				}
+				ev.ToolCall.Args = map[string]any{"path": "/etc/passwd"}
+			})
+			before := journalRows(t, db, uid)
+			if _, err := c.Resume(t.Context(), &v1.ResumeRequest{Session: uid}); status.Code(err) != codes.DataLoss {
+				t.Errorf("Resume = %v, want DATA_LOSS", err)
+			}
+			// Exec sends the session frame before the turn runs; nothing after it is served.
+			frames, err := collectPublicExec(c, &v1.ExecRequest{Session: uid})
+			if status.Code(err) != codes.DataLoss {
+				t.Errorf("input-less Exec = %v, want DATA_LOSS", err)
+			}
+			if len(frames) != 1 || frames[0].GetSession() == nil {
+				t.Errorf("input-less Exec sent %v, want only the leading session frame", frames)
+			}
+			if after := journalRows(t, db, uid); !reflect.DeepEqual(after, before) {
+				t.Errorf("journal changed: %d records -> %d", len(before), len(after))
+			}
+			if b.ioCounts() != ([4]int32{}) {
+				t.Errorf("runtime reached: %v", b.ioCounts())
+			}
+		})
 	}
 }
 

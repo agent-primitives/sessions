@@ -3,6 +3,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 
 	"github.com/agent-primitives/sessions/eventlog"
@@ -87,6 +88,14 @@ func verifyRecords(prevHash string, recs []eventlog.Record) error {
 // is refused before any of that work.
 func VerifyForkPrefix(parent eventlog.Store, atSeq int64) error {
 	_, err := readVerifiedPrefix(parent, atSeq)
+	return err
+}
+
+// VerifyJournal checks the hash chain of every record in log and returns ErrJournalTampered on a
+// mismatch (CHAIN-12). A caller that reports or extends a journal without a Controller (an
+// approval park or request repair) calls it first.
+func VerifyJournal(log eventlog.Store) error {
+	_, err := readVerifiedPrefix(log, math.MaxInt64)
 	return err
 }
 

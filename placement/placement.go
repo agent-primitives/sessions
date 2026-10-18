@@ -1017,13 +1017,14 @@ func (p *Placer) handoffPark(ctx context.Context, log eventlog.Store, sessionUID
 	return park
 }
 
-// Resume returns *api.ApprovalParkedError for an owned pending request without runtime IO or a
-// new fence. A call-only cut mints a fence and repairs one request at the captured head, also
-// without runtime IO. Neither park proves cold compute: only a committed SUSPEND records that.
-// Otherwise Resume restores the recorded SnapshotRef (or the session handle when no owned
-// SUSPEND exists), mints a new fence, re-drives the turn and records RESUME on ordinary success.
-// A new gate instead closes the dial, snapshots and commits SUSPEND under that recovery fence,
-// returning a typed park without RESUME. Repair/handoff failures return their actual cause.
+// Resume returns *api.ApprovalParkedError for an owned pending request without runtime IO or a new
+// fence. A call-only cut mints a fence and repairs one request at the captured head, also without
+// runtime IO. Both first verify the journal's hash chain and return controller.ErrJournalTampered
+// on a mismatch. Neither park proves cold compute: only a committed SUSPEND records that. Otherwise
+// Resume restores the recorded SnapshotRef (or the session handle when no owned SUSPEND exists),
+// mints a new fence, re-drives the turn and records RESUME on ordinary success. A new gate instead
+// closes the dial, snapshots and commits SUSPEND under that recovery fence, returning a typed park
+// without RESUME. Repair/handoff failures return their actual cause.
 func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID string, opts ...ResumeOption) error {
 	var cfg resumeConfig
 	for _, o := range opts {
@@ -1051,13 +1052,14 @@ func (p *Placer) resumeApproval(log eventlog.Store, sessionUID string, state *co
 	if state.Decision != nil {
 		return false, nil
 	}
+	// Neither the park nor the repair runs the controller, so this checks the chain itself
+	// (CHAIN-12): a tampered journal is refused before a park is reported or, for the repair,
+	// before Describe, a fence or the append.
+	if err := controller.VerifyJournal(log); err != nil {
+		return true, err
+	}
 	if state.Request != nil {
 		return true, &api.ApprovalParkedError{Ref: api.ApprovalRef{ExecutionID: state.ExecutionID, ToolCallID: state.Call.ID, RequestSeq: state.Request.Seq}}
-	}
-	// The repair extends the journal without the controller, so it checks the chain itself
-	// (CHAIN-12) before Describe, a fence or the append.
-	if err := log.Verify(); err != nil {
-		return true, err
 	}
 	if beforeRepair != nil {
 		if err := beforeRepair(); err != nil {

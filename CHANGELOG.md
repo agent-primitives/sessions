@@ -30,10 +30,10 @@ not provide.
   `controller.ErrJournalTampered`; the Sessions API reports `DATA_LOSS`. Before, a record changed in
   storage without its `content_hash` (disk corruption, a manual edit, a bad migration) was served by
   replay with no model call, re-driven by `Resume` (the model ran on a changed `INPUT`), extended by
-  `Exec`, and copied by `Fork` into a child whose re-hashed chain then verified. Resume's
-  approval-request repair and `Fork` (the copied prefix) check the chain too. The chain is unkeyed:
-  this catches corruption and edits that skip rehashing, not a writer that recomputes every hash
-  after its edit, and not records removed from the end.
+  `Exec`, and copied by `Fork` into a child whose re-hashed chain then verified. `Resume` of a
+  pending approval (its park and its approval-request repair) and `Fork` (the copied prefix) check
+  the chain too. The chain is unkeyed: this catches corruption and edits that skip rehashing, not a
+  writer that recomputes every hash after its edit, and not records removed from the end.
 
 ### Changed
 

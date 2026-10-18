@@ -22,6 +22,10 @@ not provide.
 - Socket executor write/read errors, including journaled approval receipts, no longer expose
   the Unix socket path.
 - Tool-executor refusal receipts no longer reference an issue number.
+- `sqlitelog.Open` now uses `BEGIN IMMEDIATE` for `file:` URIs and paths with a `?` query, not
+  only plain paths, so concurrent writers from separate stores on one database wait for the write
+  lock (up to the 5s busy timeout) instead of failing with `SQLITE_BUSY`. A non-empty `_txlock`
+  in the DSN is kept; an empty one, which the driver ignores, gets `immediate`.
 
 ### Changed
 

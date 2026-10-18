@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -288,11 +289,13 @@ type Store struct {
 	defaultProject string
 }
 
-// Open opens (creating if needed) the sqlite database at path and migrates it to SchemaVersion. Use
-// ":memory:" for an ephemeral store. For a file-backed store it uses BEGIN IMMEDIATE (via the
-// _txlock DSN) so cross-process writers take the write lock upfront and serialize cleanly instead
-// of deadlocking on a lock upgrade (SQLITE_BUSY), and synchronous=FULL so every committed
-// transaction is durable across power loss, not just process death.
+// Open opens (creating if needed) the sqlite database at path and migrates it to SchemaVersion.
+// path is a file name, a "file:" URI, or either with a "?" query of modernc.org/sqlite DSN
+// parameters. Use ":memory:" for an ephemeral store. For a file-backed store it uses BEGIN
+// IMMEDIATE (via the _txlock DSN parameter, added unless path already sets one) so
+// cross-process writers take the write lock upfront and serialize cleanly instead of deadlocking on
+// a lock upgrade (SQLITE_BUSY), and synchronous=FULL so every committed transaction is durable
+// across power loss, not just process death.
 //
 // Durability boundary: a *committed* append survives process death and power loss. A crash
 // mid-append (before commit) drops only that uncommitted event, which is re-driven on resume
@@ -302,11 +305,7 @@ func Open(path string, opts ...Option) (*Store, error) {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	dsn := path
-	if path != ":memory:" && !strings.Contains(path, "?") && !strings.HasPrefix(path, "file:") {
-		dsn = "file:" + path + "?_txlock=immediate"
-	}
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", immediateDSN(path))
 	if err != nil {
 		return nil, err
 	}
@@ -334,6 +333,44 @@ func Open(path string, opts ...Option) (*Store, error) {
 		return nil, err
 	}
 	return &Store{db: db, defaultProject: cfg.defaultProject}, nil
+}
+
+// immediateDSN returns path with _txlock=immediate added to the query modernc.org/sqlite parses,
+// so every read-then-write transaction (Append, RegisterHarness, ...) takes the write lock at BEGIN.
+// A non-empty _txlock in path is the caller's choice and is kept. An empty one is not: the driver
+// ignores it and issues a plain (deferred) BEGIN, so it gets the same default as no _txlock.
+//
+// It mirrors the driver's own split: the query is everything after the first '?' at index 1 or
+// later, in a plain name and a "file:" URI alike. The parameter goes first in that query, so it is
+// the value the driver reads (url.Values.Get takes the first) even when an empty _txlock follows.
+// A plain name with no query is made a "file:" URI, as Open always has. A query url.ParseQuery
+// rejects is left alone: the driver refuses the DSN with that error on the first connection.
+func immediateDSN(path string) string {
+	const param = "_txlock=immediate"
+	if path == ":memory:" {
+		return path
+	}
+	pos := strings.IndexByte(path, '?')
+	switch {
+	case pos < 0:
+		if strings.HasPrefix(path, "file:") {
+			return path + "?" + param
+		}
+		return "file:" + path + "?" + param
+	case pos == 0:
+		// The driver takes a leading '?' as part of the file name, not a query, so there is no
+		// query to extend without renaming the file.
+		return path
+	}
+	query := path[pos+1:]
+	q, err := url.ParseQuery(query)
+	if err != nil || q.Get("_txlock") != "" {
+		return path
+	}
+	if query == "" {
+		return path + param
+	}
+	return path[:pos+1] + param + "&" + query
 }
 
 // Close closes the underlying database.

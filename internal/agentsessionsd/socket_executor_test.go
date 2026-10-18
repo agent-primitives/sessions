@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -103,7 +104,7 @@ func TestSocketExecutorForwardsIdentityAndResult(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("connections = %d", calls.Load())
 	}
-	if !strings.Contains(logs.String(), `"durable_dedup":"true"`) || strings.Contains(logs.String(), "same-key") {
+	if !strings.Contains(logs.String(), `"durable_dedup":"true"`) || !strings.Contains(logs.String(), `"level":"INFO"`) || strings.Contains(logs.String(), `"level":"WARN"`) || strings.Contains(logs.String(), "same-key") {
 		t.Fatalf("operator declarations = %s", logs.String())
 	}
 }
@@ -127,6 +128,14 @@ func TestConfiguredRoutesRefuseWithoutDialing(t *testing.T) {
 		}
 		if !strings.Contains(logs.String(), `"durable_dedup":"`+want+`"`) {
 			t.Fatalf("missing declaration %s: %s", want, logs.String())
+		}
+		if declaration != "true" {
+			if !strings.Contains(logs.String(), `"level":"WARN"`) {
+				t.Errorf("non-dispatchable route must warn: %s", logs.String())
+			}
+			if !strings.Contains(err.Error(), "requires durable_dedup true") || strings.Contains(err.Error(), "#139") {
+				t.Errorf("refusal must state requirement without issue reference: %v", err)
+			}
 		}
 	}
 	if fn := configExecutor(t, socket, "true", "other", io.Discard); fn != nil {
@@ -277,6 +286,36 @@ func TestSocketExecutorDownAndAlreadyCanceled(t *testing.T) {
 	e := socketExecutorConfig{Socket: filepath.Join(dir, "absent.sock")}
 	if _, err := e.execute(t.Context(), "h", controller.ToolCallContext{SessionUID: "s"}, socketCall()); !errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), e.Socket) {
 		t.Fatalf("down socket must preserve cause without path: %v", err)
+	}
+	for _, stage := range []string{"write", "read"} {
+		t.Run(stage, func(t *testing.T) {
+			socket, _ := unixToolPeer(t, func(conn net.Conn) {
+				if stage == "read" {
+					// Leave request bytes unread: Linux resets the peer's read; Darwin returns EOF.
+					_, _ = io.ReadFull(conn, make([]byte, 1))
+				}
+			})
+			call := socketCall()
+			if stage == "write" {
+				// Exceed the socket buffer so a peer closing interrupts the write.
+				call.Args = map[string]any{"text": strings.Repeat("x", toolMessageLimit-1024)}
+			}
+			e := socketExecutorConfig{Socket: socket}
+			_, err := e.execute(t.Context(), "h", controller.ToolCallContext{SessionUID: "s"}, call)
+			if err == nil || !strings.Contains(err.Error(), " "+stage+": ") || strings.Contains(err.Error(), socket) {
+				t.Fatalf("%s error must preserve stage without path: %v", stage, err)
+			}
+			// Write failures and Linux read resets have syscall causes. Other systems
+			// may return plain EOF on read; the path/address checks still apply there.
+			var syscallErr *os.SyscallError
+			if !errors.As(err, &syscallErr) && (stage != "read" || runtime.GOOS == "linux" || !errors.Is(err, io.EOF)) {
+				t.Fatalf("%s error must preserve its syscall cause (or EOF on non-Linux reads): %v", stage, err)
+			}
+			var op *net.OpError
+			if errors.As(err, &op) {
+				t.Fatalf("%s error still wraps socket addresses: %v", stage, err)
+			}
+		})
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

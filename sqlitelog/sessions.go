@@ -65,7 +65,8 @@ type SessionInfo struct {
 	PendingApproval     api.ApprovalRef
 }
 
-// ListOptions bounds one page of ListSessions.
+// ListOptions bounds one page of ListSessions. Enforcing callers must always set
+// Owner: nil lists every owner's ACTIVE sessions in the selected project.
 type ListOptions struct {
 	Project   string // exact match; empty means DefaultProject, never "all tenants"
 	PageSize  int

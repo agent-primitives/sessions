@@ -1408,7 +1408,9 @@ The reference implementation protects the integrity of the record, not access to
     Legacy and RPC-created sessions remain unbound; these host-side contracts add no RPC enforcement.
     This host refuses required, unknown or missing authorization markers, even at version 5.
     Stop every older writer sharing a journal and back it up before its first version 5 open;
-    an already-open older writer does not check the marker.
+    an already-open older writer does not check the marker. The marker is checked only at Open,
+    including by this build: changing the mode requires stopping every writer (including embedded
+    CLI processes), then restarting all hosts with binaries that support the new mode.
   - An older binary refuses a version 4 journal when it opens it, but one that already had the
     journal open does not enforce deletion (`OPS-36`): it can still append, mint fences, and
     update metadata after a `LIFECYCLE_DELETE`. Every older host and embedded `agentctl` sharing

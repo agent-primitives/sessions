@@ -196,6 +196,25 @@ var ateapiReconnectBackoff = grpc.ConnectParams{
 	MinConnectTimeout: 20 * time.Second,
 }
 
+// ateapiCallTimeout bounds each ate-api call, so a hung ate-api fails a session operation instead
+// of holding it, and the turn or the agentctl call behind it, forever when the caller's context has
+// no deadline (agentctl exec sends none). A caller's earlier deadline still applies. The bound is
+// per call, not per operation, so a backend's follow-up read after a failed call gets its own. It
+// is the daemon's model call timeout (model/openai), above the 30s the substrate backend allows a
+// failed fork's teardown, because SuspendActor and ResumeActor return only once the actor's RAM
+// snapshot is taken or restored.
+var ateapiCallTimeout = 2 * time.Minute
+
+// ateapiDeadline is a unary interceptor that gives every call at most timeout. The ControlClient
+// makes only unary calls.
+func ateapiDeadline(timeout time.Duration) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
+}
+
 // Backends dials the ate-api once and builds the substrate backend for the -substrate-harness. The
 // returned close function releases the connection. grpc.NewClient does not connect, so nothing is
 // sent before the first session is placed.
@@ -219,6 +238,7 @@ func (f *substrateFlags) Backends(logger *slog.Logger) (map[string]placement.Bac
 	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
 		grpc.WithConnectParams(ateapiReconnectBackoff),
+		grpc.WithUnaryInterceptor(ateapiDeadline(ateapiCallTimeout)),
 	}
 	if *f.tokenFile != "" {
 		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(fileTokenCreds{path: *f.tokenFile}))

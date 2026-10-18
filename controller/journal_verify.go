@@ -10,12 +10,15 @@ import (
 
 // ErrJournalTampered refuses a journal whose hash chain fails verification (CHAIN-12). Exec,
 // Replay, Resume and Outputs return it before they run a harness, call a model or tool, serve a
-// recorded effect or append. The returned error also wraps eventlog.ErrTampered (which is
-// sqlitelog.ErrTampered) and names the first bad seq.
+// recorded effect or append; Fork returns it before it fences or writes the child, and
+// VerifyForkPrefix before a placer checkpoints the parent or provisions a child. The returned
+// error also wraps eventlog.ErrTampered (which is sqlitelog.ErrTampered) and names the first bad
+// seq.
 //
 // The chain is unkeyed, so this catches storage corruption and edits that do not recompute the
-// hashes. A writer that rewrites events and recomputes every later hash, or removes records from
-// the end of the journal, is not detected.
+// hashes. A writer that rewrites events and recomputes every later hash is not detected, and
+// neither is removal of records from the end of the journal by a controller that has not already
+// verified those records.
 var ErrJournalTampered = errors.New("controller: refusing a journal that failed hash-chain verification")
 
 // journalCheck remembers how much of the journal this controller has verified, so each read
@@ -76,4 +79,32 @@ func verifyRecords(prevHash string, recs []eventlog.Record) error {
 		return fmt.Errorf("%w: %w", ErrJournalTampered, err)
 	}
 	return err
+}
+
+// VerifyForkPrefix checks the hash chain of the parent records Fork copies, seq 1 through atSeq,
+// and returns ErrJournalTampered on a mismatch (CHAIN-12). A caller that checkpoints the parent or
+// provisions child compute before ForkWithComputeInstance runs calls it first, so a tampered parent
+// is refused before any of that work.
+func VerifyForkPrefix(parent eventlog.Store, atSeq int64) error {
+	_, err := readVerifiedPrefix(parent, atSeq)
+	return err
+}
+
+// readVerifiedPrefix reads the records with seq <= atSeq and verifies their chain.
+func readVerifiedPrefix(log eventlog.Store, atSeq int64) ([]eventlog.Record, error) {
+	recs, err := log.Read(1)
+	if err != nil {
+		return nil, err
+	}
+	prefix := recs
+	for i, r := range recs {
+		if r.Seq > atSeq {
+			prefix = recs[:i]
+			break
+		}
+	}
+	if err := verifyRecords("", prefix); err != nil {
+		return nil, err
+	}
+	return prefix, nil
 }

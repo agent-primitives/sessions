@@ -27,10 +27,11 @@ not provide.
 
 - `Exec`, `Resume` and replay reconstruction (`controller.Controller.Replay`, also `Outputs`) verify
   the journal's hash chain before using it and refuse one that fails with the new
-  `controller.ErrJournalTampered`; the Sessions API reports `DATA_LOSS`. Before, a record changed
-  in storage without its `content_hash` (disk corruption, a manual edit, a bad migration) was served
-  by replay with no model call, re-driven by `Resume` (the model ran on a changed `INPUT`) and
-  extended by `Exec`. Resume's approval-request repair checks the chain too. The chain is unkeyed:
+  `controller.ErrJournalTampered`; the Sessions API reports `DATA_LOSS`. Before, a record changed in
+  storage without its `content_hash` (disk corruption, a manual edit, a bad migration) was served by
+  replay with no model call, re-driven by `Resume` (the model ran on a changed `INPUT`), extended by
+  `Exec`, and copied by `Fork` into a child whose re-hashed chain then verified. Resume's
+  approval-request repair and `Fork` (the copied prefix) check the chain too. The chain is unkeyed:
   this catches corruption and edits that skip rehashing, not a writer that recomputes every hash
   after its edit, and not records removed from the end.
 
@@ -63,10 +64,11 @@ not provide.
   harness. An override onto a name that aliases the session's own registry entry is not an
   override and still runs. Stateless-to-stateless overrides are unchanged: a stored runtime without
   memory-snapshot support is not contacted for this check, even when its remote harness is down.
-- A journal that fails hash-chain verification is now refused where it used to run: `Exec`, and
-  `Resume` (including input-less `Exec` recovery), are `DATA_LOSS` before the harness runs, a model
-  or tool is called, or anything is appended. `Resume` of a completed turn on such a journal fails
-  rather than returning as a no-op. Find affected sessions with
+- A journal that fails hash-chain verification is now refused where it used to run: `Exec`, `Resume`
+  (including input-less `Exec` recovery) and `Fork` are `DATA_LOSS` before the harness runs, a model
+  or tool is called, or anything is appended to the session or a child; `Fork` also refuses before a
+  memory-tier parent is checkpointed or any child compute is provisioned. `Resume` of a completed
+  turn on such a journal fails rather than returning as a no-op. Find affected sessions with
   `python3 hack/verify_chain.py --journal <db>`; nothing is written by the check, so a rollback
   restores the old behavior. The `Replay` RPC and `Approve` do not check, and `Replay` still returns
   the stored hashes. `eventlog.ErrTampered` is new and `sqlitelog.ErrTampered` is now the same

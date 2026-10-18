@@ -20,8 +20,8 @@ import (
 	"github.com/agent-primitives/sessions/wire"
 )
 
-// A journal whose hash chain fails verification is DATA_LOSS on Exec and Resume (CHAIN-12), and
-// neither calls the model nor writes the journal.
+// A journal whose hash chain fails verification is DATA_LOSS on Exec, Resume and Fork (CHAIN-12),
+// and none of them calls the model or writes the journal.
 func TestTamperedJournalIsDataLoss(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "journal.db")
 	store := openStore(t, path)
@@ -68,13 +68,15 @@ func TestTamperedJournalIsDataLoss(t *testing.T) {
 
 	before := journalRows(t, db, uid)
 	models.Store(0)
-	for _, operation := range []string{"Exec", "Resume"} {
+	for _, operation := range []string{"Exec", "Resume", "Fork"} {
 		var err error
 		switch operation {
 		case "Exec":
 			err = exec()
 		case "Resume":
 			_, err = client.Resume(t.Context(), &v1.ResumeRequest{Session: uid})
+		case "Fork":
+			_, err = client.Fork(t.Context(), &v1.ForkRequest{Session: uid})
 		}
 		if status.Code(err) != codes.DataLoss {
 			t.Errorf("%s = %v, want DATA_LOSS", operation, err)

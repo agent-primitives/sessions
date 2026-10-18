@@ -18,12 +18,13 @@ reach it, because Sessions RPCs do not check caller authority.
 These are enforced in code and exercised by the conformance suite.
 
 **The log is tamper-evident.** Every record is hash-chained over a canonical form (RFC 8785 JCS over
-proto3-JSON), so altering, removing, or reordering a record breaks verification. The canonicalization
-is language-neutral by design: `hack/verify_chain.py` is an independent Python implementation that
-reproduces the Go hashes, so an auditor does not have to trust the Go binary that wrote the journal.
-The host checks the chain itself before it uses a journal: `Exec`, reconstruction and recovery
-refuse a journal that fails verification (`DATA_LOSS`) before running the harness, calling a model or
-tool, or appending, so a record changed in storage is neither served nor extended.
+proto3-JSON), so altering, removing, or reordering a record breaks verification. The
+canonicalization is language-neutral by design: `hack/verify_chain.py` is an independent Python
+implementation that reproduces the Go hashes, so an auditor does not have to trust the Go binary
+that wrote the journal. The host checks the chain itself before it uses a journal: `Exec`,
+reconstruction, recovery and `Fork` refuse a journal that fails verification (`DATA_LOSS`) before
+running the harness, calling a model or tool, or appending, and `Fork` before checkpointing the
+parent or provisioning a child, so a record changed in storage is not served, extended or copied.
 
 **A superseded writer cannot corrupt a session.** Each incarnation holds a fencing token, and the log
 rejects an append carrying a stale one. A process that was presumed dead and then wakes up cannot

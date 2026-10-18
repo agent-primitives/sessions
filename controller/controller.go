@@ -547,7 +547,9 @@ func (c *Controller) invokeModel(ctx context.Context, executionID string, req ap
 // canonical hashes reproduce identically, so the child shares the prefix chain) and records a
 // LIFECYCLE_FORK marker as the child's first new event, whose prev_hash links to parent@atSeq —
 // turning the hash-chain into a hash-tree. child must be an empty log. The marker records no
-// compute instance; ForkWithComputeInstance records the one the child was cloned onto.
+// compute instance; ForkWithComputeInstance records the one the child was cloned onto. A copied
+// prefix that fails hash-chain verification returns ErrJournalTampered before the child is fenced
+// or written.
 func Fork(parent, child eventlog.Store, atSeq int64) error {
 	return ForkWithComputeInstance(parent, child, atSeq, "")
 }
@@ -565,7 +567,9 @@ func ForkWithComputeInstance(parent, child eventlog.Store, atSeq int64, instance
 	if err := eventlog.CheckWritable(child); err != nil {
 		return err
 	}
-	recs, err := parent.Read(1)
+	// Copying re-hashes the prefix into a fresh chain, so a record changed in the parent would come
+	// out verified in the child. Check what is copied before the child is touched (CHAIN-12).
+	prefix, err := readVerifiedPrefix(parent, atSeq)
 	if err != nil {
 		return err
 	}
@@ -574,10 +578,7 @@ func ForkWithComputeInstance(parent, child eventlog.Store, atSeq int64, instance
 		return err
 	}
 	var last int64
-	for _, r := range recs {
-		if r.Seq > atSeq {
-			break
-		}
+	for _, r := range prefix {
 		if _, err := child.Append(last, fence, r.Event); err != nil {
 			return err
 		}

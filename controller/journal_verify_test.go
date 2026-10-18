@@ -348,3 +348,49 @@ func TestJournalVerificationCachedHead(t *testing.T) {
 		})
 	}
 }
+
+// Fork re-hashes the copied prefix into a fresh chain, so it must refuse a changed parent record
+// before the child is fenced or written; a change after the fork point is not copied and does not
+// block the fork.
+func TestForkRefusesTamperedPrefix(t *testing.T) {
+	records := modernRecords(t, "")
+	var input, output int64
+	for _, r := range records {
+		switch r.Event.Kind {
+		case api.EventInput:
+			input = r.Seq
+		case api.EventOutput:
+			output = r.Seq
+		}
+	}
+	parent := tamperedJournal(t, records, api.EventOutput)
+	for _, tc := range []struct {
+		name  string
+		atSeq int64
+		ok    bool
+	}{
+		{"tampered record copied", output, false},
+		{"tampered record after the fork point", input, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			child := eventlog.AsStore(eventlog.New())
+			err := controller.Fork(parent, child, tc.atSeq)
+			if tc.ok {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := child.Verify(); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			assertJournalTampered(t, err)
+			if head, _ := child.Head(); head != 0 {
+				t.Errorf("child head = %d", head)
+			}
+			if fence, _ := child.NewFence(); fence != 1 {
+				t.Errorf("child was fenced before the refusal: next fence %d", fence)
+			}
+		})
+	}
+}

@@ -938,6 +938,9 @@ func forkError(err error) error {
 	switch {
 	case errors.Is(err, eventlog.ErrDeleted):
 		return withStatusCause(codes.FailedPrecondition, err)
+	case errors.Is(err, eventlog.ErrTampered):
+		// The parent's copied prefix failed hash-chain verification (CHAIN-12).
+		return status.Error(codes.DataLoss, err.Error())
 	case errors.Is(err, placement.ErrSessionBusy):
 		return status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, api.ErrMemoryStateLost):
@@ -1082,7 +1085,7 @@ func resumeError(err error) error {
 		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, eventlog.ErrTampered):
 		// The journal failed hash-chain verification (CHAIN-12); retrying cannot help.
-		return status.Errorf(codes.DataLoss, "resume: %v", err)
+		return status.Error(codes.DataLoss, err.Error())
 	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
 		return status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport):

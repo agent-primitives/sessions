@@ -1322,6 +1322,12 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 			return fmt.Errorf("placement: fork child %q: %w", child.UID, err)
 		}
 	}
+	// Check the records the children inherit before admission, the parent's checkpoint or any child
+	// compute (CHAIN-12): a memory-tier fork appends SUSPEND to the parent in forkSource, before
+	// ForkWithComputeInstance would see the tamper.
+	if err := controller.VerifyForkPrefix(parent, atSeq); err != nil {
+		return err
+	}
 	ref, release, err := p.forkSource(ctx, parent, parentUID, atSeq)
 	if err != nil {
 		return err

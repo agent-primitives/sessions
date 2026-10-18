@@ -53,6 +53,7 @@ export default defineConfig({
           label: "Build on it",
           items: [
             { label: "Writing a harness", slug: "harness-authoring" },
+            { label: "Responses model adapter", slug: "responses-adapter" },
             { label: "Architecture", slug: "architecture" },
             { label: "Running on agent-substrate", slug: "substrate-conformance" },
           ],

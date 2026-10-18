@@ -14,6 +14,14 @@ not provide.
   parts without emitting tool JSON through the text callback. Replay and completed-effect recovery
   preserve full parts/usage through the existing neutral request hash and completion journal.
 
+- `model/openai.NewResponses` adds an explicit stateless Responses client with function tools,
+  opaque encrypted reasoning retention, usage, and text streaming. Existing Chat Completions,
+  daemon/CLI selection, neutral request hashes and journal schemas remain unchanged. Unsupported
+  content and controls refuse rather than being dropped. Assistant text history uses `output_text`;
+  system/user text uses `input_text`. Model-call diagnostics retain categories, HTTP status and bounded
+  provider `error.code`/`error.param` identifiers, not messages or transport URLs/details; see
+  [mapping and limits](docs/responses-adapter.md).
+
 ### Fixed
 
 - Socket executor write/read errors, including journaled approval receipts, no longer expose
@@ -38,6 +46,15 @@ not provide.
   chunk and argument decode errors retain only syntax or type/range diagnostics and declared field
   names, never raw provider values.
   It does not register/execute tools or add executor deduplication.
+
+- SQLite schema v5 follows approval v3 and deletion v4, adding indexed exact caller issuer/subject
+  ownership and an off-mode journal authorization marker. Legacy and RPC-created sessions remain
+  unbound; ordinary metadata writes and copied history cannot assign or replace owners. No events
+  or hashes are rewritten, and no wire fields change. Older hosts refuse v5 at open time; this host
+  also refuses required, unknown or missing authorization markers at v5 because it cannot enforce
+  caller access. Stop all older writers before the first v5 open, following the
+  [rollout order](#sqlite-v4-rollout). Back up first. Sessions RPCs remain unauthenticated and
+  unenforced.
 
 #### Sessions API
 
@@ -156,6 +173,12 @@ not provide.
   `substrate.ErrActorBusy`; a `ControlClient` that returns a raw transport status still gets
   `INTERNAL`. This is the usual outcome for the host that loses a race for a session's first turn
   while the winner's actor is still resuming.
+
+### Added
+
+- Verified-caller ownership scaffolding: `api.CallerIdentity`, `Authorizer` and owner-only
+  `OwnerAuthorizer` contracts, plus insert-only `CreateOwnedSession` and indexed owner-filtered
+  listings. These are trusted-host Go APIs, not RPC authentication or enforcement.
 
 ## v0.2.0 - 2026-10-16
 

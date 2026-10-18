@@ -1,4 +1,5 @@
-// Package openai is a model provider for OpenAI-compatible Chat Completions endpoints.
+// Package openai provides OpenAI-compatible Chat Completions and Responses protocol clients.
+// New selects Chat Completions; NewResponses explicitly selects stateless Responses.
 //
 // It speaks the HTTP wire protocol directly and depends on no vendor SDK, which is what keeps it
 // in the core module: the protocol is an interoperable format that many endpoints implement, not a
@@ -10,9 +11,8 @@
 // scopes the model into its path, pins an API version with a query string, or authenticates with
 // something other than a bearer token is reached by configuration rather than by code.
 //
-// The limit is the request body. An endpoint that accepts the chat-completions body works here; one
-// with its own body or signing scheme (a native messages API, or a cloud that signs requests) is a
-// different protocol, and the seam for those is controller.ModelFunc, which this type satisfies.
+// Client accepts the Chat Completions body; ResponsesClient implements the separate Responses body.
+// Other native APIs or signing schemes use controller.ModelFunc, which both clients satisfy.
 //
 // Client.Model satisfies controller.ModelFunc, so it plugs straight into placement.New.
 //

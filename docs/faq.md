@@ -97,7 +97,9 @@ It is model-agnostic. The harness selects a model by id and the host mediates th
 provider-specific code. Opaque provider reasoning parts are carried in one neutral `ReasoningPart` type
 and replayed verbatim, which was validated across Anthropic, OpenAI, and Gemini in the reasoning-
 continuity work. Because the harness routes model calls through the sink and not a provider SDK, swapping
-providers does not change the replay path.
+providers does not change the replay path. The bundled protocol clients are Chat Completions
+(`openai.New`) and explicit Responses (`openai.NewResponses`); see the [Responses mapping and
+limits](responses-adapter.md). The daemon/CLI still select Chat Completions.
 
 ## Can I bring my existing agent framework?
 
@@ -176,6 +178,8 @@ adapter maps function tools, tool choices, assistant tool calls and text tool re
 The stock daemon can route host-mediated tools for static CLI harnesses to
 [configured Unix-socket executors](tool-executors.md); without configuration, it has no host executor.
 A harness must still implement the tool loop and use a suitably configured executor for host effects.
+Responses tools require an explicitly composed Go host; see the
+[Responses mapping and limits](responses-adapter.md).
 This is not a complete MCP integration. See
 [approval recovery](interaction-model.md#approval-decisions-and-recovery).
 

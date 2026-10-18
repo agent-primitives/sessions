@@ -427,6 +427,9 @@ not HTTP payloads or deltas. Pure replay and recovery of completed recorded effe
 and usage without provider calls; an unanswered model intent retains its existing recovery policy.
 A custom harness and host executor still supply the application loop and durable deduplication.
 
+The explicit Responses adapter (`model/openai.NewResponses`) also maps function tools and preserves
+opaque reasoning across tool turns; see [its supported mapping and limits](responses-adapter.md).
+
 ## Reference harness 1: stateless replay (`harness/echoagent`)
 
 The whole harness. It sends the last input to the model through the sink and lets the recorded

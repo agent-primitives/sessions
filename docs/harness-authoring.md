@@ -255,15 +255,17 @@ Each tool declares how it executes (`api.Mediation`):
 
 For any side-effecting tool, the harness chooses `ToolCall.IdempotencyKey`, unique only within its
 session. If a crash forces an at-most-once re-drive (I3), the tool side dedups on **session UID plus
-idempotency key** to avoid repeating the effect during recovery of that same session. Different
+idempotency key** to avoid repeating the effect during recovery of that same session. The host
+re-drives only tools whose executor declares that dedup, and refuses the others. Different
 sessions may reuse the same key; a forked child has a different dedup namespace. Resume refuses an
 unfinished inherited execution if an inherited tool intent still lacks a matching result at the
 journal head, rather than re-driving the parent's effect under the child UID.
 
 #### Host composition for controller-mediated tools
 
-A custom Sessions host supplies its executor on the Placer registered for that harness. The same
-executor is used for live `Exec` and interrupted-turn `Resume`; no Sessions RPC field is needed.
+A custom Sessions host supplies its executor on the Placer registered for that harness, with
+`placement.WithDurableDedup` naming the tools it durably deduplicates. The same executor is used
+for live `Exec` and interrupted-turn `Resume`; no Sessions RPC field is needed.
 `controller.ToolFunc` has signature
 `func(ctx context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error)`.
 `scope.SessionUID` is the nonempty host-bound session identity, not a harness-supplied value.
@@ -282,7 +284,10 @@ import (
 
 func newToolService(store *sqlitelog.Store, backend placement.Backend,
     model controller.ModelFunc, executeTool controller.ToolFunc) (*session.Service, error) {
-    placer := placement.New(backend, model, placement.WithToolExecutor(executeTool))
+    // executeTool keeps a durable receipt per (session UID, idempotency key) for "charge" only.
+    dedups := func(tool string) bool { return tool == "charge" }
+    placer := placement.New(backend, model, placement.WithToolExecutor(executeTool),
+        placement.WithDurableDedup(dedups))
     registry, err := placement.NewRegistry("my-agent", map[string]*placement.Placer{
         "my-agent": placer,
     })
@@ -296,8 +301,17 @@ func newToolService(store *sqlitelog.Store, backend placement.Backend,
 Without an executor, controller-mediated calls fail closed after recording intent and perform no
 host effect. Every such call requires a nonempty idempotency key, rejected before intent if absent.
 The controller records intent before invoking the executor and stamps the result ID with the call
-ID. Completed intent/result pairs are served during recovery without invoking an executor; intent
-without a result is re-driven using the **original recorded key** only within the same session.
+ID. Completed intent/result pairs are served during recovery without invoking an executor. Intent
+without a result that is the turn's last effect is re-driven using the **original recorded key**
+only within the same session, and only for a tool the executor declares with
+`placement.WithDurableDedup` (or `controller.WithDurableDedup`). For any other tool `Resume` returns
+`controller.ErrUnansweredToolCall` ("tool call has no recorded result; repeating it could repeat
+the action") before running the harness or appending any event, and `Sessions.Resume` reports
+`FAILED_PRECONDITION`: declare the tool once its executor deduplicates, or Exec a new turn. The
+declaration is per tool name and is consulted only for that re-drive: first attempts, served
+results and approved `REQUIRES_APPROVAL` calls do not need it. An approved call runs on `Resume`
+either way, so a crash during it repeats the call; only deduplication prevents a repeated effect.
+Without an executor, `Resume` does not refuse; the re-issued call fails as it does live.
 Fork still copies the requested prefix, but Resume returns `controller.ErrInheritedToolIntent`
 before running the harness or appending any event if the unfinished execution has inherited tool
 intents still unresolved at the journal head. This includes legacy turns without `EXECUTION_START`.

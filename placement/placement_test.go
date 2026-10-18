@@ -1052,7 +1052,7 @@ func TestPlacerHostToolExecRecordsIntentBeforeEffect(t *testing.T) {
 	defer store.Close()
 	log := store.Session("tool-live")
 	effects := 0
-	p := newLocalPlacer(t, hostToolHarness{key: "live-key"}, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+	p := newLocalPlacer(t, hostToolHarness{key: "live-key"}, dedupAllTools, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
 		if scope.SessionUID != "tool-live" {
 			return api.ToolResult{}, fmt.Errorf("executor session = %q, want tool-live", scope.SessionUID)
 		}
@@ -1097,7 +1097,7 @@ func TestPlacerHostToolFailures(t *testing.T) {
 			attempts := 0
 			var opts []placement.Option
 			if tc.executor {
-				opts = append(opts, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				opts = append(opts, dedupAllTools, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					attempts++
 					return api.ToolResult{}, errExecutor
 				}))
@@ -1129,7 +1129,7 @@ func TestPlacerHostToolExecutorsAreIndependent(t *testing.T) {
 	}
 	defer store.Close()
 	newHost := func(receipt string) *placement.Placer {
-		return newLocalPlacer(t, hostToolHarness{key: "shared-key"}, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+		return newLocalPlacer(t, hostToolHarness{key: "shared-key"}, dedupAllTools, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 			return api.ToolResult{Output: map[string]any{"receipt": receipt}}, nil
 		}))
 	}
@@ -1204,7 +1204,7 @@ func TestPlacerHostToolResumeRedrivesTerminalIntentWithOriginalKey(t *testing.T)
 	defer store.Close()
 	log := store.Session("terminal-intent")
 	seedToolPrefix(t, log, false)
-	p := newLocalPlacer(t, hostToolHarness{key: "original-key"}, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+	p := newLocalPlacer(t, hostToolHarness{key: "original-key"}, dedupAllTools, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
 		if scope.SessionUID != "terminal-intent" {
 			return api.ToolResult{}, fmt.Errorf("resume executor session = %q, want terminal-intent", scope.SessionUID)
 		}
@@ -1307,7 +1307,7 @@ func TestPlacerHostToolSessionsScopeEffectsAndReceipts(t *testing.T) {
 	}
 	defer store.Close()
 	tool := openDurableTool(t, filepath.Join(t.TempDir(), "tool.db"))
-	p := newLocalPlacer(t, hostToolHarness{key: "shared-key"}, placement.WithToolExecutor(tool.exec))
+	p := newLocalPlacer(t, hostToolHarness{key: "shared-key"}, dedupAllTools, placement.WithToolExecutor(tool.exec))
 	for _, tc := range []struct{ uid, receipt string }{
 		{"session-a", "receipt-1"}, {"session-b", "receipt-2"},
 		{"session-a", "receipt-1"}, {"session-b", "receipt-2"},
@@ -1370,7 +1370,7 @@ func TestPlacerHostToolResumeDedupsAfterReopeningJournalAndExecutor(t *testing.T
 	tool := openDurableTool(t, receiptPath)
 	backend := local.New(hostToolHarness{key: "original-key"})
 	t.Cleanup(func() { _ = backend.Close() })
-	p := placement.New(backend, echoagent.Model, placement.WithToolExecutor(tool.exec))
+	p := placement.New(backend, echoagent.Model, dedupAllTools, placement.WithToolExecutor(tool.exec))
 	log := store.Session("durable-recovery")
 	faulted := &failToolResultLog{Store: log}
 	if _, err := p.Exec(context.Background(), faulted, "durable-recovery", []api.Message{*api.TextMessage("user", "charge")}, 0); !errors.Is(err, errToolResultAppend) {
@@ -1393,7 +1393,7 @@ func TestPlacerHostToolResumeDedupsAfterReopeningJournalAndExecutor(t *testing.T
 	}
 	defer reopened.Close()
 	recreatedTool := openDurableTool(t, receiptPath)
-	recreatedHost := newLocalPlacer(t, hostToolHarness{key: "original-key"}, placement.WithToolExecutor(recreatedTool.exec))
+	recreatedHost := newLocalPlacer(t, hostToolHarness{key: "original-key"}, dedupAllTools, placement.WithToolExecutor(recreatedTool.exec))
 	recoveredLog := reopened.Session("durable-recovery")
 	if err := recreatedHost.Resume(context.Background(), recoveredLog, "durable-recovery"); err != nil {
 		t.Fatal(err)

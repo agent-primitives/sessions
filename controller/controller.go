@@ -68,6 +68,14 @@ var ErrIncompleteInvocation = fmt.Errorf("%w: incomplete invocation", ErrInvalid
 // remaining key contract (generation, TTL) is the §10 spike; this is the minimal guard.
 var ErrMissingIdempotencyKey = errors.New("controller: CONTROLLER_MEDIATED tool call requires an idempotency key")
 
+// ErrUnansweredToolCall refuses Resume of an execution whose last recorded effect is a TOOL_CALL
+// that is not approval-gated and has no TOOL_RESULT when the configured executor has not declared
+// durable dedup for that tool (WithDurableDedup). Whether the executor already applied the effect
+// is unknown, so re-running the call could repeat it. Resume returns it before Describe, Run or
+// any append, so the journal is unchanged and a later Resume under a declaring executor can still
+// re-drive the call.
+var ErrUnansweredToolCall = errors.New("controller: tool call has no recorded result; repeating it could repeat the action")
+
 // ErrUnmediatedToolCall rejects a ToolCall whose mediation tier is not host-executed. ToolCall is
 // only for CONTROLLER_MEDIATED and REQUIRES_APPROVAL; an UNSPECIFIED or
 // IN_HARNESS_REPORTED call must not execute here (the latter uses Report), so it is rejected before
@@ -111,10 +119,16 @@ type ToolCallContext struct {
 // ToolFunc executes a CONTROLLER_MEDIATED or approved REQUIRES_APPROVAL tool. The host calls it between appending the TOOL_CALL
 // intent and appending the TOOL_RESULT (the two-phase write-ahead of §3/I3). The host owns
 // tool/resource authorization and durable deduplication scoped by scope.SessionUID plus the
-// harness-chosen IdempotencyKey, which is only unique within a session. On same-session
-// crash-recovery it receives the same session and recorded call, and MUST NOT repeat the external
-// effect. Resume rejects unresolved inherited intents across a fork. ctx carries the execution's
-// cancellation and deadline.
+// harness-chosen IdempotencyKey, which is only unique within a session. ctx carries the
+// execution's cancellation and deadline.
+//
+// Resume re-runs a call that is not approval-gated and whose TOOL_CALL is the interrupted
+// execution's last recorded effect (including a call whose executor returned an error the harness
+// did not handle) only for a tool the executor declares through WithDurableDedup; it then receives
+// the same session and recorded call and MUST NOT repeat the external effect. For an undeclared
+// tool Resume returns ErrUnansweredToolCall instead. Resume rejects unresolved inherited intents
+// across a fork whether or not the tool is declared. An approved REQUIRES_APPROVAL call runs on
+// Resume without consulting the declaration.
 type ToolFunc func(ctx context.Context, scope ToolCallContext, call api.ToolCall) (api.ToolResult, error)
 
 // Option configures a Controller at construction.
@@ -123,7 +137,19 @@ type Option func(*Controller)
 // WithToolExecutor sets the executor for CONTROLLER_MEDIATED and approved tool calls. Without it, a harness that
 // emits a host-mediated ToolCall gets an error (in-harness-reported tools use Report instead).
 // A non-nil executor requires a nonempty WithSessionUID; New rejects an unscoped executor.
+// Resume re-drives an interrupted call only for tools declared with WithDurableDedup.
 func WithToolExecutor(tool ToolFunc) Option { return func(c *Controller) { c.tool = tool } }
+
+// WithDurableDedup declares, per tool name, that the WithToolExecutor executor deduplicates that
+// tool durably by (scope.SessionUID, call.IdempotencyKey), or that repeating the call is harmless
+// (a read-only or naturally idempotent tool). Resume consults declared with the recorded call's
+// tool name only when an interrupted execution's last recorded effect is a TOOL_CALL that is not
+// approval-gated and has no TOOL_RESULT: true re-runs that call under its recorded key; false, or
+// no WithDurableDedup at all, makes Resume return ErrUnansweredToolCall. First attempts, recorded
+// results and approved REQUIRES_APPROVAL calls never consult it. declared must not block.
+func WithDurableDedup(declared func(tool string) bool) Option {
+	return func(c *Controller) { c.durableDedup = declared }
+}
 
 // WithFence binds the controller to a fence the caller already minted from the log (via NewFence),
 // instead of minting its own. The placement layer uses this so the fence it stamps on the
@@ -177,6 +203,7 @@ type Controller struct {
 	startConfig        []byte
 	startResumeFromSeq int64
 	tool               ToolFunc
+	durableDedup       func(tool string) bool
 	fence              int64
 	liveModelCalls     int
 	liveToolCalls      int
@@ -633,6 +660,8 @@ func controllerErrorKind(err error) string {
 		return "missing_idempotency_key"
 	case errors.Is(err, ErrUnmediatedToolCall):
 		return "unmediated_tool_call"
+	case errors.Is(err, ErrUnansweredToolCall):
+		return "unanswered_tool_call"
 	case errors.Is(err, context.Canceled):
 		return "canceled"
 	case errors.Is(err, context.DeadlineExceeded):

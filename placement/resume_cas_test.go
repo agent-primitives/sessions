@@ -197,7 +197,7 @@ func TestCheckedResumeRefusesForkCommittedDuringRestore(t *testing.T) {
 	hs := startHarnessServer(t, h)
 	backend := &routedBackend{address: hs.addr, desc: desc}
 	b := &resumeRestoreProbe{Backend: backend}
-	p := placement.New(b, nil, placement.WithToolExecutor(func(_ context.Context, _ controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+	p := placement.New(b, nil, dedupAllTools, placement.WithToolExecutor(func(_ context.Context, _ controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
 		effects.Add(1)
 		return api.ToolResult{ID: call.ID}, nil
 	}))

@@ -1073,7 +1073,7 @@ func TestSessionsRegistryHostToolExec(t *testing.T) {
 			var uid string
 			var opts []placement.Option
 			if tc.configured {
-				opts = append(opts, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+				opts = append(opts, dedupAllTools, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
 					if scope.SessionUID != uid {
 						return api.ToolResult{}, fmt.Errorf("executor session = %q, want %q", scope.SessionUID, uid)
 					}
@@ -1152,7 +1152,7 @@ func TestSessionsRegistryHostToolResume(t *testing.T) {
 			var uid string
 			var opts []placement.Option
 			if !completedPrefix {
-				opts = append(opts, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+				opts = append(opts, dedupAllTools, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
 					if scope.SessionUID != uid {
 						return api.ToolResult{}, fmt.Errorf("resume executor session = %q, want %q", scope.SessionUID, uid)
 					}

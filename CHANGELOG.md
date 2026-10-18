@@ -50,6 +50,21 @@ not provide.
   caller access. Stop all older writers before the first v5 open, following the
   [rollout order](#sqlite-v4-rollout). Back up first. Sessions RPCs remain unauthenticated and
   unenforced.
+- Embedders using `controller.WithToolExecutor` or `placement.WithToolExecutor` must now declare
+  durable dedup to keep `Resume` re-driving an interrupted tool call, including a call whose
+  executor returned an error the harness did not handle. `Resume` re-runs a turn's trailing
+  `TOOL_CALL` that has no `TOOL_RESULT` and is not approval-gated only for tools declared, by tool
+  name, with the new `controller.WithDurableDedup` or `placement.WithDurableDedup`. For any
+  other tool it returns `controller.ErrUnansweredToolCall` ("tool call has no recorded result;
+  repeating it could repeat the action") before running the harness, without calling the executor
+  or appending to the journal, and `Sessions.Resume` reports `FAILED_PRECONDITION`; it used to
+  re-run the call. Declare only tools whose executor deduplicates on (session UID, idempotency key)
+  or that are safe to repeat. A refused turn can be resumed once its tool is declared, or
+  superseded by a new `Exec`. First attempts, recorded results, the inherited-intent refusal after
+  `Fork`, approved `REQUIRES_APPROVAL` calls and hosts without a tool executor are unchanged.
+  `agentsessionsd -tool-executors` is unchanged: it declares its `durable_dedup: true` routes and
+  the tools it refuses without dialing (false or unknown routes, unconfigured tools).
+  Journal, wire and hash formats are unchanged; a rollback restores the unconditional re-drive.
 
 #### Sessions API
 

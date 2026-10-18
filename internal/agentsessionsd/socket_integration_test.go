@@ -318,8 +318,9 @@ func TestSocketExecutorDurableDedupAfterJournalReceiptLoss(t *testing.T) {
 		}
 		log := store.Session(uid)
 		fault := &socketReceiptFault{Store: log, fail: true}
-		executor := configExecutor(t, socket, "true", "h", io.Discard)
-		c, err := controller.New(fault, nil, controller.WithSessionUID(uid), controller.WithToolExecutor(executor))
+		executor := configToolExecutor(t, socket, "true", "h", io.Discard)
+		opts := []controller.Option{controller.WithSessionUID(uid), controller.WithToolExecutor(executor.Call), controller.WithDurableDedup(executor.DurableDedup)}
+		c, err := controller.New(fault, nil, opts...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -333,7 +334,7 @@ func TestSocketExecutorDurableDedupAfterJournalReceiptLoss(t *testing.T) {
 		}
 		db = open()
 		fault.fail = false
-		c, err = controller.New(fault, nil, controller.WithSessionUID(uid), controller.WithToolExecutor(executor))
+		c, err = controller.New(fault, nil, opts...)
 		if err != nil {
 			t.Fatal(err)
 		}

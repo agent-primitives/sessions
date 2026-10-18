@@ -320,7 +320,7 @@ func TestResumeConnectedHarnessOutageRemainsUnavailable(t *testing.T) {
 		return api.ModelResponse{}, nil
 	}, placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 		return unavailableRoutingHarness{b}, func() error { closes.Add(1); return nil }, nil
-	}), placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+	}), dedupAllTools, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 		tools.Add(1)
 		return api.ToolResult{}, nil
 	}))

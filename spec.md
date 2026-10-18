@@ -488,7 +488,8 @@ These are named in the reference controller. The numbering is the code's.
 - `I1`: Reconstruction replay MUST NOT invoke the model provider or the tool executor. Recorded
   completions and receipts are served from the log.
 - `I3`: A host-executed tool intent recorded without a receipt is re-driven on recovery under the
-  same recorded call and idempotency key (§9.3).
+  same recorded call and idempotency key when its executor declares durable dedup for the tool,
+  and refused otherwise (§9.3).
 - `EXE-13`: A harness MUST be deterministic given its `Start` (config, history, inputs, cursor) and
   the served model and tool results. A harness MUST replay `ReasoningPart` content verbatim.
 - `EXE-14`: Divergence MUST be sticky: once detected, every later sink operation in that execution
@@ -531,9 +532,10 @@ These are named in the reference controller. The numbering is the code's.
 - `EXE-23`: Recovery that fails after the harness has started running appends a best-effort
   `EVENT_ERROR`; recovery that succeeds appends `EVENT_END`. Failures raised before the harness
   runs (a chain mismatch `CHAIN-12`, invalid log, incomplete invocation `EXE-24`, harness identity
-  `EXE-25`, inherited intent `EXE-26`, an unfinished legacy execution without a session uid
-  `EXE-30`) append nothing. A run stopped after an approval intent is recorded (a park, or a
-  failure recording the approval request or receipt, §10) appends neither `ERROR` nor `END`.
+  `EXE-25`, inherited intent `EXE-26`, an undeclared trailing tool intent `TOOL-10`, an unfinished
+  legacy execution without a session uid `EXE-30`) append nothing. A run stopped after an approval
+  intent is recorded (a park, or a failure recording the approval request or receipt, §10) appends
+  neither `ERROR` nor `END`.
 - `EXE-24`: Input completeness, for an execution that has an `EXECUTION_START`: a missing or
   negative `input_count`, an `EVENT_INPUT` with no message, or a count different from the
   committed `EVENT_INPUT` records is an invalid log for a completed or selected execution. A
@@ -581,8 +583,8 @@ invokes no harness and stays a no-op without one.
 - `EXE-30`: Recovery of an unfinished legacy execution MUST use only its last `INPUT` as
   `Start.inputs` and every record before that `INPUT` as `Start.history`, with empty `config` and
   `resume_from_seq` 0. It serves the `MODEL_CALL`, `OUTPUT`, `TOOL_CALL`, and `TOOL_RESULT`
-  records after that `INPUT` as in §8.5 and re-drives a trailing tool intent (`TOOL-10`). It
-  differs from modern recovery as follows:
+  records after that `INPUT` as in §8.5 and re-drives or refuses a trailing tool intent
+  (`TOOL-10`). It differs from modern recovery as follows:
   - Recorded `USAGE` is not an effect. Served completions carry no usage, and a harness `Usage`
     call is accepted without comparison while recorded effects remain and journaled after they
     are exhausted.
@@ -657,15 +659,29 @@ invokes no harness and stays a no-op without one.
   any effect. Args the journal form cannot represent are divergence.
 - `TOOL-9`: A recorded call with a receipt MUST be answered from the receipt; the executor MUST NOT
   be called. A receipt whose `id` differs from the call is divergence.
-- `TOOL-10`: A trailing `TOOL_CALL` without a receipt MUST be re-driven on recovery with the
-  recorded call (same `idempotency_key`) and the same session uid. A non-trailing `TOOL_CALL`
-  without a receipt MUST NOT be re-executed: the re-issued call returns an error to the harness,
-  which is not divergence. The execution fails only if the harness does not handle that error; an
-  in-process harness that handled it originally can continue and complete. Over
+- `TOOL-10`: A trailing host-executed `TOOL_CALL` without a receipt, other than an approval-gated
+  call (§10.4), MUST be re-driven on recovery with the recorded call (same `idempotency_key`) and
+  the same session uid only when the executor declares durable dedup for that tool (`TOOL-11`).
+  Otherwise recovery MUST refuse it (`ErrUnansweredToolCall`, `FAILED_PRECONDITION`: "tool call has
+  no recorded result; repeating it could repeat the action") after the chain check (`CHAIN-12`) and
+  `EXE-26` and before the controller's own `Describe`, run, or any journal append, so a later
+  recovery with a declaring executor can still re-drive it. A journal that fails `CHAIN-12` is
+  refused as tampered whether or not the tool is declared, and its call is never re-driven. A host
+  may act before that refusal without appending: the reference `placement.Placer.Resume` admits
+  through the backend's `Describe`, restores compute, and may `Describe` a connected harness first.
+  The reference host declares per tool name (`controller.WithDurableDedup`,
+  `placement.WithDurableDedup`); the stock daemon declares its `durable_dedup: true` routes and the
+  tools it refuses before dialing ([tool executors](docs/tool-executors.md)). With no executor
+  configured it does not refuse: the re-issued call fails as on the live path (§9.2). A non-trailing
+  `TOOL_CALL` without a receipt MUST NOT be re-executed: the re-issued call returns an error to the
+  harness, which is not divergence. The execution fails only if the harness does not handle that
+  error; an in-process harness that handled it originally can continue and complete. Over
   `Harness.Connect` the execution fails (`EXE-33`).
-- `TOOL-11`: The executor MUST deduplicate on (session uid, `idempotency_key`) and MUST NOT repeat
-  the external effect for a key it has already applied. The host re-drives on every recovery that
-  finds the intent unresolved, so at-most-once holds only if the executor deduplicates.
+- `TOOL-11`: An executor that declares durable dedup for a tool MUST deduplicate its calls on
+  (session uid, `idempotency_key`) and MUST NOT repeat the external effect for a key it has already
+  applied, or the tool MUST be safe to repeat (read-only or naturally idempotent). The host
+  re-drives on every recovery that finds a declared intent unresolved, so at-most-once holds only
+  if the declaration is true. First attempts and served receipts do not consult the declaration.
 - `TOOL-12`: `idempotency_key` is unique only within a session. Inherited intents across a fork are
   refused (`EXE-26`) rather than re-driven in the child.
 - `IN_HARNESS_REPORTED` tools have no intent record and therefore no host re-drive or at-most-once
@@ -732,7 +748,8 @@ invokes no harness and stays a no-op without one.
   `REQUIRES_MEMORY_SNAPSHOT` harness is `FAILED_PRECONDITION`.
 - `APR-14`: After a decision, recovery MUST use the recorded invocation (harness, config, inputs,
   cursor) and snapshot reference. A denial writes an `APPROVAL_DENIED` receipt without calling the
-  executor. An approval calls the executor with the recorded call; an executor failure becomes a
+  executor. An approval calls the executor with the recorded call, whether or not the executor
+  declares durable dedup for the tool (`TOOL-10` does not apply); an executor failure becomes a
   durable `EXECUTOR_ERROR` receipt. A missing executor is `FAILED_PRECONDITION` and leaves the
   decision recoverable.
 - `APR-15`: An inherited unresolved gate (copied by a fork) MUST be refused with
@@ -988,7 +1005,7 @@ does not erase data or reclaim compute.
 | Missing required field, bad page token, unknown harness name, fork `count > 128`, `child_names` length mismatch, fork `identity` set | `INVALID_ARGUMENT` |
 | Unknown session (Get, Exec, Suspend, Resume, Fork, Approve, Delete) | `NOT_FOUND` |
 | Compare-and-swap conflict, stale fence, session busy (including an overlap with `DeleteSession`, `OPS-30`), checkpoint in progress, snapshot superseded, compute busy with another operation (`api.ErrComputeBusy`) | `ABORTED` |
-| Unplaceable harness, descriptor mismatch, pin violation, memory-tier override (`OPS-7`), retired or unservable harness, static harness name with a registration row, approval state violation, inherited intent, memory fork at a historical `seq`, deleted session (`OPS-34`), memory-tier compute gone or replaced (`api.ErrMemoryStateLost`, `RT-4e`, `RT-4h`) | `FAILED_PRECONDITION` |
+| Unplaceable harness, descriptor mismatch, pin violation, memory-tier override (`OPS-7`), retired or unservable harness, static harness name with a registration row, approval state violation, inherited intent, undeclared trailing tool intent (`TOOL-10`), memory fork at a historical `seq`, deleted session (`OPS-34`), memory-tier compute gone or replaced (`api.ErrMemoryStateLost`, `RT-4e`, `RT-4h`) | `FAILED_PRECONDITION` |
 | Harness `Describe` (admission `RT-1`, the `RT-3` recheck, or a `Describe` during the turn) could not reach the harness while the caller's context is live: the peer returned `UNAVAILABLE` or `DEADLINE_EXCEEDED`; or, on admission and the recheck, the host's own bound expired; or, during the turn, the error wraps `context.DeadlineExceeded` | `UNAVAILABLE` |
 | Any other `Describe` error on those paths, for example a peer `UNIMPLEMENTED` or `INTERNAL`, or a plain error from an in-process harness (during the turn, even one returned after the host's bound expired) | `INTERNAL` |
 | Any `Describe` error in the stored harness's half of the memory-tier override check (`OPS-7`) while the caller's context is live | `UNAVAILABLE` |
@@ -1336,7 +1353,8 @@ involved, and `TestApprovalRawProtocol` uses neither controller nor journal.
 | `TestSingleWriter` | A second controller with a stale cursor (0) is rejected | `LOG-7`, `EXE-2` |
 | `TestTamperedJournalRefusedBeforeUse` | A stored `OUTPUT` changed without its hash refuses reconstruction, recovery and `Exec` with 0 model calls and no append | `CHAIN-12` |
 | `TestIntegrityGoldenVectorCrossImpl` | Python verifier reproduces the Go `content_hash` (skipped without python3) | `CHAIN-11` |
-| `TestCrashMidToolCallAtMostOnce` | Trailing intent re-driven under the same key; one effect, one receipt | `TOOL-10`, `TOOL-11` |
+| `TestCrashMidToolCallAtMostOnce` | Declared trailing intent re-driven under the same key; one effect, one receipt | `TOOL-10`, `TOOL-11` |
+| `TestCrashMidToolCallUndeclaredRefused` | Undeclared trailing intent refused; no executor call, journal unchanged | `TOOL-10` |
 | `TestControllerMediatedToolRequiresKey` | Keyless call rejected; no `TOOL_CALL` recorded | `TOOL-4` |
 | `TestUnmediatedToolCallRejected` | Unspecified mediation rejected | `TOOL-1` |
 | `TestReplayNeverReachesTheProvider` | A real HTTP provider client sees 1 request live, 0 on replay | `I1` |
@@ -1393,8 +1411,11 @@ The reference implementation protects the integrity of the record, not access to
   journals whose stored hashes no longer match their content.
 - `ExecRequest.config` and every journaled payload are durable and readable through `Replay`.
   Credentials MUST NOT be placed in them.
-- At-most-once tool execution depends on executor deduplication (`TOOL-11`). An executor that does
-  not deduplicate can apply an effect twice after a crash.
+- At-most-once tool execution depends on executor deduplication (`TOOL-11`). An executor that
+  declares durable dedup but does not deduplicate can apply an effect twice after a crash. An
+  approved `REQUIRES_APPROVAL` call runs on recovery without the declaration (`APR-14`): the
+  journal cannot tell its first attempt from a re-drive after a crash during execution, so an
+  executor that does not deduplicate can apply that effect twice.
 - The harness registry chooses what the host dials and whose model credential pays for it. It MUST
   NOT be served on the Sessions listener.
 

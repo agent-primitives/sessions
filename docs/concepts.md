@@ -401,7 +401,8 @@ replay-conformance suite (`conformance/`) enforces a numbered contract. The load
 - **I2: reasoning continuity.** Opaque provider reasoning parts are recorded verbatim and replayed, so
   reasoning survives resume and fork on the stateless path.
 - **I3: at-most-once effect re-drive.** A crash between an effect's intent and its result is re-driven at
-  most once. Host-executed tools carry an idempotency key so the re-drive dedups.
+  most once. Host-executed tools carry an idempotency key so the re-drive dedups, and a tool intent
+  is re-driven only when its executor declares durable dedup for the tool.
 - **I4: memory-restore is not replay.** After a memory restore the harness already holds its state in
   RAM. The host still sends the full prior log as `Start.History`, and it must not be replayed into
   that state: a `REQUIRES_MEMORY_SNAPSHOT` harness never reconstructs state from `History` (see

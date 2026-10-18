@@ -615,8 +615,8 @@ func TestForkOfMemoryHarnessWithoutExternalHandleRefusesCheckpoint(t *testing.T)
 
 	ctl := &cloningControl{} // every suspend reports no held snapshot
 	err = memorySubstratePlacer(ctl).Fork(context.Background(), parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, head)
-	if err == nil || errors.Is(err, substrate.ErrNoSnapshotToClone) {
-		t.Fatalf("err=%v want a checkpoint refusal, not ErrNoSnapshotToClone", err)
+	if !errors.Is(err, placement.ErrUnplaceable) || !errors.Is(err, api.ErrInvalidCheckpoint) || errors.Is(err, substrate.ErrNoSnapshotToClone) {
+		t.Fatalf("err=%v want ErrUnplaceable wrapping ErrInvalidCheckpoint, not ErrNoSnapshotToClone", err)
 	}
 	for _, c := range ctl.calls {
 		if strings.HasPrefix(c, "tag:") || strings.HasPrefix(c, "clone:") {

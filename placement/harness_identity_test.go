@@ -165,7 +165,7 @@ func TestPlacerResumeDoesNotVersionCheckConfiguredMemoryDescriptor(t *testing.T)
 	}
 	h := &identityToolHarness{version: "restored-v1"}
 	var closes, tools atomic.Int32
-	ctl := &cloningControl{}
+	ctl := &cloningControl{snapshot: ref.ExternalURI}
 	backend := substrate.New(ctl, "space", substrate.ObjectRef{Name: "new-image"}, api.Descriptor{
 		ID: "configured-id", Version: "new-image-v2", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot},
 	})

@@ -199,6 +199,57 @@ func TestResumeMapsActorState(t *testing.T) {
 	}
 }
 
+// Another host can attach after CreateActor stored a snapshot-less SUSPENDED actor but before
+// its first ResumeActor. Only authoritative no-history evidence permits that cold start.
+func TestNoSnapshotHistoryRequiresAuthoritativeEvidence(t *testing.T) {
+	for _, kind := range []string{"fresh", "missing status", "missing UID", "generation assigned", "borrowed snapshot", "unknown legacy fields", "paused"} {
+		t.Run(kind, func(t *testing.T) {
+			a := runningActor()
+			a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
+			a.Status.Snapshots = nil
+			a.Status.LastAssignedGeneration = 0
+			switch kind {
+			case "missing status":
+				a.Status = nil
+			case "missing UID":
+				a.Metadata.Uid = ""
+			case "generation assigned":
+				a.Status.LastAssignedGeneration = 1
+			case "borrowed snapshot":
+				a.Status.Snapshots = runningActor().Status.Snapshots
+			case "unknown legacy fields":
+				a.Status.ProtoReflect().SetUnknown(wireMessage(4, wireString(1, "legacy")))
+			case "paused":
+				a.Status.State = atepb.ActorState_ACTOR_STATE_PAUSED
+			}
+			if got := actorInfo(a).NoSnapshotHistory; got != (kind == "fresh") {
+				t.Fatalf("NoSnapshotHistory=%v for %s", got, kind)
+			}
+		})
+	}
+}
+
+func TestFirstPlacementAttachesBeforeFirstResume(t *testing.T) {
+	for _, memory := range []bool{false, true} {
+		a := runningActor()
+		a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
+		a.Status.Snapshots = nil
+		a.Status.LastAssignedGeneration = 0
+		f := &fakeControl{actor: a, resumeErr: errors.New("first resume reached")}
+		desc := api.Descriptor{ID: "echo"}
+		opts := []substrate.Option{substrate.WithVolumesOnly()}
+		if memory {
+			desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
+			opts = nil
+		}
+		b := substrate.New(FromClient(f), "space", substrate.ObjectRef{Name: "echo"}, desc, opts...)
+		_, err := b.Create(t.Context(), &api.SessionSpec{SessionUID: "sess-x"})
+		if !errors.Is(err, f.resumeErr) || !reflect.DeepEqual(f.calls, []string{"get:sess-x", "resume:space/sess-x"}) {
+			t.Fatalf("first placement memory=%v err=%v calls=%v", memory, err, f.calls)
+		}
+	}
+}
+
 // The bytes here are encoded by hand with the field numbers of ateapi.proto at substrate 96dffb28,
 // not by the generated package, so a regenerated client whose numbering no longer matches that
 // server fails here instead of silently on a cluster:

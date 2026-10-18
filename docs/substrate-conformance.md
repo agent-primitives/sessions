@@ -223,6 +223,21 @@ descriptor or recorded compute instance also refuses direct `Snapshot` calls. Wi
 a memory-required descriptor or recorded compute instance requires observed MEMORY and a nonempty
 URI; a custom `ControlClient` must supply that evidence too.
 
+Invalid checkpoints wrap `api.ErrInvalidCheckpoint` and map to `FAILED_PRECONDITION` from
+Suspend/Fork; stateful Fork retains `placement.ErrUnplaceable`. Validation can refuse after
+SuspendActor already suspended compute: no usable ref or SUSPEND is recorded. Create and Restore
+also check the suspended actor's durable URI and configured fidelity before resuming, so a fresh
+host cannot revive that refused state. A memory-required actor with non-MEMORY evidence also
+wraps `api.ErrMemoryStateLost`. Custom clients must populate fidelity in GetActor too.
+
+First placement can find an actor between CreateActor and its first ResumeActor. The additive
+`ActorInfo.NoSnapshotHistory` flag permits that snapshot-less attachment only with positive evidence:
+an identified SUSPENDED actor, generation zero and an empty snapshot list, with no unknown legacy
+status fields. False means history is present or unknown and refuses missing checkpoint evidence.
+Only the adapter derives this flag; fork children and refused captures do not qualify. Capture
+itself never uses the exemption. A backend's own successful CreateActor → ResumeActor path remains
+unchanged. These client-side checks are not atomic and do not fence traffic directly to the router.
+
 The option **validates the result; it does not configure Substrate**. Configure the ActorTemplate
 with `snapshotConfig.preferredFidelity: SNAPSHOT_FIDELITY_VOLUMES`, at least one mounted `durable-dir`
 volume, and `goldenSnapshotConfig.mode: GOLDEN_SNAPSHOT_MODE_DISABLED`. Substrate defaults to MEMORY

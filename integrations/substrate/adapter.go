@@ -90,8 +90,7 @@ func (ad *Adapter) ResumeActor(ctx context.Context, actor substrate.ActorRef) (s
 // SuspendActor snapshots the actor to durable storage and frees the worker, returning the actor as
 // the suspend left it: the external snapshot's URI and observed fidelity (see heldSnapshot), and
 // its UID. Substrate refuses a suspend while another operation holds the actor's lease with ABORTED,
-// reported as
-// substrate.ErrActorBusy, and a missing actor with NOT_FOUND (RPCService.SuspendActor in
+// reported as substrate.ErrActorBusy, and a missing actor with NOT_FOUND (RPCService.SuspendActor in
 // cmd/ateapi/internal/controlapi/actor.go maps the store's ErrNotFound from
 // ActorWorkflow.SuspendActor in cmd/ateapi/internal/controlapi/workflow_suspend.go), reported as
 // substrate.ErrActorNotFound, which the ControlClient contract requires: a memory-tier Snapshot
@@ -203,6 +202,11 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 	st := a.GetStatus()
 	snap := heldSnapshot(st)
 	return substrate.ActorInfo{
+		// Unknown legacy fields (notably pre-list external_snapshot) are not proof of no history.
+		NoSnapshotHistory: st != nil && a.GetMetadata().GetUid() != "" &&
+			st.GetState() == atepb.ActorState_ACTOR_STATE_SUSPENDED &&
+			st.GetLastAssignedGeneration() == 0 && len(st.GetSnapshots()) == 0 &&
+			len(st.ProtoReflect().GetUnknown()) == 0,
 		Status:           actorStatus(st.GetState()),
 		Worker:           st.GetWorkerAssignment().GetWorkerPod(),
 		Snapshot:         snap.GetDurableSnapshot().GetObject().GetSnapshotUri(),

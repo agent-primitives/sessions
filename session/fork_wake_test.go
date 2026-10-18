@@ -127,7 +127,12 @@ func (c *actorControl) GetActor(_ context.Context, a substrate.ActorRef) (substr
 	if !ok {
 		return substrate.ActorInfo{}, substrate.ErrActorNotFound
 	}
-	return substrate.ActorInfo{Status: st, Worker: "w", Snapshot: c.snapshots[a.Name], SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: c.uids[a.Name]}, nil
+	fidelity := substrate.SnapshotFidelityMemory
+	noHistory := c.snapshots[a.Name] == ""
+	if noHistory {
+		fidelity = substrate.SnapshotFidelityUnknown
+	}
+	return substrate.ActorInfo{Status: st, Worker: "w", Snapshot: c.snapshots[a.Name], SnapshotFidelity: fidelity, NoSnapshotHistory: noHistory, UID: c.uids[a.Name]}, nil
 }
 
 func (c *actorControl) TagActor(_ context.Context, a substrate.ActorRef, _ substrate.SnapshotID) error {

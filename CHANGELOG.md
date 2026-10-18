@@ -55,6 +55,19 @@ not provide.
 
 #### Substrate backend
 
+- Invalid Substrate checkpoints now wrap `api.ErrInvalidCheckpoint` and report
+  `FAILED_PRECONDITION` from Suspend/Fork instead of `INTERNAL`; stateful Fork retains
+  `placement.ErrUnplaceable`. A post-capture refusal leaves the actor suspended but returns no ref,
+  so no SUSPEND or child is journaled. Create and Restore check the suspended actor's durable URI
+  and configured fidelity before resuming, so another host cannot revive a refused checkpoint.
+  A memory-required actor holding non-MEMORY evidence also wraps `api.ErrMemoryStateLost`.
+  Custom control clients must report fidelity from GetActor as well as SuspendActor.
+  `ActorInfo.NoSnapshotHistory` is an additive first-placement exemption, set only by the adapter
+  for an identified SUSPENDED actor with generation zero and an empty snapshot list; unknown legacy
+  fields disqualify it. Its zero value means history is present or unknown and refuses missing
+  evidence. Fork children and refused captures do not qualify. Capture never uses the exemption;
+  VOLUMES-only plus a memory requirement refuses before suspension. These are client-side guards,
+  not atomic lifecycle preconditions or protection against direct router traffic.
 - `runtime/substrate` now reports `SnapshotRef.Memory` from the completed snapshot's observed
   fidelity instead of always reporting true. The adapter carries the selected generation's URI
   and fidelity together in `ActorInfo.Snapshot` and the new `ActorInfo.SnapshotFidelity`. ROOTFS

@@ -1238,8 +1238,16 @@ The reference host takes it as `placement.Backend` in
   recorded compute instance instead requires MEMORY and a nonempty URI. Missing or mismatched
   evidence refuses without a ref, so no `SUSPEND` is journaled. Combining VOLUMES-only with a memory
   requirement refuses direct `Snapshot` calls too. The option validates results; template settings
-  remain operator-owned. `Snapshot` and `Restore` call `SuspendActor` and `ResumeActor` without the
-  existence check `Create` makes, so when no actor exists for the session uid (for example a fresh
+  remain operator-owned. Invalid checkpoints wrap `api.ErrInvalidCheckpoint` and are
+  `FAILED_PRECONDITION` from Suspend/Fork; the actor may already be suspended when capture refuses,
+  but no ref or SUSPEND is recorded. Create and Restore check a suspended actor's durable URI and
+  configured fidelity before resuming it; memory-required non-MEMORY evidence also wraps
+  `api.ErrMemoryStateLost`. GetActor must report that evidence too. An identified SUSPENDED actor
+  with authoritative generation-zero/empty-list evidence can report `ActorInfo.NoSnapshotHistory`
+  for first placement between CreateActor and its first ResumeActor. False means present or unknown
+  history, not an exemption; borrowed fork snapshots and refused captures do not qualify. Capture
+  never uses this exemption. These client checks can race lifecycle operations or router ingress.
+  `Snapshot` and `Restore` do not create missing actors. When no actor exists (for example a fresh
   session before any `Create` reached `CreateActor`, and not a fork child, or an actor deleted
   outside the host) both fail with the control API's `NOT_FOUND` (substrate module pinned in
   `integrations/substrate/go.mod`, `cmd/ateapi/internal/controlapi/actor.go`), reported as

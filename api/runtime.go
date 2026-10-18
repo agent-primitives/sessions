@@ -26,6 +26,12 @@ var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was supers
 // FAILED_PRECONDITION.
 var ErrMemoryStateLost = errors.New("runtime: session's in-memory harness state is lost")
 
+// ErrInvalidCheckpoint reports that a runtime cannot produce or resume a checkpoint with the
+// required durable handle and fidelity. Capture may already have suspended compute; no usable ref
+// is returned, and callers must inspect/correct the runtime evidence before retrying. The session
+// service reports it as FAILED_PRECONDITION, not an internal transport failure.
+var ErrInvalidCheckpoint = errors.New("runtime: checkpoint does not meet the required contract")
+
 // ErrComputeBusy reports that the session's compute is in the middle of another operation (another
 // host resuming or suspending it, say), so the backend could not place onto it or act on it right
 // now. Nothing was journaled, and the state settles on its own, so the session service reports it

@@ -1483,10 +1483,14 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
 	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID, ComputeInstance: instance}, api.SnapshotExternal)
 	if err != nil {
+		if errors.Is(err, api.ErrInvalidCheckpoint) {
+			return api.SnapshotRef{}, nil, fmt.Errorf("%w: %w", ErrUnplaceable, err)
+		}
 		return api.SnapshotRef{}, nil, err
 	}
-	// Record the checkpoint before validating it: the parent is already cold, and the SUSPEND event
-	// is what keeps that fact on the chain. CAS on atSeq — the seq the head check validated — rather
+	// A backend may refuse an unusable checkpoint inside Snapshot, leaving compute cold without a
+	// ref. On success, record it before the Placer's independent cloneability check: SUSPEND keeps
+	// the cold transition on the chain. CAS on atSeq — the seq the head check validated — rather
 	// than a re-read head, so a writer that minted an even newer fence in the meantime aborts the
 	// fork instead of silently widening the children's prefix past the RAM they were cloned from.
 	if err := appendLifecycleAt(parent, atSeq, fence, api.Lifecycle{Kind: api.LifecycleSuspend, Snapshot: &ref}); err != nil {

@@ -336,7 +336,11 @@ provenance all live. It has three properties stacked on an append-only sequence:
 - **A fencing token per incarnation.** See [Incarnation and fence](#incarnation-and-fence).
 - **A hash chain.** Each record carries `prev_hash` and a `content_hash` over its event. Change any past
   event and its hash no longer matches, and every later `prev_hash` link is now inconsistent. Tampering
-  is detectable by recomputation, with no external index.
+  is detectable by recomputation, with no external index. The controller does that recomputation
+  before it acts: `Exec`, `Replay` and `Resume` refuse a journal whose chain fails with
+  `controller.ErrJournalTampered` (`DATA_LOSS` over the API) before the harness runs, a model is
+  called or anything is appended. The chain is unkeyed, so it catches corruption and edits that skip
+  rehashing, not a writer that recomputes every hash after its edit (spec `CHAIN-12`).
 
 ## Canonical hash and language-neutral provenance
 

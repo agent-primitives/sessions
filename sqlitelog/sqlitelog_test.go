@@ -173,7 +173,8 @@ func TestTamperDetected(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	if err := s2.Session("s").Verify(); !errors.Is(err, sqlitelog.ErrTampered) {
+	// One sentinel for every store, so callers above the store need not know which one it is.
+	if err := s2.Session("s").Verify(); !errors.Is(err, sqlitelog.ErrTampered) || !errors.Is(err, eventlog.ErrTampered) {
 		t.Fatalf("want ErrTampered, got %v", err)
 	}
 }

@@ -1054,6 +1054,11 @@ func (p *Placer) resumeApproval(log eventlog.Store, sessionUID string, state *co
 	if state.Request != nil {
 		return true, &api.ApprovalParkedError{Ref: api.ApprovalRef{ExecutionID: state.ExecutionID, ToolCallID: state.Call.ID, RequestSeq: state.Request.Seq}}
 	}
+	// The repair extends the journal without the controller, so it checks the chain itself
+	// (CHAIN-12) before Describe, a fence or the append.
+	if err := log.Verify(); err != nil {
+		return true, err
+	}
 	if beforeRepair != nil {
 		if err := beforeRepair(); err != nil {
 			return true, err
@@ -1258,6 +1263,8 @@ func placementErrorKind(err error) string {
 		return "checkpointing"
 	case errors.Is(err, api.ErrMemoryStateLost):
 		return "memory_state_lost"
+	case errors.Is(err, eventlog.ErrTampered):
+		return "journal_tampered"
 	case errors.Is(err, ErrSessionBusy), errors.Is(err, eventlog.ErrConflict):
 		return "conflict"
 	case errors.Is(err, eventlog.ErrFenced):

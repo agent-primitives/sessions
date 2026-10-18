@@ -185,6 +185,7 @@ type Controller struct {
 	harnessName        string
 	computeInstance    string
 	sameHarness        func(recorded string) bool
+	journal            journalCheck
 }
 
 // New starts an incarnation over log. Unless the caller supplies a fence via WithFence, it advances
@@ -218,6 +219,8 @@ func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, erro
 // expectedLastSeq (the single-writer CAS at the session boundary); the harness runs
 // host-mediated, and a completed turn ends with END. A durable approval request seals the sink
 // and returns a typed park without ERROR/END. An owned unresolved gate blocks new turns before Describe.
+// A journal whose hash chain fails verification returns ErrJournalTampered before Describe or any
+// append.
 func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Message, expectedLastSeq int64) (err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	executionID := newID()
@@ -248,7 +251,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 
 	// The harness receives the committed conversation so far as History (a stateless harness
 	// reconstructs its context from it); the echo harness ignores it, but a real one needs it.
-	prior, err := c.log.Read(1)
+	prior, err := c.readJournal()
 	if err != nil {
 		return err
 	}
@@ -357,6 +360,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 // effects. Pure legacy logs use v0.1.2's whole-log Run, even if unfinished. A modern boundary
 // abandons the legacy tail after its last END for replay only; modern history retains it. Replay asserts
 // the model is never invoked (I1) and each recorded model-input hash matches (I0). It is read-only.
+// A journal whose hash chain fails verification returns ErrJournalTampered before the harness runs.
 func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []string, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var recordCount, effectCount int
@@ -370,7 +374,7 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 		)
 	}()
 
-	recs, err := c.log.Read(1)
+	recs, err := c.readJournal()
 	if err != nil {
 		return nil, err
 	}
@@ -456,9 +460,10 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 	return outputs, nil
 }
 
-// Outputs returns the recorded assistant outputs in order.
+// Outputs returns the recorded assistant outputs in order, after the same chain verification as
+// Replay.
 func (c *Controller) Outputs() ([]string, error) {
-	recs, err := c.log.Read(1)
+	recs, err := c.readJournal()
 	if err != nil {
 		return nil, err
 	}
@@ -607,6 +612,8 @@ func controllerErrorKind(err error) string {
 		return "conflict"
 	case errors.Is(err, eventlog.ErrFenced):
 		return "fenced"
+	case errors.Is(err, ErrJournalTampered):
+		return "journal_tampered"
 	case errors.Is(err, ErrReplayInvokedModel):
 		return "replay_invoked_model"
 	case errors.Is(err, ErrReplayDiverged):

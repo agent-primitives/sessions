@@ -29,8 +29,9 @@ import (
 // ErrTampered indicates the stored hash-chain failed verification: a prev_hash link or a
 // content_hash does not match what canon re-derives. It is deliberately distinct from an internal
 // canonicalize/decode failure (a bug or storage corruption), which is returned wrapped and does
-// NOT satisfy errors.Is(err, ErrTampered) — different severities, per the integrity contract.
-var ErrTampered = errors.New("sqlitelog: hash-chain verification failed (tamper-evident)")
+// NOT satisfy errors.Is(err, ErrTampered) — different severities, per the integrity contract. It is
+// eventlog.ErrTampered, so a check of either matches every store's verification failure.
+var ErrTampered = eventlog.ErrTampered
 
 var errReservedDelete = errors.New("sqlitelog: DELETE is reserved for atomic DeleteSession")
 
@@ -599,21 +600,7 @@ func (l *Log) Verify() error {
 	if err != nil {
 		return err
 	}
-	prev := ""
-	for _, r := range recs {
-		if r.PrevHash != prev {
-			return fmt.Errorf("%w: prev_hash mismatch at seq %d", ErrTampered, r.Seq)
-		}
-		want, err := canon.HashRecord(prev, r.Seq, r.Event)
-		if err != nil {
-			return fmt.Errorf("sqlitelog: canonicalize seq %d: %w", r.Seq, err)
-		}
-		if r.Hash != want {
-			return fmt.Errorf("%w: content_hash mismatch at seq %d", ErrTampered, r.Seq)
-		}
-		prev = r.Hash
-	}
-	return nil
+	return eventlog.VerifyChain("", recs)
 }
 
 func decode(blob []byte) (api.Event, error) {

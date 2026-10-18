@@ -391,8 +391,9 @@ Running the call is still Rule 4: copy the part's `ToolCall` (`tc := *p.ToolCall
 `IdempotencyKey` on the copy, and pass the copy to `sink.ToolCall`; or run it yourself and `sink.Report`
 the result. Never change the `ToolCall` (or its `Args`) in the returned message in place: the message
 can share memory with the completion the host already recorded, so an in-place change alters a recorded
-event after it was hashed, and the in-memory log then fails `Verify`. A tool your harness runs itself
-runs again when the turn is replayed; use `CONTROLLER_MEDIATED` for a tool that must not.
+event after it was hashed: the in-memory log then fails `Verify`, and the next `Exec`, `Replay` or
+`Resume` on it fails with `controller.ErrJournalTampered`. A tool your harness runs itself runs again
+when the turn is replayed; use `CONTROLLER_MEDIATED` for a tool that must not.
 
 The input hash (I0) covers the tools, the tool choice, and every tool part, so on replay build the next
 request from the recorded completion exactly as you did live. A changed definition, choice, or argument

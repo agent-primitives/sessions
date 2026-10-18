@@ -62,7 +62,12 @@ var ErrPermissionDenied = errors.New("api: permission denied")
 // OwnerAuthorizer is the first owner/grants policy implementation. It supports
 // owner checks only; no grants are interpreted. Approval decisions, audience
 // minting and creation require separate policy and are denied even to owners.
+// ActionFork authorizes the parent only; it does not assign child ownership.
+// The current fork path creates unbound children. Enforcing hosts need a separate
+// owned-child reservation/publication primitive before exposing owned forks.
 type OwnerAuthorizer struct{}
+
+var _ Authorizer = OwnerAuthorizer{}
 
 func (OwnerAuthorizer) Authorize(ctx context.Context, r AuthorizationRequest) error {
 	if err := ctx.Err(); err != nil {

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Regenerates sqlitelog/testdata/schema-v4.db, the persisted-format fixture, from this checkout's
-# session.Service and HarnessRegistry over sqlitelog (see session/persisted_format_test.go), then runs
-# the tests that read it. Regenerate only for an intentional, unreleased format change: once a release
-# has written schema version 4, the file is frozen and a later version gets a fixture of its own.
+# Regenerates sqlitelog/testdata/schema-v4.db only from a schema v4 checkout, through
+# session.Service and HarnessRegistry over sqlitelog (see session/persisted_format_test.go).
+# The writer test refuses newer schemas before touching the frozen v4 fixture.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,8 +21,8 @@ func TestOwnedCreationIsImmutableAndDoesNotInherit(t *testing.T) {
 	if err := s.CreateOwnedSession(meta, owner, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateOwnedSession(meta, api.CallerIdentity{Issuer: "other", Subject: "owner"}, false); !errors.Is(err, sqlitelog.ErrSessionExists) {
-		t.Fatalf("replace owner: %v", err)
+	if err := s.CreateOwnedSession(meta, api.CallerIdentity{Issuer: "other", Subject: "owner"}, false); !errors.Is(err, sqlitelog.ErrSessionExists) || !strings.Contains(err.Error(), `"parent"`) {
+		t.Fatalf("replace owner must retain UID and sentinel: %v", err)
 	}
 	meta.Name = "updated"
 	put(t, s, meta)
@@ -105,6 +106,21 @@ func TestOwnedCreationAdmissionIsAtomic(t *testing.T) {
 		if _, err := s.SessionInfo("invalid"); !errors.Is(err, sqlitelog.ErrSessionNotFound) {
 			t.Fatalf("invalid owner published session: %v", err)
 		}
+	}
+}
+
+func TestOwnedCreationStoresComputeNone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "compute.db")
+	s := mustOpen(t, path)
+	if err := s.CreateOwnedSession(sqlitelog.SessionMeta{UID: "new"}, api.CallerIdentity{Issuer: "i", Subject: "s"}, false); err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	if err := rawDB(t, path).QueryRow(`SELECT compute_state FROM sessions WHERE session='new'`).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "NONE" {
+		t.Fatalf("stored compute state = %q, want NONE", state)
 	}
 }
 

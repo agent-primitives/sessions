@@ -254,16 +254,27 @@ Given the above, there is one safe shape for this release:
 `sqlitelog.Store.CreateOwnedSession`, including active-harness admission. Existing UIDs cannot be
 claimed, even when unbound or deleted. Metadata updates, fencing and appended/copied history do
 not assign or replace owners. Legacy and RPC-created sessions remain unbound; ownership is not
-inferred from provenance. Owner metadata is not hash-chain attested; database writers are trusted.
+inferred from provenance. Unbound sessions are denied by `OwnerAuthorizer`, not treated as public.
+Owner metadata is not hash-chain attested; database writers are trusted.
 
 The host-side `api.Authorizer` contract has an owner-only implementation. `OwnerAuthorizer` grants
 only ordinary session actions to an exact owner; create, approval decisions, audience minting and
-unknown actions are denied. It does not verify credentials. `ListOptions.Owner` filters an exact
-pair in SQL before paging; nil retains the existing project listing. Its unsigned cursors are not
-caller-bound credentials.
+unknown actions are denied. It does not verify credentials. `ActionFork` authorizes the parent
+only, not child ownership. The current fork path creates unbound child rows before metadata
+publication; `CreateOwnedSession` cannot claim them afterward. Enforcing hosts must not expose
+owned forks until a separate primitive reserves verified child ownership before fencing or copying
+logs, with publication and failure cleanup defined. This must preserve fork admission for existing
+sessions on retired harnesses; ordinary create admission is not a substitute. This is a prerequisite
+for enforcement ([#127](https://github.com/agent-primitives/sessions/issues/127)).
+
+`ListOptions.Owner` filters an exact pair in SQL before paging; enforcing callers must always set
+it, since nil retains the full project listing. Its unsigned cursors are not caller-bound credentials.
 
 These Go contracts are not wired into Sessions RPCs or the daemon. They provide no authentication,
 TLS or access-control enforcement. SQLite schema v5 carries an off-mode authorization marker;
 this host refuses required, unknown or missing markers even at the same schema version. There is
-no supported switch to enable required mode. Owner identifiers are retained metadata: deletion is
-not erasure. Do not expose a host on an untrusted network.
+no supported switch to enable required mode. The marker is checked only at Open. Changing it
+requires stopping every writer, including embedded CLI processes, then restarting all hosts with
+binaries that support the new mode; already-open hosts do not recheck it.
+Owner identifiers are retained metadata: deletion is not erasure. Do not expose a host on an
+untrusted network.

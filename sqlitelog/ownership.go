@@ -48,17 +48,17 @@ func (s *Store) CreateOwnedSession(m SessionMeta, owner api.CallerIdentity, regi
 	}
 	defer func() { _ = tx.Rollback() }()
 	// Target only the UID conflict: a CHECK or other integrity failure is not a duplicate.
-	result, err := tx.Exec(`INSERT INTO sessions(session, owner_issuer, owner_subject)
-		VALUES(?, ?, ?) ON CONFLICT(session) DO NOTHING`, m.UID, owner.Issuer, owner.Subject)
+	result, err := tx.Exec(`INSERT INTO sessions(session, owner_issuer, owner_subject, compute_state)
+		VALUES(?, ?, ?, 'NONE') ON CONFLICT(session) DO NOTHING`, m.UID, owner.Issuer, owner.Subject)
 	if err != nil {
-		return fmt.Errorf("sqlitelog: insert owned session: %w", err)
+		return fmt.Errorf("sqlitelog: insert owned session %q: %w", m.UID, err)
 	}
 	count, err := result.RowsAffected()
 	if err != nil {
-		return err
+		return fmt.Errorf("sqlitelog: insert owned session %q: %w", m.UID, err)
 	}
 	if count == 0 {
-		return ErrSessionExists
+		return fmt.Errorf("sqlitelog: insert owned session %q: %w", m.UID, ErrSessionExists)
 	}
 	if err := checkActiveHarness(tx, m.Harness, registered); err != nil {
 		return err
@@ -73,9 +73,21 @@ func (s *Store) CreateOwnedSession(m SessionMeta, owner api.CallerIdentity, regi
 }
 
 func checkAuthorization(db queryRower) error {
+	// SQLite has no distinct result code for a missing table. Check the catalog
+	// rather than classifying all SQL errors (including I/O and busy) as policy.
+	var exists int
+	if err := db.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='journal_authorization'`).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: missing marker table", ErrUnsupportedAuthorization)
+		}
+		return err
+	}
 	var mode string
 	if err := db.QueryRow(`SELECT mode FROM journal_authorization WHERE singleton=1`).Scan(&mode); err != nil {
-		return fmt.Errorf("%w: read marker: %w", ErrUnsupportedAuthorization, err)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: missing marker row", ErrUnsupportedAuthorization)
+		}
+		return err
 	}
 	if mode != "off" {
 		return ErrUnsupportedAuthorization

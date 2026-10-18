@@ -9,6 +9,7 @@ import (
 
 	sqlite "modernc.org/sqlite"
 
+	"github.com/agent-primitives/sessions/eventlog"
 	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
@@ -23,15 +24,19 @@ func isBusy(err error) bool {
 
 // TestOpenSerializesWritersForEveryDSNForm races an Append and a RegisterHarness from two Stores
 // (two "pods") on one database, opened through each DSN form Open accepts. Both are read-then-write
-// transactions. Under BEGIN DEFERRED each takes a read snapshot, then fails with SQLITE_BUSY when
-// it tries to write after another connection has committed; under BEGIN IMMEDIATE each waits for
-// the write lock at BEGIN and the two serialize. A third connection holds the write lock and then
-// commits a write, so both operations are pending at once and the stale-snapshot outcome is
-// deterministic rather than timing-dependent.
+// transactions. A third connection holds the write lock while they run.
 //
-// The caller-supplied _txlock=deferred row is the control: it shows Open does not overwrite a
-// _txlock the caller chose, and that this scenario does produce SQLITE_BUSY without IMMEDIATE. An
-// empty _txlock is not a choice (the driver ignores it), so that row gets IMMEDIATE.
+// Under BEGIN IMMEDIATE each waits for the write lock at BEGIN, so neither may return while the
+// lock is held; after the holder commits, the two serialize and both succeed. The 250ms window only
+// bounds how long the test looks for an early return: a slow scheduler can let a regression pass,
+// but cannot fail a correct implementation.
+//
+// The caller-supplied _txlock=deferred row is the control. It shows Open keeps a _txlock the caller
+// chose, and that this scenario produces SQLITE_BUSY without IMMEDIATE. Under BEGIN DEFERRED each
+// operation's reads run without the write lock, and its first write then fails with SQLITE_BUSY at
+// once: sqlite does not run the busy handler when a read transaction needs the write lock. The row
+// waits for both to return while the lock is still held, so its outcome does not depend on timing.
+// An empty _txlock is not a choice (the driver ignores it), so that row gets IMMEDIATE.
 func TestOpenSerializesWritersForEveryDSNForm(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -75,6 +80,17 @@ func TestOpenSerializesWritersForEveryDSNForm(t *testing.T) {
 				t.Fatalf("holder write: %v", err)
 			}
 
+			if tc.wantBusy {
+				// A transaction that only reads must complete while the lock is held. Under IMMEDIATE its
+				// BEGIN would wait out the busy timeout and fail with SQLITE_BUSY, so this fails if Open
+				// replaced the caller's _txlock, which the BUSY results below would not show.
+				for name, s := range map[string]*sqlitelog.Store{"appender": appender, "registrar": registrar} {
+					if _, err := s.Session("s1").Append(1, fence, sampleEvents()[0]); !errors.Is(err, eventlog.ErrConflict) {
+						t.Fatalf("%s: read-only Append while the write lock is held: got %v, want eventlog.ErrConflict", name, err)
+					}
+				}
+			}
+
 			appended := make(chan error, 1)
 			registered := make(chan error, 1)
 			go func() {
@@ -85,41 +101,44 @@ func TestOpenSerializesWritersForEveryDSNForm(t *testing.T) {
 				_, _, err := registrar.RegisterHarness(sqlitelog.HarnessRecord{Name: "h", UID: "uid-1", Spec: `{}`, SpecDigest: "d1"})
 				registered <- err
 			}()
-
-			if !tc.wantBusy {
-				// Both must wait for the lock, not fail on it. Long enough for both to have reached
-				// their first statement.
+			results := map[string]chan error{"Append": appended, "RegisterHarness": registered}
+			wait := func(op string) error {
 				select {
-				case err := <-appended:
-					t.Fatalf("Append returned while the write lock was held: %v", err)
-				case err := <-registered:
-					t.Fatalf("RegisterHarness returned while the write lock was held: %v", err)
-				case <-time.After(250 * time.Millisecond):
+				case err := <-results[op]:
+					return err
+				case <-time.After(30 * time.Second):
+					t.Fatalf("%s did not return", op)
+					return nil
 				}
-			} else {
-				// Let both take their read snapshot before the holder commits.
-				time.Sleep(250 * time.Millisecond)
+			}
+
+			if tc.wantBusy {
+				// Both return while the holder still has the lock: no commit has happened, so there is
+				// no ordering against it to race.
+				for op := range results {
+					if err := wait(op); !isBusy(err) {
+						t.Errorf("%s: got %v, want SQLITE_BUSY under the caller's _txlock=deferred", op, err)
+					}
+				}
+				return
+			}
+
+			// Both must wait for the lock, not fail on it. Long enough for both to have reached their
+			// first statement.
+			select {
+			case err := <-appended:
+				t.Fatalf("Append returned while the write lock was held: %v", err)
+			case err := <-registered:
+				t.Fatalf("RegisterHarness returned while the write lock was held: %v", err)
+			case <-time.After(250 * time.Millisecond):
 			}
 			if err := tx.Commit(); err != nil {
 				t.Fatalf("holder commit: %v", err)
 			}
-
-			for op, ch := range map[string]chan error{"Append": appended, "RegisterHarness": registered} {
-				var err error
-				select {
-				case err = <-ch:
-				case <-time.After(30 * time.Second):
-					t.Fatalf("%s did not return after the write lock was released", op)
-				}
-				switch {
-				case tc.wantBusy && !isBusy(err):
-					t.Errorf("%s: got %v, want SQLITE_BUSY under the caller's _txlock=deferred", op, err)
-				case !tc.wantBusy && err != nil:
+			for op := range results {
+				if err := wait(op); err != nil {
 					t.Errorf("%s: %v, want the writers to serialize", op, err)
 				}
-			}
-			if tc.wantBusy {
-				return
 			}
 			if head, err := l.Head(); err != nil || head != 1 {
 				t.Errorf("head after append: %d, %v; want 1", head, err)

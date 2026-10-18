@@ -47,6 +47,11 @@ func (e socketExecutorConfig) execute(parent context.Context, harness string, sc
 		} else if ne := net.Error(nil); errors.As(err, &ne) && ne.Timeout() {
 			err = context.DeadlineExceeded
 		}
+		// Socket addresses must not enter harness-visible errors or approval receipts.
+		var op *net.OpError
+		if errors.As(err, &op) {
+			err = op.Err
+		}
 		return api.ToolResult{}, fmt.Errorf("tool executor harness %q tool %q %s: %w", harness, call.Tool, stage, err)
 	}
 	if err := ctx.Err(); err != nil {
@@ -63,11 +68,6 @@ func (e socketExecutorConfig) execute(parent context.Context, harness string, sc
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", e.Socket)
 	if err != nil {
-		// Dial's net.OpError includes the local address; receipts are visible to the harness.
-		var op *net.OpError
-		if errors.As(err, &op) {
-			err = op.Err
-		}
 		return fail("dial", err)
 	}
 	defer conn.Close()

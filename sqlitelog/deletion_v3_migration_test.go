@@ -31,8 +31,8 @@ func TestDeletionUpgradesGenuineApprovalV3(t *testing.T) {
 		before[i] = queryValues(t, raw, q)
 	}
 	s := mustOpen(t, path)
-	if got := readUserVersion(t, path); got != 4 {
-		t.Errorf("upgrade stamp=%d, want v4", got)
+	if got := readUserVersion(t, path); got != sqlitelog.SchemaVersion {
+		t.Errorf("upgrade stamp=%d, want v%d", got, sqlitelog.SchemaVersion)
 	}
 	for i, q := range queries {
 		if !reflect.DeepEqual(queryValues(t, raw, q), before[i]) {

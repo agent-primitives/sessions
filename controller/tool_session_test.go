@@ -75,7 +75,7 @@ func TestToolExecutorReceivesConfiguredSessionUID(t *testing.T) {
 				return api.ToolResult{Output: map[string]any{"receipt": "receipt:" + uid}}, nil
 			})}
 			if tc.uid != "" {
-				opts = append(opts, controller.WithSessionUID(tc.uid))
+				opts = append(opts, controller.WithSessionUID(tc.uid), dedupAll)
 			}
 			c, err := controller.New(log, echoModel, opts...)
 			if tc.uid == "" {

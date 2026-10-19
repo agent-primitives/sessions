@@ -1,6 +1,7 @@
 package eventlog
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/agent-primitives/sessions/api"
@@ -62,8 +63,56 @@ func TestHashChain(t *testing.T) {
 	}
 	// Tamper with a committed record's content; the chain must no longer verify.
 	l.records[1].Event.Message.Parts[0].Text.Text = "tampered"
-	if err := l.Verify(); err == nil {
-		t.Fatalf("verify tampered chain: want error, got nil")
+	if err := l.Verify(); !errors.Is(err, ErrTampered) {
+		t.Fatalf("verify tampered chain: want ErrTampered, got %v", err)
+	}
+}
+
+// VerifyChain checks links and content from any verified point, so a reader can verify only the
+// records appended since it last checked.
+func TestVerifyChain(t *testing.T) {
+	l := New()
+	f := l.NewFence()
+	for i, s := range []string{"a", "b", "c", "d"} {
+		if _, err := l.Append(int64(i), f, out(s)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recs := l.Read(1)
+	if err := VerifyChain("", recs); err != nil {
+		t.Fatalf("whole chain: %v", err)
+	}
+	if err := VerifyChain(recs[1].Hash, recs[2:]); err != nil {
+		t.Fatalf("continued chain: %v", err)
+	}
+	if err := VerifyChain("", nil); err != nil {
+		t.Fatalf("empty chain: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		prev string
+		recs func() []Record
+		want string
+	}{
+		{"wrong start", recs[0].Hash, func() []Record { return recs[2:] }, "prev_hash mismatch at seq 3"},
+		{"missing record", "", func() []Record { return append([]Record{recs[0]}, recs[2:]...) }, "prev_hash mismatch at seq 3"},
+		{"changed event", "", func() []Record {
+			cp := append([]Record(nil), recs...)
+			cp[2].Event = out("changed")
+			return cp
+		}, "content_hash mismatch at seq 3"},
+		{"changed hash", "", func() []Record {
+			cp := append([]Record(nil), recs...)
+			cp[3].Hash = "rewritten"
+			return cp
+		}, "content_hash mismatch at seq 4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := VerifyChain(tc.prev, tc.recs())
+			if !errors.Is(err, ErrTampered) || err.Error() != ErrTampered.Error()+": "+tc.want {
+				t.Fatalf("err = %v, want ErrTampered: %s", err, tc.want)
+			}
+		})
 	}
 }
 

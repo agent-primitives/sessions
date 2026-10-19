@@ -334,9 +334,14 @@ provenance all live. It has three properties stacked on an append-only sequence:
   Two writers racing the same session: one wins, the other is rejected. This is what makes "single
   writer" enforceable rather than aspirational.
 - **A fencing token per incarnation.** See [Incarnation and fence](#incarnation-and-fence).
-- **A hash chain.** Each record carries `prev_hash` and a `content_hash` over its event. Change any past
-  event and its hash no longer matches, and every later `prev_hash` link is now inconsistent. Tampering
-  is detectable by recomputation, with no external index.
+- **A hash chain.** Each record carries `prev_hash` and a `content_hash` over its event. Change any
+  past event and its hash no longer matches, and every later `prev_hash` link is now inconsistent.
+  Tampering is detectable by recomputation, with no external index. The controller does that
+  recomputation before it acts: `Exec`, `Replay`, `Resume` and `Fork` refuse a journal whose chain
+  fails with `controller.ErrJournalTampered` (`DATA_LOSS` over the API) before the harness runs, a
+  model is called or anything is appended; `Fork` refuses before it checkpoints the parent or
+  provisions a child. The chain is unkeyed, so it catches corruption and edits that skip rehashing,
+  not a writer that recomputes every hash after its edit (spec `CHAIN-12`).
 
 ## Canonical hash and language-neutral provenance
 
@@ -396,7 +401,8 @@ replay-conformance suite (`conformance/`) enforces a numbered contract. The load
 - **I2: reasoning continuity.** Opaque provider reasoning parts are recorded verbatim and replayed, so
   reasoning survives resume and fork on the stateless path.
 - **I3: at-most-once effect re-drive.** A crash between an effect's intent and its result is re-driven at
-  most once. Host-executed tools carry an idempotency key so the re-drive dedups.
+  most once. Host-executed tools carry an idempotency key so the re-drive dedups, and a tool intent
+  is re-driven only when its executor declares durable dedup for the tool.
 - **I4: memory-restore is not replay.** After a memory restore the harness already holds its state in
   RAM. The host still sends the full prior log as `Start.History`, and it must not be replayed into
   that state: a `REQUIRES_MEMORY_SNAPSHOT` harness never reconstructs state from `History` (see

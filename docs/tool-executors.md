@@ -85,9 +85,10 @@ silently overrides the other. Startup never probes/dials the socket.
 is surfaced in structured startup logs alongside harness, tool and executor names: true at
 Info, false/unknown at Warn.
 **Only explicit true dispatches today, even for a first attempt.** False/unknown remain
-representable but refuse before dialing until [#139](https://github.com/agent-primitives/sessions/issues/139)
-provides a safe recovery policy. This restriction is deliberate: the current ToolFunc API
-cannot tell a first attempt from a crash redrive. Approval does not override it.
+representable but refuse before dialing. This restriction is deliberate: an approved call runs on
+Resume, where its first attempt and a crash redrive look the same. Approval does not override it.
+The daemon declares durable dedup to the controller (`controller.WithDurableDedup`) for true
+routes, and for the tools it refuses before dialing: repeating a refusal repeats no action.
 
 True is an operator assertion, not something the daemon can prove. **Read-only or naturally
 idempotent tools can honestly declare true when rerunning them is harmless:** they do not
@@ -143,11 +144,13 @@ cancellation, malformed/truncated/oversized replies and version/correlation erro
 transport/protocol Go errors, distinct from a valid executor `is_error` response. The
 adapter includes route/stage context, not raw request/reply bytes, and never retries itself.
 
-Ordinary controller-mediated transport errors leave unresolved intent. Resume can redrive
-it with the same identity, relying on the executor's true declaration. Completed journal
-receipts are replayed without dialing. Approved calls instead turn executor errors into
-**durable EXECUTOR_ERROR receipts**, including false/unknown/unconfigured-tool refusals.
-Changing configuration afterward does not retry such a receipted failure.
+Ordinary controller-mediated transport errors leave unresolved intent. Resume can redrive it
+with the same identity, relying on the executor's true declaration. For a false/unknown
+route or an unconfigured tool, Resume re-sends the call to the same refusal without dialing
+and the turn fails again; Exec a new turn to continue. Completed journal receipts are
+replayed without dialing. Approved calls instead turn executor errors into **durable
+EXECUTOR_ERROR receipts**, including false/unknown/unconfigured-tool refusals. Changing
+configuration afterward does not retry such a receipted failure.
 
 Cancelling Resume while an approved call is in flight closes its socket connection. If the
 controller commits the resulting error receipt, that **EXECUTOR_ERROR is permanent**, even

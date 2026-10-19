@@ -47,6 +47,10 @@ func ResumeInvocation(log eventlog.Store) (*api.ExecutionStart, error) {
 // missing or inconsistent input completeness information is rejected before the harness runs.
 // An unresolved tool intent inherited across a fork returns ErrInheritedToolIntent before running
 // the harness or appending events: the child's dedup namespace cannot recover the parent's effect.
+// Any trailing TOOL_CALL that is not approval-gated and has no TOOL_RESULT is re-driven under its
+// recorded key only when the executor declares durable dedup for its tool (WithDurableDedup);
+// otherwise Resume returns ErrUnansweredToolCall, also before Describe, Run or any append. Without
+// a tool executor the call is not refused here; re-issuing it fails as on the live path.
 //
 // An owned unanswered approval returns (true, *api.ApprovalParkedError) without Describe or Run.
 // A call-only cut repairs its request exactly once using the captured head and current fence;
@@ -55,6 +59,9 @@ func ResumeInvocation(log eventlog.Store) (*api.ExecutionStart, error) {
 // Outside a legacy ID-less prefix, ERROR events, including those left by earlier failed Resume
 // attempts, are not effects: they stay in the journal as an audit trail, are skipped when the
 // effect stream is rebuilt, and do not end the execution, so a later Resume still recovers it.
+//
+// A journal whose hash chain fails verification returns ErrJournalTampered before Describe, Run, an
+// approval repair or any append, even when its last turn is complete.
 func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var recordCount, recordedEffectCount int
@@ -72,7 +79,7 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		return false, err
 	}
 
-	recs, err := c.log.Read(1)
+	recs, err := c.readJournal()
 	if err != nil {
 		return false, err
 	}
@@ -140,6 +147,14 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	if inheritedTools > 0 {
 		return false, fmt.Errorf("%w: execution %q", ErrInheritedToolIntent, execution.id)
 	}
+	// A trailing intent is re-driven only under an executor that declares durable dedup for its
+	// tool: the journal cannot show whether the effect already ran. Refuse before Describe or Run so
+	// nothing is appended and a later Resume with a declaring executor can still re-drive it.
+	if call := trailingToolIntent(execution.stream); call != nil && c.tool != nil &&
+		(c.durableDedup == nil || !c.durableDedup(call.Tool)) {
+		return false, fmt.Errorf("%w: execution %q tool %q call %q: the tool executor does not declare durable dedup for this tool",
+			ErrUnansweredToolCall, execution.id, call.Tool, call.ID)
+	}
 	// Reject identity mismatches before Run or its best-effort ERROR append path.
 	desc, err := c.checkHarness(ctx, har, []recordedExecution{*execution})
 	if err != nil {
@@ -187,6 +202,21 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	}
 	_, err = sink.live.append(api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
 	return true, err
+}
+
+// trailingToolIntent returns the execution's last recorded effect when it is a TOOL_CALL that
+// Resume would re-drive: no TOOL_RESULT follows it and it is not approval-gated (an approval
+// call-only cut is repaired and parked instead; a decided call runs by its decision). Any other
+// mediation qualifies, including a legacy call recorded without a tier.
+func trailingToolIntent(stream []api.Event) *api.ToolCall {
+	if len(stream) == 0 {
+		return nil
+	}
+	last := stream[len(stream)-1]
+	if last.Kind != api.EventToolCall || last.ToolCall == nil || last.ToolCall.Mediation == api.MediationRequiresApproval {
+		return nil
+	}
+	return last.ToolCall
 }
 
 // resumeSink serves already-recorded effects (in order) and, once they are exhausted, delegates to

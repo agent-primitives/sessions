@@ -41,13 +41,64 @@ client without substrate's Tag APIs still satisfies the base interface.
 - `integrations/substrate` is a **separate Go module** with its own `go.mod` that adapts the real
   generated ate-api client to `ControlClient`. The core never imports it.
 - A CI gate asserts `go list -deps ./...` on the core contains **zero** `agent-substrate` packages.
+- The server is shared the same way. `internal/agentsessionsd` holds `agentsessionsd`, with no
+  substrate import, not even `runtime/substrate`; `cmd/agentsessionsd` is the neutral binary.
+  `integrations/substrate/cmd/agentsessionsd` is the same server with the substrate harnesses added
+  through its neutral `agentsessionsd.WithHarnessBackends` hook: the substrate flags below, their
+  startup checks and the ate-api connection are in that module, so only it offers them. A root
+  module test (`internal/agentsessionsd/neutrality_test.go`) fails if the root `go.mod` requires an
+  `agent-substrate` module or the daemon links a substrate package.
+
+### Running sessions on substrate with agentsessionsd
+
+The substrate build of `agentsessionsd` adds these flags:
+
+| Flag | Meaning |
+|---|---|
+| `-substrate-harness name=atespace/template[,memory]` | Serve harness `name` from that ActorTemplate, one actor per session. `,memory` declares `REQUIRES_MEMORY_SNAPSHOT`; the default is `STATELESS_REPLAY`. At most one: a second is refused at startup (see [Substrate placement binding](#substrate-placement-binding)). Requires `-model`, like `-harness`. |
+| `-substrate-atespace` | Atespace the session actors are created in (required). It must already exist, and must not change while sessions exist: see [Substrate placement binding](#substrate-placement-binding). |
+| `-ateapi-addr` | ate-api Control address, TLS (default `api.ate-system.svc:443`). |
+| `-ateapi-token-file` | Bearer token file, re-read on every call, so a projected ServiceAccount token rotates. |
+| `-ateapi-ca-file`, `-ateapi-server-name` | Verify the ate-api certificate against this CA and name; the default is the system roots and the host of `-ateapi-addr`. |
+| `-ateapi-insecure-skip-verify` | Skip certificate verification (dev clusters; the conformance Job does the same). A server impersonating the ate-api then receives the `-ateapi-token-file` bearer token. Exclusive with `-ateapi-ca-file`. |
+| `-atenet-router` | Router address harnesses are reached through (default `atenet-router.ate-system.svc:80`). |
+
+The other flags only configure `-substrate-harness` entries; given without one, the daemon refuses
+to start rather than ignore them.
+
+The tier is declared, not discovered: placement gates on it before an actor exists, and nothing
+checks it against the image's own `Describe`. Declaring a `REQUIRES_MEMORY_SNAPSHOT` harness as
+stateless lets fork and a lost actor rebuild it by replay, which loses its RAM state, so declare what
+the harness's own `Describe` reports.
 
 ### Substrate placement binding
 
-A session's journal records its harness name, not where that harness's actors live: the atespace,
-the ActorTemplate and the declared tier come from the host's configuration, and the session store
-keeps none of them. A `REQUIRES_MEMORY_SNAPSHOT` session's state lives in one actor's RAM, so a lost
-or replaced actor loses it.
+A session's journal records its harness name, not where that harness's actors live. The atespace,
+the ActorTemplate and the declared tier come from the daemon's flags at each start, and the session
+store keeps none of them. Three ways that goes wrong for a `REQUIRES_MEMORY_SNAPSHOT` session, the
+second of which the daemon prevents by refusing a second `-substrate-harness`:
+
+- **The binding changes under existing sessions.** Restarting with another `-substrate-atespace`
+  makes the next `Exec` look for the session's actor where it never was. Without the check below,
+  `Create` would cold-create a new actor from the template and continue the journal with a harness
+  that remembers none of it. Changing a harness's template does not move its actors, which are named
+  by session UID in the atespace: an existing session's actor is found and attached, still running
+  the old template, and only new sessions and stateless fork children get the new one. Nothing
+  reports the difference.
+- **Harnesses would share one actor per session.** A substrate backend creates its actors in the
+  one `-substrate-atespace`, under the session UID. With two substrate harnesses, a turn an
+  `ExecRequest.harness` override sent to the second would find the first harness's actor running and
+  attach to it, so it would run on the first harness's template while its `EXECUTION_START` records
+  the second. The cold-create guard below counts turns per harness, so after that shared actor is
+  lost, a harness that never ran a turn for the session would cold-create over state the other
+  harness built. `agentsessionsd` therefore accepts `-substrate-harness` at most once and exits
+  with status 2 on a second; per-harness actor names are the open question below. The rule is per
+  daemon: two `agentsessionsd` hosts that share a journal and an atespace but serve different
+  `-substrate-harness` names still share each session's actor, and so does a program that builds
+  its own `placement.Registry` with two substrate backends on one atespace.
+- **The tier is mis-declared.** A stateful image declared without `,memory` is treated as
+  `STATELESS_REPLAY`: a fork cold-creates the child and replays the journal into it, and a lost actor
+  is recreated, both without the parent's RAM.
 
 What is enforced today: `runtime/substrate` refuses to cold-create an actor for a
 `REQUIRES_MEMORY_SNAPSHOT` session whose journal already has a started turn (an `EXECUTION_START`)
@@ -140,9 +191,16 @@ Open questions, not implemented:
 
 - Can the atenet-router target an actor by UID, or reject a request whose expected UID differs? If it
   could, a turn already placed would never reach a replacement actor.
+- Should the session store persist each session's substrate binding (atespace, template, declared
+  tier) at its first placement, and refuse a turn when the daemon's configured binding differs?
 - Should `runtime/substrate` verify the live harness's `Describe` resumability against the configured
   tier, given that `Placer.recheck` runs only for a `LiveDescriber` backend and does not compare
   tiers?
+- Should a substrate actor name carry the harness as well as the session, or should `Create` refuse
+  to attach to an actor created from another template? Either would let `agentsessionsd` accept more
+  than one `-substrate-harness` without them sharing a session's actor, and without the per-harness
+  cold-create guard undercounting the turns that ran on it. Existing actors are named by session UID
+  only, so this needs a migration story.
 
 ### A fork child's clone UID
 

@@ -7,8 +7,8 @@
    retry into success, fall back to a default or skip silently.
 2. **Event log and provenance.** Preserve sequence numbers, RFC 8785 canonical bytes and the hash
    chain; changed canonical bytes need a migration story. Replay never calls the model. A
-   host-executed tool re-drives at most once, deduplicated by session UID plus idempotency key, and
-   its receipt is journaled.
+   host-executed tool re-drives at most once, only when its executor declares durable dedup,
+   deduplicated by session UID plus idempotency key, and its receipt is journaled.
 3. **Credentials and privacy.** No tokens, keys, private endpoints or session payloads in fixtures,
    logs, errors or traces. Model keys come from the environment, never argv or a URL query.
 4. **Ownership and neutrality.** No cloud, sandbox or provider-specific code or naming in the root

@@ -20,6 +20,9 @@ type liveSink struct {
 	desc           *api.Descriptor
 	har            api.Harness
 	calls          map[string]bool // true for approval; ordinary IDs cannot later be reused by a gate
+	// runCtx is the context Exec or Resume passed to Harness.Run. It, not the per-call context a
+	// harness may narrow for ToolCall, decides whether the host ended the turn.
+	runCtx context.Context
 }
 
 var _ api.EventSink = (*liveSink)(nil)

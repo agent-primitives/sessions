@@ -33,6 +33,18 @@ not provide.
 
 ### Fixed
 
+- Cancelling `Resume` while an approved `REQUIRES_APPROVAL` call is in flight no longer records a
+  permanent `EXECUTOR_ERROR` receipt. When `Resume`'s context has ended and the executor's
+  error is that context's error, no receipt, `ERROR` or `END` is written: the call stays pending and
+  the next `Resume` runs it again under the same session UID and idempotency key, as after a crash.
+  The same holds when `Resume`'s deadline has passed and the executor's error is a deadline error,
+  which covers a deadline that surfaces through I/O just before the context reports it. An
+  executor error while `Resume` is running, including an executor's own timeout or a harness
+  cancelling the context it passed to that one `ToolCall`, is still an `EXECUTOR_ERROR` receipt.
+  Receipts already journaled are unchanged.
+- An approved call's `EXECUTOR_ERROR` receipt for an executor Go error now carries model-facing
+  `Content` ("Tool execution failed."), like the denial receipt; the error text stays in `Error`,
+  and a partial result returned with the error is dropped. Before, it had no `Content`.
 - Socket executor write/read errors, including journaled approval receipts, no longer expose
   the Unix socket path.
 - Tool-executor refusal receipts no longer reference an issue number.

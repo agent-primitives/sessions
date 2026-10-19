@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/agent-primitives/sessions/api"
 )
@@ -25,6 +26,32 @@ var ErrApprovalReceiptReport = errors.New("controller: approval receipts are hos
 
 // ErrMissingToolExecutor is a recoverable host precondition, not an executor-failure receipt.
 var ErrMissingToolExecutor = errors.New("controller: no tool executor configured")
+
+// executorFailure is the model-facing Content of an approved call's EXECUTOR_ERROR receipt when
+// the executor returned a Go error. The error text is kept in ToolResult.Error only.
+const executorFailure = "Tool execution failed."
+
+// hostEnded returns the error that ended the host's turn when the executor's err is that ending,
+// and nil for an executor outcome. Only the state of the context Exec or Resume received, when the
+// executor returns, counts. The turn ended when the host context is done and err is its error, or
+// when the host deadline has passed and err is a deadline error: a host deadline can surface
+// through I/O (a socket deadline) just before the context's own timer marks it done. Errors match
+// by kind: an error from a per-call context the harness passed to ToolCall is the host's only when
+// it is the same kind as the host's ending, even if the per-call deadline expired first, and an
+// executor outcome otherwise.
+func hostEnded(host context.Context, err error) error {
+	hostErr := host.Err()
+	if hostErr != nil && errors.Is(err, hostErr) {
+		return hostErr
+	}
+	if deadline, ok := host.Deadline(); ok && !time.Now().Before(deadline) && errors.Is(err, context.DeadlineExceeded) {
+		if hostErr != nil {
+			return hostErr
+		}
+		return context.DeadlineExceeded
+	}
+	return nil
+}
 
 func approvalPark(state *ApprovalState) error {
 	return &api.ApprovalParkedError{Ref: api.ApprovalRef{ExecutionID: state.ExecutionID, ToolCallID: state.Call.ID, RequestSeq: state.Request.Seq}}
@@ -85,7 +112,8 @@ func (s *liveSink) parkTool(ctx context.Context, call api.ToolCall) (api.ToolRes
 }
 
 // completeApproval executes only a scanned, committed decision. The executor gets the original
-// session/key namespace; after an uncertain receipt write it must durably deduplicate.
+// session/key namespace; after an uncertain receipt write or a host cancellation it must durably
+// deduplicate, because the next Resume calls it again with the same key.
 func (s *liveSink) completeApproval(ctx context.Context, state *ApprovalState) (api.ToolResult, error) {
 	if err := s.approvalDescriptor(ctx); err != nil {
 		s.guard.stop = err
@@ -109,8 +137,16 @@ func (s *liveSink) completeApproval(ctx context.Context, state *ApprovalState) (
 		s.c.liveToolCalls++
 		result = res
 		if err != nil {
-			result.IsError = true
-			result.Error = err.Error()
+			// A host-caused cancellation is not an executor outcome. Leave the approved call
+			// without a receipt, as a crash at this point would, so the next Resume re-drives it
+			// under the same key. The stop keeps the harness from continuing past the open call.
+			if hostErr := hostEnded(s.runCtx, err); hostErr != nil {
+				s.guard.stop = hostErr
+				return api.ToolResult{}, hostErr
+			}
+			// Like the ordinary path, a Go error discards any partial result. The error text
+			// stays in Error; the model-facing Content is fixed so it never carries host detail.
+			result = api.ToolResult{IsError: true, Error: err.Error(), Content: api.TextMessage("tool", executorFailure).Parts}
 		}
 		result.Code = api.ToolResultCodeUnspecified
 		if result.IsError {

@@ -541,7 +541,7 @@ func TestPublicApprovalExecutorFailureReceiptContinuesModel(t *testing.T) {
 		models.Add(1)
 		if len(req.Messages) != 1 || len(req.Messages[0].Parts) != 1 {
 			t.Errorf("model did not receive the tool receipt: %+v", req)
-		} else if receipt := req.Messages[0].Parts[0].ToolResult; receipt == nil || receipt.ID != "call" || !receipt.IsError || receipt.Code != api.ToolResultCodeExecutorError || receipt.Error != "executor offline" || receipt.ApprovalRequestSeq <= 0 || receipt.ApprovalDecisionSeq <= receipt.ApprovalRequestSeq {
+		} else if receipt := req.Messages[0].Parts[0].ToolResult; receipt == nil || receipt.ID != "call" || !receipt.IsError || receipt.Code != api.ToolResultCodeExecutorError || receipt.Error != "executor offline" || (&api.Message{Parts: receipt.Content}).Text() != "Tool execution failed." || receipt.ApprovalRequestSeq <= 0 || receipt.ApprovalDecisionSeq <= receipt.ApprovalRequestSeq {
 			t.Errorf("model receipt lost failure/correlation: %+v", receipt)
 		}
 		return api.ModelResponse{Message: *api.TextMessage("assistant", "handled executor failure")}, nil

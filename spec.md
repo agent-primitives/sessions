@@ -699,7 +699,7 @@ invokes no harness and stays a no-op without one.
   the intent without a receipt; the error is returned to the harness (over `Harness.Connect` it
   ends the invocation, `EXE-33`) and no `TOOL_RESULT` is written. An approved
   `REQUIRES_APPROVAL` call is different: an executor error becomes a durable receipt with
-  `code = EXECUTOR_ERROR` and `is_error` set (§10).
+  `code = EXECUTOR_ERROR` and `is_error` set (§10), unless the host ended the recovery (`APR-14`).
 - A reference host with no tool executor configured records `TOOL_CALL`, then fails the call ("no
   tool executor configured") and the execution ends with `EVENT_ERROR`. The intent stays without a
   receipt, as in `TOOL-6`.
@@ -804,7 +804,23 @@ invokes no harness and stays a no-op without one.
   cursor) and snapshot reference. A denial writes an `APPROVAL_DENIED` receipt without calling the
   executor. An approval calls the executor with the recorded call, whether or not the executor
   declares durable dedup for the tool (`TOOL-10` does not apply); an executor failure becomes a
-  durable `EXECUTOR_ERROR` receipt. A missing executor is `FAILED_PRECONDITION` and leaves the
+  durable `EXECUTOR_ERROR` receipt. When the executor fails with an error instead of a result, the
+  reference host sets the receipt's `content` to the fixed text "Tool execution failed." and keeps
+  the error text in `error`; a result the executor returns with `is_error = true` keeps the
+  `content` it returned. An error the host caused by ending the recovery is not an executor failure:
+  either the context the recovery runs under is done and the executor returned that context's error,
+  or that context's deadline has passed and the executor returned a deadline error (a deadline
+  enforced by I/O can surface just before the context reports it). The host MUST NOT write a
+  receipt, `ERROR` or `END` for it, and returns the context error, so the decision stays recoverable
+  as after a crash and the next recovery calls the executor again with the recorded call. The host
+  decides by the recovery context's state when the executor returns, not by which context ended the
+  call, and matches the error by kind. An error returned while the recovery context is live and
+  before its deadline MUST become an `EXECUTOR_ERROR` receipt, including the error from cancelling a
+  context the harness narrowed for that one call (`api.Harness`) or from its deadline. A
+  cancellation error returned after the recovery context was cancelled, or a deadline error returned
+  after its deadline passed, MUST NOT be receipted, even when that per-call deadline expired first.
+  Any other error MUST become an `EXECUTOR_ERROR` receipt, including one unrelated to either context
+  returned after the recovery ended. A missing executor is `FAILED_PRECONDITION` and leaves the
   decision recoverable.
 - `APR-15`: An inherited unresolved gate (copied by a fork) MUST be refused with
   `FAILED_PRECONDITION`. A reference inherited through fork cannot authorize an effect in the child.
@@ -1523,8 +1539,8 @@ The reference implementation protects the integrity of the record, not access to
 - At-most-once tool execution depends on executor deduplication (`TOOL-11`). An executor that
   declares durable dedup but does not deduplicate can apply an effect twice after a crash. An
   approved `REQUIRES_APPROVAL` call runs on recovery without the declaration (`APR-14`): the
-  journal cannot tell its first attempt from a re-drive after a crash during execution, so an
-  executor that does not deduplicate can apply that effect twice.
+  journal cannot tell its first attempt from a re-drive after a crash or host cancellation during
+  execution, so an executor that does not deduplicate can apply that effect twice.
 - The harness registry chooses what the host dials and whose model credential pays for it. It MUST
   NOT be served on the Sessions listener.
 

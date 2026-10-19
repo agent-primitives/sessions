@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +22,8 @@ import (
 	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
 	"github.com/agent-primitives/sessions/sqlitelog"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func runSocketDaemon(t *testing.T, harnessAddr, journal, config string) (*client.Client, func()) {
@@ -192,6 +195,106 @@ func TestRunSocketApprovalAndReceiptRecovery(t *testing.T) {
 				t.Fatalf("completed receipt redialed after restart: %d", calls.Load())
 			}
 		})
+	}
+}
+
+// Cancelling Resume while an approved socket call is in flight is a host cancellation, not an
+// executor failure: the daemon journals no receipt, and the next Resume redials the call once
+// under its original session UID and idempotency key.
+func TestRunSocketApprovalCancelledResumeRedrives(t *testing.T) {
+	harness := serveHarness(t, gatedHarness{})
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	started := make(chan struct{})
+	var mu sync.Mutex
+	var keys []string
+	socket, calls := unixToolPeer(t, func(conn net.Conn) {
+		data, err := bufio.NewReader(conn).ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		var req map[string]any
+		if json.Unmarshal(data, &req) != nil {
+			return
+		}
+		mu.Lock()
+		keys = append(keys, fmt.Sprint(req["session_uid"], "/", req["idempotency_key"]))
+		first := len(keys) == 1
+		mu.Unlock()
+		if first {
+			close(started)
+			_, _ = io.Copy(io.Discard, conn) // hold the call until the daemon closes the connection
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(map[string]any{"version": 1, "call_id": req["call_id"], "is_error": false, "output": map[string]any{"text": "published"}})
+	})
+	c, _ := runSocketDaemon(t, harness, filepath.Join(t.TempDir(), "journal.db"), configuredSocketJSON(socket, "true", "publish"))
+	turn, err := c.Exec(ctx, client.ExecOptions{Harness: "h", Inputs: []string{"hi"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := turn.Session.GetMetadata().GetUid()
+	ref := turn.Session.GetPendingApproval()
+	if ref == nil {
+		t.Fatal("call did not park")
+	}
+	if _, err := c.Approve(ctx, uid, api.ApprovalDecision{ExecutionID: ref.GetExecutionId(), ToolCallID: ref.GetToolCallId(), RequestSeq: ref.GetRequestSeq(), Approved: true}); err != nil {
+		t.Fatal(err)
+	}
+	resumeCtx, cancelResume := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-started:
+		case <-ctx.Done():
+		}
+		cancelResume()
+	}()
+	if _, err := c.Resume(resumeCtx, uid, false); status.Code(err) != codes.Canceled {
+		t.Fatalf("cancelled Resume = %v, want Canceled", err)
+	}
+	// The cancelled Resume may still hold the session while it unwinds; retry only that refusal.
+	for {
+		_, err = c.Resume(ctx, uid, false)
+		if status.Code(err) != codes.Aborted || ctx.Err() != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("redrive Resume: %v", err)
+	}
+	if _, err := c.Resume(ctx, uid, false); err != nil {
+		t.Fatal(err)
+	}
+	records, err := c.Replay(ctx, uid, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipts []*v1.ToolResult
+	var outputs []string
+	for _, r := range records {
+		switch r.GetEvent().GetKind() {
+		case v1.EventKind_EVENT_TOOL_RESULT:
+			receipts = append(receipts, r.GetEvent().GetResult())
+		case v1.EventKind_EVENT_ERROR:
+			t.Errorf("host cancellation journaled ERROR: %v", r.GetEvent())
+		case v1.EventKind_EVENT_OUTPUT:
+			for _, part := range r.GetEvent().GetMessage().GetParts() {
+				outputs = append(outputs, part.GetText().GetText())
+			}
+		}
+	}
+	if len(receipts) != 1 || receipts[0].GetIsError() || receipts[0].GetCode() != v1.ToolResult_CODE_UNSPECIFIED {
+		t.Fatalf("receipts = %v; want one successful receipt", receipts)
+	}
+	if !slices.Contains(outputs, "tool:published") {
+		t.Fatalf("harness did not continue with the redriven receipt: %v", outputs)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := uid + "/" + ref.GetToolCallId()
+	if calls.Load() != 2 || len(keys) != 2 || keys[0] != want || keys[1] != want {
+		t.Fatalf("dials=%d keys=%v; want two dials under %q", calls.Load(), keys, want)
 	}
 }
 

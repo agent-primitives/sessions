@@ -280,7 +280,7 @@ func TestApprovalSelectionDecisionAndOwnership(t *testing.T) {
 }
 
 func gateLive(c *Controller) *liveSink {
-	return &liveSink{c: c, executionID: "e", guard: &sinkGuard{}, desc: &api.Descriptor{Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, calls: make(map[string]bool)}
+	return &liveSink{c: c, executionID: "e", guard: &sinkGuard{}, desc: &api.Descriptor{Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, calls: make(map[string]bool), runCtx: context.Background()}
 }
 func allGateMethods(ctx context.Context, s api.EventSink) []error {
 	_, m := s.Model(ctx, api.ModelRequest{})

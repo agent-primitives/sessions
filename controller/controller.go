@@ -379,7 +379,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		Config:        config,
 		ResumeFromSeq: c.startResumeFromSeq,
 	}
-	sink := &liveSink{c: c, executionID: executionID, modelDefault: model, modelPolicy: c.invocationPolicy(model), guard: &sinkGuard{}, desc: &desc, har: har, calls: make(map[string]bool)}
+	sink := &liveSink{c: c, executionID: executionID, modelDefault: model, modelPolicy: c.invocationPolicy(model), guard: &sinkGuard{}, desc: &desc, har: har, calls: make(map[string]bool), runCtx: ctx}
 	runErr := har.Run(ctx, start, sink)
 	stop := sink.guard.close()
 	if stop != nil {

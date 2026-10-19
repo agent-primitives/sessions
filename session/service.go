@@ -1010,7 +1010,7 @@ func forkError(err error) error {
 		return status.Error(codes.DataLoss, err.Error())
 	case errors.Is(err, placement.ErrSessionBusy):
 		return status.Error(codes.Aborted, err.Error())
-	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, api.ErrMemoryStateLost):
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, api.ErrMemoryStateLost), errors.Is(err, api.ErrInvalidCheckpoint):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return status.Error(codes.Unavailable, err.Error())
@@ -1145,7 +1145,7 @@ func suspendError(err error) error {
 	// api.ErrMemoryStateLost: the compute the session's turns ran on is gone or replaced; retrying
 	// cannot help.
 	case errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, controller.ErrReplayDiverged),
-		errors.Is(err, api.ErrMemoryStateLost):
+		errors.Is(err, api.ErrMemoryStateLost), errors.Is(err, api.ErrInvalidCheckpoint):
 		return status.Errorf(codes.FailedPrecondition, "suspend: %v", err)
 	case errors.Is(err, placement.ErrUnknownHarness):
 		return harnessError(err)
@@ -1174,7 +1174,7 @@ func resumeError(err error) error {
 	case errors.Is(err, controller.ErrInvalidExecutionLog):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
 	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrStatefulOverride), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch),
-		errors.Is(err, api.ErrMemoryStateLost):
+		errors.Is(err, api.ErrMemoryStateLost), errors.Is(err, api.ErrInvalidCheckpoint):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
 	case errors.Is(err, placement.ErrUnknownHarness):
 		return harnessError(err)
@@ -1211,7 +1211,7 @@ func execError(err error) error {
 	case errors.Is(err, placement.ErrSessionBusy):
 		return status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport), errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrStatefulOverride), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch),
-		errors.Is(err, api.ErrMemoryStateLost):
+		errors.Is(err, api.ErrMemoryStateLost), errors.Is(err, api.ErrInvalidCheckpoint):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return status.Error(codes.Unavailable, err.Error())

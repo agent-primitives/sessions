@@ -251,28 +251,94 @@ attached to as if it held the cloned RAM. The child now records the clone's UID 
 | `api.Runtime` | substrate Control |
 |---|---|
 | `Create` | `CreateActor` + `ResumeActor` (starts from the template's golden snapshot, or cold-boots); refused for a memory-tier session with started turns and no actor |
-| `Snapshot(EXTERNAL)` | `SuspendActor` (RAM+disk snapshot to storage, worker freed, actor SUSPENDED) |
+| `Snapshot(EXTERNAL)` | `SuspendActor` (snapshot to storage, worker freed, actor SUSPENDED; fidelity reported from the completed snapshot) |
 | `Restore` | `ResumeActor` (restores the actor's own snapshot on a possibly-different worker) |
 | `Fork` (stateless) | `CreateActor` + `ResumeActor` — a replay-fork; the journal reconstructs the child |
 | `Fork` (memory) | `CreateTag{source_actor}` + `CreateActor{source_tag}` + `ResumeActor` — clones the parent's RAM |
 | `Stop` | `SuspendActor` + `DeleteActor` |
 | `Status` | `GetActor` |
 
-There is no per-resume boot flag (substrate removed `ResumeActorRequest.boot`). Substrate picks the
-source itself: the actor's own snapshot, else the template's golden snapshot, else a cold boot of the
-template spec. That is enough for `STATELESS_REPLAY`: a new actor has no snapshot of its own, and the
-golden snapshot is the harness captured right after it became ready, before any session touched it,
-so it carries no session state. A template that must cold-boot on every resume would set
-`snapshotConfig.preferredFidelity: SNAPSHOT_FIDELITY_VOLUMES` instead; nothing here needs that.
+There is no per-resume boot flag (substrate removed `ResumeActorRequest.boot`). At creation,
+Substrate borrows the template's current golden tag into the actor as snapshot generation 1 when
+one exists. Resume restores the actor's own snapshot, or cold-boots the template spec if it has
+none; it does not look up a template golden at resume time. That is enough for `STATELESS_REPLAY`:
+the borrowed golden captures a freshly ready harness before any session touched it, so it carries
+no session state.
 
-`Capabilities.MemorySnapshot = true` is the tier that lets substrate host a `REQUIRES_MEMORY_SNAPSHOT`
-harness a filesystem-only backend (`runtime/local`, a plain pod) refuses via `CanPlace`.
+### Snapshot fidelity and files-only recovery
+
+The adapter carries the URI and observed fidelity of the **same** highest-generation completed
+external snapshot through `ActorInfo.Snapshot` and `ActorInfo.SnapshotFidelity`. Pending or local-only
+snapshots are not candidates; equal generations use the later entry, matching Substrate. The backend
+sets `SnapshotRef.Memory` true only for observed MEMORY. VOLUMES and ROOTFS report false. For default
+stateless replay, missing or unrecognized fidelity also reports false to preserve compatibility:
+that is **not evidence that process memory was excluded**.
+
+For a files-only template, construct the backend with `substrate.WithVolumesOnly()`. It requires a
+nonempty durable snapshot URI and observed VOLUMES; unknown, ROOTFS and MEMORY all refuse without
+returning a ref, so the host records no `SUSPEND`. It reports `Capabilities.MemorySnapshot = false`,
+which refuses `REQUIRES_MEMORY_SNAPSHOT` admission via `CanPlace`. A conflicting memory-required
+descriptor or recorded compute instance also refuses direct `Snapshot` calls. Without this option,
+a memory-required descriptor or recorded compute instance requires observed MEMORY and a nonempty
+URI; a custom `ControlClient` must supply that evidence too.
+
+Invalid checkpoints wrap `api.ErrInvalidCheckpoint` and map to `FAILED_PRECONDITION` from
+Suspend/Fork; stateful Fork retains `placement.ErrUnplaceable`. Validation can refuse after
+SuspendActor already suspended compute: no usable ref or SUSPEND is recorded. Create and Restore
+also check the suspended actor's durable URI and configured fidelity before resuming, so a fresh
+host cannot revive that refused state. Restore decides whether MEMORY is required from the backend
+contract, not from a legacy `SnapshotRef.Memory` bit: journals written before this change
+recorded `Memory: true` for every Substrate suspend, including stateless actors. A
+memory-required actor with non-MEMORY evidence also wraps `api.ErrMemoryStateLost`. Custom clients
+must populate fidelity in GetActor too.
+
+First placement can find an actor between CreateActor and its first ResumeActor. The additive
+`ActorInfo.NoSnapshotHistory` flag permits that snapshot-less attachment only with positive evidence:
+an identified SUSPENDED actor, generation zero and an empty snapshot list, with no unknown legacy
+status fields. False means history is present or unknown and refuses missing checkpoint evidence.
+Only the adapter derives this flag; fork children and refused captures do not qualify. At the
+pinned Substrate, `CreateActor` without a source tag freezes the template's current golden tag as
+snapshot generation 1, so this exemption applies only when golden snapshots are disabled (or no
+golden exists yet). Capture itself never uses the exemption. A backend's own successful CreateActor
+→ ResumeActor path remains unchanged. These client-side checks are not atomic and do not fence
+traffic directly to the router.
+
+**Known limit — effective resume source can differ from durable evidence:** the adapter maps
+Substrate PAUSED to suspended but reports only the latest completed durable checkpoint. At the
+pinned Substrate, resume can restore something other than the durable checkpoint the adapter
+validated. Validation can falsely refuse recoverable local state or accept a checkpoint whose
+fidelity does not meet the backend's requirement. For example, a local-only MEMORY checkpoint can
+be refused as `api.ErrMemoryStateLost` even though it is recoverable; an older durable VOLUMES
+checkpoint can pass `WithVolumesOnly()` validation while resume actually restores a local MEMORY
+checkpoint. Likewise, when a durable snapshot's recorded `ActorTemplate` UID differs from the
+actor's current template UID (for example because the template was deleted and recreated under the
+same name), pinned Substrate restores at VOLUMES scope: a memory-tier session can pass durable
+MEMORY validation yet still cold-boot and lose RAM.
+Sessions does not call `PauseActor`; these fidelity checks do not cover actors paused by an
+operator or another client. Durable checkpoint evidence is not proof of the effective resume
+source in either case.
+
+The option **validates the result; it does not configure Substrate**. Configure the ActorTemplate
+with `snapshotConfig.preferredFidelity: SNAPSHOT_FIDELITY_VOLUMES`, at least one mounted `durable-dir`
+volume, and `goldenSnapshotConfig.mode: GOLDEN_SNAPSHOT_MODE_DISABLED`. Substrate defaults to MEMORY
+and enables golden snapshots when their configuration is omitted; golden snapshots capture MEMORY.
+Keep credentials outside captured directories. A failed validation happens after suspension and
+does not undo the capture or restore discarded RAM. Create and Restore keep refusing that actor
+while it still holds the same invalid snapshot. For a memory-required session that means the
+in-RAM state is lost; for a VOLUMES-only stateless template, retrying `Suspend` while the actor
+stays SUSPENDED preserves that same held snapshot, so the operator must delete or otherwise replace
+the actor before cold-starting again.
+
+By default `Capabilities.MemorySnapshot = true` admits a `REQUIRES_MEMORY_SNAPSHOT` harness, so use
+a MEMORY-capable template for that configuration. Files-only result validation does not prove
+snapshot contents, fresh process identity or stale-credential revocation; those require live tests.
 
 ## Fork: cloning an actor from a durable snapshot
 
 Every successful `SuspendActor` leaves the actor holding a new external snapshot: a new generation in
 `Actor.status.snapshots` whose durable copy is `COMPLETED`. The adapter reports the highest such
-generation's URI as the held snapshot, the same one `ResumeActor` restores and `CreateTag` copies.
+generation's URI and fidelity as the held snapshot, which `CreateTag` copies and durable resume
+restores; an actor-local pause checkpoint takes precedence on resume, as noted above.
 `CreateTag{source_actor}` copies the snapshot a SUSPENDED actor holds into tag-owned storage, and
 `CreateActor{source_tag}` seeds a new actor from that copy. That is the compute half of a session
 fork.

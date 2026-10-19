@@ -88,9 +88,9 @@ func (ad *Adapter) ResumeActor(ctx context.Context, actor substrate.ActorRef) (s
 }
 
 // SuspendActor snapshots the actor to durable storage and frees the worker, returning the actor as
-// the suspend left it: the external snapshot it now holds (see heldSnapshot) and its UID. Substrate
-// refuses a suspend while another operation holds the actor's lease with ABORTED, reported as
-// substrate.ErrActorBusy, and a missing actor with NOT_FOUND (RPCService.SuspendActor in
+// the suspend left it: the external snapshot's URI and observed fidelity (see heldSnapshot), and
+// its UID. Substrate refuses a suspend while another operation holds the actor's lease with ABORTED,
+// reported as substrate.ErrActorBusy, and a missing actor with NOT_FOUND (RPCService.SuspendActor in
 // cmd/ateapi/internal/controlapi/actor.go maps the store's ErrNotFound from
 // ActorWorkflow.SuspendActor in cmd/ateapi/internal/controlapi/workflow_suspend.go), reported as
 // substrate.ErrActorNotFound, which the ControlClient contract requires: a memory-tier Snapshot
@@ -200,22 +200,30 @@ func (ad *Adapter) DeleteTag(ctx context.Context, tag substrate.SnapshotID) erro
 // reports a different one.
 func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 	st := a.GetStatus()
+	snap := heldSnapshot(st)
 	return substrate.ActorInfo{
-		Status:   actorStatus(st.GetState()),
-		Worker:   st.GetWorkerAssignment().GetWorkerPod(),
-		Snapshot: heldSnapshot(st),
-		UID:      a.GetMetadata().GetUid(),
+		// Unknown legacy fields (notably pre-list external_snapshot) are not proof of no history.
+		NoSnapshotHistory: st != nil && a.GetMetadata().GetUid() != "" &&
+			st.GetState() == atepb.ActorState_ACTOR_STATE_SUSPENDED &&
+			st.GetLastAssignedGeneration() == 0 && len(st.GetSnapshots()) == 0 &&
+			len(st.ProtoReflect().GetUnknown()) == 0,
+		Status:           actorStatus(st.GetState()),
+		Worker:           st.GetWorkerAssignment().GetWorkerPod(),
+		Snapshot:         snap.GetDurableSnapshot().GetObject().GetSnapshotUri(),
+		SnapshotFidelity: snapshotFidelity(snap.GetFidelity()),
+		UID:              a.GetMetadata().GetUid(),
 	}
 }
 
-// heldSnapshot returns the object-storage URI of the external snapshot the actor holds: the
-// highest-generation entry of ActorStatus.snapshots whose durable copy is COMPLETED, or "" when there
-// is none. That is the snapshot substrate restores on ResumeActor and copies on CreateTag
-// (findLatestDurableSnapshot in substrate's cmd/ateapi/internal/controlapi/snapshot_helpers.go), so
-// comparing it before and after a tag proves which snapshot the tag took. The entry is picked by
-// the same rule (on equal generations the later entry wins) before its URI is read: if that entry
-// has no URI the result is "" and the caller refuses, rather than naming an older completed
-// generation the tag would not copy.
+// heldSnapshot returns the external snapshot the actor holds: the highest-generation entry of
+// ActorStatus.snapshots whose durable copy is COMPLETED, or nil when there is none. URI and fidelity
+// are read from this same entry. Substrate copies it on CreateTag and uses it for durable resume
+// (findLatestDurableSnapshot in substrate's cmd/ateapi/internal/controlapi/snapshot_helpers.go).
+// A node-local pause checkpoint takes precedence on resume and is not reported by this helper.
+// Comparing its URI before and after a tag proves which snapshot the tag took. The entry is picked
+// by the same rule (on equal generations the later entry wins) before its URI is read: if that entry
+// has no URI, actorInfo reports an empty handle rather than naming an older completed generation
+// the tag would not copy.
 //
 // Entries that are not candidates: a PENDING durable copy is still being written (a suspend in
 // flight), and an entry with no durable copy is a node-local pause checkpoint, which a tag cannot
@@ -223,10 +231,10 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 // suspend, so a fork child reports the borrowed URI, under the tag's prefix.
 //
 // Substrate f03327bd replaced the single ActorStatus.external_snapshot (field 4) with this list. A
-// server older than that still sends field 4, which this client does not read, so it reports "" and
-// a stateful fork refuses rather than tagging a snapshot it cannot name: through the Placer as
-// unplaceable (no external snapshot handle), and a direct Backend.Fork with ErrNoSnapshotToClone.
-func heldSnapshot(st *atepb.ActorStatus) string {
+// server older than that still sends field 4, which this client does not read, so it reports no
+// handle or fidelity. A memory checkpoint refuses before SUSPEND is recorded; a direct Backend.Fork
+// with no handle refuses with ErrNoSnapshotToClone rather than tagging a snapshot it cannot name.
+func heldSnapshot(st *atepb.ActorStatus) *atepb.Snapshot {
 	var held *atepb.Snapshot
 	for _, snap := range st.GetSnapshots() {
 		if snap.GetDurableSnapshot().GetStatus() != atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED {
@@ -236,7 +244,20 @@ func heldSnapshot(st *atepb.ActorStatus) string {
 			held = snap
 		}
 	}
-	return held.GetDurableSnapshot().GetObject().GetSnapshotUri()
+	return held
+}
+
+func snapshotFidelity(f atepb.SnapshotFidelity) substrate.SnapshotFidelity {
+	switch f {
+	case atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY:
+		return substrate.SnapshotFidelityMemory
+	case atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES:
+		return substrate.SnapshotFidelityVolumes
+	case atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS:
+		return substrate.SnapshotFidelityRootFS
+	default:
+		return substrate.SnapshotFidelityUnknown
+	}
 }
 
 // actorStatus narrows substrate's lifecycle onto the states the backend acts on. RESUMING,

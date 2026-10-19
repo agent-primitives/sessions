@@ -160,10 +160,10 @@ func TestModelDoesNotInventReasoning(t *testing.T) {
 // asked for while the journal records the full request, so replay would reproduce the wrong call.
 func TestModelRejectsUnsupportedParts(t *testing.T) {
 	for name, part := range map[string]api.Part{
-		"file":        {File: &api.FilePart{MIME: "image/png", Bytes: []byte{1}}},
-		"data":        {Data: map[string]any{"k": "v"}},
-		"tool call":   {ToolCall: &api.ToolCall{ID: "c1", Tool: "get_weather", Args: map[string]any{"city": "Paris"}}},
-		"tool result": {ToolResult: &api.ToolResult{ID: "c1", Content: []api.Part{{Text: &api.TextPart{Text: "sunny"}}}}},
+		"file":                     {File: &api.FilePart{MIME: "image/png", Bytes: []byte{1}}},
+		"data":                     {Data: map[string]any{"k": "v"}},
+		"tool call in user role":   {ToolCall: &api.ToolCall{ID: "c1", Tool: "get_weather", Args: map[string]any{"city": "Paris"}}},
+		"tool result in user role": {ToolResult: &api.ToolResult{ID: "c1", Content: []api.Part{{Text: &api.TextPart{Text: "sunny"}}}}},
 		// A part with no known content is what a newer peer's part kind decodes to on the wire.
 		"unknown": {},
 	} {
@@ -186,12 +186,78 @@ func TestModelRejectsUnsupportedParts(t *testing.T) {
 	}
 }
 
-// Tools offered to the model are refused until this adapter maps them. Sending the call without them
-// would let the model answer a request the harness never made while the I0 hash covers the tools.
-func TestModelRejectsTools(t *testing.T) {
-	for name, req := range map[string]api.ModelRequest{
-		"tools":       {Tools: []api.ToolDefinition{{Name: "get_weather", InputSchema: map[string]any{"type": "object"}}}},
-		"tool choice": {ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceNone}},
+func TestModelRequestEncodingErrorsDoNotExposePayload(t *testing.T) {
+	const private = "fixture-private-value"
+	for _, tc := range []struct {
+		name, want string
+		req        api.ModelRequest
+	}{
+		{"arguments", "encode tool arguments", api.ModelRequest{Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{ID: "c1", Tool: "weather", Args: map[string]any{"private": json.Number(private)}}}}}}}},
+		{"schema", "encode request", api.ModelRequest{Messages: []api.Message{*api.TextMessage("user", "weather?")}, Tools: []api.ToolDefinition{{Name: "weather", InputSchema: map[string]any{"private": json.Number(private)}}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var called atomic.Bool
+			c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				called.Store(true)
+				_, _ = io.WriteString(w, completion("x"))
+			})
+			for _, stream := range []bool{false, true} {
+				var err error
+				if stream {
+					_, err = c.StreamModel(t.Context(), tc.req, func(string) {})
+				} else {
+					_, err = c.Model(t.Context(), tc.req)
+				}
+				if !errors.Is(err, openai.ErrUnsupportedPart) || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("stream=%v: err = %v, want ErrUnsupportedPart with %q", stream, err, tc.want)
+				}
+				if strings.Contains(err.Error(), private) {
+					t.Fatalf("stream=%v: encoding error leaked private value: %v", stream, err)
+				}
+			}
+			if called.Load() {
+				t.Fatal("sent a request despite unencodable content")
+			}
+		})
+	}
+}
+
+// Refuse unsupported semantics before HTTP; never silently empty a result or ignore a choice.
+func TestModelRejectsUnmappedToolSemantics(t *testing.T) {
+	result := func(r api.ToolResult) api.ModelRequest {
+		r.ID = "c1"
+		return api.ModelRequest{Messages: []api.Message{{Role: "tool", Parts: []api.Part{{ToolResult: &r}}}}}
+	}
+	for name, tc := range map[string]struct {
+		req    api.ModelRequest
+		reason string
+	}{
+		"unnamed tool":      {api.ModelRequest{Tools: []api.ToolDefinition{{InputSchema: map[string]any{}}}}, "empty or duplicate tool name"},
+		"schema":            {api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather", InputSchema: map[string]any{"bad": make(chan int)}}}}, "encode request"},
+		"choice":            {api.ModelRequest{ToolChoice: &api.ToolChoice{Mode: "NEW_MODE"}}, "tool choice mode"},
+		"name default":      {api.ModelRequest{ToolChoice: &api.ToolChoice{Name: "weather"}}, "named tool choice requires REQUIRED"},
+		"name auto":         {api.ModelRequest{ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceAuto, Name: "weather"}}, "named tool choice requires REQUIRED"},
+		"name none":         {api.ModelRequest{ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceNone, Name: "weather"}}, "named tool choice requires REQUIRED"},
+		"params":            {api.ModelRequest{Params: map[string]string{"unmapped": "true"}}, "Params"},
+		"output":            {result(api.ToolResult{Output: map[string]any{}}), "requires model-facing Content"},
+		"URI":               {result(api.ToolResult{OutputURI: "file://result"}), "requires model-facing Content"},
+		"digest":            {result(api.ToolResult{OutputDigest: "sha256:digest"}), "requires model-facing Content"},
+		"error flag":        {result(api.ToolResult{IsError: true}), "requires model-facing Content"},
+		"error":             {result(api.ToolResult{Error: "failed"}), "requires model-facing Content"},
+		"code":              {result(api.ToolResult{Code: api.ToolResultCodeApprovalDenied}), "requires model-facing Content"},
+		"request seq":       {result(api.ToolResult{ApprovalRequestSeq: 1}), "requires model-facing Content"},
+		"decision seq":      {result(api.ToolResult{ApprovalDecisionSeq: 2}), "requires model-facing Content"},
+		"nested file":       {result(api.ToolResult{Content: []api.Part{{File: &api.FilePart{MIME: "image/png"}}}}), "Content must be text-only"},
+		"mixed part":        {api.ModelRequest{Messages: []api.Message{{Parts: []api.Part{{Text: &api.TextPart{Text: "x"}, File: &api.FilePart{}}}}}}, "exactly one known content field"},
+		"args":              {api.ModelRequest{Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{ID: "c1", Tool: "weather", Args: map[string]any{"bad": make(chan int)}}}}}}}, "encode tool arguments"},
+		"interleaved text":  {api.ModelRequest{Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{ID: "c1", Tool: "weather"}}, {Text: &api.TextPart{Text: "late"}}}}}}, "text after a tool call"},
+		"multiple results":  {api.ModelRequest{Messages: []api.Message{{Role: "tool", Parts: []api.Part{{ToolResult: &api.ToolResult{ID: "c1"}}, {ToolResult: &api.ToolResult{ID: "c2"}}}}}}, "requires one tool result"},
+		"missing result ID": {api.ModelRequest{Messages: []api.Message{{Role: "tool", Parts: []api.Part{{ToolResult: &api.ToolResult{}}}}}}, "tool result ID is required"},
+		"call metadata": {api.ModelRequest{Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{
+			ID: "c1", Tool: "weather", Mediation: api.MediationControllerMediated, IdempotencyKey: "key",
+		}}}}}}, "no execution metadata"},
+		"duplicate tools":      {api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}, {Name: "weather"}}}, "empty or duplicate tool name"},
+		"unknown named choice": {api.ModelRequest{Tools: []api.ToolDefinition{{Name: "other"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceRequired, Name: "weather"}}, "named tool choice requires REQUIRED and an offered tool"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var called atomic.Bool
@@ -199,7 +265,10 @@ func TestModelRejectsTools(t *testing.T) {
 				called.Store(true)
 				_, _ = io.WriteString(w, completion("x"))
 			})
-			req.Messages = []api.Message{*api.TextMessage("user", "weather?")}
+			req := tc.req
+			if req.Messages == nil {
+				req.Messages = []api.Message{*api.TextMessage("user", "weather?")}
+			}
 			for _, stream := range []bool{false, true} {
 				var err error
 				if stream {
@@ -207,12 +276,12 @@ func TestModelRejectsTools(t *testing.T) {
 				} else {
 					_, err = c.Model(t.Context(), req)
 				}
-				if !errors.Is(err, openai.ErrUnsupportedPart) || !strings.Contains(err.Error(), "tool") {
-					t.Fatalf("stream=%v: err = %v, want ErrUnsupportedPart naming tools", stream, err)
+				if !errors.Is(err, openai.ErrUnsupportedPart) || !strings.Contains(err.Error(), tc.reason) {
+					t.Fatalf("stream=%v: err = %v, want ErrUnsupportedPart with %q", stream, err, tc.reason)
 				}
 			}
 			if called.Load() {
-				t.Fatal("sent a request despite tools it cannot represent")
+				t.Fatal("sent a request despite unmapped semantics")
 			}
 		})
 	}

@@ -16,8 +16,8 @@
 // Transport: the harness is reached through substrate's atenet-router, the only supported ingress
 // to an actor. Every incarnation addresses the router and carries the ate-target-actor metadata that
 // selects the actor; the router resumes the actor if needed and proxies the h2c gRPC stream to it.
-// Capabilities report MemorySnapshot=true — the headline differentiator vs a plain pod, which lets
-// substrate host REQUIRES_MEMORY_SNAPSHOT harnesses a pod must refuse (the honest-degradation proof).
+// Capabilities report MemorySnapshot=true by default; WithVolumesOnly disables memory admission
+// for files-only templates. Snapshot reports the observed fidelity, not the configured preference.
 package substrate
 
 import (
@@ -57,6 +57,31 @@ type ObjectRef struct {
 	Name     string
 }
 
+// SnapshotFidelity describes what a completed snapshot captured, as reported by the control plane.
+// Unknown is not evidence of files-only capture.
+type SnapshotFidelity int
+
+const (
+	SnapshotFidelityUnknown SnapshotFidelity = iota
+	SnapshotFidelityMemory
+	SnapshotFidelityVolumes
+	SnapshotFidelityRootFS
+)
+
+// String names the observed fidelity without exposing a snapshot's storage URI.
+func (f SnapshotFidelity) String() string {
+	switch f {
+	case SnapshotFidelityMemory:
+		return "MEMORY"
+	case SnapshotFidelityVolumes:
+		return "VOLUMES"
+	case SnapshotFidelityRootFS:
+		return "ROOTFS"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 // ActorInfo is the subset of an actor's state the backend needs.
 type ActorInfo struct {
 	Status ActorStatus
@@ -67,6 +92,15 @@ type ActorInfo struct {
 	// changes on every suspend, so comparing it against a recorded handle tells whether the actor
 	// still holds the snapshot a caller took.
 	Snapshot string
+	// SnapshotFidelity is the observed fidelity of Snapshot, not the template's preferred fidelity.
+	// A missing, unspecified or unrecognized value must be reported as SnapshotFidelityUnknown.
+	SnapshotFidelity SnapshotFidelity
+	// NoSnapshotHistory is positive control-plane evidence that no snapshot generation has ever
+	// been assigned and the snapshot list is empty. Only the adapter should set it from authoritative
+	// metadata. False means history is present or unknown, never permission to boot without a
+	// checkpoint. It permits initial attachment between CreateActor and the first ResumeActor;
+	// captures and actors seeded from a fork tag do not receive this exemption.
+	NoSnapshotHistory bool
 	// UID is the actor's server-assigned identity (substrate ResourceMetadata.uid). It is fixed for the
 	// actor's lifetime, suspends and resumes included, and differs for an actor created later under the
 	// same name, which is how the backend tells a replacement apart. A REQUIRES_MEMORY_SNAPSHOT harness
@@ -78,17 +112,19 @@ type ActorInfo struct {
 // real substrate deployment implements this over pkg/proto/ateapipb; keeping it an interface here
 // is what keeps agentsessions free of a substrate dependency.
 type ControlClient interface {
-	// CreateActor creates a SUSPENDED actor holding no snapshot of its own. A name that is already
-	// taken must be reported as (or wrap) ErrActorExists.
+	// CreateActor creates a SUSPENDED actor, borrowing the template's current golden tag as its
+	// first snapshot when one exists. A name that is already taken must be reported as (or wrap)
+	// ErrActorExists.
 	CreateActor(ctx context.Context, actor ActorRef, template ObjectRef) error
-	// ResumeActor schedules the actor onto a worker. Substrate picks the source itself: the actor's
-	// own snapshot if it has one, else the template's golden snapshot (a freshly started harness),
-	// else a cold boot from the template spec. There is no per-call boot flag.
+	// ResumeActor schedules the actor onto a worker from its own snapshot, or cold-boots the
+	// template spec if it has none. It does not look up the template's golden tag at resume time.
+	// There is no per-call boot flag.
 	ResumeActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 	// SuspendActor snapshots the actor to durable storage and frees the worker, returning the actor
-	// as the suspend left it: ActorInfo.Snapshot is the external snapshot it now holds, and
-	// ActorInfo.UID tells which actor under the name was suspended. UID must be set: a memory-tier
-	// Snapshot refuses a suspend that reports none, since it cannot tell which actor it captured.
+	// as the suspend left it: ActorInfo.Snapshot is the external snapshot it now holds, paired with
+	// its observed SnapshotFidelity, and ActorInfo.UID tells which actor under the name was suspended.
+	// UID must be set: a memory-tier Snapshot refuses a suspend that reports none, since it cannot
+	// tell which actor it captured.
 	// An actor that does not exist must be reported as (or wrap) ErrActorNotFound.
 	SuspendActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 	DeleteActor(ctx context.Context, actor ActorRef) error
@@ -154,12 +190,13 @@ type SnapshotCloner interface {
 
 // Backend implements api.Runtime over a substrate ControlClient.
 type Backend struct {
-	ctl        ControlClient
-	atespace   string
-	template   ObjectRef      // the ActorTemplate whose OCI image is the harness
-	descriptor api.Descriptor // the harness's declared contract (see Describe)
-	router     string         // host:port of the atenet-router ingress the harness is reached through
-	logger     *slog.Logger
+	ctl         ControlClient
+	atespace    string
+	template    ObjectRef      // the ActorTemplate whose OCI image is the harness
+	descriptor  api.Descriptor // the harness's declared contract (see Describe)
+	router      string         // host:port of the atenet-router ingress the harness is reached through
+	logger      *slog.Logger
+	volumesOnly bool
 }
 
 var _ api.Runtime = (*Backend)(nil)
@@ -178,6 +215,12 @@ func WithLogger(logger *slog.Logger) Option { return func(b *Backend) { b.logger
 // WithRouter overrides the atenet-router address (host:port) incarnations point at. The default,
 // DefaultRouterAddress, is the in-cluster Service a stock substrate install creates.
 func WithRouter(address string) Option { return func(b *Backend) { b.router = address } }
+
+// WithVolumesOnly requires Snapshot to observe a completed VOLUMES snapshot with a durable URI
+// and disables memory-snapshot admission. It validates results, not template configuration: set
+// the template's preferred fidelity to VOLUMES, configure durable directories and disable goldens.
+// Combining it with a memory-required descriptor is unplaceable and Snapshot refuses directly too.
+func WithVolumesOnly() Option { return func(b *Backend) { b.volumesOnly = true } }
 
 // New builds the backend targeting one atespace and harness ActorTemplate. descriptor is the
 // harness's declared contract, used by the placement gate (see Describe).
@@ -335,6 +378,10 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation
 		return api.Incarnation{}, false, fmt.Errorf("substrate: get actor: %w", err)
 	case info.Status == StatusRunning:
 	case info.Status == StatusSuspended:
+		memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+		if err := b.requireResumeCheckpoint(info, memory, true); err != nil {
+			return api.Incarnation{}, true, err
+		}
 		seen := info
 		if info, err = b.ctl.ResumeActor(ctx, ref); err != nil {
 			return b.resumeFailed(ctx, ref, seen, err)
@@ -372,7 +419,10 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 	return api.Incarnation{}, true, fmt.Errorf("substrate: resume suspended actor: %w", resumeErr)
 }
 
-// Snapshot suspends the actor: RAM+disk snapshot to external storage, worker freed. Only the
+// Snapshot suspends the actor to external storage, reporting Memory only for observed MEMORY
+// fidelity. WithVolumesOnly requires observed VOLUMES; a memory-required descriptor or recorded
+// compute instance requires MEMORY. Both require a durable handle and refuse missing evidence.
+// Unknown fidelity remains accepted as Memory:false for default stateless replay. Only the
 // external (cold/suspend) kind is supported; substrate has no node-local warm checkpoint API today.
 //
 // When in.ComputeInstance is set (Placer.Suspend and a stateful fork pass the UID the journal last
@@ -398,6 +448,10 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 
 	if kind == api.SnapshotLocal {
 		return api.SnapshotRef{}, fmt.Errorf("substrate: local (warm) snapshot not supported; use EXTERNAL")
+	}
+	memoryRequired := in.ComputeInstance != "" || b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+	if b.volumesOnly && memoryRequired {
+		return api.SnapshotRef{}, fmt.Errorf("%w: VOLUMES-only backend cannot capture a memory-required checkpoint; no actor was suspended", api.ErrInvalidCheckpoint)
 	}
 	suspendFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "suspend_actor",
 		"actor", in.ID,
@@ -426,13 +480,50 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 		suspendFinished(err, "error_kind", snapshotErrorKind(err, "actor_uid_missing"))
 		return api.SnapshotRef{}, err
 	}
+	// Check the completed snapshot, not the template's preferred fidelity. Substrate can return a
+	// different fidelity (for example a golden MEMORY snapshot), so configuration alone is not proof.
+	if err := b.requireCheckpoint(info, memoryRequired); err != nil {
+		suspendFinished(err, "error_kind", "snapshot_fidelity_mismatch")
+		return api.SnapshotRef{}, err
+	}
 	suspendFinished(nil)
 	uri := info.Snapshot
 	// Local carries the actor name (the handle Restore/ResumeActor needs); ExternalURI carries the
 	// external snapshot the suspend produced. Fork clones by tagging the ACTOR, not this handle, and
 	// uses the handle to check that the actor still holds this exact snapshot when it is tagged.
-	snapshot = api.SnapshotRef{Local: in.ID, ExternalURI: uri, Memory: true}
+	snapshot = api.SnapshotRef{Local: in.ID, ExternalURI: uri, Memory: info.SnapshotFidelity == SnapshotFidelityMemory}
 	return snapshot, nil
+}
+
+// requireResumeCheckpoint permits a proven snapshot-less initial placement, not a refused capture.
+// A held ref never gets this exemption, even when another actor was created under the same name.
+func (b *Backend) requireResumeCheckpoint(info ActorInfo, memory, allowFresh bool) error {
+	if allowFresh && info.NoSnapshotHistory && info.Snapshot == "" &&
+		info.SnapshotFidelity == SnapshotFidelityUnknown && (!b.volumesOnly || !memory) {
+		return nil
+	}
+	return b.requireCheckpoint(info, memory)
+}
+
+// requireCheckpoint enforces configured fidelity on the suspended actor itself, so a refused
+// capture cannot be bypassed by another host's Create or Restore. Unknown evidence fails closed.
+func (b *Backend) requireCheckpoint(info ActorInfo, memory bool) error {
+	if !b.volumesOnly && !memory {
+		return nil
+	}
+	required := SnapshotFidelityMemory
+	if b.volumesOnly {
+		required = SnapshotFidelityVolumes
+	}
+	if (!b.volumesOnly || !memory) && info.Snapshot != "" && info.SnapshotFidelity == required {
+		return nil
+	}
+	err := fmt.Errorf("%w: required %s with a durable URI, observed %s (URI present: %t); actor remains suspended",
+		api.ErrInvalidCheckpoint, required, info.SnapshotFidelity, info.Snapshot != "")
+	if memory && info.SnapshotFidelity != SnapshotFidelityMemory {
+		return fmt.Errorf("%w: %w: the checkpoint cannot restore the session's in-RAM state", err, api.ErrMemoryStateLost)
+	}
+	return err
 }
 
 // instanceGone wraps err, from the control call op, for Snapshot. When the actor is not found and
@@ -513,6 +604,30 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 	name := ref.Local
 	if name == "" {
 		return api.Incarnation{}, fmt.Errorf("substrate: snapshot ref missing actor name")
+	}
+	// Restore admission follows the backend contract, not SnapshotRef.Memory, which reports the
+	// observed capture fidelity rather than the resumability tier required to continue the session.
+	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+	if b.volumesOnly || memory {
+		info, getErr := b.ctl.GetActor(ctx, b.ref(name))
+		if getErr != nil {
+			if lost := b.memoryActorGone(ctx, ref, recorded, getErr); lost != nil {
+				return api.Incarnation{}, lost
+			}
+			return api.Incarnation{}, fmt.Errorf("substrate: get actor before restore: %w", getErr)
+		}
+		if info.Status == StatusSuspended {
+			if err := b.requireResumeCheckpoint(info, memory, ref.ExternalURI == "" && !memory); err != nil {
+				if recorded != nil {
+					// Classify loss/replacement first, without labeling that failure as bad fidelity.
+					cause := errors.New("substrate: actor could not restore the checkpoint")
+					if lost := b.memoryActorGone(ctx, ref, recorded, cause); lost != nil {
+						return api.Incarnation{}, lost
+					}
+				}
+				return api.Incarnation{}, err
+			}
+		}
 	}
 	resumeFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "resume_actor",
 		"actor", name,
@@ -889,14 +1004,14 @@ func (b *Backend) Status(ctx context.Context, in api.Incarnation) (state api.Com
 	return state, nil
 }
 
-// Capabilities reports what substrate supports. MemorySnapshot=true is the headline differentiator
-// vs a plain pod. CoWFork stays false deliberately: substrate can clone an actor from a tagged
-// snapshot, but the tag copies the snapshot and each restore materializes a private per-actor copy,
-// so a fork is a full copy and restore, not a copy-on-write share.
+// Capabilities reports what the configured backend supports. MemorySnapshot is true by default,
+// but false with WithVolumesOnly. CoWFork stays false deliberately: substrate can clone an actor
+// from a tagged snapshot, but the tag copies the snapshot and each restore materializes a private
+// per-actor copy, so a fork is a full copy and restore, not a copy-on-write share.
 // Attestation and GPU-state capture are not surfaced by the control API today (spike §3/§7).
 func (b *Backend) Capabilities() api.RuntimeCapabilities {
 	return api.RuntimeCapabilities{
-		MemorySnapshot: true,
+		MemorySnapshot: !b.volumesOnly,
 		CoWFork:        false,
 		Attest:         false,
 		GPUState:       false,

@@ -174,9 +174,15 @@ require independent [approve permission](security.md#optional-go-rpc-authorizati
 tool/resource policy hook, timeout or expiry. Snapshots and unresolved requests are retained
 indefinitely, and Cancel remains `UNIMPLEMENTED`. DeleteSession commits permanent intent without
 reclaiming resources.
-Tool calls align with the MCP shape (name plus structured arguments), but approval alone is not a
-complete MCP/provider integration. The daemon's default Chat Completions adapter does not map tools;
-Responses tools require an explicitly composed Go host. See
+Tool calls align with the MCP shape (name plus structured arguments). The bundled Chat Completions
+adapter maps function tools, tool choices, assistant tool calls and text tool results; see the
+[harness tool loop](harness-authoring.md#rule-6-carry-the-tool-loop-in-the-model-request).
+The stock daemon can route host-mediated tools for static CLI harnesses to
+[configured Unix-socket executors](tool-executors.md); without configuration, it has no host executor.
+A harness must still implement the tool loop and use a suitably configured executor for host effects.
+Responses tools require an explicitly composed Go host; see the
+[Responses mapping and limits](responses-adapter.md).
+This is not a complete MCP integration. See
 [approval recovery](interaction-model.md#approval-decisions-and-recovery).
 
 ## How do I list sessions, and can I trust the compute state I get back?

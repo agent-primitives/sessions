@@ -51,20 +51,18 @@ func (c *ResponsesClient) buildResponsesRequest(req api.ModelRequest, stream boo
 			return model, nil, responsesUnsupported("unsupported parameter")
 		}
 	}
-	names := map[string]bool{}
+	if err := validateTools(req.Tools, req.ToolChoice); err != nil {
+		return model, nil, responsesUnsupported("%v", err)
+	}
 	tools := make([]map[string]any, 0, len(req.Tools))
 	for _, tool := range req.Tools {
-		if tool.Name == "" || names[tool.Name] {
-			return model, nil, responsesUnsupported("empty or duplicate tool name")
-		}
-		names[tool.Name] = true
 		t := map[string]any{"type": "function", "name": tool.Name, "description": tool.Description, "strict": false}
 		if tool.InputSchema != nil {
 			raw, err := responsesMarshal(tool.InputSchema)
 			if err != nil {
 				return model, nil, responsesUnsupported("tool schema: %v", err)
 			}
-			if _, err := responsesArguments(string(raw)); err != nil {
+			if _, err := toolArguments(string(raw)); err != nil {
 				return model, nil, responsesUnsupported("tool schema: %v", err)
 			}
 			t["parameters"] = tool.InputSchema
@@ -76,17 +74,12 @@ func (c *ResponsesClient) buildResponsesRequest(req api.ModelRequest, stream boo
 	}
 	if choice := req.ToolChoice; choice != nil {
 		if choice.Name != "" {
-			if choice.Mode != api.ToolChoiceRequired || !names[choice.Name] {
-				return model, nil, responsesUnsupported("named tool choice requires REQUIRED and an offered tool")
-			}
 			body["tool_choice"] = map[string]string{"type": "function", "name": choice.Name}
 		} else {
 			switch choice.Mode {
 			case "":
 			case api.ToolChoiceAuto, api.ToolChoiceNone, api.ToolChoiceRequired:
 				body["tool_choice"] = strings.ToLower(string(choice.Mode))
-			default:
-				return model, nil, responsesUnsupported("unsupported tool choice mode")
 			}
 		}
 	}
@@ -196,7 +189,7 @@ func responsesInput(model string, messages []api.Message) ([][]byte, error) {
 				if err != nil {
 					return nil, responsesUnsupported("function arguments: %v", err)
 				}
-				if _, err = responsesArguments(string(raw)); err != nil {
+				if _, err = toolArguments(string(raw)); err != nil {
 					return nil, responsesUnsupported("function arguments: %v", err)
 				}
 				if err := add(map[string]any{"type": "function_call", "call_id": tc.ID, "name": tc.Tool, "arguments": string(raw)}); err != nil {
@@ -235,9 +228,9 @@ func responsesInput(model string, messages []api.Message) ([][]byte, error) {
 	return input, nil
 }
 
-// responsesArguments validates numbers before converting to the neutral float64
+// toolArguments validates numbers before converting to the neutral float64
 // domain. Parsing directly as float64 would silently round 2^53+1 into 2^53.
-func responsesArguments(raw string) (map[string]any, error) {
+func toolArguments(raw string) (map[string]any, error) {
 	dec := json.NewDecoder(strings.NewReader(raw))
 	dec.UseNumber()
 	var value any
@@ -251,7 +244,7 @@ func responsesArguments(raw string) (map[string]any, error) {
 	if !ok || obj == nil {
 		return nil, fmt.Errorf("arguments must be a JSON object")
 	}
-	if err := responsesNumbers(value); err != nil {
+	if err := toolArgumentNumbers(value); err != nil {
 		return nil, err
 	}
 	var out map[string]any
@@ -261,7 +254,7 @@ func responsesArguments(raw string) (map[string]any, error) {
 	return out, nil
 }
 
-func responsesNumbers(value any) error {
+func toolArgumentNumbers(value any) error {
 	switch v := value.(type) {
 	case json.Number:
 		f, err := v.Float64()
@@ -281,13 +274,13 @@ func responsesNumbers(value any) error {
 		}
 	case map[string]any:
 		for _, key := range slices.Sorted(maps.Keys(v)) {
-			if err := responsesNumbers(v[key]); err != nil {
+			if err := toolArgumentNumbers(v[key]); err != nil {
 				return err
 			}
 		}
 	case []any:
 		for _, x := range v {
-			if err := responsesNumbers(x); err != nil {
+			if err := toolArgumentNumbers(x); err != nil {
 				return err
 			}
 		}
@@ -441,7 +434,7 @@ func decodeResponses(model string, raw []byte) (api.ModelResponse, error) {
 			if err := responsesKeys(rawItem, "type", "id", "status", "call_id", "name", "arguments"); err != nil {
 				return fail(err)
 			}
-			args, err := responsesArguments(*item.Arguments)
+			args, err := toolArguments(*item.Arguments)
 			if err != nil {
 				return fail(fmt.Errorf("function arguments: %w", err))
 			}

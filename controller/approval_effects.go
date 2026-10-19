@@ -32,11 +32,13 @@ var ErrMissingToolExecutor = errors.New("controller: no tool executor configured
 const executorFailure = "Tool execution failed."
 
 // hostEnded returns the error that ended the host's turn when the executor's err is that ending,
-// and nil for an executor outcome. Only the context Exec or Resume received counts: a harness that
-// cancels or times out the context it passed to ToolCall is ending one call, not the turn. The turn
-// ended when the host context is done and err is its error, or when the host deadline has passed
-// and err is a deadline error: a host deadline can surface through I/O (a socket deadline) just
-// before the context's own timer marks it done.
+// and nil for an executor outcome. Only the state of the context Exec or Resume received, when the
+// executor returns, counts. The turn ended when the host context is done and err is its error, or
+// when the host deadline has passed and err is a deadline error: a host deadline can surface
+// through I/O (a socket deadline) just before the context's own timer marks it done. Errors match
+// by kind: an error from a per-call context the harness passed to ToolCall is the host's only when
+// it is the same kind as the host's ending, even if the per-call deadline expired first, and an
+// executor outcome otherwise.
 func hostEnded(host context.Context, err error) error {
 	hostErr := host.Err()
 	if hostErr != nil && errors.Is(err, hostErr) {

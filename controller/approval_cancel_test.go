@@ -424,3 +424,79 @@ func TestApprovalHostDeadlinePassed(t *testing.T) {
 		})
 	}
 }
+
+// The host classifies an executor error by the recovery context's state when the executor returns,
+// not by which context ended the call. A per-call deadline that expires first still yields a
+// deadline error the host cannot tell from its own: returned while Resume's context is live it is
+// an EXECUTOR_ERROR receipt, returned after Resume's deadline it leaves the call pending (APR-14).
+// After Resume is cancelled instead, the per-call deadline error matches neither rule and is
+// receipted.
+func TestApprovalCallDeadlineBeforeHostEnds(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		host    func(context.Context) (context.Context, context.CancelFunc)
+		wait    bool  // the executor returns only after Resume's context is done
+		wantErr error // nil wants an EXECUTOR_ERROR receipt
+	}{
+		{name: "returned while host live", host: func(ctx context.Context) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(ctx, time.Hour)
+		}},
+		{name: "returned after host deadline", wait: true, wantErr: context.DeadlineExceeded, host: func(ctx context.Context) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(ctx, 200*time.Millisecond)
+		}},
+		{name: "returned after host cancel", wait: true, host: func(ctx context.Context) (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithTimeout(ctx, time.Hour)
+			go func() { time.Sleep(200 * time.Millisecond); cancel() }()
+			return ctx, cancel
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := decidedGateLog(t)
+			hostCtx, cancel := tc.host(t.Context())
+			defer cancel()
+			attempts := 0
+			c, err := New(log, nil, WithSessionUID("s"), WithToolExecutor(func(ctx context.Context, _ ToolCallContext, _ api.ToolCall) (api.ToolResult, error) {
+				attempts++
+				if attempts > 1 {
+					return api.ToolResult{Content: api.TextMessage("tool", "done").Parts}, nil
+				}
+				<-ctx.Done()
+				if hostCtx.Err() != nil {
+					t.Error("host context ended before the per-call deadline")
+				}
+				if tc.wait {
+					<-hostCtx.Done()
+				}
+				return api.ToolResult{}, fmt.Errorf("executor: %w", ctx.Err())
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := &approvalHarness{fn: func(ctx context.Context, _ *api.Start, s api.EventSink) error {
+				callCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+				defer cancel()
+				if _, err := s.ToolCall(callCtx, *gateEvents()[1].ToolCall); err != nil {
+					return err
+				}
+				return s.Output(ctx, "handled")
+			}}
+			resumed, err := c.Resume(hostCtx, h)
+			receipt := journalReceipt(t, log)
+			if tc.wantErr == nil {
+				if !resumed || receipt == nil || receipt.Code != api.ToolResultCodeExecutorError || receipt.Error != "executor: context deadline exceeded" || !reflect.DeepEqual(receipt.Content, failedContent) {
+					t.Fatalf("Resume = %v, %v, receipt %+v; want EXECUTOR_ERROR", resumed, err, receipt)
+				}
+				return
+			}
+			if !resumed || !errors.Is(err, tc.wantErr) || receipt != nil {
+				t.Fatalf("Resume = %v, %v, receipt %+v; want %v and no receipt", resumed, err, receipt, tc.wantErr)
+			}
+			if resumed, err := c.Resume(t.Context(), h); !resumed || err != nil || attempts != 2 {
+				t.Fatalf("re-drive: resumed=%v err=%v attempts=%d; want one more attempt", resumed, err, attempts)
+			}
+			if receipt := journalReceipt(t, log); receipt == nil || receipt.IsError {
+				t.Fatalf("re-driven receipt = %+v; want success", receipt)
+			}
+		})
+	}
+}

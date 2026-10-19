@@ -376,10 +376,13 @@ receipt fields with `sink.Report`. A missing executor is a recoverable host prec
 executor-failure receipt. If the host cancels Resume while the executor runs and the executor returns
 that cancellation, or Resume's deadline has passed and the executor returns a deadline error, the
 call returns the host's context error with no receipt and the sink stays closed: propagate it. The
-decision stays recoverable, and the next Resume runs the executor again under the same key. Only the
-context Run received counts: cancelling a context you derived for this `ToolCall`, or its own
-deadline expiring before Resume's, ends the call with a durable `EXECUTOR_ERROR` receipt, which no
-later Resume retries.
+decision stays recoverable, and the next Resume runs the executor again under the same key. Resume's
+state when the executor returns decides this, not which context ended the call: an error returned
+while Resume's context is live and before its deadline, including one from cancelling a context you
+derived for this `ToolCall` or from that context's deadline, is a durable `EXECUTOR_ERROR` receipt,
+which no later Resume retries. A cancellation error after Resume was cancelled, or a deadline error
+after Resume's deadline passed, leaves the call pending with no receipt even if your per-call
+deadline expired first. Any other error is still an `EXECUTOR_ERROR` receipt.
 
 The gate serializes sink operations across decision/effect/receipt handling. Observer/model/executor
 callbacks must not re-enter the same sink: re-entry can deadlock the serialized operation. Recorded

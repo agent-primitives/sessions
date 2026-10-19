@@ -98,7 +98,12 @@ func loadToolExecutorConfig(path string, remotes remoteHarnesses) (*toolExecutor
 }
 
 // factory freezes the exact allowlist at startup. Declarations are operator assertions;
-// only true is dispatchable while the controller cannot distinguish first use from recovery.
+// only true is dispatchable: an approved call runs on Resume, where the controller cannot
+// distinguish first use from recovery. The controller is told a tool has durable dedup when its
+// route declares true or when Call refuses it without dialing (a false/unknown route or an
+// unconfigured tool): repeating a refusal repeats no action, so Resume re-sends such a call to the
+// same refusal exactly as before declarations existed. A change that lets a non-true route dial
+// must stop declaring it in the same change.
 func (c *toolExecutorConfig) factory(logger *slog.Logger) ToolExecutorFunc {
 	executors := map[string]socketExecutorConfig{}
 	for _, e := range c.Executors {
@@ -120,20 +125,28 @@ func (c *toolExecutorConfig) factory(logger *slog.Logger) ToolExecutorFunc {
 		}
 		logger.Log(context.Background(), level, "configured tool executor", "harness", r.Harness, "tool", r.Tool, "executor", r.Executor, "durable_dedup", declaration)
 	}
-	return func(harness string, _ *client.Client) (controller.ToolFunc, error) {
+	return func(harness string, _ *client.Client) (ToolExecutor, error) {
 		tools := routes[harness]
 		if len(tools) == 0 {
-			return nil, nil
+			return ToolExecutor{}, nil
 		}
-		return func(ctx context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+		declaresTrue := func(tool string) bool {
+			r, ok := tools[tool]
+			return ok && r.DurableDedup != nil && *r.DurableDedup
+		}
+		// dispatches reports whether Call can dial for tool. Call and the declaration both read it.
+		dispatches := declaresTrue
+		durableDedup := func(tool string) bool { return !dispatches(tool) || declaresTrue(tool) }
+		run := func(ctx context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
 			r, ok := tools[call.Tool]
 			if !ok {
 				return api.ToolResult{}, fmt.Errorf("tool executor: harness %q tool %q is not configured", harness, call.Tool)
 			}
-			if r.DurableDedup == nil || !*r.DurableDedup {
+			if !dispatches(call.Tool) {
 				return api.ToolResult{}, fmt.Errorf("tool executor: harness %q tool %q requires durable_dedup true", harness, call.Tool)
 			}
 			return executors[r.Executor].execute(ctx, harness, scope, call)
-		}, nil
+		}
+		return ToolExecutor{Call: run, DurableDedup: durableDedup}, nil
 	}
 }

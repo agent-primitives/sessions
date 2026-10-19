@@ -36,7 +36,7 @@ func TestResumeExpectedLastSeq(t *testing.T) {
 			b := &publicGateBackend{Backend: local.New(h)}
 			t.Cleanup(func() { _ = b.Close() })
 			var effects atomic.Int32
-			p := placement.New(b, nil, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+			p := placement.New(b, nil, dedupAllTools, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 				effects.Add(1)
 				return api.ToolResult{Output: map[string]any{"receipt": "recovered"}}, nil
 			}))

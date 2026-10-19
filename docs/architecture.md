@@ -71,7 +71,8 @@ companion determinism contract, exercised by `conformance/`):
 - **I2 — reasoning continuity.** Opaque provider reasoning parts are recorded verbatim and replayed, so
   reasoning survives resume/fork on the stateless path.
 - **I3 — at-most-once effect re-drive.** A crash between an effect's intent and its result is re-driven
-  at most once; host-executed tools carry an idempotency key so the re-drive dedups. A model call cut
+  at most once; host-executed tools carry an idempotency key so the re-drive dedups, and a tool
+  intent is re-driven only when its executor declares durable dedup for the tool. A model call cut
   after `MODEL_CALL`, when that call is the turn's last recorded effect, is re-invoked on `Resume`
   when the harness re-issues the same input hash, and its completion is recorded against that call.
   Each cut costs at most one extra provider call within one host, where the per-session guard

@@ -68,7 +68,7 @@ func TestToolCallDivergenceFailsBeforeResultsOrEffects(t *testing.T) {
 		for _, change := range changes {
 			t.Run(path+"/"+change.name, func(t *testing.T) {
 				log := memStore(t)
-				c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					if path == "resume intent" {
 						return api.ToolResult{}, errToolInterrupted
 					}
@@ -85,7 +85,7 @@ func TestToolCallDivergenceFailsBeforeResultsOrEffects(t *testing.T) {
 				change.change(&changed)
 				h := &callHarness{calls: []api.ToolCall{changed}}
 				attempts := 0
-				fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					attempts++
 					return api.ToolResult{}, nil
 				}))
@@ -112,7 +112,7 @@ func TestToolCallNormalizedIdentityServesRecordedResult(t *testing.T) {
 	for _, recovery := range []bool{false, true} {
 		t.Run(map[bool]string{false: "replay", true: "resume"}[recovery], func(t *testing.T) {
 			log := memStore(t)
-			c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+			c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 				return api.ToolResult{ID: "executor-cannot-pick-id", Output: map[string]any{"receipt": "receipt-1"}}, nil
 			}))
 			if err != nil {
@@ -122,7 +122,7 @@ func TestToolCallNormalizedIdentityServesRecordedResult(t *testing.T) {
 			if recovery && !errors.Is(err, errToolInterrupted) || !recovery && err != nil {
 				t.Fatal(err)
 			}
-			fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+			fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 				t.Error("recorded result invoked executor")
 				return api.ToolResult{}, nil
 			}))
@@ -174,7 +174,7 @@ func TestMalformedToolEvidenceFailsClosed(t *testing.T) {
 				log := memStore(t)
 				appendToolEvidence(t, log, test.events, !recovery)
 				attempts := 0
-				c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					attempts++
 					return api.ToolResult{}, nil
 				}))
@@ -242,7 +242,7 @@ func TestRecoveryRejectsInvalidRecordedToolIntent(t *testing.T) {
 				}
 				appendToolEvidence(t, log, events, path == "replay")
 				attempts := 0
-				c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					attempts++
 					return api.ToolResult{}, nil
 				}))
@@ -346,7 +346,7 @@ func TestHandledToolDivergenceCannotActivateLiveEffectsOrVerify(t *testing.T) {
 				c, err := controller.New(log, func(context.Context, api.ModelRequest) (api.ModelResponse, error) {
 					models++
 					return api.ModelResponse{Message: *api.TextMessage("assistant", "unexpected")}, nil
-				}, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				}, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					tools++
 					return api.ToolResult{}, nil
 				}))
@@ -418,7 +418,7 @@ func TestRecoveryExecutesOnlyNewCallsAfterRecordedPrefix(t *testing.T) {
 	newCall.ID = "call-2"
 	newCall.IdempotencyKey = "key-2"
 	attempts := 0
-	c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(_ context.Context, _ controller.ToolCallContext, got api.ToolCall) (api.ToolResult, error) {
+	c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(_ context.Context, _ controller.ToolCallContext, got api.ToolCall) (api.ToolResult, error) {
 		attempts++
 		if got.ID != "call-2" || got.IdempotencyKey != "key-2" {
 			t.Fatalf("wrong live call: %+v", got)
@@ -461,7 +461,7 @@ func TestToolArgumentPresenceRemainsDistinct(t *testing.T) {
 				}
 				appendToolEvidence(t, log, events, path == "replay")
 				attempts := 0
-				c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					attempts++
 					return api.ToolResult{}, nil
 				}))
@@ -506,7 +506,7 @@ func TestToolReplayPreservesLegacyFallbackRequestIdentity(t *testing.T) {
 					}
 					appendToolEvidence(t, log, events, path == "replay")
 					attempts := 0
-					c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+					c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 						attempts++
 						return api.ToolResult{}, nil
 					}))
@@ -545,7 +545,7 @@ func TestToolReplayPreservesExistingEmptyCallIDs(t *testing.T) {
 	log := memStore(t)
 	call := recordedToolCall()
 	call.ID = ""
-	c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+	c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 		return api.ToolResult{Output: map[string]any{"receipt": "recorded"}}, nil
 	}))
 	if err != nil {
@@ -581,7 +581,7 @@ func TestLiveToolExecutorReceivesOriginalArguments(t *testing.T) {
 			live.ID, live.IdempotencyKey = "call-2", "key-2"
 			live.Args = map[string]any{"number": json.Number("2.00000000000000000001"), "items": []int{1, 2}}
 			attempts := 0
-			c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(_ context.Context, _ controller.ToolCallContext, got api.ToolCall) (api.ToolResult, error) {
+			c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(_ context.Context, _ controller.ToolCallContext, got api.ToolCall) (api.ToolResult, error) {
 				attempts++
 				want := map[string]any{"number": json.Number("2.00000000000000000001"), "items": []int{1, 2}}
 				if !reflect.DeepEqual(got.Args, want) {
@@ -624,82 +624,89 @@ func TestForkCutAtToolCallRejectsInheritedIntentBeforeIdentityChecks(t *testing.
 		{"different mediation", func(c *api.ToolCall) { c.Mediation = api.MediationRequiresApproval }},
 		{"different key", func(c *api.ToolCall) { c.IdempotencyKey = "changed" }},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			store, err := sqlitelog.Open(":memory:")
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { store.Close() })
-			parent, child := store.Session("parent"), store.Session("child")
-			original, err := controller.New(parent, echoModel, controller.WithSessionUID("parent"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
-				return api.ToolResult{Output: map[string]any{"receipt": "parent"}}, nil
-			}))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := original.Exec(t.Context(), &callHarness{calls: []api.ToolCall{recordedToolCall()}}, []api.Message{msg("read")}, 0); err != nil {
-				t.Fatal(err)
-			}
-			before, err := parent.Read(1)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var atSeq int64
-			for _, rec := range before {
-				if rec.Event.Kind == api.EventToolCall {
-					atSeq = rec.Seq
+		// Durable dedup does not extend to the parent's namespace: a declaring executor is refused too.
+		for _, declared := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/declared=%v", test.name, declared), func(t *testing.T) {
+				store, err := sqlitelog.Open(":memory:")
+				if err != nil {
+					t.Fatal(err)
 				}
-			}
-			if atSeq == 0 {
-				t.Fatal("parent has no tool intent")
-			}
-			if err := controller.Fork(parent, child, atSeq); err != nil {
-				t.Fatal(err)
-			}
-			attempts := 0
-			fresh, err := controller.New(child, echoModel, controller.WithSessionUID("child"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
-				attempts++
-				return api.ToolResult{}, nil
-			}))
-			if err != nil {
-				t.Fatal(err)
-			}
-			call := recordedToolCall()
-			test.change(&call)
-			h := &callHarness{calls: []api.ToolCall{call}}
-			resumed, err := fresh.Resume(t.Context(), h)
-			// The inherited-intent guard runs before the harness can emit either a matching or
-			// divergent call; only completed inherited receipts may be served in the child.
-			if resumed || !errors.Is(err, controller.ErrInheritedToolIntent) || attempts != 0 || len(h.results) != 0 {
-				t.Fatalf("inherited intent accepted: resumed=%v attempts=%d results=%d err=%v", resumed, attempts, len(h.results), err)
-			}
-			after, err := parent.Read(1)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(before, after) {
-				t.Fatal("child recovery changed parent journal")
-			}
-			recs, err := child.Read(1)
-			if err != nil {
-				t.Fatal(err)
-			}
-			wantTail := []api.EventKind{api.EventLifecycle}
-			if len(recs) != int(atSeq)+len(wantTail) {
-				t.Fatalf("child journal has %d records, want prefix plus %v", len(recs), wantTail)
-			}
-			if recs[atSeq-1].Hash != before[atSeq-1].Hash {
-				t.Fatal("fork changed shared prefix hash")
-			}
-			for i, kind := range wantTail {
-				if recs[int(atSeq)+i].Event.Kind != kind {
-					t.Fatalf("child tail event %d = %s, want %s", i, recs[int(atSeq)+i].Event.Kind, kind)
+				t.Cleanup(func() { store.Close() })
+				parent, child := store.Session("parent"), store.Session("child")
+				original, err := controller.New(parent, echoModel, controller.WithSessionUID("parent"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+					return api.ToolResult{Output: map[string]any{"receipt": "parent"}}, nil
+				}))
+				if err != nil {
+					t.Fatal(err)
 				}
-			}
-			if err := child.Verify(); err != nil {
-				t.Fatal(err)
-			}
-		})
+				if err := original.Exec(t.Context(), &callHarness{calls: []api.ToolCall{recordedToolCall()}}, []api.Message{msg("read")}, 0); err != nil {
+					t.Fatal(err)
+				}
+				before, err := parent.Read(1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var atSeq int64
+				for _, rec := range before {
+					if rec.Event.Kind == api.EventToolCall {
+						atSeq = rec.Seq
+					}
+				}
+				if atSeq == 0 {
+					t.Fatal("parent has no tool intent")
+				}
+				if err := controller.Fork(parent, child, atSeq); err != nil {
+					t.Fatal(err)
+				}
+				attempts := 0
+				opts := []controller.Option{controller.WithSessionUID("child"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+					attempts++
+					return api.ToolResult{}, nil
+				})}
+				if declared {
+					opts = append(opts, dedupAll)
+				}
+				fresh, err := controller.New(child, echoModel, opts...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				call := recordedToolCall()
+				test.change(&call)
+				h := &callHarness{calls: []api.ToolCall{call}}
+				resumed, err := fresh.Resume(t.Context(), h)
+				// The inherited-intent guard runs before the harness can emit either a matching or
+				// divergent call; only completed inherited receipts may be served in the child.
+				if resumed || !errors.Is(err, controller.ErrInheritedToolIntent) || attempts != 0 || len(h.results) != 0 {
+					t.Fatalf("inherited intent accepted: resumed=%v attempts=%d results=%d err=%v", resumed, attempts, len(h.results), err)
+				}
+				after, err := parent.Read(1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(before, after) {
+					t.Fatal("child recovery changed parent journal")
+				}
+				recs, err := child.Read(1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantTail := []api.EventKind{api.EventLifecycle}
+				if len(recs) != int(atSeq)+len(wantTail) {
+					t.Fatalf("child journal has %d records, want prefix plus %v", len(recs), wantTail)
+				}
+				if recs[atSeq-1].Hash != before[atSeq-1].Hash {
+					t.Fatal("fork changed shared prefix hash")
+				}
+				for i, kind := range wantTail {
+					if recs[int(atSeq)+i].Event.Kind != kind {
+						t.Fatalf("child tail event %d = %s, want %s", i, recs[int(atSeq)+i].Event.Kind, kind)
+					}
+				}
+				if err := child.Verify(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
 	}
 }
 
@@ -753,7 +760,7 @@ func TestOrdinaryToolRejectsApprovalReceiptBeforeAppend(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			log := memStore(t)
-			original, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+			original, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 				return test.result, nil
 			}))
 			if err != nil {
@@ -776,7 +783,7 @@ func TestOrdinaryToolRejectsApprovalReceiptBeforeAppend(t *testing.T) {
 					t.Fatal("invalid ordinary tool result was journaled")
 				}
 			}
-			fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+			fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 				t.Fatal("handled invalid result repeated an effect")
 				return api.ToolResult{}, nil
 			}))
@@ -822,7 +829,7 @@ func TestCompletedTurnReplaysHandledToolFailures(t *testing.T) {
 					next.ID, next.IdempotencyKey = "call-2", "key-2"
 					calls = append(calls, next)
 				}
-				original, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(_ context.Context, _ controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+				original, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(_ context.Context, _ controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
 					if call.ID == "call-1" {
 						return api.ToolResult{}, errToolInterrupted
 					}
@@ -846,7 +853,7 @@ func TestCompletedTurnReplaysHandledToolFailures(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					t.Fatal("replay invoked executor")
 					return api.ToolResult{}, nil
 				}))
@@ -904,7 +911,7 @@ func TestRecoveryContinuesAfterHandledExecutorFailure(t *testing.T) {
 					next.ID, next.IdempotencyKey = "call-2", "key-2"
 					calls = append(calls, next)
 				}
-				original, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(_ context.Context, _ controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+				original, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(_ context.Context, _ controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
 					if call.ID == "call-1" {
 						return api.ToolResult{}, errToolInterrupted
 					}
@@ -920,7 +927,7 @@ func TestRecoveryContinuesAfterHandledExecutorFailure(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					t.Fatal("handled failure repeated an effect")
 					return api.ToolResult{}, nil
 				}))
@@ -993,7 +1000,7 @@ func TestHandledMediationRejectionPreservesContinuation(t *testing.T) {
 					attempts++
 					return api.ToolResult{}, errors.New("unexpected tool execution")
 				}
-				original, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(executor))
+				original, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(executor))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1015,7 +1022,7 @@ func TestHandledMediationRejectionPreservesContinuation(t *testing.T) {
 						t.Fatalf("live rejection recorded a tool effect: %s", rec.Event.Kind)
 					}
 				}
-				fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(executor))
+				fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(executor))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1128,7 +1135,7 @@ func TestHandledMediationFallbackPreservesRecordedCall(t *testing.T) {
 						models++
 						return echoModel(ctx, req)
 					}
-					original, err := controller.New(log, model, controller.WithSessionUID("s"), controller.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, got api.ToolCall) (api.ToolResult, error) {
+					original, err := controller.New(log, model, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, got api.ToolCall) (api.ToolResult, error) {
 						tools++
 						if scope.SessionUID != "s" || !reflect.DeepEqual(got, fallback) {
 							t.Fatalf("rejected call executed or fallback identity changed: scope=%+v call=%+v", scope, got)
@@ -1177,7 +1184,7 @@ func TestHandledMediationFallbackPreservesRecordedCall(t *testing.T) {
 					if tools != 1 || models != 1 || calls != 1 || results != wantResults {
 						t.Fatalf("wrong live evidence/effects: tools=%d models=%d calls=%d results=%d", tools, models, calls, results)
 					}
-					fresh, err := controller.New(log, model, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+					fresh, err := controller.New(log, model, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 						tools++
 						t.Error("recorded fallback repeated executor")
 						return api.ToolResult{}, nil
@@ -1248,7 +1255,7 @@ func TestHandledMediationFallbackTerminalIntentRedrivesRecordedCall(t *testing.T
 				}
 				// Cut a live-written journal at B's intent, not a synthetic recovery protocol.
 				source := memStore(t)
-				original, err := controller.New(source, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				original, err := controller.New(source, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					return api.ToolResult{Output: map[string]any{"receipt": "second"}}, nil
 				}))
 				if err != nil {
@@ -1284,7 +1291,7 @@ func TestHandledMediationFallbackTerminalIntentRedrivesRecordedCall(t *testing.T
 				}
 				attempts := 0
 				executorErr := errors.New("test: fallback redrive failed")
-				fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, got api.ToolCall) (api.ToolResult, error) {
+				fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, got api.ToolCall) (api.ToolResult, error) {
 					attempts++
 					if scope.SessionUID != "s" || !reflect.DeepEqual(got, *intent) {
 						t.Fatalf("redrive did not use original recorded scope/call: scope=%+v call=%+v", scope, got)
@@ -1349,7 +1356,7 @@ func TestRecoveryHandlesTerminalToolRedriveErrors(t *testing.T) {
 			call := recordedToolCall()
 			appendToolEvidence(t, log, []api.Event{{Kind: api.EventToolCall, ToolCall: &call}}, false)
 			attempts := 0
-			c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+			c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 				attempts++
 				return api.ToolResult{}, executorErr
 			}))
@@ -1393,7 +1400,7 @@ func TestRecoveryLiveTailToolErrorsAreNotDivergence(t *testing.T) {
 			live.ID, live.IdempotencyKey = "call-2", "key-2"
 			test.change(&live)
 			attempts := 0
-			c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+			c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 				attempts++
 				return api.ToolResult{}, executorErr
 			}))

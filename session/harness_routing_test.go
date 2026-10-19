@@ -50,7 +50,7 @@ func routingPlacer(t *testing.T, h *routingHarness, receipt string, models, tool
 	return placement.New(backend, func(context.Context, api.ModelRequest) (api.ModelResponse, error) {
 		models.Add(1)
 		return api.ModelResponse{}, nil
-	}, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+	}, dedupAllTools, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
 		tools.Add(1)
 		if scope.SessionUID != "routing-session" || !reflect.DeepEqual(call, routingToolCall()) {
 			return api.ToolResult{}, fmt.Errorf("wrong routed tool scope/call: %+v %+v", scope, call)

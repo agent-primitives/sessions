@@ -31,7 +31,7 @@ func TestForkedToolIntentResumeFailsClosed(t *testing.T) {
 				}
 				defer store.Close()
 				tool := openDurableTool(t, filepath.Join(t.TempDir(), "tool.db"))
-				p := newLocalPlacer(t, hostToolHarness{key: "shared-key"}, placement.WithToolExecutor(tool.exec))
+				p := newLocalPlacer(t, hostToolHarness{key: "shared-key"}, dedupAllTools, placement.WithToolExecutor(tool.exec))
 				parent := store.Session("parent")
 				if _, err := p.Exec(t.Context(), parent, "parent", []api.Message{*api.TextMessage("user", "charge")}, 0); err != nil {
 					t.Fatal(err)
@@ -86,7 +86,7 @@ func TestForkedToolIntentResumeFailsClosed(t *testing.T) {
 						}
 					}
 				}
-				c, err := controller.New(child, echoagent.Model, controller.WithSessionUID("child"), controller.WithToolExecutor(tool.exec))
+				c, err := controller.New(child, echoagent.Model, controller.WithSessionUID("child"), controller.WithDurableDedup(declareAllTools), controller.WithToolExecutor(tool.exec))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -154,7 +154,7 @@ func TestForkedEarlierUnresolvedToolIntentFailsClosed(t *testing.T) {
 	}
 	parent := store.Session("parent")
 	har := handledToolFailureHarness{}
-	c, err := controller.New(parent, echoagent.Model, controller.WithSessionUID("parent"), controller.WithToolExecutor(executor))
+	c, err := controller.New(parent, echoagent.Model, controller.WithSessionUID("parent"), controller.WithDurableDedup(declareAllTools), controller.WithToolExecutor(executor))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestForkedEarlierUnresolvedToolIntentFailsClosed(t *testing.T) {
 	if err := controller.Fork(parent, child, head); err != nil {
 		t.Fatal(err)
 	}
-	recovery, err := controller.New(child, echoagent.Model, controller.WithSessionUID("child"), controller.WithToolExecutor(executor))
+	recovery, err := controller.New(child, echoagent.Model, controller.WithSessionUID("child"), controller.WithDurableDedup(declareAllTools), controller.WithToolExecutor(executor))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestForkChildOwnToolIntentResumeDedups(t *testing.T) {
 	}
 	defer store.Close()
 	tool := openDurableTool(t, filepath.Join(t.TempDir(), "tool.db"))
-	p := newLocalPlacer(t, hostToolHarness{key: "shared-key"}, placement.WithToolExecutor(tool.exec))
+	p := newLocalPlacer(t, hostToolHarness{key: "shared-key"}, dedupAllTools, placement.WithToolExecutor(tool.exec))
 	parent := store.Session("parent")
 	if _, err := p.Exec(t.Context(), parent, "parent", nil, 0); err != nil {
 		t.Fatal(err)

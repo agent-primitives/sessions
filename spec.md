@@ -751,15 +751,17 @@ invokes no harness and stays a no-op without one.
   cursor) and snapshot reference. A denial writes an `APPROVAL_DENIED` receipt without calling the
   executor. An approval calls the executor with the recorded call, whether or not the executor
   declares durable dedup for the tool (`TOOL-10` does not apply); an executor failure becomes a
-  durable `EXECUTOR_ERROR` receipt. The reference host sets its `content` to the fixed text "Tool
-  execution failed." and keeps the executor's error text in `error`. An error the host caused by
-  ending the recovery is not an executor failure: either the context the recovery runs under is done
-  and the executor returned that context's error, or that context's deadline has passed and the
-  executor returned a deadline error (a deadline enforced by I/O can surface just before the context
-  reports it). The host MUST NOT write a receipt, `ERROR` or `END` for it, and returns the context
-  error, so the decision stays recoverable as after a crash and the next recovery calls the executor
-  again with the recorded call. A context the harness narrows for one call (`api.Harness`) does not
-  count: its cancellation or deadline ends that call, and the executor's error is an
+  durable `EXECUTOR_ERROR` receipt. When the executor fails with an error instead of a result, the
+  reference host sets the receipt's `content` to the fixed text "Tool execution failed." and keeps
+  the error text in `error`; a result the executor returns with `is_error = true` keeps the
+  `content` it returned. An error the host caused by ending the recovery is not an executor failure:
+  either the context the recovery runs under is done and the executor returned that context's error,
+  or that context's deadline has passed and the executor returned a deadline error (a deadline
+  enforced by I/O can surface just before the context reports it). The host MUST NOT write a
+  receipt, `ERROR` or `END` for it, and returns the context error, so the decision stays recoverable
+  as after a crash and the next recovery calls the executor again with the recorded call. A context
+  the harness narrows for one call (`api.Harness`) does not count: its cancellation, or its own
+  deadline expiring before the recovery context's, ends that call, and the executor's error is an
   `EXECUTOR_ERROR` receipt. A missing executor is `FAILED_PRECONDITION` and leaves the decision
   recoverable.
 - `APR-15`: An inherited unresolved gate (copied by a fork) MUST be refused with

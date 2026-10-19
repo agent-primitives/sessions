@@ -25,7 +25,7 @@ not provide.
 ### Fixed
 
 - Cancelling `Resume` while an approved `REQUIRES_APPROVAL` call is in flight no longer records a
-  permanent `EXECUTOR_ERROR` receipt. When the controller's context has ended and the executor's
+  permanent `EXECUTOR_ERROR` receipt. When `Resume`'s context has ended and the executor's
   error is that context's error, no receipt, `ERROR` or `END` is written: the call stays pending and
   the next `Resume` runs it again under the same session UID and idempotency key, as after a crash.
   The same holds when `Resume`'s deadline has passed and the executor's error is a deadline error,

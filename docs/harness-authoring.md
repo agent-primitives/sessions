@@ -377,8 +377,9 @@ executor-failure receipt. If the host cancels Resume while the executor runs and
 that cancellation, or Resume's deadline has passed and the executor returns a deadline error, the
 call returns the host's context error with no receipt and the sink stays closed: propagate it. The
 decision stays recoverable, and the next Resume runs the executor again under the same key. Only the
-context Run received counts: cancelling or timing out a context you derived for this `ToolCall` ends
-the call with a durable `EXECUTOR_ERROR` receipt, which no later Resume retries.
+context Run received counts: cancelling a context you derived for this `ToolCall`, or its own
+deadline expiring before Resume's, ends the call with a durable `EXECUTOR_ERROR` receipt, which no
+later Resume retries.
 
 The gate serializes sink operations across decision/effect/receipt handling. Observer/model/executor
 callbacks must not re-enter the same sink: re-entry can deadlock the serialized operation. Recorded

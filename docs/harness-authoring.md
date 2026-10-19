@@ -102,8 +102,11 @@ unavailable until restart. Build a fresh Placer to retry a failed admission. The
 still must not dial or provision; `HarnessRegistry` checks the policy after construction and before
 persisting a new registration. No-policy registration remains unchanged and does not probe.
 
-The Sessions service validates `Session.model` at creation, keeps empty metadata as empty, and
-resolves each new execution's effective default on the selected route. Direct Placer callers use
+The Sessions service marks all new sessions as eligible, including creation on an unconfigured
+route. It validates `Session.model` when creation has policy, keeps empty metadata empty, and
+resolves each new execution's effective default against current selected-route policy. A restricted
+override or later policy activation cannot inherit an unconfigured-route bypass. Genuine pre-policy
+sessions keep legacy behavior; the separate creation-time opt-in flag is not the eligibility test. Direct Placer callers use
 `placement.WithSessionModel(model)` on `Exec` to opt in; omitting it keeps legacy behavior.
 Standalone controllers can use `controller.WithModelPolicy` and `controller.WithModelDefault`.
 The reference daemon does not yet expose binding policy configuration.

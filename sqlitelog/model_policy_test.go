@@ -54,11 +54,21 @@ func TestModelPolicyMigrationDefaultsLegacySessionsOff(t *testing.T) {
 		t.Run(filepath.Base(fixture), func(t *testing.T) {
 			path := copyFixture(t, fixture)
 			raw := rawDB(t, path)
+			if _, err := raw.Exec(`INSERT INTO sessions(session) VALUES('legacy-empty-policy-check')`); err != nil {
+				t.Fatal(err)
+			}
 			before := queryValues(t, raw, `SELECT * FROM events ORDER BY session,seq`)
 			s := mustOpen(t, path)
 			var optedIn int
 			if err := raw.QueryRow(`SELECT COUNT(*) FROM sessions WHERE model_policy != 0`).Scan(&optedIn); err != nil {
 				t.Fatal(err)
+			}
+			var emptyFlags, emptyEvents int
+			if err := raw.QueryRow(`SELECT model_policy, (SELECT COUNT(*) FROM events WHERE session='legacy-empty-policy-check') FROM sessions WHERE session='legacy-empty-policy-check'`).Scan(&emptyFlags, &emptyEvents); err != nil {
+				t.Fatal(err)
+			}
+			if emptyFlags != 0 || emptyEvents != 0 {
+				t.Fatalf("pre-v6 empty session changed: flags=%d events=%d", emptyFlags, emptyEvents)
 			}
 			if optedIn != 0 || !reflect.DeepEqual(before, queryValues(t, raw, `SELECT * FROM events ORDER BY session,seq`)) {
 				t.Fatal("migration opted legacy sessions in or changed events")

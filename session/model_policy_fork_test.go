@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"sync"
@@ -37,16 +38,24 @@ func (b *interruptedPolicyForkBackend) Fork(ctx context.Context, ref api.Snapsho
 }
 
 func TestForkChildModelPolicyBeforeFanoutFinishes(t *testing.T) {
+	for _, source := range []string{"policy", "open"} {
+		t.Run(source, func(t *testing.T) { checkForkChildModelAdmission(t, source) })
+	}
+}
+
+func checkForkChildModelAdmission(t *testing.T, source string) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "fork.db")
 	store := openStore(t, path)
 	backend := &interruptedPolicyForkBackend{Backend: local.New(sessionPolicyHarness{}), second: make(chan string, 1), release: make(chan struct{})}
 	t.Cleanup(func() { _ = backend.Close() })
 	var release sync.Once
 	defer release.Do(func() { close(backend.release) })
-	p := placement.New(backend, func(_ context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+	model := func(_ context.Context, req api.ModelRequest) (api.ModelResponse, error) {
 		return api.ModelResponse{Message: *api.TextMessage("assistant", req.Model)}, nil
-	}, placement.WithModelPolicy(api.ModelPolicy{Default: "default", Allowed: []string{"default", "chosen"}}))
-	registry, err := placement.NewRegistry("policy", map[string]*placement.Placer{"policy": p})
+	}
+	p := placement.New(backend, model, placement.WithModelPolicy(api.ModelPolicy{Default: "default", Allowed: []string{"default", "chosen"}}))
+	registry, err := placement.NewRegistry(source, map[string]*placement.Placer{"policy": p, "open": placement.New(backend, model)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,13 +72,36 @@ func TestForkChildModelPolicyBeforeFanoutFinishes(t *testing.T) {
 	child := <-backend.second
 	// Always unblock the second clone before reporting a failure, avoiding a stranded handler.
 	info, lookupErr := store.SessionInfo(child)
-	outputs := execOutputs(t, client, child, "while fork pending", info.LastSeq)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var flags int
+	err = db.QueryRow(`SELECT model_policy FROM sessions WHERE session=?`, child).Scan(&flags)
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates, execErr := collectPublicExec(client, &v1.ExecRequest{Session: child, Harness: "policy", ExpectedLastSeq: &info.LastSeq})
+	var outputs []string
+	for _, update := range updates {
+		event := update.GetRecord().GetEvent()
+		if event.GetKind() == v1.EventKind_EVENT_OUTPUT {
+			for _, part := range event.GetMessage().GetParts() {
+				outputs = append(outputs, part.GetText().GetText())
+			}
+		}
+	}
 	release.Do(func() { close(backend.release) })
 	forkErr := <-forked
-	if lookupErr != nil || !info.ModelPolicy || info.Harness != "policy" || info.Model != "chosen" {
+	wantFlags := 2
+	if source == "policy" {
+		wantFlags = 3
+	}
+	if lookupErr != nil || info.ModelPolicy != (source == "policy") || !info.ModelPolicyEligible || flags != wantFlags || info.Harness != source || info.Model != "chosen" {
 		t.Fatalf("visible child lost policy metadata: %+v, %v", info, lookupErr)
 	}
-	if len(outputs) != 1 || outputs[0] != "chosen" {
+	if execErr != nil || len(outputs) != 1 || outputs[0] != "chosen" {
 		t.Fatalf("partial child executed legacy/default model: %v", outputs)
 	}
 	if forkErr == nil {
@@ -80,7 +112,7 @@ func TestForkChildModelPolicyBeforeFanoutFinishes(t *testing.T) {
 	}
 	store = openStore(t, path)
 	info, err = store.SessionInfo(child)
-	if err != nil || !info.ModelPolicy || info.Model != "chosen" {
+	if err != nil || info.ModelPolicy != (source == "policy") || !info.ModelPolicyEligible || info.Model != "chosen" {
 		t.Fatalf("failed-fork policy lost after reopen: %+v,%v", info, err)
 	}
 	if err := store.Session(child).Verify(); err != nil {

@@ -11,7 +11,9 @@ not provide.
 
 - Go embedders can configure `placement.WithModelPolicy(api.ModelPolicy{Default, Allowed})` per
   harness route. New sessions validate `Session.model` at creation (`INVALID_ARGUMENT`) and pass its
-  effective default through `Start.Model` and `ExecutionStart.model`. Registration checks
+  effective default through `Start.Model` and `ExecutionStart.model`. Every new service-created
+  session applies current selected-route policy, including restricted overrides from initially
+  unconfigured routes and later policy activation. Registration checks
   `Descriptor.Models` is a subset, never infers its default, and fails closed on a bounded Describe
   failure. Per-call overrides are allowed within policy. An invalid live model request is
   execution-fatal even if caught: no provider call or `MODEL_CALL`, later effects refused,
@@ -53,8 +55,9 @@ not provide.
 
 ### Compatibility
 
-- SQLite schema v6 adds a host-owned session model-policy eligibility bit. Existing sessions,
-  including zero-event sessions, remain legacy; fork inherits eligibility. Existing journal bytes,
+- SQLite schema v6 adds host-owned model-admission flags: creation-time policy opt-in and an
+  independent birth marker for all new sessions, even on unconfigured routes. Genuine pre-policy
+  sessions, including zero-event sessions, remain legacy; fork inherits both flags atomically. Existing journal bytes,
   hashes and `ModelCall` format are unchanged. Replay/resume restore the recorded effective default;
   recorded results ignore today's allowlist, while new live effects and unanswered model-intent
   re-drives check current policy when configured. No policy keeps existing model behavior. Before
@@ -62,7 +65,9 @@ not provide.
   [rollout order](#sqlite-v4-rollout). Older builds refuse v6 at open, but already-open older writers
   do not enforce model policy. There is no downgrade migration. Policy-enabled remote registration
   now requires a bounded successful Describe at startup; a failed stored route needs a restart
-  after its endpoint is restored. Unconfigured registration remains probe-free.
+  after its endpoint is restored. Unconfigured registration remains probe-free. Earlier unreleased
+  v6 boolean prototypes cannot read new flag values and must also be stopped, not mixed with this
+  host. Their ambiguous zero rows stay legacy; unknown flag bits refuse Get/List reads.
 - Optional `authn` interceptors reject unverified calls in required mode and expire authenticated
   streams. Unary authentication is admission-only; credential expiry does not end an admitted call.
   The reference daemon remains unauthenticated and unenforced; authentication alone is not isolation,

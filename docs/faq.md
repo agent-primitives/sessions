@@ -40,12 +40,14 @@ and the core knows about none of these specifically.
 
 ## Does Session.model select the model?
 
-With an explicit embedder-configured host policy, it is a validated default: empty uses the route's
-explicit default; other values must be allowed. The effective value is delivered in `Start.Model`
+For new sessions, an explicit embedder-configured host policy makes it a validated default: empty
+uses the selected route's explicit default; other values must be allowed. Creation on an
+unconfigured route does not bypass policy on a later restricted override or route reconfiguration. The effective value is delivered in `Start.Model`
 and recorded in `ExecutionStart.model`. Per-call overrides are allowed within that set. An invalid
 live request fails the execution even if caught, calls no provider, records no `MODEL_CALL`, and
 refuses later effects. Recorded replay/recovery prefixes keep their original default and hashes.
-No policy, and sessions/journals created before policy opt-in, retain their existing behavior.
+An unconfigured selected route and genuine pre-policy sessions/journals retain existing behavior;
+legacy sessions are not inferred from creation on an unconfigured route.
 The daemon does not yet expose binding policy configuration. See
 [model defaults](concepts.md#model-defaults) and [embedder setup](harness-authoring.md#host-owned-model-policy).
 

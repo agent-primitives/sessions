@@ -79,11 +79,11 @@ message ComputeRef {
 message Session {
   ResourceMetadata metadata = 1;
   string harness = 2;
-  // Optional model-agnostic session default. Validated and applied only when the selected harness
-  // route explicitly enables host-owned model policy; empty selects that policy's explicit
-  // default. Without policy this remains metadata and does not change harness defaults.
-  // HarnessDescriptor.models never defines the default. Policy is configured through the host
-  // embedder API only, not by Sessions clients or daemon configuration.
+  // Optional model-agnostic session default. New sessions apply the selected route's host-owned
+  // policy when configured, including overrides from an initially unconfigured route. Empty uses
+  // its explicit default. Without current policy this is metadata; genuine pre-policy sessions
+  // retain legacy behavior even when policy is added later. HarnessDescriptor.models never defines
+  // the default. Policy is host embedder configuration, not Sessions clients or daemon configuration.
   string model = 3;
 
   reserved 4; // retired: a flattened lifecycle phase, replaced by the two axes below

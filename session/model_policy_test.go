@@ -57,20 +57,20 @@ func TestCreateSessionModelPolicy(t *testing.T) {
 				}
 				return
 			}
-			if len(page.Sessions) != 1 || page.Sessions[0].ModelPolicy != tc.policy || sess.GetModel() != tc.model || page.Sessions[0].Model != tc.model {
+			if len(page.Sessions) != 1 || page.Sessions[0].ModelPolicy != tc.policy || !page.Sessions[0].ModelPolicyEligible || sess.GetModel() != tc.model || page.Sessions[0].Model != tc.model {
 				t.Fatalf("create changed requested metadata: %v, %+v", sess, page)
 			}
 		})
 	}
 }
 
-// The service's real Connect path must preserve the opt-in discriminator, including across
-// empty-session reopen and fork. A current policy alone must never opt an old session in.
+// Every new session is eligible, including creation on an unconfigured route. Keep the
+// creation-time opt-in independent across reopen/Fork; genuine legacy coverage uses pre-v6 rows.
 func TestSessionModelPolicyLifecycle(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
-		name := "legacy"
+		name := "new_unconfigured"
 		if enabled {
-			name = "opted_in"
+			name = "new_policy_enabled"
 		}
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "journal.db")
@@ -86,7 +86,7 @@ func TestSessionModelPolicyLifecycle(t *testing.T) {
 				t.Fatal(err)
 			}
 			store = openStore(t, path)
-			// Policy activation after a zero-event legacy session cannot change its semantics.
+			// The creation route now has policy. This zero-event session is modern, not legacy.
 			client = serveRegistry(t, store, sessionPolicyRegistry(t, true))
 			forked, err := client.Fork(t.Context(), &v1.ForkRequest{Session: uid, Count: 1})
 			if err != nil {
@@ -98,13 +98,10 @@ func TestSessionModelPolicyLifecycle(t *testing.T) {
 			}
 			store = openStore(t, path)
 			client = serveRegistry(t, store, sessionPolicyRegistry(t, true))
-			want := "legacy"
-			if enabled {
-				want = "route-default"
-			}
+			want := "route-default"
 			for _, id := range []string{uid, child} {
 				info, err := store.SessionInfo(id)
-				if err != nil || info.ModelPolicy != enabled {
+				if err != nil || info.ModelPolicy != enabled || !info.ModelPolicyEligible {
 					t.Fatalf("stored eligibility %s=%t, %v", id, info.ModelPolicy, err)
 				}
 				got := execOutputs(t, client, id, "input", info.LastSeq)
@@ -117,10 +114,7 @@ func TestSessionModelPolicyLifecycle(t *testing.T) {
 				}
 				for _, rec := range records {
 					if rec.Event.ExecutionStart != nil {
-						model := ""
-						if enabled {
-							model = "route-default"
-						}
+						model := "route-default"
 						if rec.Event.ExecutionStart.Model != model {
 							t.Fatalf("recorded model=%q, want %q", rec.Event.ExecutionStart.Model, model)
 						}
@@ -182,7 +176,7 @@ func TestSchemaV4FixtureUnderModelPolicy(t *testing.T) {
 	policy := api.ModelPolicy{Default: "today", Allowed: []string{"today", "echo"}}
 	client := serveRegistry(t, store, echoRegistry(t, b, placement.WithModelPolicy(policy)))
 	info, err := store.SessionInfo(uid)
-	if err != nil || info.ModelPolicy || info.Model != "echo-model" {
+	if err != nil || info.ModelPolicy || info.ModelPolicyEligible || info.Model != "echo-model" {
 		t.Fatalf("legacy metadata=%+v, %v", info, err)
 	}
 	before, err := store.Session(uid).Read(1)

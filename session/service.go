@@ -198,6 +198,9 @@ func (s *Service) createSession(uid string, meta sqlitelog.SessionMeta) (*v1.Ses
 		return nil, withStatusCause(codes.InvalidArgument, fmt.Errorf("create session: %w", err))
 	}
 	meta.ModelPolicy = configured
+	// Birth, not the creation route's policy, distinguishes modern sessions from legacy ones.
+	// A later restricted override must enforce admission even if this route is unconfigured.
+	meta.ModelPolicyEligible = true
 	// A new session is the one thing a retired harness refuses. The check runs in the insert's
 	// transaction, so once RetireHarness has returned no new session can land on the harness, even
 	// one whose create started first. A name that is not static must have a registration row.
@@ -571,7 +574,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	// goes through CreateSession.
 	uid := req.GetSession()
 	var sess *v1.Session
-	var modelPolicy bool
+	var modelPolicy, modelPolicyEligible bool
 	if uid == "" {
 		uid = newUID()
 		created, err := s.createSession(uid, sqlitelog.SessionMeta{UID: uid, Harness: req.GetHarness()})
@@ -630,6 +633,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 			return sessionStoreError(err, uid)
 		}
 		modelPolicy = info.ModelPolicy
+		modelPolicyEligible = info.ModelPolicyEligible || modelPolicy
 		if sess == nil {
 			sess, err = sessionProto(info)
 			return err
@@ -701,7 +705,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		placement.WithObserver(observer),
 		placement.WithStart(req.GetConfig(), req.GetResumeFromSeq()),
 	}
-	if modelPolicy {
+	if modelPolicyEligible {
 		execOpts = append(execOpts, placement.WithSessionModel(sess.GetModel()))
 	}
 	if d := req.GetDeadlineUnix(); d > 0 {
@@ -893,12 +897,13 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		meta := sqlitelog.SessionMeta{
 			UID: uid, Project: parentInfo.Project, Name: name,
 			Harness: parentInfo.Harness, Model: parentInfo.Model, ModelPolicy: parentInfo.ModelPolicy,
-			ParentUID: req.GetSession(), ForkSeq: atSeq,
+			ModelPolicyEligible: parentInfo.ModelPolicyEligible,
+			ParentUID:           req.GetSession(), ForkSeq: atSeq,
 			// Identity is not inherited; per-child principals are rejected before placement.
 			Annotations: parentInfo.Annotations, Origin: parentInfo.Origin, Labels: childLabels,
 		}
 		log := s.store.Session(uid)
-		if meta.ModelPolicy {
+		if meta.ModelPolicy || meta.ModelPolicyEligible {
 			// First child-row visibility must include its inherited route/default and policy bit,
 			// even if a later clone fails or the process exits before fan-out finalization.
 			log = s.store.ForkSession(meta)
@@ -912,8 +917,8 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		return nil, forkError(err)
 	}
 	childrenCreated = len(children)
-	// Finalize metadata after the fan-out as before. Policy-enabled children already inherited it
-	// atomically at their first fence; legacy children retain their existing publication behavior.
+	// Finalize metadata after the fan-out as before. Modern children already inherited admission
+	// metadata atomically at their first fence; legacy children retain their publication behavior.
 	// Neither handle construction nor a refused/unprovisioned fork creates phantom rows.
 	out := make([]*v1.Session, 0, len(children))
 	for i, child := range children {

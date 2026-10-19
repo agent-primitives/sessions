@@ -29,6 +29,13 @@ const (
 	MaxPageSize     = 500
 )
 
+// The original v6 value 1 retains creation-time policy opt-in. The independent birth flag
+// distinguishes new unconfigured-route sessions from genuine legacy rows (0).
+const (
+	modelPolicyOptIn int64 = 1 << iota
+	modelPolicyBirth
+)
+
 // SessionMeta is mutable workload and provenance metadata, separate from verified caller
 // ownership. It is durable before the first event, making empty sessions listable.
 type SessionMeta struct {
@@ -37,12 +44,16 @@ type SessionMeta struct {
 	Name    string
 	Harness string
 	Model   string
-	// ModelPolicy is host-owned eligibility, not caller metadata. Legacy sessions stay false.
+	// ModelPolicy records creation on a policy-enabled route, independently of eligibility.
+	// Hosts use this sticky opt-in to refuse losing a required binding. Neither flag is API metadata.
 	ModelPolicy bool
-	ParentUID   string // set iff this session was forked
-	ForkSeq     int64  // parent event seq forked at
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// ModelPolicyEligible marks new sessions, even on unconfigured routes. Their selected
+	// route's policy applies; genuine legacy rows keep both flags false. Old opt-in rows are eligible.
+	ModelPolicyEligible bool
+	ParentUID           string // set iff this session was forked
+	ForkSeq             int64  // parent event seq forked at
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 
 	// Caller-supplied metadata, carried as proto3-JSON. The store round-trips these without
 	// interpreting them: they describe a session, they do not control it. Identity especially is
@@ -121,8 +132,8 @@ func eventComputeState(ev api.Event) (api.ComputeState, bool) {
 //
 // It preserves the incarnation fence and all append-owned projections, so re-registering
 // an active session updates its metadata without rewinding its identity or reporting state.
-// ModelPolicy is sticky: ordinary metadata updates cannot clear explicit eligibility. Setting it
-// on an existing event-created row lets Fork attach the parent's eligibility after copying events.
+// Both model-policy flags are sticky: ordinary metadata updates cannot clear either one. Setting
+// them on an existing event-created row lets Fork attach the parent's admission state after copying.
 // This lets Fork write child metadata around a controller.Fork that already populated the log.
 //
 // `created_at` follows the caller: an explicit CreatedAt is honored, and a zero one means "now on
@@ -151,6 +162,13 @@ func (s *Store) putSession(db execer, m SessionMeta) error {
 	if !explicitCreated {
 		created = now
 	}
+	var policyFlags int64
+	if m.ModelPolicy {
+		policyFlags |= modelPolicyOptIn
+	}
+	if m.ModelPolicyEligible {
+		policyFlags |= modelPolicyBirth
+	}
 	result, err := db.Exec(
 		`INSERT INTO sessions(session, fence, project, name, harness, model,
 		                      parent_uid, fork_seq, compute_state, created_at, updated_at,
@@ -161,7 +179,7 @@ func (s *Store) putSession(db execer, m SessionMeta) error {
 		   name        = excluded.name,
 		   harness     = excluded.harness,
 		   model       = excluded.model,
-		   model_policy = MAX(sessions.model_policy, excluded.model_policy),
+		   model_policy = sessions.model_policy | excluded.model_policy,
 		   parent_uid  = excluded.parent_uid,
 		   fork_seq    = excluded.fork_seq,
 		   labels      = excluded.labels,
@@ -174,7 +192,7 @@ func (s *Store) putSession(db execer, m SessionMeta) error {
 		 WHERE sessions.deletion_state = 'ACTIVE'`,
 		m.UID, m.Project, m.Name, m.Harness, m.Model,
 		m.ParentUID, m.ForkSeq, string(api.ComputeNone), created.UnixNano(), now.UnixNano(),
-		m.Labels, m.Annotations, m.Origin, m.Identity, m.ModelPolicy,
+		m.Labels, m.Annotations, m.Origin, m.Identity, policyFlags,
 		explicitCreated,
 	)
 	if err != nil {
@@ -309,17 +327,23 @@ func scanSession(row scanner) (SessionInfo, error) {
 		createdAt, updatedAt int64
 		deletionState        string
 		requested            int64
+		policyFlags          int64
 	)
 	if err := row.Scan(
 		&info.UID, &info.Project, &info.Name, &info.Harness, &info.Model,
 		&info.ParentUID, &info.ForkSeq, &state, &createdAt, &updatedAt,
-		&info.Labels, &info.Annotations, &info.Origin, &info.Identity, &info.ModelPolicy, &info.Owner.Issuer, &info.Owner.Subject,
+		&info.Labels, &info.Annotations, &info.Origin, &info.Identity, &policyFlags, &info.Owner.Issuer, &info.Owner.Subject,
 		&deletionState, &requested, &info.DeletionSeq,
 		&info.LastSeq, &info.PendingApproval.RequestSeq,
 		&info.PendingApproval.ExecutionID, &info.PendingApproval.ToolCallID,
 	); err != nil {
 		return SessionInfo{}, err
 	}
+	if policyFlags & ^(modelPolicyOptIn|modelPolicyBirth) != 0 {
+		return SessionInfo{}, fmt.Errorf("sqlitelog: unsupported model-policy flags %d", policyFlags)
+	}
+	info.ModelPolicy = policyFlags&modelPolicyOptIn != 0
+	info.ModelPolicyEligible = policyFlags&(modelPolicyOptIn|modelPolicyBirth) != 0
 	if info.PendingApproval.RequestSeq == 0 {
 		info.PendingApproval = api.ApprovalRef{}
 	}

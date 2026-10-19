@@ -105,10 +105,12 @@ bounded `Describe` at registration, including startup: a static failure refuses 
 failed stored registration stays unavailable until restart. Unconfigured routes do not gain this
 probe. Aliases of one Placer share its policy.
 
-For sessions created with policy, `Session.model` is a validated default: empty selects the binding's
-explicit default, nonempty must be allowed (`INVALID_ARGUMENT` before persistence). Metadata keeps
-the requested value. Each new execution resolves it against the selected route, including a harness
-override, before compute is provisioned. The effective default is delivered in `Start.Model` and
+For every new session, `Session.model` is a validated default whenever its selected route has
+policy: empty selects the binding's explicit default, nonempty must be allowed (`INVALID_ARGUMENT`
+at creation before persistence). Metadata keeps the requested value. Each new execution resolves
+it against the selected route, including a restricted harness override from an initially
+unconfigured route, before compute is provisioned. Later policy activation on the original route
+also applies to these modern sessions. The effective default is delivered in `Start.Model` and
 recorded in `ExecutionStart.model`. An empty per-call model uses that effective default; an explicit
 per-call ID may override it within the allowed set. Existing `ModelCall.model` and `input_hash`
 record the effective request; no new per-call record format is introduced.
@@ -121,14 +123,16 @@ their original default and per-call hashes, not today's policy. Only new live ef
 unanswered model-intent re-drive check the current allowlist. Removing policy disables membership
 checks but does not erase the invocation's recorded default.
 
-No configured policy means existing behavior. Pre-policy sessions, including zero-event sessions,
-remain on that behavior even after a policy is configured; fork inherits this eligibility alongside
-`model`. For policy-enabled forks, inherited metadata commits atomically with the first child fence,
-so a later clone failure cannot expose a child without model admission. SQLite schema v6 records
-this host-owned bit without changing old events or hashes. Stop
-all older hosts and embedded CLI writers before the first upgraded open, and back up first if
-rollback is required: older binaries refuse schema v6 at open, but already-open older writers do
-not implement these semantics. There is no downgrade migration. The reference daemon has no binding
+An unconfigured route keeps existing model behavior. Genuine pre-policy sessions, including
+zero-event sessions, stay legacy even after policy is configured. SQLite v6 stores independent
+flags in `model_policy`: bit 0 is creation-time policy opt-in, bit 1 marks all new service-created
+sessions; zero remains legacy and old value 1 remains eligible. Fork inherits both flags alongside
+`model`; modern child metadata commits with its first fence, even for unconfigured parents, so a
+later clone failure cannot expose a legacy child. Unknown flag bits fail Get/List reads. No old
+event or hash changes. Stop all older hosts and embedded CLI readers/writers before upgrading and
+back up for rollback. Earlier unreleased v6 boolean prototypes cannot read the new flags; their
+ambiguous zero rows remain legacy. Older released binaries refuse v6 at open, but already-open old
+writers do not enforce admission. There is no downgrade migration. The reference daemon has no binding
 policy configuration yet; see [embedder composition](harness-authoring.md#host-owned-model-policy).
 
 ### How exec_state is derived

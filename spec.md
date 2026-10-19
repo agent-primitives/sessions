@@ -160,19 +160,25 @@ flowchart LR
   caller's cancellation/deadline caused it (`CANCELLED`/`DEADLINE_EXCEEDED`). A policy-enabled static
   route can therefore refuse startup, and a failed stored route remains unservable until restart. Routes
   without policy retain their existing no-probe registration behavior.
-- `SES-17`: For a session created on a policy-enabled route, `CreateSession` MUST reject a
-  nonempty `Session.model` outside that set with `INVALID_ARGUMENT`, before persisting it. Empty
-  means the route's explicit default; metadata keeps the requested value, including empty. New
-  executions MUST resolve against their selected route, including a per-turn harness override,
-  and reject a disallowed session default before provisioning compute. Without a configured policy,
-  the existing model behavior MUST remain unchanged.
-- `SES-18`: Pre-policy sessions MUST retain existing behavior even if policy is configured later,
-  including sessions with no events. The reference SQLite host records a host-owned eligibility bit
-  on session creation; migration leaves old rows unset. Fork inherits that bit with `model`, rather
-  than opting an old session into today's policy. For policy-enabled children, the inherited route,
-  default and eligibility MUST commit with the first child row, before fan-out finalization: a later
-  clone failure or interruption MUST NOT leave a runnable legacy child. No old event or hash is
-  rewritten.
+- `SES-17`: Every newly created session MUST be eligible for selected-route model admission,
+  independently of whether its creation route currently has policy. At `CreateSession`, a configured
+  policy MUST reject a nonempty `Session.model` outside its allowed set with `INVALID_ARGUMENT`,
+  before persistence. Empty means that route's explicit default; metadata keeps the requested value,
+  including empty. New executions MUST apply any current selected-route policy, including a harness
+  override from an initially unconfigured route, and reject a disallowed session default before
+  provisioning compute. Policy activation on the original route also applies to these new sessions.
+  A route without policy retains its existing model behavior while it is unconfigured.
+- `SES-18`: Genuine pre-policy sessions MUST retain existing behavior even if policy is configured
+  later, including sessions with no events. The reference SQLite v6 `model_policy` integer stores
+  independent host-owned flags: bit 0 records creation-time policy opt-in, bit 1 marks a new session
+  even on an unconfigured route. Zero is legacy; the original prototype value 1 remains opted-in and
+  eligible. All new service-created sessions set bit 1; normal metadata updates MUST NOT clear either
+  flag. Fork inherits both flags with `model`, never marking a legacy child as new. For modern
+  children, inherited route/default/admission metadata MUST commit with the first child row, before
+  fan-out finalization: a later clone failure or interruption MUST NOT leave a runnable legacy child.
+  No old event or hash is rewritten. Earlier unreleased v6 prototypes cannot read new flag values
+  and MUST NOT be mixed with this host; their ambiguous zero rows remain legacy, not inferred modern.
+  Unsupported flag bits refuse Get/List reads rather than silently disabling admission.
 
 ### 5.2 Two-axis state
 

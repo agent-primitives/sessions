@@ -241,7 +241,7 @@ func (f *substrateFlags) Backends(logger *slog.Logger) (map[string]placement.Bac
 		grpc.WithUnaryInterceptor(ateapiDeadline(ateapiCallTimeout)),
 	}
 	if *f.tokenFile != "" {
-		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(fileTokenCreds{path: *f.tokenFile}))
+		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(fileTokenCreds{path: *f.tokenFile, logger: logger}))
 	}
 	conn, err := grpc.NewClient(*f.ateapi, dialOpts...)
 	if err != nil {
@@ -285,15 +285,28 @@ func (f *substrateFlags) logConfig(logger *slog.Logger) {
 	}
 }
 
+// errTokenUnavailable is the error a call fails with when the token file cannot be read. gRPC
+// carries it into the ate-api call's error, which can reach Sessions API clients, so it names
+// neither the file nor its content.
+var errTokenUnavailable = errors.New("ate-api token unavailable")
+
 // fileTokenCreds presents a token file as a per-call bearer token. It re-reads the file on every
 // call, so a rotated Kubernetes projected ServiceAccount token is picked up without a restart, and
 // it requires transport security so the token never crosses a cleartext connection.
-type fileTokenCreds struct{ path string }
+type fileTokenCreds struct {
+	path string
+	// logger, if set, records why the file could not be read, which the call's error leaves out.
+	logger *slog.Logger
+}
 
 func (c fileTokenCreds) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
 	tok, err := readToken(c.path)
 	if err != nil {
-		return nil, err
+		// The cause names the file, as the startup log does, but never its content.
+		if c.logger != nil {
+			c.logger.Error("ate-api call not sent: cannot read -ateapi-token-file", "error", err)
+		}
+		return nil, errTokenUnavailable
 	}
 	return map[string]string{"authorization": "Bearer " + tok}, nil
 }

@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"flag"
+	"log/slog"
 	"maps"
 	"math/big"
 	"net"
@@ -207,8 +208,8 @@ func TestFileTokenCreds(t *testing.T) {
 	if !creds.RequireTransportSecurity() {
 		t.Fatal("a bearer token must never be sent over a cleartext connection")
 	}
-	if _, err := creds.GetRequestMetadata(t.Context()); err == nil {
-		t.Fatal("a missing token file must fail the call, not send it unauthenticated")
+	if _, err := creds.GetRequestMetadata(t.Context()); !errors.Is(err, errTokenUnavailable) {
+		t.Fatalf("missing token error = %v, want %v: a missing token file must fail the call, not send it unauthenticated", err, errTokenUnavailable)
 	}
 	for _, tok := range []string{"first", "rotated"} {
 		if err := os.WriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
@@ -225,8 +226,8 @@ func TestFileTokenCreds(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := creds.GetRequestMetadata(t.Context()); err == nil || !strings.Contains(err.Error(), "empty") {
-		t.Fatalf("empty token error = %v", err)
+	if _, err := creds.GetRequestMetadata(t.Context()); !errors.Is(err, errTokenUnavailable) {
+		t.Fatalf("empty token error = %v, want %v", err, errTokenUnavailable)
 	}
 }
 
@@ -678,4 +679,109 @@ func TestSubstrateFlagsRefusedWithoutHarness(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A token file that disappears or empties after startup fails the session's ate-api call, and the
+// error a Sessions API client sees names neither the file nor its content: the cause is logged for
+// the operator instead. The test drives Exec through the Sessions API over the real ate-api adapter
+// and a TLS ate-api, which the call never reaches because the per-call credentials fail first.
+func TestSubstrateTokenFileErrorIsNotSentToClients(t *testing.T) {
+	certPEM, keyPEM := selfSignedCert(t, "api.ate-system.svc")
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reached := make(chan struct{}, 16)
+	srv := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})),
+		grpc.UnknownServiceHandler(func(any, grpc.ServerStream) error {
+			reached <- struct{}{}
+			return status.Error(codes.Unavailable, "test ate-api")
+		}),
+	)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	for _, tt := range []struct {
+		name  string
+		after func(path string) error
+	}{
+		{name: "deleted", after: os.Remove},
+		{name: "emptied", after: func(path string) error { return os.WriteFile(path, nil, 0o600) }},
+		{name: "whitespace", after: func(path string) error { return os.WriteFile(path, []byte(" \n\t"), 0o600) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tokenFile := filepath.Join(t.TempDir(), "ateapi-token-"+tt.name)
+			const tok = "sa-token-content"
+			if err := os.WriteFile(tokenFile, []byte(tok), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f := parseFlags(t, newControl,
+				"-substrate-harness", "writer=agentsuite/writer", "-substrate-atespace", "sessions",
+				"-ateapi-addr", lis.Addr().String(), "-ateapi-insecure-skip-verify", "-ateapi-token-file", tokenFile)
+			var logs syncBuffer
+			backends, closeConn, err := f.Backends(slog.New(slog.NewTextHandler(&logs, nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(closeConn)
+			registry, err := placement.NewRegistry("writer", map[string]*placement.Placer{"writer": placement.New(backends["writer"], echoagent.Model)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := newTestClient(t, registry)
+
+			if err := tt.after(tokenFile); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			_, err = c.Exec(ctx, client.ExecOptions{Harness: "writer", Inputs: []string{"hello"}})
+			if err == nil {
+				t.Fatal("exec succeeded without a token")
+			}
+			st, _ := status.FromError(err)
+			if st.Code() != codes.Internal {
+				t.Fatalf("exec error code = %v (%v), want Internal, the code the client saw before the message was sanitized", st.Code(), err)
+			}
+			for _, leak := range []string{tokenFile, filepath.Base(tokenFile), tok} {
+				if strings.Contains(st.Message(), leak) {
+					t.Fatalf("client-visible error %q contains %q", st.Message(), leak)
+				}
+			}
+			if !strings.Contains(st.Message(), "ate-api token unavailable") {
+				t.Fatalf("client-visible error %q, want it to say the ate-api token is unavailable", st.Message())
+			}
+			select {
+			case <-reached:
+				t.Fatal("the call reached the ate-api without a token")
+			default:
+			}
+			if got := logs.String(); !strings.Contains(got, tokenFile) || strings.Contains(got, tok) {
+				t.Fatalf("daemon log = %q, want the token file's path for the operator and never its content", got)
+			}
+		})
+	}
+}
+
+// syncBuffer is a log destination safe to write from gRPC goroutines and read from the test.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

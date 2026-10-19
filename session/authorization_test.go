@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/agent-primitives/sessions/api"
@@ -104,6 +105,10 @@ func TestAuthorizationEveryGeneratedRPC(t *testing.T) {
 	}
 	t.Cleanup(registry.Close)
 	ctx := callerContext(t, authOwner)
+	canceled, cancel := context.WithCancelCause(ctx)
+	cancel(errors.New("private detail"))
+	expired, expire := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+	defer expire()
 	actions := map[string][]api.Action{
 		"CreateSession": {api.ActionCreate}, "GetSession": {api.ActionRead}, "ListSessions": {api.ActionList}, "DeleteSession": {api.ActionDelete},
 		"Exec": {api.ActionExec}, "Replay": {api.ActionRead}, "Approve": {api.ActionRead, api.ActionApprove}, "Cancel": {api.ActionCancel},
@@ -140,8 +145,12 @@ func TestAuthorizationEveryGeneratedRPC(t *testing.T) {
 					{"denied", ctx, fmt.Errorf("private detail: %w", api.ErrPermissionDenied), codes.PermissionDenied},
 					{"policy failure", ctx, errors.New("private detail"), codes.Internal},
 					{"status is not denial", ctx, status.Error(codes.PermissionDenied, "private detail"), codes.Internal},
-					{"cancel", ctx, context.Canceled, codes.Canceled},
-					{"deadline", ctx, context.DeadlineExceeded, codes.DeadlineExceeded},
+					{"policy cancel", ctx, context.Canceled, codes.Internal},
+					{"policy deadline", ctx, context.DeadlineExceeded, codes.Internal},
+					{"wrapped policy cancel", ctx, fmt.Errorf("private detail: %w", context.Canceled), codes.Internal},
+					{"wrapped policy deadline", ctx, fmt.Errorf("private detail: %w", context.DeadlineExceeded), codes.Internal},
+					{"caller cancel", canceled, nil, codes.Canceled},
+					{"caller deadline", expired, nil, codes.DeadlineExceeded},
 				} {
 					t.Run(tc.name, func(t *testing.T) {
 						wantActions = want
@@ -162,7 +171,7 @@ func TestAuthorizationEveryGeneratedRPC(t *testing.T) {
 						if head != 0 {
 							t.Fatalf("denied call changed head: %d", head)
 						}
-						if tc.code == codes.Unauthenticated {
+						if tc.code == codes.Unauthenticated || tc.ctx.Err() != nil {
 							if len(requests) != 0 {
 								t.Fatal("unauthenticated policy call")
 							}
@@ -203,6 +212,52 @@ func TestAuthorizationEveryGeneratedRPC(t *testing.T) {
 			run(m.StreamName, func(ctx context.Context, req proto.Message, s *rpcStream) error {
 				s.req = req
 				return m.Handler(service.impl, s)
+			})
+		}
+	}
+}
+
+func TestAuthorizationCallerEndsDuringPolicy(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		for _, policyFailure := range []bool{false, true} {
+			t.Run(fmt.Sprintf("deadline=%t/policy_failure=%t", deadline, policyFailure), func(t *testing.T) {
+				store := openStore(t, ":memory:")
+				r, b := publicGateRegistry(t, &publicGateHarness{}, nil)
+				if err := store.CreateOwnedSession(sqlitelog.SessionMeta{UID: "owned", Harness: "gate"}, authOwner, false); err != nil {
+					t.Fatal(err)
+				}
+				synctest.Test(t, func(t *testing.T) {
+					ctx, cancel := context.WithCancel(callerContext(t, authOwner))
+					defer cancel()
+					want := codes.Canceled
+					if deadline {
+						var expire context.CancelFunc
+						ctx, expire = context.WithTimeout(ctx, time.Hour)
+						defer expire()
+						want = codes.DeadlineExceeded
+					}
+					called := false
+					svc := session.NewService(store, r, session.WithAuthorization(policyFunc(func(ctx context.Context, _ api.AuthorizationRequest) error {
+						called = true
+						if deadline {
+							<-ctx.Done() // Virtual time advances only after policy admission.
+						} else {
+							cancel()
+						}
+						if policyFailure {
+							return fmt.Errorf("private detail: %w", ctx.Err())
+						}
+						return nil
+					})))
+					_, err := svc.GetSession(ctx, &pb.GetSessionRequest{Uid: "owned"})
+					if !called || status.Code(err) != want || strings.Contains(err.Error(), "private detail") {
+						t.Fatalf("policy called=%t, GetSession=%v, want %v without private detail", called, err, want)
+					}
+					head, headErr := store.Session("owned").Head()
+					if headErr != nil || head != 0 || b.ioCounts() != ([4]int32{}) {
+						t.Fatalf("canceled policy had effects: head=%d err=%v", head, headErr)
+					}
+				})
 			})
 		}
 	}
@@ -478,6 +533,48 @@ func TestAuthorizationRegistryObservationAndForkRefusal(t *testing.T) {
 	}
 	if _, err := session.NewService(store, r, session.WithAuthorization(nil)).GetSession(ctx, &pb.GetSessionRequest{Uid: "owned"}); status.Code(err) != codes.Internal {
 		t.Fatalf("nil policy fell open: %v", err)
+	}
+}
+
+// Recovery policy evaluation must not hold deletion admission, even before approval repair.
+func TestAuthorizationExecRecoveryPolicyReleasesDeletionAdmission(t *testing.T) {
+	for _, cut := range []api.EventKind{api.EventToolCall, api.EventApprovalRequest} {
+		t.Run(string(cut), func(t *testing.T) {
+			store := openStore(t, ":memory:")
+			r, b := publicGateRegistry(t, &publicGateHarness{}, nil)
+			if err := store.CreateOwnedSession(sqlitelog.SessionMeta{UID: "owned", Harness: "gate"}, authOwner, false); err != nil {
+				t.Fatal(err)
+			}
+			seedPublicGate(t, store.Session("owned"), "gate", cut)
+			before := routingRecords(t, store.Session("owned"))
+			var svc *session.Service
+			var deleteErr error
+			var checked bool
+			svc = session.NewService(store, r, session.WithAuthorization(policyFunc(func(ctx context.Context, q api.AuthorizationRequest) error {
+				if q.Action == api.ActionResume {
+					checked = true
+					// A separate deletion during policy evaluation must not contend with Exec's
+					// metadata read. Re-entry probes the hold without goroutines or timing races.
+					_, deleteErr = svc.DeleteSession(ctx, &pb.DeleteSessionRequest{Uid: q.SessionUID})
+					return api.ErrPermissionDenied
+				}
+				return (api.OwnerAuthorizer{}).Authorize(ctx, q)
+			})))
+			stream := &rpcStream{ctx: callerContext(t, authOwner)}
+			if err := svc.Exec(&pb.ExecRequest{Session: "owned"}, stream); status.Code(err) != codes.PermissionDenied {
+				t.Fatalf("recovery policy denial = %v", err)
+			}
+			if !checked || deleteErr != nil {
+				t.Fatalf("resume policy checked=%t, Delete during policy = %v", checked, deleteErr)
+			}
+			if len(stream.sent) != 0 || b.ioCounts() != ([4]int32{}) {
+				t.Fatal("denied recovery sent a frame or touched runtime")
+			}
+			after := routingRecords(t, store.Session("owned"))
+			if len(after) != len(before)+1 || !reflect.DeepEqual(before, after[:len(before)]) || after[len(before)].Event.Lifecycle == nil || after[len(before)].Event.Lifecycle.Kind != api.LifecycleDelete {
+				t.Fatal("recovery changed the journal beyond the authorized deletion")
+			}
+		})
 	}
 }
 

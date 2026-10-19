@@ -640,10 +640,6 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 				}
 				if state != nil && !state.Completed {
 					if len(req.GetInputs()) == 0 {
-						// This path can repair and Resume the parked turn, not just Exec.
-						if err := s.authorize(ctx, uid, api.ActionResume); err != nil {
-							return err
-						}
 						recoveryInfo = &info
 					} else if !state.Inherited && state.Receipt == nil {
 						return execError(controller.ErrApprovalBlocked)
@@ -680,6 +676,14 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 			return withStatusCause(codes.Aborted, err)
 		}
 		return err
+	}
+
+	if recoveryInfo != nil {
+		// Recovery can repair and Resume the parked turn. Release the read phase before policy
+		// evaluation; the authorization lookup still obeys deletion admission on its own.
+		if err := s.authorizeMutation(ctx, uid, api.ActionResume); err != nil {
+			return err
+		}
 	}
 
 	// Unset expected_last_seq means "append at the current head": the single-writer check is opt-in,

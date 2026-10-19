@@ -49,8 +49,6 @@ func authorizationError(ctx context.Context, err error) error {
 	switch {
 	case ctx.Err() != nil:
 		return status.FromContextError(ctx.Err()).Err()
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		return status.FromContextError(err).Err()
 	case errors.Is(err, api.ErrPermissionDenied):
 		return status.Error(codes.PermissionDenied, "permission denied")
 	default:

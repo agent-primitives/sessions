@@ -96,7 +96,8 @@ func TestRenderMapsTheComposition(t *testing.T) {
 	}
 	sub := out.Registration.GetSpec().GetSubstrate()
 	if out.Registration.GetMetadata().GetName() != "triage" || sub.GetAtespace() != "agentsuite-demo" || sub.GetTemplate() != name ||
-		out.Registration.GetSpec().GetCapabilities().GetResumability() != v1.Resumability_RESUMABILITY_STATELESS_REPLAY {
+		out.Registration.GetSpec().GetCapabilities().GetResumability() != v1.Resumability_RESUMABILITY_STATELESS_REPLAY ||
+		!out.Registration.GetSpec().GetCapabilities().GetForkSafe() {
 		t.Fatalf("registration = %v", out.Registration)
 	}
 	if out.DaemonFlag != "triage=agentsuite-demo/"+name {
@@ -229,7 +230,8 @@ func TestRenderMemoryTier(t *testing.T) {
 	}
 	reg := out.Registration
 	if reg.GetMetadata().GetName() != "triage-memory" || reg.GetSpec().GetDescriptorId() != "triage" ||
-		reg.GetSpec().GetCapabilities().GetResumability() != v1.Resumability_RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT {
+		reg.GetSpec().GetCapabilities().GetResumability() != v1.Resumability_RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT ||
+		!reg.GetSpec().GetCapabilities().GetForkSafe() {
 		t.Fatalf("registration = %v", reg)
 	}
 }

@@ -17,7 +17,7 @@ Build half (build.mmd, end of chapter 2):
 - binding-microvm.json -> emit render: `LoadBinding` (render/render.go:179), used by `Render`
   (render/render.go:275).
 - emit render -> actortemplate.json and agentsessionsd.args: cmd/emit/main.go:191,201, the flag from
-  `Output.DaemonFlag` (render/render.go:354).
+  `Output.DaemonFlag` (render/render.go:356).
 - actortemplate.json -> ActorTemplate in substrate, created by hand: driver.sh chapter 3.
 - agentsessionsd.args -> agentsessionsd flag, set by hand: up.sh substitutes it into the Deployment
   (up.sh:378,380). The daemon is the substrate build, integrations/substrate/cmd/agentsessionsd,

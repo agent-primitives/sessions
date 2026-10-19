@@ -342,8 +342,10 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 		Metadata: &v1.ResourceMetadata{Name: harness},
 		Spec: &v1.HarnessSpec{
 			Placement: &v1.HarnessSpec_Substrate{Substrate: &v1.SubstratePlacement{Atespace: b.Atespace, Template: name}},
+			// ForkSafe matches agent.Harness.Describe, which reports it for both tiers.
 			Capabilities: &v1.Capabilities{
 				Resumability: resumability,
+				ForkSafe:     true,
 			},
 			DescriptorId: c.Agent.ID,
 		},

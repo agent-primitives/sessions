@@ -891,8 +891,10 @@ invokes no harness and stays a no-op without one.
   `FAILED_PRECONDITION`; for a `STATELESS_REPLAY` harness the service reports `INTERNAL` (§13.4). A
   failed `Exec` does not imply that case: when `Create` succeeded and the dial or turn failed, or
   `CreateActor` succeeded and `Create`'s `ResumeActor` failed, the actor remains, since the host
-  calls no `Stop` (`RT-7`), and a later `Suspend` or `Resume` reaches it. `agentsessionsd` itself
-  does not build substrate placements (`REG-2a`).
+  calls no `Stop` (`RT-7`), and a later `Suspend` or `Resume` reaches it. The neutral
+  `agentsessionsd` builds no substrate placement. Its substrate build
+  (`integrations/substrate/cmd/agentsessionsd`) serves one static `-substrate-harness`; neither
+  build accepts a registered `substrate` placement (`REG-2a`).
 - TODO(spike): Should a repeated `Suspend`, or `Resume` without a prior `Suspend`, be refused or be
   a no-op? Current behavior appends a marker each time the backend call succeeds, and no test pins
   it.
@@ -1312,7 +1314,8 @@ address, never on the Sessions listener.
   `INVALID_ARGUMENT`.
 - `REG-2a`: Which placements a host can instantiate is host-defined. A valid spec whose placement
   this host cannot build is `FAILED_PRECONDITION`, with nothing stored. The reference
-  `agentsessionsd` builds `remote` placements and refuses `substrate` this way.
+  `agentsessionsd` builds `remote` placements and refuses `substrate` this way, in its substrate
+  build too, which serves substrate harnesses only from `-substrate-harness`.
 - `REG-3`: `RegisterHarness` is idempotent on `spec_digest` (§7.5): the same spec returns unchanged
   (or reactivated if retired, keeping the uid); a different spec under a taken name is
   `ALREADY_EXISTS`.

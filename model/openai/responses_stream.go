@@ -50,7 +50,14 @@ func (c *ResponsesClient) StreamModel(ctx context.Context, req api.ModelRequest,
 						if err := ctx.Err(); err != nil {
 							return api.ModelResponse{}, err
 						}
-						return decodeResponses(model, completed)
+						result, err := decodeResponses(model, completed)
+						if err != nil {
+							return api.ModelResponse{}, err
+						}
+						if err := validateCompletionToolCalls(result.Message.Parts, req.Tools, req.ToolChoice); err != nil {
+							return api.ModelResponse{}, fmt.Errorf("openai responses: %w", err)
+						}
+						return result, nil
 					}
 				}
 			}

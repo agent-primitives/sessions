@@ -88,7 +88,7 @@ func TestResponsesOrderedToolsAndReasoning(t *testing.T) {
 		posted, _ = io.ReadAll(r.Body)
 		_, _ = fmt.Fprintf(w, `{"status":"completed","output":[%s,%s,{"type":"message","id":"msg_2","role":"assistant","status":"completed","content":[{"type":"output_text","text":"done","annotations":[]}]}],"usage":null}`, reasoning, call)
 	})
-	first, err := c.Model(t.Context(), api.ModelRequest{Model: "explicit"})
+	first, err := c.Model(t.Context(), api.ModelRequest{Model: "explicit", Tools: []api.ToolDefinition{{Name: "lookup"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,6 +190,10 @@ func TestResponsesChoicesEffortsAndEmptyResult(t *testing.T) {
 			var posted map[string]any
 			c := newResponses(t, func(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewDecoder(r.Body).Decode(&posted)
+				if mode == api.ToolChoiceRequired {
+					_, _ = io.WriteString(w, `{"status":"completed","output":[{"type":"function_call","id":"fc","call_id":"c","name":"f","arguments":"{}"}]}`)
+					return
+				}
 				_, _ = io.WriteString(w, responsesText)
 			})
 			_, err := c.Model(t.Context(), api.ModelRequest{Tools: []api.ToolDefinition{{Name: "f"}}, ToolChoice: &api.ToolChoice{Mode: mode}, Messages: []api.Message{{Role: "tool", Parts: []api.Part{{ToolResult: &api.ToolResult{ID: "c", Content: []api.Part{{Text: &api.TextPart{Text: ""}}}}}}}}})
@@ -223,6 +227,62 @@ func TestResponsesChoicesEffortsAndEmptyResult(t *testing.T) {
 	}
 }
 
+func TestResponsesCompletionToolChoiceValidation(t *testing.T) {
+	call := func(name string) string {
+		return fmt.Sprintf(`{"status":"completed","output":[{"type":"function_call","id":"fc","call_id":"c","name":%q,"arguments":"{}"}]}`, name)
+	}
+	text := `{"status":"completed","output":[{"type":"message","id":"m","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello","annotations":[]}]}]}`
+	for _, streaming := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, body, want string
+			req              api.ModelRequest
+			private          []string
+			wantOK           bool
+			wantLen          int
+		}{
+			{name: "named match", body: call("weather"), req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceRequired, Name: "weather"}}, wantOK: true, wantLen: 1},
+			{name: "auto unoffered", body: call("fixture-private-tool"), req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceAuto}}, want: "unoffered tool", private: []string{"fixture-private-tool"}},
+			{name: "named mismatch", body: call("fixture-private-tool"), req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "fixture-private-choice"}, {Name: "fixture-private-tool"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceRequired, Name: "fixture-private-choice"}}, want: "named tool choice", private: []string{"fixture-private-tool", "fixture-private-choice"}},
+			{name: "none tool call", body: call("weather"), req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceNone}}, want: "ToolChoiceNone"},
+			{name: "named text only", body: text, req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceRequired, Name: "weather"}}, want: "required tool call"},
+			{name: "required text only", body: text, req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceRequired}}, want: "required tool call"},
+		} {
+			t.Run(fmt.Sprintf("stream=%t/%s", streaming, tc.name), func(t *testing.T) {
+				c := newResponses(t, func(w http.ResponseWriter, _ *http.Request) {
+					if streaming {
+						_, _ = io.WriteString(w, responseEvent("response.completed", `,"response":`+tc.body))
+						return
+					}
+					_, _ = io.WriteString(w, tc.body)
+				})
+				var (
+					got api.ModelResponse
+					err error
+				)
+				if streaming {
+					got, err = c.StreamModel(t.Context(), tc.req, nil)
+				} else {
+					got, err = c.Model(t.Context(), tc.req)
+				}
+				if !tc.wantOK {
+					if !errors.Is(err, openai.ErrUnsupportedPart) || len(got.Message.Parts) != 0 || !strings.Contains(err.Error(), tc.want) {
+						t.Fatalf("response=%+v err=%v, want unsupported %q and no completion", got, err, tc.want)
+					}
+					for _, private := range tc.private {
+						if strings.Contains(err.Error(), private) {
+							t.Fatalf("error leaked private tool-choice payload %q: %v", private, err)
+						}
+					}
+					return
+				}
+				if err != nil || len(got.Message.Parts) != tc.wantLen {
+					t.Fatalf("response=%+v err=%v", got, err)
+				}
+			})
+		}
+	}
+}
+
 // Unsupported output may not be silently dropped while supported text is returned.
 func TestResponsesOutputRefusals(t *testing.T) {
 	cases := map[string]string{
@@ -242,7 +302,7 @@ func TestResponsesOutputRefusals(t *testing.T) {
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
 			c := newResponses(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) })
-			got, err := c.Model(t.Context(), api.ModelRequest{})
+			got, err := c.Model(t.Context(), api.ModelRequest{Tools: []api.ToolDefinition{{Name: "f"}}})
 			if err == nil || !reflect.DeepEqual(got, api.ModelResponse{}) {
 				t.Fatalf("response=%+v err=%v", got, err)
 			}
@@ -259,7 +319,7 @@ func TestResponsesArgumentNumberBoundaries(t *testing.T) {
 			c := newResponses(t, func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = fmt.Fprintf(w, `{"status":"completed","output":[{"type":"function_call","id":"fc","call_id":"c","name":"f","arguments":%q}]}`, `{"nested":[{"n":`+tc.number+`}]}`)
 			})
-			got, err := c.Model(t.Context(), api.ModelRequest{})
+			got, err := c.Model(t.Context(), api.ModelRequest{Tools: []api.ToolDefinition{{Name: "f"}}})
 			if (err == nil) != tc.ok {
 				t.Fatalf("err=%v, success want %v", err, tc.ok)
 			}

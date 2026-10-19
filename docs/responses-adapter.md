@@ -46,7 +46,9 @@ client has a two-minute timeout. There are no automatic retries or model/protoco
   assistant history. An empty role uses `user`; unsupported roles refuse.
 - Function definitions and AUTO/NONE/REQUIRED choices, including a named REQUIRED choice. Schemas
   are passed through within the neutral JSON domain, with `strict:false` so Responses does not
-  silently tighten them. Nil schema is omitted; an explicit empty schema remains `{}`.
+  silently tighten them. Nil schema is omitted; an explicit empty schema remains `{}`. Completed
+  function calls must name an offered tool; NONE forbids any tool call; REQUIRED requires at least
+  one; and a named REQUIRED choice requires every returned call to use that tool name.
 - Assistant function calls, using the provider's `call_id` as the neutral tool-call ID, not its
   output-item `id`. Arguments must be JSON objects. Integer arguments beyond the exactly representable
   ±2^53 domain refuse rather than silently rounding; neutral structured values use float64.

@@ -169,10 +169,51 @@ func toolCallParts(calls []chatToolCall) ([]api.Part, error) {
 	return parts, nil
 }
 
+// validateCompletionToolCalls keeps request-aware tool-call semantics aligned across adapters after
+// each endpoint maps its wire format into the shared assistant-part representation.
+func validateCompletionToolCalls(parts []api.Part, defs []api.ToolDefinition, choice *api.ToolChoice) error {
+	offered := map[string]bool{}
+	for _, def := range defs {
+		if def.Name != "" {
+			offered[def.Name] = true
+		}
+	}
+	calls := 0
+	for _, part := range parts {
+		call := part.ToolCall
+		if call == nil {
+			continue
+		}
+		calls++
+		if !offered[call.Tool] {
+			return fmt.Errorf("%w: completion called an unoffered tool", ErrUnsupportedPart)
+		}
+		if choice != nil && choice.Name != "" && call.Tool != choice.Name {
+			return fmt.Errorf("%w: completion does not match the named tool choice", ErrUnsupportedPart)
+		}
+	}
+	if choice == nil {
+		return nil
+	}
+	switch choice.Mode {
+	case "", api.ToolChoiceAuto:
+		return nil
+	case api.ToolChoiceNone:
+		if calls != 0 {
+			return fmt.Errorf("%w: completion called a tool under ToolChoiceNone", ErrUnsupportedPart)
+		}
+	case api.ToolChoiceRequired:
+		if calls == 0 {
+			return fmt.Errorf("%w: completion omitted a required tool call", ErrUnsupportedPart)
+		}
+	}
+	return nil
+}
+
 // Only accept a finalized tool completion, never a truncated-but-parseable call or empty intent.
 func checkToolFinish(reason string, calls []chatToolCall, choice *api.ToolChoice) error {
 	// Named forced calls can use stop on compatible endpoints. Keep this exception
-	// request-aware and singular; toolCallParts still validates identity and arguments.
+	// request-aware and singular; selection/count rules are checked on the finalized parts.
 	if reason == "stop" && choice != nil && choice.Mode == api.ToolChoiceRequired &&
 		choice.Name != "" && len(calls) == 1 && calls[0].Function.Name == choice.Name {
 		return nil

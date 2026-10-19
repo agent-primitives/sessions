@@ -317,7 +317,14 @@ func (c *Client) Model(ctx context.Context, req api.ModelRequest) (api.ModelResp
 	if err := checkToolFinish(choice.FinishReason, choice.Message.ToolCalls, req.ToolChoice); err != nil {
 		return api.ModelResponse{}, err
 	}
-	return toModelResponse(model, choice.Message, out.Usage.toAPI(model))
+	result, err := toModelResponse(model, choice.Message, out.Usage.toAPI(model))
+	if err != nil {
+		return api.ModelResponse{}, err
+	}
+	if err := validateCompletionToolCalls(result.Message.Parts, req.Tools, req.ToolChoice); err != nil {
+		return api.ModelResponse{}, err
+	}
+	return result, nil
 }
 
 // StreamModel performs one live completion, reporting text as it arrives. It satisfies
@@ -362,7 +369,14 @@ func (c *Client) StreamModel(ctx context.Context, req api.ModelRequest, onChunk 
 		if err := checkToolFinish(reason, message.ToolCalls, req.ToolChoice); err != nil {
 			return api.ModelResponse{}, err
 		}
-		return toModelResponse(model, message, usage)
+		result, err := toModelResponse(model, message, usage)
+		if err != nil {
+			return api.ModelResponse{}, err
+		}
+		if err := validateCompletionToolCalls(result.Message.Parts, req.Tools, req.ToolChoice); err != nil {
+			return api.ModelResponse{}, err
+		}
+		return result, nil
 	}
 
 	scanner := bufio.NewScanner(resp.Body)

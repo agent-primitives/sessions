@@ -33,6 +33,10 @@ func TestModelMapsToolRequests(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 					t.Error(err)
 				}
+				if tc.choice != nil && tc.choice.Mode == api.ToolChoiceRequired {
+					_, _ = io.WriteString(w, `{"choices":[{"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"c0","type":"function","function":{"name":"weather","arguments":"{}"}}]}}]}`)
+					return
+				}
 				_, _ = io.WriteString(w, completion("ok"))
 			})
 			req := api.ModelRequest{ToolChoice: tc.choice, Tools: []api.ToolDefinition{
@@ -77,6 +81,7 @@ func TestModelToolPartsMatchStreamedCompletion(t *testing.T) {
 		{ToolCall: &api.ToolCall{ID: "c0", Tool: "empty", Args: map[string]any{}}},
 		{ToolCall: &api.ToolCall{ID: "c1", Tool: "weather", Args: map[string]any{"n": float64(2)}}},
 	}}, Usage: api.Usage{Model: "test-model", InputTokens: 3, OutputTokens: 5, ReasoningTokens: 2}}
+	req := api.ModelRequest{Tools: []api.ToolDefinition{{Name: "empty"}, {Name: "weather"}}}
 	for _, stream := range []bool{false, true} {
 		c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
 			if !stream {
@@ -92,9 +97,9 @@ func TestModelToolPartsMatchStreamedCompletion(t *testing.T) {
 		var chunks strings.Builder
 		var err error
 		if stream {
-			got, err = c.StreamModel(t.Context(), api.ModelRequest{}, func(s string) { chunks.WriteString(s) })
+			got, err = c.StreamModel(t.Context(), req, func(s string) { chunks.WriteString(s) })
 		} else {
-			got, err = c.Model(t.Context(), api.ModelRequest{})
+			got, err = c.Model(t.Context(), req)
 		}
 		if err != nil || !reflect.DeepEqual(got, want) {
 			t.Fatalf("stream=%v response=%+v err=%v, want %+v", stream, got, err, want)
@@ -106,30 +111,37 @@ func TestModelToolPartsMatchStreamedCompletion(t *testing.T) {
 }
 
 // A named REQUIRED choice may finish with stop, but that exception must not admit
-// a different, multiple, malformed, legacy, or unfinished call in either HTTP path.
+// an unoffered tool, a named-choice mismatch, or text-only/forbidden tool completions.
 func TestNamedToolCompletionFinish(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		for _, tc := range []struct {
-			name, finish, tool, id, kind, args string
-			count                              int
-			choice                             *api.ToolChoice
-			legacy, wantOK                     bool
+			name, finish, tool, id, kind, args, want string
+			count                                    int
+			choice                                   *api.ToolChoice
+			tools                                    []api.ToolDefinition
+			private                                  []string
+			legacy, omitCalls, wantOK                bool
 		}{
 			{name: "named stop", finish: "stop", wantOK: true},
 			{name: "ordinary tool_calls", finish: "tool_calls", wantOK: true},
-			{name: "wrong name", finish: "stop", tool: "other"},
-			{name: "two calls", finish: "stop", count: 2},
-			{name: "length", finish: "length"},
-			{name: "content_filter", finish: "content_filter"},
-			{name: "empty finish"},
-			{name: "legacy", finish: "stop", legacy: true},
-			{name: "malformed arguments", finish: "stop", args: "{"},
-			{name: "null arguments", finish: "stop", args: "null"},
-			{name: "array arguments", finish: "stop", args: "[]"},
-			{name: "missing ID", finish: "stop", id: "missing"},
-			{name: "wrong type", finish: "stop", kind: "custom"},
-			{name: "auto stop", finish: "stop", choice: &api.ToolChoice{Mode: api.ToolChoiceAuto}},
-			{name: "unnamed required stop", finish: "stop", choice: &api.ToolChoice{Mode: api.ToolChoiceRequired}},
+			{name: "auto unoffered tool_calls", finish: "tool_calls", tool: "fixture-private-tool", choice: &api.ToolChoice{Mode: api.ToolChoiceAuto}, want: "unoffered tool", private: []string{"fixture-private-tool"}},
+			{name: "named mismatch tool_calls", finish: "tool_calls", tool: "fixture-private-tool", tools: []api.ToolDefinition{{Name: "fixture-private-choice"}, {Name: "fixture-private-tool"}}, choice: &api.ToolChoice{Mode: api.ToolChoiceRequired, Name: "fixture-private-choice"}, want: "named tool choice", private: []string{"fixture-private-tool", "fixture-private-choice"}},
+			{name: "none tool_calls", finish: "tool_calls", choice: &api.ToolChoice{Mode: api.ToolChoiceNone}, want: "ToolChoiceNone"},
+			{name: "named text stop", finish: "stop", count: -1, omitCalls: true, want: "required tool call"},
+			{name: "unnamed required text stop", finish: "stop", count: -1, omitCalls: true, choice: &api.ToolChoice{Mode: api.ToolChoiceRequired}, want: "required tool call"},
+			{name: "wrong name", finish: "stop", tool: "other", want: "incomplete or unsupported tool completion"},
+			{name: "two calls", finish: "stop", count: 2, want: "incomplete or unsupported tool completion"},
+			{name: "length", finish: "length", want: "incomplete or unsupported tool completion"},
+			{name: "content_filter", finish: "content_filter", want: "incomplete or unsupported tool completion"},
+			{name: "empty finish", want: "incomplete or unsupported tool completion"},
+			{name: "legacy", finish: "stop", legacy: true, want: "legacy function_call"},
+			{name: "malformed arguments", finish: "stop", args: "{", want: "decode tool arguments"},
+			{name: "null arguments", finish: "stop", args: "null", want: "decode tool arguments"},
+			{name: "array arguments", finish: "stop", args: "[]", want: "decode tool arguments"},
+			{name: "missing ID", finish: "stop", id: "missing", want: "unique ID/name"},
+			{name: "wrong type", finish: "stop", kind: "custom", want: "function type"},
+			{name: "auto stop", finish: "stop", choice: &api.ToolChoice{Mode: api.ToolChoiceAuto}, want: "incomplete or unsupported tool completion"},
+			{name: "unnamed required stop", finish: "stop", choice: &api.ToolChoice{Mode: api.ToolChoiceRequired}, want: "incomplete or unsupported tool completion"},
 		} {
 			t.Run(fmt.Sprintf("stream=%t/%s", streaming, tc.name), func(t *testing.T) {
 				tool, id, kind, args, count := "weather", "c", "function", "{}", 1
@@ -148,7 +160,7 @@ func TestNamedToolCompletionFinish(t *testing.T) {
 				if tc.count != 0 {
 					count = tc.count
 				}
-				calls := make([]any, 0, count)
+				calls := make([]any, 0, max(count, 0))
 				for i := 0; i < count; i++ {
 					callID := id
 					if i > 0 {
@@ -156,9 +168,11 @@ func TestNamedToolCompletionFinish(t *testing.T) {
 					}
 					calls = append(calls, map[string]any{"index": i, "id": callID, "type": kind, "function": map[string]any{"name": tool, "arguments": args}})
 				}
-				message := map[string]any{"tool_calls": calls}
+				message := map[string]any{}
 				if tc.legacy {
 					message = map[string]any{"function_call": map[string]any{"name": tool, "arguments": args}}
+				} else if !tc.omitCalls {
+					message["tool_calls"] = calls
 				}
 				key := "message"
 				if streaming {
@@ -179,7 +193,11 @@ func TestNamedToolCompletionFinish(t *testing.T) {
 				if choice == nil {
 					choice = &api.ToolChoice{Mode: api.ToolChoiceRequired, Name: "weather"}
 				}
-				req := api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}, ToolChoice: choice}
+				tools := tc.tools
+				if tools == nil {
+					tools = []api.ToolDefinition{{Name: "weather"}}
+				}
+				req := api.ModelRequest{Tools: tools, ToolChoice: choice}
 				var got api.ModelResponse
 				if streaming {
 					got, err = c.StreamModel(t.Context(), req, nil)
@@ -187,8 +205,13 @@ func TestNamedToolCompletionFinish(t *testing.T) {
 					got, err = c.Model(t.Context(), req)
 				}
 				if !tc.wantOK {
-					if !errors.Is(err, openai.ErrUnsupportedPart) || len(got.Message.Parts) != 0 {
-						t.Fatalf("response=%+v err=%v, want unsupported and no completion", got, err)
+					if !errors.Is(err, openai.ErrUnsupportedPart) || len(got.Message.Parts) != 0 || !strings.Contains(err.Error(), tc.want) {
+						t.Fatalf("response=%+v err=%v, want unsupported %q and no completion", got, err, tc.want)
+					}
+					for _, private := range tc.private {
+						if strings.Contains(err.Error(), private) {
+							t.Fatalf("error leaked private tool-choice payload %q: %v", private, err)
+						}
 					}
 					return
 				}
@@ -290,7 +313,7 @@ func TestDecodeErrorsDoNotExposePayload(t *testing.T) {
 	}
 }
 
-// A refusal is not an empty successful completion, even under a forced tool choice.
+// A nonempty refusal is never accepted as a successful forced-tool completion.
 func TestToolCompletionRefusal(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		for _, refusal := range []string{`null`, `""`, `"private refusal"`} {
@@ -317,8 +340,8 @@ func TestToolCompletionRefusal(t *testing.T) {
 					got, err = c.Model(t.Context(), req)
 				}
 				if refusal != `"private refusal"` {
-					if err != nil || got.Message.Text() != "must not emit" {
-						t.Fatalf("empty refusal: response=%+v err=%v", got, err)
+					if !errors.Is(err, openai.ErrUnsupportedPart) || !strings.Contains(err.Error(), "required tool call") || len(got.Message.Parts) != 0 {
+						t.Fatalf("empty refusal: response=%+v chunks=%q err=%v", got, chunks.String(), err)
 					}
 					return
 				}
@@ -367,7 +390,7 @@ func TestModelRefusesMalformedToolCompletions(t *testing.T) {
 				t.Fatal(err)
 			}
 			c := newClient(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) })
-			if _, err := c.Model(t.Context(), api.ModelRequest{}); !errors.Is(err, openai.ErrUnsupportedPart) {
+			if _, err := c.Model(t.Context(), api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}}); !errors.Is(err, openai.ErrUnsupportedPart) {
 				t.Fatalf("err=%v, want unsupported completion", err)
 			}
 		})
@@ -392,7 +415,7 @@ func TestStreamCompletionFreezesAtFinish(t *testing.T) {
 				fmt.Fprintf(w, "data: %s\n\ndata: %s\n\ndata: [DONE]\n\n", tc.first, tc.tail)
 			})
 			var chunks strings.Builder
-			got, err := c.StreamModel(t.Context(), api.ModelRequest{}, func(s string) { chunks.WriteString(s) })
+			got, err := c.StreamModel(t.Context(), api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}}, func(s string) { chunks.WriteString(s) })
 			if !errors.Is(err, openai.ErrUnsupportedPart) || len(got.Message.Parts) != 0 {
 				t.Errorf("response=%+v err=%v, want unsupported and no completion", got, err)
 			}
@@ -404,6 +427,7 @@ func TestStreamCompletionFreezesAtFinish(t *testing.T) {
 }
 
 func TestStreamFinalFrameDeltaAndTrailingUsage(t *testing.T) {
+	req := api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}}
 	for _, done := range []bool{false, true} {
 		t.Run(fmt.Sprintf("done=%t", done), func(t *testing.T) {
 			c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -422,7 +446,7 @@ func TestStreamFinalFrameDeltaAndTrailingUsage(t *testing.T) {
 				}
 			})
 			var chunks strings.Builder
-			got, err := c.StreamModel(t.Context(), api.ModelRequest{}, func(s string) { chunks.WriteString(s) })
+			got, err := c.StreamModel(t.Context(), req, func(s string) { chunks.WriteString(s) })
 			want := api.ModelResponse{Message: api.Message{Role: "assistant", Parts: []api.Part{
 				{Text: &api.TextPart{Text: "checkingdone"}},
 				{ToolCall: &api.ToolCall{ID: "c", Tool: "weather", Args: map[string]any{"n": float64(2)}}},
@@ -455,7 +479,7 @@ func TestStreamRefusesUnmappedOrIncompleteToolDeltas(t *testing.T) {
 				}
 				_, _ = io.WriteString(w, "data: [DONE]\n\n")
 			})
-			if _, err := c.StreamModel(t.Context(), api.ModelRequest{}, nil); !errors.Is(err, openai.ErrUnsupportedPart) {
+			if _, err := c.StreamModel(t.Context(), api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}}, nil); !errors.Is(err, openai.ErrUnsupportedPart) {
 				t.Fatalf("err=%v, want unsupported stream", err)
 			}
 		})

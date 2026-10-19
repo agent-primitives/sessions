@@ -55,17 +55,18 @@ not provide.
   interrupted under an older build whose harness sets Params fails if recovery must re-drive the
   model call; completed recorded model effects remain replayable without invoking the adapter.
   Unmapped parts/choices, duplicate tool names, nonempty completion refusals and malformed or
-  incomplete tool calls fail closed. Integer arguments outside ±2^53 are refused rather than
-  rounded. Tool results require explicit text Content when receipt data is populated; the
-  adapter does not guess text from Output/error metadata or fetch external URIs. A named
-  REQUIRED choice also accepts `stop` for exactly one complete matching function call; AUTO and
-  unnamed REQUIRED still require `tool_calls`. Streaming validates and freezes a completion
-  after processing the finish-bearing frame's own delta, refusing later semantic deltas or
-  contradictory finish reasons while allowing trailing usage. Text-only missing-finish responses
-  and EOF without `[DONE]` remain supported. Response, stream chunk and argument decode errors
-  retain only syntax or type/range diagnostics and declared field names, never raw provider
-  values or toolchain-dependent slice indexes. It does not register/execute tools or add
-  executor deduplication.
+  incomplete tool calls fail closed. Chat Completions and Responses now also refuse a completion
+  that calls an unoffered tool, violates a named REQUIRED choice, calls a tool under NONE, or
+  returns text-only output under REQUIRED. Integer arguments outside ±2^53 are refused rather than
+  rounded. Tool results require explicit text Content when receipt data is populated; the adapter
+  does not guess text from Output/error metadata or fetch external URIs. A named REQUIRED choice
+  also accepts `stop` for exactly one complete matching function call; AUTO and unnamed REQUIRED
+  still require `tool_calls`. Streaming validates and freezes a completion after processing the
+  finish-bearing frame's own delta, refusing later semantic deltas or contradictory finish reasons
+  while allowing trailing usage. Text-only missing-finish responses and EOF without `[DONE]`
+  remain supported. Response, stream chunk and argument decode errors retain only syntax or
+  type/range diagnostics and declared field names, never raw provider values or toolchain-dependent
+  slice indexes. It does not register/execute tools or add executor deduplication.
 - Optional `authn` interceptors reject unverified calls in required mode and expire authenticated
   streams. Unary authentication is admission-only; credential expiry does not end an admitted call.
   The reference daemon remains unauthenticated and unenforced; authentication alone is not isolation,

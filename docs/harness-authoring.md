@@ -423,7 +423,9 @@ JSON-native map/float64 domain; malformed, null, scalar or array arguments and i
 type/range category, not raw argument values.
 Calls normally require a `tool_calls` finish reason. A named REQUIRED choice also accepts `stop`
 for exactly one complete function call matching that name; AUTO and unnamed REQUIRED do not.
-Truncated, filtered or missing-finish tool completions are still refused.
+Completed calls must still name an offered tool, NONE still forbids any tool call, and REQUIRED
+still requires at least one. Truncated, filtered or missing-finish tool completions are still
+refused.
 
 Set `ToolResult.Content` explicitly to text parts: this is the model-facing result, concatenated into
 the tool message's content. Receipt fields such as `Output`, URI/digest, error and approval status

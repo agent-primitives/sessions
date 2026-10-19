@@ -169,7 +169,7 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		}
 	}
 	sink := &resumeSink{
-		live:      liveSink{c: c, executionID: execution.id, legacyRecovery: legacy, guard: &sinkGuard{}, har: har, desc: desc, calls: make(map[string]bool)},
+		live:      liveSink{c: c, executionID: execution.id, legacyRecovery: legacy, guard: &sinkGuard{}, har: har, desc: desc, calls: make(map[string]bool), runCtx: ctx},
 		stream:    execution.stream,
 		approvals: approvalEvidence(scan, execution.id),
 	}

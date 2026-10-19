@@ -60,14 +60,18 @@ not provide.
   `placement.ErrUnplaceable`. A post-capture refusal leaves the actor suspended but returns no ref,
   so no SUSPEND or child is journaled. Create and Restore check the suspended actor's durable URI
   and configured fidelity before resuming, so another host cannot revive a refused checkpoint.
-  A memory-required actor holding non-MEMORY evidence also wraps `api.ErrMemoryStateLost`.
-  Custom control clients must report fidelity from GetActor as well as SuspendActor.
-  `ActorInfo.NoSnapshotHistory` is an additive first-placement exemption, set only by the adapter
-  for an identified SUSPENDED actor with generation zero and an empty snapshot list; unknown legacy
-  fields disqualify it. Its zero value means history is present or unknown and refuses missing
-  evidence. Fork children and refused captures do not qualify. Capture never uses the exemption;
-  VOLUMES-only plus a memory requirement refuses before suspension. These are client-side guards,
-  not atomic lifecycle preconditions or protection against direct router traffic.
+  Restore decides whether MEMORY is required from the backend descriptor, not from a legacy
+  `SnapshotRef.Memory` bit, so main-era stateless Substrate checkpoints still resume. A
+  memory-required actor holding non-MEMORY evidence also wraps `api.ErrMemoryStateLost`. Custom
+  control clients must report fidelity from GetActor as well as SuspendActor. `ActorInfo.NoSnapshotHistory`
+  is an additive first-placement exemption, set only by the adapter for an identified SUSPENDED
+  actor with generation zero and an empty snapshot list; unknown legacy fields disqualify it. Its
+  zero value means history is present or unknown and refuses missing evidence. At the pinned
+  Substrate, `CreateActor` without a source tag records the template's current golden tag as
+  snapshot generation 1, so the exemption applies only when golden snapshots are disabled or absent.
+  Fork children and refused captures do not qualify. Capture never uses the exemption; VOLUMES-only
+  plus a memory requirement refuses before suspension. These are client-side guards, not atomic
+  lifecycle preconditions or protection against direct router traffic.
 - `runtime/substrate` now reports `SnapshotRef.Memory` from the completed snapshot's observed
   fidelity instead of always reporting true. The adapter carries the selected generation's URI
   and fidelity together in `ActorInfo.Snapshot` and the new `ActorInfo.SnapshotFidelity`. ROOTFS

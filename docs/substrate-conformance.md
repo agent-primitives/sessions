@@ -227,25 +227,32 @@ Invalid checkpoints wrap `api.ErrInvalidCheckpoint` and map to `FAILED_PRECONDIT
 Suspend/Fork; stateful Fork retains `placement.ErrUnplaceable`. Validation can refuse after
 SuspendActor already suspended compute: no usable ref or SUSPEND is recorded. Create and Restore
 also check the suspended actor's durable URI and configured fidelity before resuming, so a fresh
-host cannot revive that refused state. A memory-required actor with non-MEMORY evidence also
+host cannot revive that refused state. Restore decides whether MEMORY is required from the backend
+contract, not from a legacy `SnapshotRef.Memory` bit: main journaled `Memory: true` for every
+Substrate suspend, even for stateless actors. A memory-required actor with non-MEMORY evidence also
 wraps `api.ErrMemoryStateLost`. Custom clients must populate fidelity in GetActor too.
 
 First placement can find an actor between CreateActor and its first ResumeActor. The additive
 `ActorInfo.NoSnapshotHistory` flag permits that snapshot-less attachment only with positive evidence:
 an identified SUSPENDED actor, generation zero and an empty snapshot list, with no unknown legacy
 status fields. False means history is present or unknown and refuses missing checkpoint evidence.
-Only the adapter derives this flag; fork children and refused captures do not qualify. Capture
-itself never uses the exemption. A backend's own successful CreateActor → ResumeActor path remains
-unchanged. These client-side checks are not atomic and do not fence traffic directly to the router.
+Only the adapter derives this flag; fork children and refused captures do not qualify. At the
+pinned Substrate, `CreateActor` without a source tag freezes the template's current golden tag as
+snapshot generation 1, so this exemption applies only when golden snapshots are disabled (or no
+golden exists yet). Capture itself never uses the exemption. A backend's own successful CreateActor
+→ ResumeActor path remains unchanged. These client-side checks are not atomic and do not fence
+traffic directly to the router.
 
 The option **validates the result; it does not configure Substrate**. Configure the ActorTemplate
 with `snapshotConfig.preferredFidelity: SNAPSHOT_FIDELITY_VOLUMES`, at least one mounted `durable-dir`
 volume, and `goldenSnapshotConfig.mode: GOLDEN_SNAPSHOT_MODE_DISABLED`. Substrate defaults to MEMORY
 and enables golden snapshots when their configuration is omitted; golden snapshots capture MEMORY.
 Keep credentials outside captured directories. A failed validation happens after suspension and
-does not undo the capture or restore discarded RAM. A later resume of that same actor is not
-blocked by fidelity validation in `Snapshot`; resolve the configuration and state loss before
-continuing a memory-required session after such a refusal.
+does not undo the capture or restore discarded RAM. Create and Restore keep refusing that actor
+while it still holds the same invalid snapshot. For a memory-required session that means the
+in-RAM state is lost; for a VOLUMES-only stateless template, retrying `Suspend` while the actor
+stays SUSPENDED preserves that same held snapshot, so the operator must delete or otherwise replace
+the actor before cold-starting again.
 
 By default `Capabilities.MemorySnapshot = true` admits a `REQUIRES_MEMORY_SNAPSHOT` harness, so use
 a MEMORY-capable template for that configuration. Files-only result validation does not prove

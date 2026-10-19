@@ -604,7 +604,9 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 	if name == "" {
 		return api.Incarnation{}, fmt.Errorf("substrate: snapshot ref missing actor name")
 	}
-	memory := ref.Memory || b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+	// Restore admission follows the backend contract, not SnapshotRef.Memory, which reports the
+	// observed capture fidelity rather than the resumability tier required to continue the session.
+	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
 	if b.volumesOnly || memory {
 		info, getErr := b.ctl.GetActor(ctx, b.ref(name))
 		if getErr != nil {
@@ -614,7 +616,7 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 			return api.Incarnation{}, fmt.Errorf("substrate: get actor before restore: %w", getErr)
 		}
 		if info.Status == StatusSuspended {
-			if err := b.requireResumeCheckpoint(info, memory, ref.ExternalURI == "" && !ref.Memory); err != nil {
+			if err := b.requireResumeCheckpoint(info, memory, ref.ExternalURI == "" && !memory); err != nil {
 				if recorded != nil {
 					// Classify loss/replacement first, without labeling that failure as bad fidelity.
 					cause := errors.New("substrate: actor could not restore the checkpoint")

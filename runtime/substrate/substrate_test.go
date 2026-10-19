@@ -375,11 +375,38 @@ func TestSuspendRestoreRoundtrip(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := []string{"suspend:sess-x", "resume:sess-x"}
-			if tc.memory || tc.volumesOnly {
+			if tc.volumesOnly {
 				want = []string{"suspend:sess-x", "get:sess-x", "resume:sess-x"}
 			}
 			if !reflect.DeepEqual(m.calls, want) {
 				t.Fatalf("suspend/restore calls=%v want %v", m.calls, want)
+			}
+		})
+	}
+}
+
+func TestRestoreOfMainEraStatelessCheckpointIgnoresLegacyMemoryFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fidelity substrate.SnapshotFidelity
+	}{
+		{name: "volumes", fidelity: substrate.SnapshotFidelityVolumes},
+		{name: "unknown", fidelity: substrate.SnapshotFidelityUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockControl{info: running("worker-a")}
+			m.info.SnapshotFidelity = tc.fidelity
+			m.exists("sess-x", substrate.StatusSuspended)
+			m.holds("sess-x", "gs://snap/sess-x")
+			_, err := newBackend(m).RestoreInstance(context.Background(), api.SnapshotRef{Local: "sess-x", ExternalURI: "gs://snap/sess-x", Memory: true}, func() (string, error) {
+				m.calls = append(m.calls, "read-record")
+				return "", nil
+			})
+			if err != nil {
+				t.Fatalf("RestoreInstance: %v", err)
+			}
+			if want := []string{"resume:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+				t.Fatalf("calls=%v want %v", m.calls, want)
 			}
 		})
 	}
@@ -1016,17 +1043,18 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 	resumeErr := errors.New("rpc error: code = NotFound desc = actor not found")
 	notFound := fmt.Errorf("%w: space/sess-x: %w", substrate.ErrActorNotFound, resumeErr)
 	for _, tc := range []struct {
-		name      string
-		backend   func(*mockControl) *substrate.Backend
-		existing  substrate.ActorStatus // StatusUnknown: the actor does not exist
-		getErr    error
-		holds     string // the snapshot the existing actor holds
-		snapshot  string // the ExternalURI restored: "" is gs://snap/sess-x, "-" is none
-		recorded  string // the UID RestoreInstance reads: "" calls Restore, "-" reads none, "!" fails the read
-		resumeErr error  // nil: resumeErr below, which GetActor has to classify
-		wantCalls []string
-		wantLost  bool
-		wantMsg   string // "" is "cannot be restored" alone
+		name         string
+		backend      func(*mockControl) *substrate.Backend
+		preflightGet bool
+		existing     substrate.ActorStatus // StatusUnknown: the actor does not exist
+		getErr       error
+		holds        string // the snapshot the existing actor holds
+		snapshot     string // the ExternalURI restored: "" is gs://snap/sess-x, "-" is none
+		recorded     string // the UID RestoreInstance reads: "" calls Restore, "-" reads none, "!" fails the read
+		resumeErr    error  // nil: resumeErr below, which GetActor has to classify
+		wantCalls    []string
+		wantLost     bool
+		wantMsg      string // "" is "cannot be restored" alone
 	}{
 		{name: "memory tier without an actor", backend: memory,
 			wantCalls: []string{"resume:sess-x", "get:sess-x"}, wantLost: true},
@@ -1132,7 +1160,14 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 				m.actors, m.snapshots, m.getErr = actors, snapshots, getErr
 				m.afterGet = nil
 			}
-			wantCalls := append([]string{"get:sess-x"}, tc.wantCalls...)
+			wantCalls := append([]string{}, tc.wantCalls...)
+			desc, derr := tc.backend(&mockControl{}).Describe(context.Background())
+			if derr != nil {
+				t.Fatalf("Describe: %v", derr)
+			}
+			if tc.preflightGet || desc.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
+				wantCalls = append([]string{"get:sess-x"}, wantCalls...)
+			}
 			var err error
 			switch tc.recorded {
 			case "":

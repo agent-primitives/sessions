@@ -1241,12 +1241,17 @@ The reference host takes it as `placement.Backend` in
   remain operator-owned. Invalid checkpoints wrap `api.ErrInvalidCheckpoint` and are
   `FAILED_PRECONDITION` from Suspend/Fork; the actor may already be suspended when capture refuses,
   but no ref or SUSPEND is recorded. Create and Restore check a suspended actor's durable URI and
-  configured fidelity before resuming it; memory-required non-MEMORY evidence also wraps
+  configured fidelity before resuming it. Restore decides whether MEMORY is required from the
+  backend descriptor, not from a legacy `SnapshotRef.Memory` bit, because older stateless journals
+  set that bit on every Substrate suspend. Memory-required non-MEMORY evidence also wraps
   `api.ErrMemoryStateLost`. GetActor must report that evidence too. An identified SUSPENDED actor
   with authoritative generation-zero/empty-list evidence can report `ActorInfo.NoSnapshotHistory`
   for first placement between CreateActor and its first ResumeActor. False means present or unknown
-  history, not an exemption; borrowed fork snapshots and refused captures do not qualify. Capture
-  never uses this exemption. These client checks can race lifecycle operations or router ingress.
+  history, not an exemption; borrowed fork snapshots and refused captures do not qualify. At the
+  pinned Substrate, an unsourced `CreateActor` records the template's current golden tag as
+  generation 1, so this exemption exists only when golden snapshots are disabled or unavailable.
+  Capture never uses this exemption. These client checks can race lifecycle operations or router
+  ingress.
   `Snapshot` and `Restore` do not create missing actors. When no actor exists (for example a fresh
   session before any `Create` reached `CreateActor`, and not a fork child, or an actor deleted
   outside the host) both fail with the control API's `NOT_FOUND` (substrate module pinned in

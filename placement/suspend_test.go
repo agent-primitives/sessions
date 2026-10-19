@@ -25,14 +25,15 @@ import (
 // ResumeActor picks its source as substrate does: the actor's own snapshot if it holds one, else a
 // fresh harness (the template's golden snapshot or a cold boot), so there is no per-call boot flag.
 type suspendControl struct {
-	actors       map[substrate.ActorRef]*suspendActor
-	snapshots    map[substrate.SnapshotID]suspendSnapshot
-	tags         map[substrate.SnapshotID]substrate.SnapshotID
-	calls        []string
-	snapshotErr  error
-	afterSuspend func()
-	afterResume  func()
-	created      int // actors created so far, for server-assigned UIDs
+	actors           map[substrate.ActorRef]*suspendActor
+	snapshots        map[substrate.SnapshotID]suspendSnapshot
+	tags             map[substrate.SnapshotID]substrate.SnapshotID
+	calls            []string
+	snapshotErr      error
+	snapshotFidelity substrate.SnapshotFidelity
+	afterSuspend     func()
+	afterResume      func()
+	created          int // actors created so far, for server-assigned UIDs
 }
 
 type suspendActor struct {
@@ -55,9 +56,10 @@ var _ substrate.SnapshotCloner = (*suspendControl)(nil)
 
 func newSuspendControl() *suspendControl {
 	return &suspendControl{
-		actors:    make(map[substrate.ActorRef]*suspendActor),
-		snapshots: make(map[substrate.SnapshotID]suspendSnapshot),
-		tags:      make(map[substrate.SnapshotID]substrate.SnapshotID),
+		actors:           make(map[substrate.ActorRef]*suspendActor),
+		snapshots:        make(map[substrate.SnapshotID]suspendSnapshot),
+		tags:             make(map[substrate.SnapshotID]substrate.SnapshotID),
+		snapshotFidelity: substrate.SnapshotFidelityMemory,
 	}
 }
 
@@ -110,7 +112,7 @@ func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef)
 		return substrate.ActorInfo{}, status.Error(codes.NotFound, "actor does not exist")
 	}
 	if a.status == substrate.StatusSuspended && a.snapshot.Name != "" {
-		return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: a.uid}, nil
+		return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid}, nil
 	}
 	a.snapshot = substrate.SnapshotID{Atespace: ref.Atespace, Name: fmt.Sprintf("snap-%s-%d", ref.Name, len(c.snapshots)+1)}
 	c.snapshots[a.snapshot] = suspendSnapshot{turns: a.turns, template: a.template}
@@ -120,7 +122,7 @@ func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef)
 		c.afterSuspend = nil
 		hook()
 	}
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: a.uid}, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid}, nil
 }
 
 func (c *suspendControl) DeleteActor(_ context.Context, ref substrate.ActorRef) error {
@@ -151,7 +153,7 @@ func (c *suspendControl) GetActor(_ context.Context, ref substrate.ActorRef) (su
 }
 
 func (c *suspendControl) info(ref substrate.ActorRef, a *suspendActor) substrate.ActorInfo {
-	info := substrate.ActorInfo{Status: a.status, Snapshot: a.snapshot.Name, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: a.uid}
+	info := substrate.ActorInfo{Status: a.status, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid}
 	if a.worker {
 		info.Worker = ref.Name
 	}
@@ -450,6 +452,57 @@ func TestSubstrateSuspendResumePreservesActor(t *testing.T) {
 	wantCalls := []string{"create:session", "resume:session", "suspend:session", "resume:session"}
 	if !reflect.DeepEqual(ctl.calls, wantCalls) {
 		t.Fatalf("lifecycle calls=%v want %v", ctl.calls, wantCalls)
+	}
+}
+
+func TestResumeAcceptsMainEraStatelessSubstrateCheckpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fidelity substrate.SnapshotFidelity
+	}{
+		{name: "volumes", fidelity: substrate.SnapshotFidelityVolumes},
+		{name: "unknown", fidelity: substrate.SnapshotFidelityUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			ctl := newSuspendControl()
+			ctl.snapshotFidelity = tc.fidelity
+			p, backend := newSuspendPlacer(t, ctl, false)
+			log := newSuspendStore(t).Session("session")
+			execSuspendTurn(t, p, log, "session", "first")
+
+			// Main-era journals recorded Memory=true for every Substrate suspend, even for stateless
+			// actors. Build that exact shape with one legacy SUSPEND record, not by layering it over a
+			// newer journaled checkpoint.
+			ref, err := backend.Snapshot(ctx, api.Incarnation{ID: "session"}, api.SnapshotExternal)
+			if err != nil {
+				t.Fatalf("backend snapshot: %v", err)
+			}
+			if ref.Memory {
+				t.Fatalf("premise broken: ref=%+v, want current code to record Memory=false for %s", ref, tc.name)
+			}
+			head, err := log.Head()
+			if err != nil {
+				t.Fatalf("Head: %v", err)
+			}
+			recs := suspendRecords(t, log)
+			last := recs[len(recs)-1]
+			legacy := ref
+			legacy.Memory = true
+			if _, err := log.Append(head, last.Fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleSuspend, Snapshot: &legacy}}); err != nil {
+				t.Fatalf("append legacy suspend: %v", err)
+			}
+
+			ctl.calls = nil
+			if err := p.Resume(ctx, log, "session"); err != nil {
+				t.Fatalf("resume legacy checkpoint (gRPC code %s): %v", status.Code(err), err)
+			}
+			if want := []string{"resume:session"}; !reflect.DeepEqual(ctl.calls, want) {
+				t.Fatalf("resume calls=%v want %v", ctl.calls, want)
+			}
+			execSuspendTurn(t, p, log, "session", "second")
+			assertSuspendOutputs(t, log, []string{"echo:first", "echo:second"})
+		})
 	}
 }
 

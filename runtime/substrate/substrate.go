@@ -112,12 +112,13 @@ type ActorInfo struct {
 // real substrate deployment implements this over pkg/proto/ateapipb; keeping it an interface here
 // is what keeps agentsessions free of a substrate dependency.
 type ControlClient interface {
-	// CreateActor creates a SUSPENDED actor holding no snapshot of its own. A name that is already
-	// taken must be reported as (or wrap) ErrActorExists.
+	// CreateActor creates a SUSPENDED actor, borrowing the template's current golden tag as its
+	// first snapshot when one exists. A name that is already taken must be reported as (or wrap)
+	// ErrActorExists.
 	CreateActor(ctx context.Context, actor ActorRef, template ObjectRef) error
-	// ResumeActor schedules the actor onto a worker. Substrate picks the source itself: the actor's
-	// own snapshot if it has one, else the template's golden snapshot (a freshly started harness),
-	// else a cold boot from the template spec. There is no per-call boot flag.
+	// ResumeActor schedules the actor onto a worker from its own snapshot, or cold-boots the
+	// template spec if it has none. It does not look up the template's golden tag at resume time.
+	// There is no per-call boot flag.
 	ResumeActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 	// SuspendActor snapshots the actor to durable storage and frees the worker, returning the actor
 	// as the suspend left it: ActorInfo.Snapshot is the external snapshot it now holds, paired with

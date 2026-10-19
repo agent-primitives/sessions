@@ -1043,18 +1043,17 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 	resumeErr := errors.New("rpc error: code = NotFound desc = actor not found")
 	notFound := fmt.Errorf("%w: space/sess-x: %w", substrate.ErrActorNotFound, resumeErr)
 	for _, tc := range []struct {
-		name         string
-		backend      func(*mockControl) *substrate.Backend
-		preflightGet bool
-		existing     substrate.ActorStatus // StatusUnknown: the actor does not exist
-		getErr       error
-		holds        string // the snapshot the existing actor holds
-		snapshot     string // the ExternalURI restored: "" is gs://snap/sess-x, "-" is none
-		recorded     string // the UID RestoreInstance reads: "" calls Restore, "-" reads none, "!" fails the read
-		resumeErr    error  // nil: resumeErr below, which GetActor has to classify
-		wantCalls    []string
-		wantLost     bool
-		wantMsg      string // "" is "cannot be restored" alone
+		name      string
+		backend   func(*mockControl) *substrate.Backend
+		existing  substrate.ActorStatus // StatusUnknown: the actor does not exist
+		getErr    error
+		holds     string // the snapshot the existing actor holds
+		snapshot  string // the ExternalURI restored: "" is gs://snap/sess-x, "-" is none
+		recorded  string // the UID RestoreInstance reads: "" calls Restore, "-" reads none, "!" fails the read
+		resumeErr error  // nil: resumeErr below, which GetActor has to classify
+		wantCalls []string
+		wantLost  bool
+		wantMsg   string // "" is "cannot be restored" alone
 	}{
 		{name: "memory tier without an actor", backend: memory,
 			wantCalls: []string{"resume:sess-x", "get:sess-x"}, wantLost: true},
@@ -1165,7 +1164,7 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 			if derr != nil {
 				t.Fatalf("Describe: %v", derr)
 			}
-			if tc.preflightGet || desc.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
+			if desc.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
 				wantCalls = append([]string{"get:sess-x"}, wantCalls...)
 			}
 			var err error

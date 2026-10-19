@@ -200,11 +200,12 @@ attached to as if it held the cloned RAM. The child now records the clone's UID 
 | `Stop` | `SuspendActor` + `DeleteActor` |
 | `Status` | `GetActor` |
 
-There is no per-resume boot flag (substrate removed `ResumeActorRequest.boot`). Substrate picks the
-source itself: the actor's own snapshot, else the template's golden snapshot, else a cold boot of the
-template spec. That is enough for `STATELESS_REPLAY`: a new actor has no snapshot of its own, and the
-golden snapshot is the harness captured right after it became ready, before any session touched it,
-so it carries no session state.
+There is no per-resume boot flag (substrate removed `ResumeActorRequest.boot`). At creation,
+Substrate borrows the template's current golden tag into the actor as snapshot generation 1 when
+one exists. Resume restores the actor's own snapshot, or cold-boots the template spec if it has
+none; it does not look up a template golden at resume time. That is enough for `STATELESS_REPLAY`:
+the borrowed golden captures a freshly ready harness before any session touched it, so it carries
+no session state.
 
 ### Snapshot fidelity and files-only recovery
 
@@ -228,9 +229,9 @@ Suspend/Fork; stateful Fork retains `placement.ErrUnplaceable`. Validation can r
 SuspendActor already suspended compute: no usable ref or SUSPEND is recorded. Create and Restore
 also check the suspended actor's durable URI and configured fidelity before resuming, so a fresh
 host cannot revive that refused state. Restore decides whether MEMORY is required from the backend
-contract, not from a legacy `SnapshotRef.Memory` bit: main journaled `Memory: true` for every
-Substrate suspend, even for stateless actors. A memory-required actor with non-MEMORY evidence also
-wraps `api.ErrMemoryStateLost`. Custom clients must populate fidelity in GetActor too.
+contract, not from a legacy `SnapshotRef.Memory` bit: v0.2.0 and earlier journaled `Memory: true`
+for every Substrate suspend, even for stateless actors. A memory-required actor with non-MEMORY
+evidence also wraps `api.ErrMemoryStateLost`. Custom clients must populate fidelity in GetActor too.
 
 First placement can find an actor between CreateActor and its first ResumeActor. The additive
 `ActorInfo.NoSnapshotHistory` flag permits that snapshot-less attachment only with positive evidence:

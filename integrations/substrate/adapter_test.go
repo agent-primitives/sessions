@@ -185,16 +185,68 @@ func TestResumeMapsActorState(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := substrate.ActorInfo{
-		Status:   substrate.StatusRunning,
-		Worker:   "echo-harness-7d9f-abcde",
-		Snapshot: "gs://b/atespaces/space/actors/u1/snapshots/s1",
-		UID:      "0b5c3c56-6d5e-4f0e-9b1a-2f4d8c1e7a90",
+		Status:           substrate.StatusRunning,
+		Worker:           "echo-harness-7d9f-abcde",
+		Snapshot:         "gs://b/atespaces/space/actors/u1/snapshots/s1",
+		SnapshotFidelity: substrate.SnapshotFidelityMemory,
+		UID:              "0b5c3c56-6d5e-4f0e-9b1a-2f4d8c1e7a90",
 	}
 	if info != want {
 		t.Fatalf("info=%+v want %+v", info, want)
 	}
 	if want := []string{"resume:space/sess-x"}; !reflect.DeepEqual(f.calls, want) {
 		t.Fatalf("calls=%v want %v", f.calls, want)
+	}
+}
+
+// Another host can attach after CreateActor stored a snapshot-less SUSPENDED actor but before
+// its first ResumeActor. Only authoritative no-history evidence permits that cold start.
+func TestNoSnapshotHistoryRequiresAuthoritativeEvidence(t *testing.T) {
+	for _, kind := range []string{"fresh", "missing status", "missing UID", "generation assigned", "borrowed snapshot", "unknown legacy fields", "paused"} {
+		t.Run(kind, func(t *testing.T) {
+			a := runningActor()
+			a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
+			a.Status.Snapshots = nil
+			a.Status.LastAssignedGeneration = 0
+			switch kind {
+			case "missing status":
+				a.Status = nil
+			case "missing UID":
+				a.Metadata.Uid = ""
+			case "generation assigned":
+				a.Status.LastAssignedGeneration = 1
+			case "borrowed snapshot":
+				a.Status.Snapshots = runningActor().Status.Snapshots
+			case "unknown legacy fields":
+				a.Status.ProtoReflect().SetUnknown(wireMessage(4, wireString(1, "legacy")))
+			case "paused":
+				a.Status.State = atepb.ActorState_ACTOR_STATE_PAUSED
+			}
+			if got := actorInfo(a).NoSnapshotHistory; got != (kind == "fresh") {
+				t.Fatalf("NoSnapshotHistory=%v for %s", got, kind)
+			}
+		})
+	}
+}
+
+func TestFirstPlacementAttachesBeforeFirstResume(t *testing.T) {
+	for _, memory := range []bool{false, true} {
+		a := runningActor()
+		a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
+		a.Status.Snapshots = nil
+		a.Status.LastAssignedGeneration = 0
+		f := &fakeControl{actor: a, resumeErr: errors.New("first resume reached")}
+		desc := api.Descriptor{ID: "echo"}
+		opts := []substrate.Option{substrate.WithVolumesOnly()}
+		if memory {
+			desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
+			opts = nil
+		}
+		b := substrate.New(FromClient(f), "space", substrate.ObjectRef{Name: "echo"}, desc, opts...)
+		_, err := b.Create(t.Context(), &api.SessionSpec{SessionUID: "sess-x"})
+		if !errors.Is(err, f.resumeErr) || !reflect.DeepEqual(f.calls, []string{"get:sess-x", "resume:space/sess-x"}) {
+			t.Fatalf("first placement memory=%v err=%v calls=%v", memory, err, f.calls)
+		}
 	}
 }
 
@@ -227,8 +279,8 @@ func TestGetActorDecodesCurrentWireFormat(t *testing.T) {
 
 // A server older than substrate f03327bd sends the held snapshot as ActorStatus.external_snapshot
 // (field 4), which this client does not read. It must report no snapshot rather than fail to decode,
-// so a stateful fork against such a server refuses (unplaceable through the Placer,
-// ErrNoSnapshotToClone from a direct Backend.Fork) instead of tagging.
+// so a memory checkpoint against such a server refuses before recording SUSPEND, and a direct
+// Backend.Fork with no handle refuses with ErrNoSnapshotToClone instead of tagging.
 func TestGetActorIgnoresPreSnapshotsListField(t *testing.T) {
 	var st []byte
 	st = protowire.AppendVarint(protowire.AppendTag(st, 1, protowire.VarintType), 4) // SUSPENDED
@@ -305,13 +357,13 @@ func TestHeldSnapshotIsLatestCompletedDurable(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := heldSnapshot(&atepb.ActorStatus{Snapshots: tc.snaps}); got != tc.want {
+			if got := heldSnapshot(&atepb.ActorStatus{Snapshots: tc.snaps}).GetDurableSnapshot().GetObject().GetSnapshotUri(); got != tc.want {
 				t.Fatalf("heldSnapshot=%q want %q", got, tc.want)
 			}
 		})
 	}
-	if got := heldSnapshot(nil); got != "" {
-		t.Fatalf("heldSnapshot(nil)=%q want empty", got)
+	if got := heldSnapshot(nil); got != nil {
+		t.Fatalf("heldSnapshot(nil)=%v want nil", got)
 	}
 }
 
@@ -363,9 +415,66 @@ func TestResumeActorReportsNotFoundAsSentinel(t *testing.T) {
 	}
 }
 
-// A suspend yields the URI of the external snapshot the actor now holds, the handle the backend
-// records and later compares against GetActor to detect a superseded snapshot, and the UID of the
-// actor it suspended, which a stateful fork compares with the one the journal recorded.
+// Fidelity must follow the selected completed generation, never the template or another entry.
+func TestSnapshotFidelityFollowsSelectedGeneration(t *testing.T) {
+	const completed = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+	for _, tc := range []struct {
+		name     string
+		fidelity atepb.SnapshotFidelity
+		want     substrate.SnapshotFidelity
+	}{
+		{name: "memory", fidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, want: substrate.SnapshotFidelityMemory},
+		{name: "volumes", fidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, want: substrate.SnapshotFidelityVolumes},
+		{name: "rootfs", fidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS, want: substrate.SnapshotFidelityRootFS},
+		{name: "unspecified", want: substrate.SnapshotFidelityUnknown},
+		{name: "future", fidelity: atepb.SnapshotFidelity(99), want: substrate.SnapshotFidelityUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			older := durableSnapshot(1, "older", completed)
+			selected := durableSnapshot(2, "selected", completed)
+			selected.Fidelity = tc.fidelity
+			pending := durableSnapshot(3, "pending", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)
+			a := runningActor()
+			a.Status.Snapshots = []*atepb.Snapshot{selected, pending, older}
+			ad := FromClient(&fakeControl{actor: a})
+			ref := substrate.ActorRef{Atespace: "space", Name: "sess-x"}
+			for _, op := range []struct {
+				name string
+				call func(context.Context, substrate.ActorRef) (substrate.ActorInfo, error)
+			}{{"suspend", ad.SuspendActor}, {"get", ad.GetActor}} {
+				got, err := op.call(context.Background(), ref)
+				if err != nil || got.Snapshot != "selected" || got.SnapshotFidelity != tc.want {
+					t.Fatalf("%s: info=%+v err=%v, want selected URI and fidelity %v", op.name, got, err, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestSnapshotFidelityDoesNotFallBackToAnotherEntry(t *testing.T) {
+	const completed = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+	for _, tc := range []struct {
+		name    string
+		snaps   []*atepb.Snapshot
+		wantURI string
+		want    substrate.SnapshotFidelity
+	}{
+		{name: "no snapshot", want: substrate.SnapshotFidelityUnknown},
+		{name: "no completed snapshot", snaps: []*atepb.Snapshot{durableSnapshot(2, "pending", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)}, want: substrate.SnapshotFidelityUnknown},
+		{name: "no durable snapshot", snaps: []*atepb.Snapshot{{Generation: 3, Fidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY}}, want: substrate.SnapshotFidelityUnknown},
+		{name: "tie uses later entry", snaps: []*atepb.Snapshot{durableSnapshot(2, "first", completed), {Generation: 2, Fidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, DurableSnapshot: &atepb.SnapshotStorage{Status: completed, Object: &atepb.ObjectSnapshot{SnapshotUri: "second"}}}}, wantURI: "second", want: substrate.SnapshotFidelityVolumes},
+		{name: "missing URI keeps selected fidelity", snaps: []*atepb.Snapshot{durableSnapshot(1, "older", completed), {Generation: 2, Fidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, DurableSnapshot: &atepb.SnapshotStorage{Status: completed}}}, want: substrate.SnapshotFidelityVolumes},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := actorInfo(&atepb.Actor{Status: &atepb.ActorStatus{Snapshots: tc.snaps}})
+			if got.Snapshot != tc.wantURI || got.SnapshotFidelity != tc.want {
+				t.Fatalf("info=%+v want URI=%q fidelity=%v", got, tc.wantURI, tc.want)
+			}
+		})
+	}
+}
+
+// A suspend reports the held snapshot's URI and the actor's UID for later identity checks.
 func TestSuspendReturnsTheHeldSnapshot(t *testing.T) {
 	a := runningActor()
 	a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED

@@ -1107,7 +1107,8 @@ sequenceDiagram
   runtime calls for both tiers (`OPS-17`, `OPS-19`).
 - For `STATELESS_REPLAY` the host relies only on the log: it sends the full prior log on every
   start (`EXE-7`) and reconstructs from it (§8.6). A backend MAY capture memory anyway and report
-  `memory = true` (`RT-5`); `runtime/substrate` does, `runtime/local` and `runtime/remote` do not
+  `memory = true` (`RT-5`); `runtime/substrate` does when it observes MEMORY fidelity,
+  while `runtime/local` and `runtime/remote` do not
   (§13.4). Its `Restore` MAY recreate the incarnation or bring back what it captured.
 - For `REQUIRES_MEMORY_SNAPSHOT` the host relies on the backend: `Restore`, and `Create` on a
   suspended session (`RT-4e`), MUST bring back the captured memory, because the harness does not
@@ -1276,12 +1277,43 @@ The reference host takes it as `placement.Backend` in
 - `runtime/remote`: points every incarnation at an operator-configured harness address. `Describe`
   dials it, and the backend is a `LiveDescriber` (`RT-4g`). Same capabilities and snapshot refs as
   local. `Create`, `Restore`, and `Fork` provision nothing, and `Stop` leaves the harness running.
-- `runtime/substrate`: `memory_snapshot = true`, driven through its own `ControlClient` interface.
+- `runtime/substrate`: `memory_snapshot = true` by default, driven through its own `ControlClient`
+  interface. `WithVolumesOnly()` sets that capability false, so memory-required admission refuses.
   `Describe` returns the descriptor it was built with. `Create` attaches to a running actor, resumes
   a suspended one, and creates one only when none exists (`RT-4e`). `Snapshot` suspends the actor's
-  per-session compute and returns `memory = true` and the snapshot URI substrate reports, whatever
-  the harness tier. `Snapshot` and `Restore` call `SuspendActor` and `ResumeActor` without the
-  existence check `Create` makes, so when no actor exists for the session uid (for example a fresh
+  per-session compute and returns the selected completed durable snapshot's URI and `memory = true`
+  only for observed MEMORY fidelity. VOLUMES and ROOTFS report false; unspecified or unrecognized
+  fidelity also reports false for default stateless replay, not proof of files-only capture.
+  `WithVolumesOnly()` requires observed VOLUMES and a nonempty URI; a memory-required descriptor or
+  recorded compute instance instead requires MEMORY and a nonempty URI. Missing or mismatched
+  evidence refuses without a ref, so no `SUSPEND` is journaled. Combining VOLUMES-only with a memory
+  requirement refuses direct `Snapshot` calls too. The option validates results; template settings
+  remain operator-owned. Invalid checkpoints wrap `api.ErrInvalidCheckpoint` and are
+  `FAILED_PRECONDITION` from Suspend/Fork; the actor may already be suspended when capture refuses,
+  but no ref or SUSPEND is recorded. Create and Restore check a suspended actor's durable URI and
+  configured fidelity before resuming it. Restore decides whether MEMORY is required from the
+  backend descriptor, not from a legacy `SnapshotRef.Memory` bit, because journals written before
+  this change recorded `Memory: true` on every Substrate suspend, including stateless actors.
+  Memory-required non-MEMORY evidence also wraps `api.ErrMemoryStateLost`. GetActor must report
+  that evidence too. An identified SUSPENDED actor with authoritative generation-zero/empty-list
+  evidence can report `ActorInfo.NoSnapshotHistory` for first placement between CreateActor and its
+  first ResumeActor. False means present or unknown
+  history, not an exemption; borrowed fork snapshots and refused captures do not qualify. At the
+  pinned Substrate, an unsourced `CreateActor` records the template's current golden tag as
+  generation 1, so this exemption exists only when golden snapshots are disabled or unavailable.
+  Capture never uses this exemption. These client checks can race lifecycle operations or router
+  ingress. Known limit: the effective resume source can differ from the durable checkpoint the
+  adapter validated. Actors paused outside sessions may hold an actor-local checkpoint that
+  Substrate prefers on resume, while the adapter reports only durable checkpoint evidence.
+  Validation can falsely refuse recoverable local state or accept a fidelity that does not meet
+  the backend's requirement. For example, local-only MEMORY can be refused as lost; older durable
+  VOLUMES can pass validation even when resume restores local MEMORY. Likewise, when a durable
+  snapshot's recorded `ActorTemplate` UID differs from the actor's current template UID (for
+  example because the template was deleted and recreated under the same name), pinned Substrate
+  restores at VOLUMES scope: a memory-tier session can pass durable MEMORY validation yet still
+  cold-boot and lose RAM. The fidelity checks do not cover the PAUSED case, and sessions does not
+  call `PauseActor`.
+  `Snapshot` and `Restore` do not create missing actors. When no actor exists (for example a fresh
   session before any `Create` reached `CreateActor`, and not a fork child, or an actor deleted
   outside the host) both fail with the control API's `NOT_FOUND` (substrate module pinned in
   `integrations/substrate/go.mod`, `cmd/ateapi/internal/controlapi/actor.go`), reported as

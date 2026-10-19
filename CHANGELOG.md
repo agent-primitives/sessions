@@ -131,6 +131,39 @@ not provide.
 
 #### Substrate backend
 
+- Invalid Substrate checkpoints now wrap `api.ErrInvalidCheckpoint` and report
+  `FAILED_PRECONDITION` from Suspend/Fork instead of `INTERNAL`; stateful Fork retains
+  `placement.ErrUnplaceable`. A post-capture refusal leaves the actor suspended but returns no ref,
+  so no SUSPEND or child is journaled. Create and Restore check the suspended actor's durable URI
+  and configured fidelity before resuming, so another host cannot revive a refused checkpoint.
+  Restore decides whether MEMORY is required from the backend descriptor, not from a legacy
+  `SnapshotRef.Memory` bit, so stateless Substrate checkpoints from journals written before this
+  change still resume; those journals recorded `Memory: true` even for stateless actors. A
+  memory-required actor holding non-MEMORY evidence also wraps
+  `api.ErrMemoryStateLost`. Custom control clients must report fidelity from GetActor as well as
+  SuspendActor. `ActorInfo.NoSnapshotHistory` is an additive first-placement exemption, set only by
+  the adapter for an identified SUSPENDED actor with generation zero and an empty snapshot list;
+  unknown legacy fields disqualify it. Its zero value means history is present or unknown and
+  refuses missing evidence. At the pinned Substrate, `CreateActor` without a source tag records the
+  template's current golden tag as snapshot generation 1, so the exemption applies only when golden
+  snapshots are disabled or absent. Fork children and refused captures do not qualify. Capture
+  never uses the exemption; VOLUMES-only plus a memory requirement refuses before suspension. These
+  are client-side guards, not atomic lifecycle preconditions or protection against direct router
+  traffic. Known limit: actors paused outside sessions can resume an actor-local checkpoint instead
+  of the validated durable one, causing false recovery refusals or accepting a fidelity that does
+  not meet the backend's memory-required or VOLUMES-only contract.
+- `runtime/substrate` now reports `SnapshotRef.Memory` from the completed snapshot's observed
+  fidelity instead of always reporting true. The adapter carries the selected generation's URI
+  and fidelity together in `ActorInfo.Snapshot` and the new `ActorInfo.SnapshotFidelity`. ROOTFS
+  and VOLUMES report false; missing or unrecognized fidelity remains accepted as false for default
+  stateless replay, which is not proof of files-only capture. `WithVolumesOnly()` requires observed
+  VOLUMES plus a nonempty durable URI and disables memory-snapshot admission. A memory-required
+  descriptor or recorded compute instance instead requires observed MEMORY plus a nonempty URI;
+  custom control clients must report that evidence or Suspend and stateful Fork now refuse before
+  recording a checkpoint. Combining VOLUMES-only with a memory requirement refuses direct Snapshot
+  calls too. The option validates results, not template configuration: explicitly configure VOLUMES,
+  mount durable directories and disable golden snapshots for files-only recovery. No wire or journal
+  format changes are required.
 - `runtime/substrate` no longer cold-creates an actor for a `REQUIRES_MEMORY_SNAPSHOT` session that
   has a started turn on that harness (completed, failed or interrupted) but no actor (deleted out of
   band, or the daemon restarted with another `-substrate-atespace`). `Exec` fails with

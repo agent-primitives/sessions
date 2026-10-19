@@ -152,12 +152,17 @@ replayed without dialing. Approved calls instead turn executor errors into **dur
 EXECUTOR_ERROR receipts**, including false/unknown/unconfigured-tool refusals. Changing
 configuration afterward does not retry such a receipted failure.
 
-Cancelling Resume while an approved call is in flight closes its socket connection. If the
-controller commits the resulting error receipt, that **EXECUTOR_ERROR is permanent**, even
-with `durable_dedup: true`; subsequent Resume replays it without dialing. Graceful daemon
-shutdown (`SIGINT`/`SIGTERM`) instead drains in-flight calls with `GracefulStop`, so a call
-can still succeed. A hard crash before the receipt commits leaves the approved call eligible
-for redrive with the original session UID and idempotency key.
+Cancelling Resume, or Resume's own deadline passing, while an approved call is in flight closes
+its socket connection. When the call's error is of the same kind as Resume's ending (a
+cancellation after Resume was cancelled, a deadline error after Resume's deadline passed), that
+is not an executor failure: the controller records no receipt and leaves the approved call
+pending, as a hard crash before the receipt commits would, so the next Resume redials it with
+the original session UID and idempotency key. The executor may already have applied the effect,
+so it must deduplicate on that key. A `timeout_ms` expiry or any other failure while Resume is
+still running is a durable EXECUTOR_ERROR receipt, and so is a `timeout_ms` or per-call
+deadline error returned after Resume was cancelled while Resume's own deadline, if any, has not
+passed. Graceful daemon shutdown (`SIGINT`/`SIGTERM`) drains in-flight calls with
+`GracefulStop`, so a call can still succeed.
 
 **EXECUTOR_ERROR does not prove no effect occurred.** An executor can commit its effect and
 lose the response; approved recovery records an error and will not redial to retrieve the

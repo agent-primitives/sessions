@@ -71,6 +71,51 @@ type Capabilities struct {
 }
 ```
 
+## Host-owned model policy
+
+Go embedders opt a route into model defaults and validation explicitly. No default is inferred
+from `Descriptor.Models`; every declared model must be allowed. An empty declaration is valid and
+never widens the host allowlist. Aliases of the same Placer share its policy.
+
+<!-- doccheck: file -->
+```go
+package example
+
+import (
+    "github.com/agent-primitives/sessions/api"
+    "github.com/agent-primitives/sessions/controller"
+    "github.com/agent-primitives/sessions/placement"
+)
+
+func registry(backend placement.Backend, model controller.ModelFunc) (*placement.Registry, error) {
+    placer := placement.New(backend, model, placement.WithModelPolicy(api.ModelPolicy{
+        Default: "primary",
+        Allowed: []string{"primary", "alternate"},
+    }))
+    return placement.NewRegistry("agent", map[string]*placement.Placer{"agent": placer})
+}
+```
+
+Policy-enabled registration bounds `Describe` to 10 seconds and fails closed before registry/store
+mutation. A remote static route can refuse startup if unreachable; a failed stored route stays
+unavailable until restart. Build a fresh Placer to retry a failed admission. The factory itself
+still must not dial or provision; `HarnessRegistry` checks the policy after construction and before
+persisting a new registration. No-policy registration remains unchanged and does not probe.
+
+The Sessions service validates `Session.model` at creation, keeps empty metadata as empty, and
+resolves each new execution's effective default on the selected route. Direct Placer callers use
+`placement.WithSessionModel(model)` on `Exec` to opt in; omitting it keeps legacy behavior.
+Standalone controllers can use `controller.WithModelPolicy` and `controller.WithModelDefault`.
+The reference daemon does not yet expose binding policy configuration.
+
+Use a nonempty `Start.Model` as your default; empty retains your existing choice. An empty
+`ModelRequest.Model` also resolves to the recorded default for policy-aware turns. Explicit per-call
+models may differ within the host's allowed set. An invalid live request is execution-fatal even
+if caught: no provider call or `MODEL_CALL`, later effects refused, best-effort `ERROR`, no `END`.
+Replay and recorded recovery effects use their original default/hash independently of today's
+policy; only new live effects and unanswered model-intent re-drives check the current allowlist.
+Old sessions/journals stay unchanged; see [model defaults](concepts.md#model-defaults).
+
 ## Run: drive one turn
 
 The host hands you a `Start` and an `EventSink`.
@@ -78,6 +123,7 @@ The host hands you a `Start` and an `EventSink`.
 <!-- doccheck: skip excerpt of api.Start; the real definition is in api/harness.go -->
 ```go
 type Start struct {
+    Model         string    // host-resolved default; empty retains the harness's existing choice
     Config        []byte    // opaque per-execution config
     History       []Event   // every prior event, also after a memory restore
     Inputs        []Message // invocation inputs, restored from the journal on controller recovery
@@ -445,8 +491,12 @@ func (Harness) Run(ctx context.Context, s *api.Start, sink api.EventSink) error 
     if n := len(s.Inputs); n > 0 {
         text = s.Inputs[n-1].Text()
     }
+    model := s.Model
+    if model == "" {
+        model = "echo"
+    }
     _, err := sink.Model(ctx, api.ModelRequest{
-        Model:    "echo",
+        Model:    model,
         Messages: []api.Message{*api.TextMessage("user", text)},
     })
     return err
@@ -475,7 +525,8 @@ output, the next turn includes that prior user message without an assistant repl
 neither discards the input nor invents a response. Controller replay preserves this same context
 when re-executing later completed turns.
 
-The harness calls only `EventSink.Model` with its configured model ID and this conversation.
+The harness calls only `EventSink.Model` with nonempty `Start.Model` (otherwise its configured
+model ID) and this conversation.
 The host supplies the model implementation and records the completion; the harness does not
 import a provider SDK or re-emit the completion through `sink.Output`. It has no tools, provider
 adapter, model routing, or streaming logic.

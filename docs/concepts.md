@@ -94,6 +94,41 @@ The cursor and lifecycle status are derived rather than caller-writable:
   correlation and `last_seq` are read atomically; rendering does not decode the journal. Later
   appends do not change an earlier captured response, including one with a zero cursor.
 
+### Model defaults
+
+A Go embedder can attach `api.ModelPolicy{Default, Allowed}` with
+`placement.WithModelPolicy` to each harness route. The host's explicit default must be nonempty
+and allowed. The harness's `Descriptor.Models` is a subset declaration, never a source of defaults
+or authority to widen the allowed set. Registration checks that subset before committing a new
+registration or serving a route; an empty declaration is valid. A policy-enabled route must answer
+bounded `Describe` at registration, including startup: a static failure refuses startup, and a
+failed stored registration stays unavailable until restart. Unconfigured routes do not gain this
+probe. Aliases of one Placer share its policy.
+
+For sessions created with policy, `Session.model` is a validated default: empty selects the binding's
+explicit default, nonempty must be allowed (`INVALID_ARGUMENT` before persistence). Metadata keeps
+the requested value. Each new execution resolves it against the selected route, including a harness
+override, before compute is provisioned. The effective default is delivered in `Start.Model` and
+recorded in `ExecutionStart.model`. An empty per-call model uses that effective default; an explicit
+per-call ID may override it within the allowed set. Existing `ModelCall.model` and `input_hash`
+record the effective request; no new per-call record format is introduced.
+
+An invalid live model request is **execution-fatal even if the harness catches the error**. It calls
+no provider, appends no `MODEL_CALL`, refuses later effects, and ends with best-effort `ERROR`, not
+`END`. This prevents a handled but unrecorded refusal from making a successful turn unreplayable.
+Both plain and streaming providers use the same admission. Recorded replay/recovery prefixes use
+their original default and per-call hashes, not today's policy. Only new live effects or an
+unanswered model-intent re-drive check the current allowlist. Removing policy disables membership
+checks but does not erase the invocation's recorded default.
+
+No configured policy means existing behavior. Pre-policy sessions, including zero-event sessions,
+remain on that behavior even after a policy is configured; fork inherits this eligibility alongside
+`model`. SQLite schema v6 records this host-owned bit without changing old events or hashes. Stop
+all older hosts and embedded CLI writers before the first upgraded open, and back up first if
+rollback is required: older binaries refuse schema v6 at open, but already-open older writers do
+not implement these semantics. There is no downgrade migration. The reference daemon has no binding
+policy configuration yet; see [embedder composition](harness-authoring.md#host-owned-model-policy).
+
 ### How exec_state is derived
 
 Every Session reply — Create, Get, List, Fork, Resume, Suspend, Approve, Delete and Exec frames

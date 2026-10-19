@@ -32,15 +32,17 @@ const (
 // SessionMeta is mutable workload and provenance metadata, separate from verified caller
 // ownership. It is durable before the first event, making empty sessions listable.
 type SessionMeta struct {
-	UID       string
-	Project   string
-	Name      string
-	Harness   string
-	Model     string
-	ParentUID string // set iff this session was forked
-	ForkSeq   int64  // parent event seq forked at
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	UID     string
+	Project string
+	Name    string
+	Harness string
+	Model   string
+	// ModelPolicy is host-owned eligibility, not caller metadata. Legacy sessions stay false.
+	ModelPolicy bool
+	ParentUID   string // set iff this session was forked
+	ForkSeq     int64  // parent event seq forked at
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 
 	// Caller-supplied metadata, carried as proto3-JSON. The store round-trips these without
 	// interpreting them: they describe a session, they do not control it. Identity especially is
@@ -119,6 +121,8 @@ func eventComputeState(ev api.Event) (api.ComputeState, bool) {
 //
 // It preserves the incarnation fence and all append-owned projections, so re-registering
 // an active session updates its metadata without rewinding its identity or reporting state.
+// ModelPolicy is sticky: ordinary metadata updates cannot clear explicit eligibility. Setting it
+// on an existing event-created row lets Fork attach the parent's eligibility after copying events.
 // This lets Fork write child metadata around a controller.Fork that already populated the log.
 //
 // `created_at` follows the caller: an explicit CreatedAt is honored, and a zero one means "now on
@@ -150,13 +154,14 @@ func (s *Store) putSession(db execer, m SessionMeta) error {
 	result, err := db.Exec(
 		`INSERT INTO sessions(session, fence, project, name, harness, model,
 		                      parent_uid, fork_seq, compute_state, created_at, updated_at,
-		                      labels, annotations, origin, identity)
-		 VALUES(?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      labels, annotations, origin, identity, model_policy)
+		 VALUES(?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(session) DO UPDATE SET
 		   project     = excluded.project,
 		   name        = excluded.name,
 		   harness     = excluded.harness,
 		   model       = excluded.model,
+		   model_policy = MAX(sessions.model_policy, excluded.model_policy),
 		   parent_uid  = excluded.parent_uid,
 		   fork_seq    = excluded.fork_seq,
 		   labels      = excluded.labels,
@@ -169,7 +174,7 @@ func (s *Store) putSession(db execer, m SessionMeta) error {
 		 WHERE sessions.deletion_state = 'ACTIVE'`,
 		m.UID, m.Project, m.Name, m.Harness, m.Model,
 		m.ParentUID, m.ForkSeq, string(api.ComputeNone), created.UnixNano(), now.UnixNano(),
-		m.Labels, m.Annotations, m.Origin, m.Identity,
+		m.Labels, m.Annotations, m.Origin, m.Identity, m.ModelPolicy,
 		explicitCreated,
 	)
 	if err != nil {
@@ -192,7 +197,7 @@ func (s *Store) putSession(db execer, m SessionMeta) error {
 const sessionSelect = `
 SELECT s.session, s.project, s.name, s.harness, s.model, s.parent_uid, s.fork_seq,
        s.compute_state, s.created_at, s.updated_at,
-       s.labels, s.annotations, s.origin, s.identity, s.owner_issuer, s.owner_subject,
+       s.labels, s.annotations, s.origin, s.identity, s.model_policy, s.owner_issuer, s.owner_subject,
        s.deletion_state, s.deletion_requested_at, s.deletion_seq,
        (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session = s.session),
        CASE WHEN s.last_seq = (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session = s.session)
@@ -308,7 +313,7 @@ func scanSession(row scanner) (SessionInfo, error) {
 	if err := row.Scan(
 		&info.UID, &info.Project, &info.Name, &info.Harness, &info.Model,
 		&info.ParentUID, &info.ForkSeq, &state, &createdAt, &updatedAt,
-		&info.Labels, &info.Annotations, &info.Origin, &info.Identity, &info.Owner.Issuer, &info.Owner.Subject,
+		&info.Labels, &info.Annotations, &info.Origin, &info.Identity, &info.ModelPolicy, &info.Owner.Issuer, &info.Owner.Subject,
 		&deletionState, &requested, &info.DeletionSeq,
 		&info.LastSeq, &info.PendingApproval.RequestSeq,
 		&info.PendingApproval.ExecutionID, &info.PendingApproval.ToolCallID,

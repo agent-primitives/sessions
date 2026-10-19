@@ -168,6 +168,7 @@ non-empty values cannot be recovered. Config is opaque: preserve bytes verbatim,
 | harness | [string](#string) |  | Host-resolved registry name used for this execution, not necessarily HarnessDescriptor.id. Interrupted Resume resolves this exact name; absent legacy names use the session harness. |
 | harness_version | [string](#string) |  | Advertised, opaque harness replay-compatibility version. Empty means unknown/unversioned. When nonempty, controller replay and interrupted resume require an exact served-version match (including rejection of an empty served version) before running the harness. Empty recorded versions retain existing behavior; this field is opt-in, not required. |
 | compute_instance | [string](#string) |  | Opaque identity of the compute instance the turn was placed on, set only when the harness keeps its state in that instance&#39;s memory (REQUIRES_MEMORY_SNAPSHOT) and the backend can tell two instances behind the same name apart (substrate: the actor&#39;s server-assigned UID). The host refuses a later turn, or a Resume, whose compute reports a different identity than the latest one recorded on that harness since the session&#39;s FORK marker (or, before a fork child&#39;s first turn, the clone the marker recorded in Lifecycle.compute_instance): the state is gone. Empty means not recorded, and such a turn is not compared. |
+| model | [string](#string) |  | Host-resolved effective default for this explicitly policy-enabled invocation. Empty retains existing harness semantics and is omitted from the canonical event, preserving old hashes. Replay/resume restore this exact value, including empty, into Start.model; they never re-resolve it from current session metadata, host policy, or HarnessDescriptor.models. |
 
 
 
@@ -300,7 +301,7 @@ message. Under STATELESS_REPLAY the harness never calls a provider directly.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| model | [string](#string) |  |  |
+| model | [string](#string) |  | On new policy-enabled turns, an empty request model resolves to Start.model; explicit per-call overrides are allowed within the host&#39;s allowed set. Membership is checked before invoking the provider. Rejection is execution-fatal even if caught: the provider is not invoked, no MODEL_CALL is recorded, and subsequent effects are refused. Without policy, existing semantics apply. Replay uses recorded invocation state, not today&#39;s default. The recorded ModelCall format is unchanged; admitted policy-enabled calls record the resolved model in this field. |
 | params | [ModelCall.ParamsEntry](#agentsessions-v1-ModelCall-ParamsEntry) | repeated |  |
 | input_hash | [string](#string) |  | §7/§9.1: required for STATELESS_REPLAY so the I0 check can run |
 | id | [string](#string) |  | correlation id for the served ModelResult |
@@ -748,7 +749,7 @@ catching the error cannot authorize a later model/tool effect or mark recovery c
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [string](#string) |  |  |
-| models | [string](#string) | repeated | model-agnostic: supported/required model ids |
+| models | [string](#string) | repeated | Model-agnostic supported/required model IDs, never a source of the default. When the host explicitly enables model policy, every declared ID must belong to its allowed set. |
 | tools | [ToolSpec](#agentsessions-v1-ToolSpec) | repeated |  |
 | capabilities | [Capabilities](#agentsessions-v1-Capabilities) |  |  |
 | version | [string](#string) |  | Stable, opaque implementation replay-compatibility version, owned by the harness author. Change it when deterministic execution or config interpretation changes. Hosts record it in ExecutionStart and compare known recorded versions exactly on replay/recovery. Empty is supported for older/unversioned harnesses and records an unknown version. |
@@ -808,6 +809,7 @@ restore. A REQUIRES_MEMORY_SNAPSHOT harness does not rebuild in-memory state fro
 | inputs | [Message](#agentsessions-v1-Message) | repeated | Invocation input messages. Controller replay and interrupted recovery restore the original messages from the journal; empty inputs describe an intentionally inputless invocation. |
 | identity | [IdentityContext](#agentsessions-v1-IdentityContext) |  |  |
 | resume_from_seq | [int64](#int64) |  |  |
+| model | [string](#string) |  | Host-resolved effective default for an explicitly policy-enabled invocation. Empty retains existing harness semantics. Replay/resume restore the exact recorded ExecutionStart.model, including empty, rather than today&#39;s policy or HarnessDescriptor.models. |
 
 
 
@@ -1479,7 +1481,7 @@ stable when a session is created mid-pagination; an offset would skip or repeat 
 | ----- | ---- | ----- | ----------- |
 | metadata | [ResourceMetadata](#agentsessions-v1-ResourceMetadata) |  |  |
 | harness | [string](#string) |  |  |
-| model | [string](#string) |  | model-agnostic id |
+| model | [string](#string) |  | Optional model-agnostic session default. Validated and applied only when the selected harness route explicitly enables host-owned model policy; empty selects that policy&#39;s explicit default. Without policy this remains metadata and does not change harness defaults. HarnessDescriptor.models never defines the default. Policy is configured through the host embedder API only, not by Sessions clients or daemon configuration. |
 | exec_state | [ExecState](#agentsessions-v1-ExecState) |  | Every Session reply uses the same append-transaction projection at last_seq: no events before deletion reports EXEC_PENDING; a valid owned unanswered host approval request in the latest first-seen execution reports EXEC_AWAITING; other histories retain EXEC_COMPLETED. DELETE preserves this execution axis but withholds actionable pending_approval. COMPLETED is a compatibility fallback, not proof of END, a receipt, or admission. |
 | compute_state | [ComputeState](#agentsessions-v1-ComputeState) |  | incarnation axis |
 | pending_approval | [ApprovalRef](#agentsessions-v1-ApprovalRef) |  | Set for a valid unanswered host-owned APPROVAL_REQUEST in the latest first-seen execution at last_seq on an ACTIVE session. Requests/decisions match execution_id, tool_call_id and request_seq. Calls whose TOOL_CALL precedes the child&#39;s latest FORK are excluded. Unset when deleted, no request is reportable, approval-bearing evidence is invalid, or the projection lags last_seq. |

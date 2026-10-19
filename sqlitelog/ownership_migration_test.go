@@ -35,8 +35,8 @@ func TestOwnerMigrationPreservesGenuineJournals(t *testing.T) {
 			raw := rawDB(t, path)
 			before := queryValues(t, raw, `SELECT * FROM events ORDER BY session,seq`)
 			s := mustOpen(t, path)
-			if readUserVersion(t, path) != 5 || !reflect.DeepEqual(before, queryValues(t, raw, `SELECT * FROM events ORDER BY session,seq`)) {
-				t.Fatal("migration changed events or failed to reach v5")
+			if readUserVersion(t, path) != sqlitelog.SchemaVersion || !reflect.DeepEqual(before, queryValues(t, raw, `SELECT * FROM events ORDER BY session,seq`)) {
+				t.Fatal("migration changed events or failed to reach current schema")
 			}
 			for _, row := range queryValues(t, raw, `SELECT session FROM sessions`) {
 				uid := row[0].(string)
@@ -90,7 +90,7 @@ func TestOwnerJournalRefusesEnforcementAtSameSchema(t *testing.T) {
 				}
 				t.Fatalf("Open = %v, want ErrUnsupportedAuthorization", err)
 			}
-			if readUserVersion(t, path) != 5 || !reflect.DeepEqual(before, queryValues(t, raw, `SELECT * FROM sessions`)) {
+			if readUserVersion(t, path) != sqlitelog.SchemaVersion || !reflect.DeepEqual(before, queryValues(t, raw, `SELECT * FROM sessions`)) {
 				t.Fatal("refused journal was mutated")
 			}
 		})

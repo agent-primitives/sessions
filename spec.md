@@ -146,6 +146,31 @@ flowchart LR
 - `Session.compute` (`ComputeRef`) is not populated by the reference host. The suspend snapshot
   reference is carried on the `LIFECYCLE_SUSPEND` record instead (§13.3).
 
+### Model defaults
+
+- `SES-15`: A host MAY configure an explicit default model and allowed model IDs per harness
+  route. The reference host exposes `placement.WithModelPolicy` to Go embedders; daemon binding
+  configuration is not provided. IDs are opaque. The default MUST be nonempty and in the allowed
+  set, which MUST NOT contain an empty ID. `Descriptor.models` MUST NOT supply a default.
+- `SES-16`: When policy is configured, registration MUST check that every `Descriptor.models`
+  entry belongs to the host's allowed set before making the route usable or persisting a new
+  registration. An empty declaration is valid and never widens that set. The reference host bounds
+  this `Describe` to 10 seconds; failure refuses registration without exposing peer diagnostics.
+  A policy mismatch is `FAILED_PRECONDITION`; a failed policy Describe is `UNAVAILABLE`, unless the
+  caller's cancellation/deadline caused it (`CANCELLED`/`DEADLINE_EXCEEDED`). A policy-enabled static
+  route can therefore refuse startup, and a failed stored route remains unservable until restart. Routes
+  without policy retain their existing no-probe registration behavior.
+- `SES-17`: For a session created on a policy-enabled route, `CreateSession` MUST reject a
+  nonempty `Session.model` outside that set with `INVALID_ARGUMENT`, before persisting it. Empty
+  means the route's explicit default; metadata keeps the requested value, including empty. New
+  executions MUST resolve against their selected route, including a per-turn harness override,
+  and reject a disallowed session default before provisioning compute. Without a configured policy,
+  the existing model behavior MUST remain unchanged.
+- `SES-18`: Pre-policy sessions MUST retain existing behavior even if policy is configured later,
+  including sessions with no events. The reference SQLite host records a host-owned eligibility bit
+  on session creation; migration leaves old rows unset. Fork inherits that bit with `model`, rather
+  than opting an old session into today's policy. No old event or hash is rewritten.
+
 ### 5.2 Two-axis state
 
 A session reports an execution axis (`exec_state`) and a compute axis (`compute_state`). There is
@@ -400,7 +425,8 @@ no flattened lifecycle enum.
 - `CHAIN-11`: A chain verifier MUST reproduce the golden vectors pinned in
   [`canon/canon_test.go`](canon/canon_test.go) and [`hack/verify_chain.py`](hack/verify_chain.py)
   (`python3 hack/verify_chain.py --golden`). They cover an output event, three `EXECUTION_START`
-  shapes (opaque config with an int64 cursor above 2^53, `input_count` 0, `input_count` 2), and an
+  shapes (opaque config with an int64 cursor above 2^53, `input_count` 0, `input_count` 2), a
+  policy-aware start with `model` and `input_count` 0, and an
   output carrying a tool-call part with `Struct` args, each at `prev_hash = ""` and `seq = 1`.
 - `hack/verify_chain.py --journal` audits a SQLite journal end to end with an independent Python
   implementation. `hack/verify_chain.sh` runs it against a recorded journal and against a tampered
@@ -424,7 +450,9 @@ no flattened lifecycle enum.
   any `EVENT_INPUT` or effect. It carries the execution's `config` bytes verbatim,
   `resume_from_seq`, `input_count` (always set, including 0), the host-resolved harness name, the
   harness's advertised `version`, and, when the backend reports one, the compute instance the turn
-  was placed on (`compute_instance`, `RT-4h`).
+  was placed on (`compute_instance`, `RT-4h`). Policy-enabled executions also record their effective
+  default in `ExecutionStart.model` and deliver it in `Start.model`; empty retains pre-policy
+  behavior. Replay/resume MUST restore this recorded default, not today's policy default.
 - `EXE-2`: The caller's compare-and-swap cursor (§11.4) applies to the `EXECUTION_START` append. If
   it fails, the harness MUST NOT run.
 - `EXE-3`: One `EVENT_INPUT` per input message MUST follow `EXECUTION_START`. Each later append in
@@ -474,6 +502,22 @@ wire as §12 frames: model call, output, tool call, reported tool result, and us
   host-internal: only the host that wrote it is required to reproduce it.
 - TODO(spike): `input_hash` is not language-neutral. Should it be redefined over canonical bytes
   (`CHAIN-1`) so a journal written by one host implementation can be replayed by another?
+- `EXE-34`: For an invocation with a nonempty `ExecutionStart.model`, an empty
+  `ModelRequest.model` MUST resolve to that recorded default before hashing, journaling and provider
+  dispatch; a nonempty ID is a per-call override. Each live request, including a trailing intent
+  re-driven by Resume, MUST belong to the current configured host allowlist before provider IO.
+  A rejection MUST be execution-fatal even if the harness catches it: no provider call or
+  `MODEL_CALL` for the rejected request, no later harness effects, best-effort `ERROR` and no `END`.
+  The reference Sessions API reports `INVALID_ARGUMENT`. This fatal rule prevents an unrecorded
+  handled refusal from making a successfully completed execution unreplayable. `ERROR` still does
+  not complete a modern invocation (`EXE-6`); retrying Resume rechecks live requests.
+- `EXE-35`: Recorded replay/recovery prefixes MUST use the original effective per-call request
+  and hash, independent of today's allowlist. Completed effects MUST NOT call a provider again.
+  New live effects of a policy-aware invocation face the current policy, if configured. Removing
+  policy removes membership checks, not the invocation's recorded default. Invocations with an
+  empty recorded default, including markerless journals, retain their old model behavior without
+  default resolution or membership checks. Per-call IDs remain in the existing `ModelCall.model`;
+  its format is unchanged.
 - `EXE-12`: Model streaming deltas (`ExecUpdate.delta`) MUST NOT be journaled. Exactly one
   `EVENT_OUTPUT` records each finalized completion. Text a harness passes to `Output` is not a
   delta: each call is journaled as its own `EVENT_OUTPUT`.

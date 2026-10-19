@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/canon"
 	"github.com/agent-primitives/sessions/harnesswire"
@@ -29,8 +30,10 @@ import (
 // PlacerFactory builds the Placer for a registered harness, and a release func that frees whatever
 // it built (nil if nothing). It is where the host decides which placements it can serve and checks
 // a placement's address forms: an error for a new registration is FailedPrecondition and nothing
-// is stored. At startup, an error marks only that stored registration unservable. It must not dial
-// or provision anything: a harness that is down must not keep the host from starting.
+// is stored. At startup, an error marks only that stored registration unservable. The factory must
+// not dial or provision anything. Explicit model-policy configuration adds a bounded Describe
+// admission after construction: registration/load fails closed if that check fails. Unconfigured
+// harnesses keep the existing no-dial registration behavior.
 //
 // The Placer must be built with placement.WithDescriptorID(spec.GetDescriptorId()), so that every
 // Exec, Resume and Fork refuses a harness that reports another descriptor id. HarnessRegistry
@@ -135,7 +138,7 @@ func (h *HarnessRegistry) load(rec sqlitelog.HarnessRecord) error {
 	}
 	p, release, err := h.factory(rec.Name, spec)
 	if err == nil {
-		err = checkPlacer(p, spec)
+		err = checkPlacer(context.Background(), p, spec)
 	}
 	if err != nil {
 		if release != nil {
@@ -165,16 +168,17 @@ func (h *HarnessRegistry) unavailable(name string, cause error) error {
 }
 
 // checkPlacer refuses what a PlacerFactory returned when it cannot serve the spec as registered: no
-// Placer at all, or one that does not check the descriptor id the spec expects. Both are host bugs,
-// and running the harness anyway would send session history to a harness nobody registered.
-func checkPlacer(p *placement.Placer, spec *v1.HarnessSpec) error {
+// Placer at all, one that does not check the descriptor id the spec expects, or an invalid explicit
+// model policy. Policy admission is cached before the immutable row commits, so Registry.Add
+// cannot perform a second Describe with a different result after commit.
+func checkPlacer(ctx context.Context, p *placement.Placer, spec *v1.HarnessSpec) error {
 	if p == nil {
 		return errors.New("the placer factory returned no placer")
 	}
 	if got, want := p.DescriptorID(), spec.GetDescriptorId(); got != want {
 		return fmt.Errorf("the placer factory returned a placer that expects descriptor id %q, the spec expects %q; build it with placement.WithDescriptorID(spec.GetDescriptorId())", got, want)
 	}
-	return nil
+	return p.ValidateModelPolicy(ctx)
 }
 
 func (h *HarnessRegistry) keep(release func()) {
@@ -356,13 +360,22 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 			}
 			return nil, status.Errorf(codes.FailedPrecondition, "harness %q: %v", name, err)
 		}
-		if err := checkPlacer(placer, spec); err != nil {
+		if err := checkPlacer(ctx, placer, spec); err != nil {
 			// Storing the row would report CREATED for a name no session can use, or one whose
 			// turns skip the descriptor check, and the row is immutable.
 			if release != nil {
 				release()
 			}
-			return nil, status.Errorf(codes.Internal, "harness %q: %v", name, err)
+			code := codes.Internal // nil Placer or a dropped descriptor-ID check is a host bug.
+			switch {
+			case errors.Is(err, api.ErrModelNotAllowed), errors.Is(err, api.ErrInvalidModelPolicy):
+				code = codes.FailedPrecondition
+			case errors.Is(err, placement.ErrHarnessUnavailable):
+				code = codes.Unavailable
+			case errors.Is(err, placement.ErrAdmissionInterrupted):
+				code = admissionInterruptedCode(err)
+			}
+			return nil, withStatusCause(code, fmt.Errorf("harness %q: %w", name, err))
 		}
 	}
 	rec, result, err := h.store.RegisterHarness(sqlitelog.HarnessRecord{

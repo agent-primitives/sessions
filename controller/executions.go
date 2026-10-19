@@ -23,6 +23,7 @@ type recordedExecution struct {
 	inputRecords   int
 	harness        string
 	harnessVersion string
+	model          string
 	legacyEnd      int
 }
 
@@ -86,6 +87,7 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 			execution.inputCount = event.ExecutionStart.InputCount
 			execution.harness = event.ExecutionStart.Harness
 			execution.harnessVersion = event.ExecutionStart.HarnessVersion
+			execution.model = event.ExecutionStart.Model
 		case api.EventInput:
 			execution.inputRecords++
 			if event.Message != nil {
@@ -161,7 +163,7 @@ func (e recordedExecution) invocation() *api.ExecutionStart {
 	}
 	return &api.ExecutionStart{
 		Config: bytes.Clone(e.config), ResumeFromSeq: e.resumeFromSeq, InputCount: count,
-		Harness: e.harness, HarnessVersion: e.harnessVersion,
+		Harness: e.harness, HarnessVersion: e.harnessVersion, Model: e.model,
 	}
 }
 

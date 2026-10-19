@@ -129,6 +129,11 @@ func NewRegistry(defaultHarness string, placers map[string]*Placer, opts ...Regi
 		}
 	}
 	for name, p := range placers {
+		if err := p.ValidateModelPolicy(context.Background()); err != nil {
+			return nil, fmt.Errorf("placement: harness %q model policy: %w", name, err)
+		}
+	}
+	for name, p := range placers {
 		p.guard = r.guard
 		p.sessions = r.sessions
 		p.registry = r
@@ -175,6 +180,11 @@ func (r *Registry) Add(name string, p *Placer) error {
 		if p.sessions.busy() || p.guard.busy() {
 			return fmt.Errorf("placement: harness %q: placer has an operation in progress", name)
 		}
+	}
+	if err := p.ValidateModelPolicy(context.Background()); err != nil {
+		return fmt.Errorf("placement: harness %q model policy: %w", name, err)
+	}
+	if p.sessions != r.sessions {
 		p.guard = r.guard
 		p.sessions = r.sessions
 		p.registry = r

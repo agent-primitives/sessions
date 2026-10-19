@@ -111,6 +111,9 @@ type LiveDescriber interface {
 type Placer struct {
 	backend      Backend
 	model        controller.ModelFunc
+	modelPolicy  *api.ModelPolicy
+	policyCheck  sync.Once
+	policyError  error
 	stream       controller.StreamFunc
 	tool         controller.ToolFunc
 	durableDedup func(tool string) bool
@@ -172,6 +175,7 @@ func WithDialer(d Dialer) Option { return func(p *Placer) { p.dial = d } }
 type ExecOption func(*execConfig)
 
 type execConfig struct {
+	sessionModel  *string
 	harness       string
 	observer      controller.Observer
 	config        []byte
@@ -385,6 +389,14 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	if err := refuseStatefulOverride(desc, cfg.override); err != nil {
 		return api.Incarnation{}, err
 	}
+	if cfg.sessionModel != nil && p.modelPolicy != nil {
+		if _, _, err := p.ResolveModel(*cfg.sessionModel); err != nil {
+			return api.Incarnation{}, err
+		}
+		if err := p.modelPolicy.ValidateDescriptor(desc); err != nil {
+			return api.Incarnation{}, err
+		}
+	}
 
 	// Refuse before provisioning: on substrate, Create on an actor a stateful fork is checkpointing
 	// would either fail or wake it. openHarness re-checks atomically; this only saves the round trip.
@@ -454,6 +466,9 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		controller.WithStart(cfg.config, cfg.resumeFromSeq),
 		controller.WithHarness(cfg.harness),
 		p.computeInstance(inc))
+	if cfg.sessionModel != nil && p.modelPolicy != nil {
+		copts = append(copts, controller.WithModelPolicy(*p.modelPolicy), controller.WithModelDefault(*cfg.sessionModel))
+	}
 	c, err := controller.New(log, p.model, copts...)
 	if err != nil {
 		return inc, err
@@ -1224,6 +1239,9 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	}
 	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer), controller.WithHarness(cfg.harness),
 		p.computeInstance(inc))
+	if p.modelPolicy != nil {
+		copts = append(copts, controller.WithModelPolicy(*p.modelPolicy))
+	}
 	c, err := controller.New(log, p.model, copts...)
 	if err != nil {
 		return err

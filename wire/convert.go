@@ -63,7 +63,7 @@ func EventToProto(e api.Event) *v1.Event {
 			Config: e.ExecutionStart.Config, ResumeFromSeq: e.ExecutionStart.ResumeFromSeq,
 			InputCount: e.ExecutionStart.InputCount,
 			Harness:    e.ExecutionStart.Harness, HarnessVersion: e.ExecutionStart.HarnessVersion,
-			ComputeInstance: e.ExecutionStart.ComputeInstance,
+			ComputeInstance: e.ExecutionStart.ComputeInstance, Model: e.ExecutionStart.Model,
 		}}
 	case e.Parked != nil:
 		out.Body = &v1.Event_Parked{Parked: approvalRefToProto(e.Parked)}
@@ -112,7 +112,7 @@ func EventFromProto(p *v1.Event) api.Event {
 				Config: b.ExecutionStart.GetConfig(), ResumeFromSeq: b.ExecutionStart.GetResumeFromSeq(),
 				InputCount: b.ExecutionStart.InputCount,
 				Harness:    b.ExecutionStart.GetHarness(), HarnessVersion: b.ExecutionStart.GetHarnessVersion(),
-				ComputeInstance: b.ExecutionStart.GetComputeInstance(),
+				ComputeInstance: b.ExecutionStart.GetComputeInstance(), Model: b.ExecutionStart.GetModel(),
 			}
 		}
 	case *v1.Event_Parked:

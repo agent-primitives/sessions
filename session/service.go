@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -186,12 +187,17 @@ func (s *Service) createSession(uid string, meta sqlitelog.SessionMeta) (*v1.Ses
 	}
 	if meta.Harness == "" {
 		meta.Harness = s.registry.Default()
-	} else if _, err := s.registry.For(meta.Harness); err != nil {
-		// Reject at create rather than at first Exec. Storing an unservable harness would make
-		// the session listable but permanently unrunnable, and the failure would surface later
-		// somewhere that looks unrelated.
+	}
+	// Reject an unservable harness or model before storing even an empty session.
+	placer, err := s.registry.For(meta.Harness)
+	if err != nil {
 		return nil, harnessError(err)
 	}
+	_, configured, err := placer.ResolveModel(meta.Model)
+	if err != nil {
+		return nil, withStatusCause(codes.InvalidArgument, fmt.Errorf("create session: %w", err))
+	}
+	meta.ModelPolicy = configured
 	// A new session is the one thing a retired harness refuses. The check runs in the insert's
 	// transaction, so once RetireHarness has returned no new session can land on the harness, even
 	// one whose create started first. A name that is not static must have a registration row.
@@ -565,6 +571,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	// goes through CreateSession.
 	uid := req.GetSession()
 	var sess *v1.Session
+	var modelPolicy bool
 	if uid == "" {
 		uid = newUID()
 		created, err := s.createSession(uid, sqlitelog.SessionMeta{UID: uid, Harness: req.GetHarness()})
@@ -618,11 +625,12 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		if err != nil {
 			return status.Errorf(codes.Internal, "head: %v", err)
 		}
+		info, err := s.store.SessionInfo(uid)
+		if err != nil {
+			return sessionStoreError(err, uid)
+		}
+		modelPolicy = info.ModelPolicy
 		if sess == nil {
-			info, err := s.store.SessionInfo(uid)
-			if err != nil {
-				return sessionStoreError(err, uid)
-			}
 			sess, err = sessionProto(info)
 			return err
 		}
@@ -692,6 +700,9 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		placement.WithHarness(harness),
 		placement.WithObserver(observer),
 		placement.WithStart(req.GetConfig(), req.GetResumeFromSeq()),
+	}
+	if modelPolicy {
+		execOpts = append(execOpts, placement.WithSessionModel(sess.GetModel()))
 	}
 	if d := req.GetDeadlineUnix(); d > 0 {
 		execOpts = append(execOpts, placement.WithDeadline(time.Unix(d, 0)))
@@ -896,13 +907,14 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 			name = childNames[i]
 		}
 		if err := s.store.PutSession(sqlitelog.SessionMeta{
-			UID:       child.UID,
-			Project:   parentInfo.Project,
-			Name:      name,
-			Harness:   parentInfo.Harness,
-			Model:     parentInfo.Model,
-			ParentUID: req.GetSession(),
-			ForkSeq:   atSeq,
+			UID:         child.UID,
+			Project:     parentInfo.Project,
+			Name:        name,
+			Harness:     parentInfo.Harness,
+			Model:       parentInfo.Model,
+			ModelPolicy: parentInfo.ModelPolicy,
+			ParentUID:   req.GetSession(),
+			ForkSeq:     atSeq,
 			// A child inherits the parent's annotations and origin, because it is the same
 			// workload branched and its external context did not change. Labels come from the
 			// request instead, so callers can distinguish branches. Identity is not inherited;
@@ -1081,6 +1093,8 @@ func suspendError(err error) error {
 
 func resumeError(err error) error {
 	switch {
+	case errors.Is(err, api.ErrModelNotAllowed), errors.Is(err, api.ErrInvalidModelPolicy):
+		return withStatusCause(codes.InvalidArgument, fmt.Errorf("resume: %w", err))
 	case errors.Is(err, eventlog.ErrDeleted):
 		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, eventlog.ErrTampered):
@@ -1128,6 +1142,8 @@ func admissionInterruptedCode(err error) codes.Code {
 
 func execError(err error) error {
 	switch {
+	case errors.Is(err, api.ErrModelNotAllowed), errors.Is(err, api.ErrInvalidModelPolicy):
+		return withStatusCause(codes.InvalidArgument, err)
 	case errors.Is(err, eventlog.ErrDeleted):
 		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, eventlog.ErrTampered):

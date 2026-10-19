@@ -9,6 +9,13 @@ not provide.
 
 ### Added
 
+- Go embedders can configure `placement.WithModelPolicy(api.ModelPolicy{Default, Allowed})` per
+  harness route. New sessions validate `Session.model` at creation (`INVALID_ARGUMENT`) and pass its
+  effective default through `Start.Model` and `ExecutionStart.model`. Registration checks
+  `Descriptor.Models` is a subset, never infers its default, and fails closed on a bounded Describe
+  failure. Per-call overrides are allowed within policy. An invalid live model request is
+  execution-fatal even if caught: no provider call or `MODEL_CALL`, later effects refused,
+  best-effort `ERROR` and no `END`. Daemon binding configuration is not included.
 - `model/openai.NewResponses` adds an explicit stateless Responses client with function tools,
   opaque encrypted reasoning retention, usage, and text streaming. Existing Chat Completions,
   daemon/CLI selection, neutral request hashes and journal schemas remain unchanged. Unsupported
@@ -46,6 +53,16 @@ not provide.
 
 ### Compatibility
 
+- SQLite schema v6 adds a host-owned session model-policy eligibility bit. Existing sessions,
+  including zero-event sessions, remain legacy; fork inherits eligibility. Existing journal bytes,
+  hashes and `ModelCall` format are unchanged. Replay/resume restore the recorded effective default;
+  recorded results ignore today's allowlist, while new live effects and unanswered model-intent
+  re-drives check current policy when configured. No policy keeps existing model behavior. Before
+  upgrading, stop every older host and embedded CLI writer and back up for rollback, following the
+  [rollout order](#sqlite-v4-rollout). Older builds refuse v6 at open, but already-open older writers
+  do not enforce model policy. There is no downgrade migration. Policy-enabled remote registration
+  now requires a bounded successful Describe at startup; a failed stored route needs a restart
+  after its endpoint is restored. Unconfigured registration remains probe-free.
 - Optional `authn` interceptors reject unverified calls in required mode and expire authenticated
   streams. Unary authentication is admission-only; credential expiry does not end an admitted call.
   The reference daemon remains unauthenticated and unenforced; authentication alone is not isolation,

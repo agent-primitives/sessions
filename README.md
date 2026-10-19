@@ -96,9 +96,10 @@ capability tiers all run today. See the
 [verification boundary](docs/substrate-conformance.md#verification-boundary) for what the live tests
 cover, and [how it behaves](docs/interaction-model.md) for approvals, recovery, and known limits.
 
-Not built: authentication, authorization, and transport security; a managed control plane;
-enterprise identity and provenance; and confidential or GPU snapshots. Read
-[`docs/security.md`](docs/security.md) before exposing a host.
+The reference daemon has no authentication, authorization, or transport security. Custom Go hosts
+can opt into [caller authentication](docs/security.md#optional-go-caller-authentication), not isolation.
+A managed control plane, enterprise identity and provenance, and confidential or GPU snapshots are
+not built. Read [`docs/security.md`](docs/security.md) before exposing a host.
 
 ### API stability
 

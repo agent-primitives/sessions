@@ -49,10 +49,10 @@ const DefaultPath = "/chat/completions"
 // request into a session that can never be advanced.
 const defaultTimeout = 2 * time.Minute
 
-// ErrUnsupportedPart reports request content this provider cannot represent: a content part, or the
-// tools and tool choice offered to the model. It is returned rather than dropped: the log records
-// the request the harness built, so silently sending less than that would make the journal describe
-// a call that never happened, and replay would reproduce the wrong thing.
+// ErrUnsupportedPart reports unmapped request semantics or malformed/unsupported tool content.
+// Both Client and ResponsesClient return it for request-side tools/tool-choice violations and for
+// malformed or unsupported tool completions. Refusing rather than dropping content keeps the
+// neutral request and recorded completion faithful to the supported protocol mapping.
 var ErrUnsupportedPart = errors.New("openai: unsupported content part")
 
 // Client calls an OpenAI-compatible Chat Completions endpoint.
@@ -142,10 +142,10 @@ func WithHTTPClient(h *http.Client) Option {
 	}
 }
 
-// New builds a Client. A default model is required: the model id ends up on every recorded
-// MODEL_CALL event, so a client that cannot name one would write a journal that does not say what
-// produced the completion. A base URL that is not absolute, a path that does not parse, or a query
-// parameter set in both the base URL and the path is an error.
+// New builds a Client. A default model is required to identify fallback provider calls and usage.
+// The journal still hashes the original neutral request: callers needing an explicit MODEL_CALL
+// identity should set Model rather than rely on fallback. A non-absolute base URL, invalid path,
+// or query parameter set in both the base URL and path is an error.
 func New(opts ...Option) (*Client, error) {
 	c := &Client{
 		baseURL: DefaultBaseURL,
@@ -309,12 +309,23 @@ func (c *Client) Model(ctx context.Context, req api.ModelRequest) (api.ModelResp
 
 	var out chatResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return api.ModelResponse{}, fmt.Errorf("openai: decode response: %w", err)
+		return api.ModelResponse{}, fmt.Errorf("openai: decode response: %s", jsonDecodeDetail(err))
 	}
 	if len(out.Choices) == 0 {
 		return api.ModelResponse{}, fmt.Errorf("openai: %s returned no choices", model)
 	}
-	return toModelResponse(model, out), nil
+	choice := out.Choices[0]
+	if err := checkToolFinish(choice.FinishReason, choice.Message.ToolCalls, req.ToolChoice); err != nil {
+		return api.ModelResponse{}, err
+	}
+	result, err := toModelResponse(model, choice.Message, out.Usage.toAPI(model))
+	if err != nil {
+		return api.ModelResponse{}, err
+	}
+	if err := validateCompletionToolCalls(result.Message.Parts, req.Tools, req.ToolChoice); err != nil {
+		return api.ModelResponse{}, err
+	}
+	return result, nil
 }
 
 // StreamModel performs one live completion, reporting text as it arrives. It satisfies
@@ -340,7 +351,34 @@ func (c *Client) StreamModel(ctx context.Context, req api.ModelRequest, onChunk 
 	}
 
 	var text, reasoning strings.Builder
+	calls := map[int]*toolDeltaBuffer{}
+	var finishReason string
+	var finalized api.ModelResponse
 	usage := api.Usage{Model: model}
+	finalize := func(reason string) (api.ModelResponse, error) {
+		message := chatCompletionMessage{Content: text.String(), ReasoningContent: reasoning.String()}
+		// Never allocate a slice from a provider-controlled maximum index.
+		for i := 0; i < len(calls); i++ {
+			call := calls[i]
+			if call == nil {
+				return api.ModelResponse{}, fmt.Errorf("%w: noncontiguous tool call indexes", ErrUnsupportedPart)
+			}
+			wire := chatToolCall{ID: call.id, Type: call.kind}
+			wire.Function.Name, wire.Function.Arguments = call.name, call.args.String()
+			message.ToolCalls = append(message.ToolCalls, wire)
+		}
+		if err := checkToolFinish(reason, message.ToolCalls, req.ToolChoice); err != nil {
+			return api.ModelResponse{}, err
+		}
+		result, err := toModelResponse(model, message, usage)
+		if err != nil {
+			return api.ModelResponse{}, err
+		}
+		if err := validateCompletionToolCalls(result.Message.Parts, req.Tools, req.ToolChoice); err != nil {
+			return api.ModelResponse{}, err
+		}
+		return result, nil
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	// A single event can exceed the default 64KB line budget on a long completion, which would
@@ -358,17 +396,36 @@ func (c *Client) StreamModel(ctx context.Context, req api.ModelRequest, onChunk 
 		}
 		var chunk chatChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			return api.ModelResponse{}, fmt.Errorf("openai: decode stream chunk: %w", err)
+			return api.ModelResponse{}, fmt.Errorf("openai: decode stream chunk: %s", jsonDecodeDetail(err))
 		}
 		if u := chunk.Usage; u != nil {
-			usage.InputTokens = u.PromptTokens
-			usage.OutputTokens = u.CompletionTokens
-			usage.ReasoningTokens = u.CompletionTokensDetails.ReasoningTokens
+			usage = u.toAPI(model)
 		}
 		if len(chunk.Choices) == 0 {
 			continue // usage-only frames carry no choice
 		}
-		d := chunk.Choices[0].Delta
+		choice := chunk.Choices[0]
+		d := choice.Delta
+		if d.Refusal != "" {
+			return api.ModelResponse{}, fmt.Errorf("%w: completion refusal is not supported", ErrUnsupportedPart)
+		}
+		if finishReason != "" {
+			// A terminal choice freezes semantic output, but not trailing usage.
+			// Refuse before appending fragments or exposing text to the callback.
+			if d.Content != "" || d.ReasoningContent != "" || len(d.ToolCalls) != 0 || legacyFunctionCall(d.FunctionCall) {
+				return api.ModelResponse{}, fmt.Errorf("%w: semantic delta after completion finish", ErrUnsupportedPart)
+			}
+			if choice.FinishReason != "" && choice.FinishReason != finishReason {
+				return api.ModelResponse{}, fmt.Errorf("%w: contradictory completion finish reason", ErrUnsupportedPart)
+			}
+			continue
+		}
+		if legacyFunctionCall(d.FunctionCall) {
+			return api.ModelResponse{}, fmt.Errorf("%w: legacy function_call is not supported", ErrUnsupportedPart)
+		}
+		if err := appendToolDeltas(calls, d.ToolCalls); err != nil {
+			return api.ModelResponse{}, err
+		}
 		if d.ReasoningContent != "" {
 			reasoning.WriteString(d.ReasoningContent)
 		}
@@ -378,19 +435,51 @@ func (c *Client) StreamModel(ctx context.Context, req api.ModelRequest, onChunk 
 				onChunk(d.Content)
 			}
 		}
+		if choice.FinishReason != "" {
+			// The finish-bearing frame can carry the final argument suffix itself.
+			finalized, err = finalize(choice.FinishReason)
+			if err != nil {
+				return api.ModelResponse{}, err
+			}
+			finishReason = choice.FinishReason
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return api.ModelResponse{}, fmt.Errorf("openai: read stream: %w", err)
 	}
 
-	parts := make([]api.Part, 0, 2)
-	if r := reasoning.String(); r != "" {
-		parts = append(parts, api.Part{Reasoning: &api.ReasoningPart{Provider: "openai", ModelID: model, Opaque: []byte(r)}})
+	if finishReason == "" {
+		// Preserve text-only streams without a finish reason; tool calls still require one.
+		finalized, err = finalize("")
+		if err != nil {
+			return api.ModelResponse{}, err
+		}
 	}
-	if t := text.String(); t != "" {
-		parts = append(parts, api.Part{Text: &api.TextPart{Text: t}})
+	finalized.Usage = usage
+	return finalized, nil
+}
+
+// jsonDecodeDetail keeps decoder errors safe for durable ERROR descriptions. Raw errors can
+// contain provider-controlled values; Field names only the statically declared struct fields.
+func jsonDecodeDetail(err error) string {
+	if _, syntax := err.(*json.SyntaxError); syntax {
+		return "invalid JSON syntax"
 	}
-	return api.ModelResponse{Message: api.Message{Role: "assistant", Parts: parts}, Usage: usage}, nil
+	detail := "JSON value has the wrong type or is out of range"
+	if typeError, ok := err.(*json.UnmarshalTypeError); ok && typeError.Field != "" {
+		// Go 1.27 added slice indexes to Field. Keep journaled diagnostics stable
+		// across toolchains by retaining only the statically declared field path.
+		var fields []string
+		for _, field := range strings.Split(typeError.Field, ".") {
+			if field != "" && strings.Trim(field, "0123456789") != "" {
+				fields = append(fields, field)
+			}
+		}
+		if len(fields) != 0 {
+			detail += " for field " + strings.Join(fields, ".")
+		}
+	}
+	return detail
 }
 
 // buildRequest resolves the model and encodes the body. Both call paths share it so a streamed turn
@@ -402,23 +491,26 @@ func (c *Client) buildRequest(req api.ModelRequest, stream bool) (string, []byte
 		// harnesses run against a real endpoint without every one of them hard-coding a model.
 		model = c.model
 	}
-	// Tool definitions are not mapped to this endpoint yet. Sending the call without them would
-	// let the model answer a request the harness never made while the journal hashes the tools in.
-	if len(req.Tools) > 0 || req.ToolChoice != nil {
-		return model, nil, fmt.Errorf("%w: tool definitions and tool choice are not supported yet", ErrUnsupportedPart)
+	if len(req.Params) != 0 {
+		return model, nil, fmt.Errorf("%w: Params are not mapped to Chat Completions", ErrUnsupportedPart)
 	}
+	if err := validateTools(req.Tools, req.ToolChoice); err != nil {
+		return model, nil, fmt.Errorf("%w: %v", ErrUnsupportedPart, err)
+	}
+	tools := toChatTools(req.Tools)
+	choice := toChatToolChoice(req.ToolChoice)
 	msgs, err := toChatMessages(req.Messages)
 	if err != nil {
 		return model, nil, err
 	}
-	body := chatRequest{Model: model, Messages: msgs}
+	body := chatRequest{Model: model, Messages: msgs, Tools: tools, ToolChoice: choice}
 	if stream {
 		body.Stream = true
 		body.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
-	raw, err := json.Marshal(body)
+	raw, err := responsesMarshal(body)
 	if err != nil {
-		return model, nil, fmt.Errorf("openai: encode request: %w", err)
+		return model, nil, fmt.Errorf("%w: encode request: %w", ErrUnsupportedPart, err)
 	}
 	return model, raw, nil
 }
@@ -453,81 +545,40 @@ func statusError(model string, code int, raw []byte) error {
 	return fmt.Errorf("openai: %s: http %d: %s", model, code, detail)
 }
 
-// toChatMessages converts the neutral content model to chat messages.
-//
-// Reasoning parts are dropped on the way OUT by design: they are opaque provider state recorded for
-// replay continuity (I2), not input this endpoint accepts. Every other part this adapter cannot map
-// (file, data, tool call, tool result, or a kind it does not know) is refused instead, because
-// dropping it would change what the model saw while the journal still claims otherwise.
-func toChatMessages(msgs []api.Message) ([]chatMessage, error) {
-	out := make([]chatMessage, 0, len(msgs))
-	for i := range msgs {
-		m := &msgs[i]
-		var text strings.Builder
-		for _, p := range m.Parts {
-			switch {
-			case p.Text != nil:
-				text.WriteString(p.Text.Text)
-			case p.Reasoning != nil:
-				// Carried in the journal, not resent.
-			case p.File != nil:
-				return nil, fmt.Errorf("%w: file parts are not supported yet", ErrUnsupportedPart)
-			case p.Data != nil:
-				return nil, fmt.Errorf("%w: data parts are not supported yet", ErrUnsupportedPart)
-			case p.ToolCall != nil:
-				return nil, fmt.Errorf("%w: tool call parts are not supported yet", ErrUnsupportedPart)
-			case p.ToolResult != nil:
-				return nil, fmt.Errorf("%w: tool result parts are not supported yet", ErrUnsupportedPart)
-			default:
-				return nil, fmt.Errorf("%w: part with no known content", ErrUnsupportedPart)
-			}
-		}
-		role := m.Role
-		if role == "" {
-			role = "user"
-		}
-		out = append(out, chatMessage{Role: role, Content: text.String()})
+// toModelResponse is shared by streaming and nonstreaming so the journal receives the same
+// finalized parts. Reasoning is recorded only when supplied; tool arguments enter the existing
+// JSON-native map domain (float64 numbers), not a lexical JSON/whitespace representation.
+func toModelResponse(model string, message chatCompletionMessage, usage api.Usage) (api.ModelResponse, error) {
+	if message.Refusal != "" {
+		return api.ModelResponse{}, fmt.Errorf("%w: completion refusal is not supported", ErrUnsupportedPart)
 	}
-	return out, nil
-}
-
-// toModelResponse builds the neutral completion.
-//
-// A reasoning part is produced only when the endpoint actually returned reasoning content. The
-// project never synthesizes one: a fabricated part would be recorded verbatim and replayed as if
-// the provider had produced it.
-func toModelResponse(model string, out chatResponse) api.ModelResponse {
-	choice := out.Choices[0]
-	parts := make([]api.Part, 0, 2)
-	if r := choice.Message.ReasoningContent; r != "" {
-		parts = append(parts, api.Part{Reasoning: &api.ReasoningPart{
-			Provider: "openai",
-			ModelID:  model,
-			Opaque:   []byte(r),
-		}})
+	if legacyFunctionCall(message.FunctionCall) {
+		return api.ModelResponse{}, fmt.Errorf("%w: legacy function_call is not supported", ErrUnsupportedPart)
 	}
-	if t := choice.Message.Content; t != "" {
+	calls, err := toolCallParts(message.ToolCalls)
+	if err != nil {
+		return api.ModelResponse{}, err
+	}
+	parts := make([]api.Part, 0, 2+len(calls))
+	if r := message.ReasoningContent; r != "" {
+		parts = append(parts, api.Part{Reasoning: &api.ReasoningPart{Provider: "openai", ModelID: model, Opaque: []byte(r)}})
+	}
+	if t := message.Content; t != "" {
 		parts = append(parts, api.Part{Text: &api.TextPart{Text: t}})
 	}
-	return api.ModelResponse{
-		Message: api.Message{Role: "assistant", Parts: parts},
-		Usage: api.Usage{
-			Model:           model,
-			InputTokens:     out.Usage.PromptTokens,
-			OutputTokens:    out.Usage.CompletionTokens,
-			ReasoningTokens: out.Usage.CompletionTokensDetails.ReasoningTokens,
-		},
-	}
+	parts = append(parts, calls...)
+	return api.ModelResponse{Message: api.Message{Role: "assistant", Parts: parts}, Usage: usage}, nil
 }
 
 // ---- wire types ----
 
 type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-	Stream   bool          `json:"stream,omitempty"`
-	// Ask a streaming response to carry usage too. Without it the stream ends with no accounting,
-	// and a streamed turn would silently record zero tokens.
+	Model      string               `json:"model"`
+	Messages   []chatMessage        `json:"messages"`
+	Tools      []chatToolDefinition `json:"tools,omitempty"`
+	ToolChoice any                  `json:"tool_choice,omitempty"`
+	Stream     bool                 `json:"stream,omitempty"`
+	// Include usage so streaming does not silently lose accounting.
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
 }
 
@@ -535,47 +586,54 @@ type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
-// chatChunk is one server-sent event from a streaming response. The fields mirror chatResponse but
-// carry deltas rather than a whole message.
 type chatChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content          string `json:"content"`
-			ReasoningContent string `json:"reasoning_content"`
+			Content          string          `json:"content"`
+			Refusal          string          `json:"refusal"`
+			ReasoningContent string          `json:"reasoning_content"`
+			ToolCalls        []chatToolDelta `json:"tool_calls"`
+			FunctionCall     json.RawMessage `json:"function_call"`
 		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
-	Usage *struct {
-		PromptTokens            int64 `json:"prompt_tokens"`
-		CompletionTokens        int64 `json:"completion_tokens"`
-		CompletionTokensDetails struct {
-			ReasoningTokens int64 `json:"reasoning_tokens"`
-		} `json:"completion_tokens_details"`
-	} `json:"usage"`
+	Usage *chatUsage `json:"usage"`
 }
 
 type chatMessage struct {
-	Role    string `json:"role"`
+	Role       string         `json:"role"`
+	Content    string         `json:"content"`
+	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+type chatCompletionMessage struct {
 	Content string `json:"content"`
+	Refusal string `json:"refusal"`
+	// Compatible endpoints may supply reasoning text; never synthesize it when absent.
+	ReasoningContent string          `json:"reasoning_content"`
+	ToolCalls        []chatToolCall  `json:"tool_calls"`
+	FunctionCall     json.RawMessage `json:"function_call"`
 }
 
 type chatResponse struct {
 	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-			// Not an OpenAI field. OpenAI keeps reasoning hidden and reports only its token
-			// count. Several compatible endpoints (DeepSeek and gateways that pass it through)
-			// do return the text here, so it is read when present and absent everywhere else,
-			// which simply yields no reasoning part. Untested against a live reasoning endpoint.
-			ReasoningContent string `json:"reasoning_content"`
-		} `json:"message"`
+		Message      chatCompletionMessage `json:"message"`
+		FinishReason string                `json:"finish_reason"`
 	} `json:"choices"`
-	Usage struct {
-		PromptTokens            int64 `json:"prompt_tokens"`
-		CompletionTokens        int64 `json:"completion_tokens"`
-		CompletionTokensDetails struct {
-			ReasoningTokens int64 `json:"reasoning_tokens"`
-		} `json:"completion_tokens_details"`
-	} `json:"usage"`
+	Usage chatUsage `json:"usage"`
+}
+
+type chatUsage struct {
+	PromptTokens            int64 `json:"prompt_tokens"`
+	CompletionTokens        int64 `json:"completion_tokens"`
+	CompletionTokensDetails struct {
+		ReasoningTokens int64 `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
+}
+
+func (u chatUsage) toAPI(model string) api.Usage {
+	return api.Usage{Model: model, InputTokens: u.PromptTokens, OutputTokens: u.CompletionTokens, ReasoningTokens: u.CompletionTokensDetails.ReasoningTokens}
 }
 
 type errorResponse struct {

@@ -9,6 +9,11 @@ not provide.
 
 ### Added
 
+- `model/openai` maps Chat Completions function tools and tool choices, assistant tool-call parts
+  and text `ToolResult.Content`. Streaming assembles indexed argument deltas into finalized tool
+  parts without emitting tool JSON through the text callback. Replay and completed-effect recovery
+  preserve full parts/usage through the existing neutral request hash and completion journal.
+
 - `model/openai.NewResponses` adds an explicit stateless Responses client with function tools,
   opaque encrypted reasoning retention, usage, and text streaming. Existing Chat Completions,
   daemon/CLI selection, neutral request hashes and journal schemas remain unchanged. Unsupported
@@ -46,6 +51,22 @@ not provide.
 
 ### Compatibility
 
+- `model/openai` now refuses nonempty `ModelRequest.Params`, previously silently ignored. A turn
+  interrupted under an older build whose harness sets Params fails if recovery must re-drive the
+  model call; completed recorded model effects remain replayable without invoking the adapter.
+  Unmapped parts/choices, duplicate tool names, nonempty completion refusals and malformed or
+  incomplete tool calls fail closed. Chat Completions and Responses now also refuse a completion
+  that calls an unoffered tool, violates a named REQUIRED choice, calls a tool under NONE, or
+  returns text-only output under REQUIRED. Integer arguments outside ±2^53 are refused rather than
+  rounded. Tool results require explicit text Content when receipt data is populated; the adapter
+  does not guess text from Output/error metadata or fetch external URIs. A named REQUIRED choice
+  also accepts `stop` for exactly one complete matching function call; AUTO and unnamed REQUIRED
+  still require `tool_calls`. Streaming validates and freezes a completion after processing the
+  finish-bearing frame's own delta, refusing later semantic deltas or contradictory finish reasons
+  while allowing trailing usage. Text-only missing-finish responses and EOF without `[DONE]`
+  remain supported. Response, stream chunk and argument decode errors retain only syntax or
+  type/range diagnostics and declared field names, never raw provider values or toolchain-dependent
+  slice indexes. It does not register/execute tools or add executor deduplication.
 - Optional `authn` interceptors reject unverified calls in required mode and expire authenticated
   streams. Unary authentication is admission-only; credential expiry does not end an admitted call.
   The reference daemon remains unauthenticated and unenforced; authentication alone is not isolation,

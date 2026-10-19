@@ -229,9 +229,10 @@ Suspend/Fork; stateful Fork retains `placement.ErrUnplaceable`. Validation can r
 SuspendActor already suspended compute: no usable ref or SUSPEND is recorded. Create and Restore
 also check the suspended actor's durable URI and configured fidelity before resuming, so a fresh
 host cannot revive that refused state. Restore decides whether MEMORY is required from the backend
-contract, not from a legacy `SnapshotRef.Memory` bit: v0.2.0 and earlier journaled `Memory: true`
-for every Substrate suspend, even for stateless actors. A memory-required actor with non-MEMORY
-evidence also wraps `api.ErrMemoryStateLost`. Custom clients must populate fidelity in GetActor too.
+contract, not from a legacy `SnapshotRef.Memory` bit: journals written before this change
+recorded `Memory: true` for every Substrate suspend, including stateless actors. A
+memory-required actor with non-MEMORY evidence also wraps `api.ErrMemoryStateLost`. Custom clients
+must populate fidelity in GetActor too.
 
 First placement can find an actor between CreateActor and its first ResumeActor. The additive
 `ActorInfo.NoSnapshotHistory` flag permits that snapshot-less attachment only with positive evidence:
@@ -244,16 +245,20 @@ golden exists yet). Capture itself never uses the exemption. A backend's own suc
 → ResumeActor path remains unchanged. These client-side checks are not atomic and do not fence
 traffic directly to the router.
 
-**Known limit — actors paused outside sessions:** the adapter maps Substrate PAUSED to suspended
-but reports only the latest completed durable checkpoint. At the pinned Substrate, resume prefers
-an actor-local checkpoint when one exists. Validation can falsely refuse recoverable local state
-or accept a local checkpoint whose fidelity does not meet the backend's requirement. For example,
-a local-only MEMORY checkpoint can be refused as `api.ErrMemoryStateLost` even though it is
-recoverable; an older durable VOLUMES checkpoint can pass `WithVolumesOnly()` validation while
-resume actually restores a local MEMORY checkpoint.
+**Known limit — effective resume source can differ from durable evidence:** the adapter maps
+Substrate PAUSED to suspended but reports only the latest completed durable checkpoint. At the
+pinned Substrate, resume can restore something other than the durable checkpoint the adapter
+validated. Validation can falsely refuse recoverable local state or accept a checkpoint whose
+fidelity does not meet the backend's requirement. For example, a local-only MEMORY checkpoint can
+be refused as `api.ErrMemoryStateLost` even though it is recoverable; an older durable VOLUMES
+checkpoint can pass `WithVolumesOnly()` validation while resume actually restores a local MEMORY
+checkpoint. Likewise, when a durable snapshot's recorded `ActorTemplate` UID differs from the
+actor's current template UID (for example because the template was deleted and recreated under the
+same name), pinned Substrate restores at VOLUMES scope: a memory-tier session can pass durable
+MEMORY validation yet still cold-boot and lose RAM.
 Sessions does not call `PauseActor`; these fidelity checks do not cover actors paused by an
 operator or another client. Durable checkpoint evidence is not proof of the effective resume
-source in that case.
+source in either case.
 
 The option **validates the result; it does not configure Substrate**. Configure the ActorTemplate
 with `snapshotConfig.preferredFidelity: SNAPSHOT_FIDELITY_VOLUMES`, at least one mounted `durable-dir`

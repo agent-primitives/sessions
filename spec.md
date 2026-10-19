@@ -1242,21 +1242,27 @@ The reference host takes it as `placement.Backend` in
   `FAILED_PRECONDITION` from Suspend/Fork; the actor may already be suspended when capture refuses,
   but no ref or SUSPEND is recorded. Create and Restore check a suspended actor's durable URI and
   configured fidelity before resuming it. Restore decides whether MEMORY is required from the
-  backend descriptor, not from a legacy `SnapshotRef.Memory` bit, because older stateless journals
-  set that bit on every Substrate suspend. Memory-required non-MEMORY evidence also wraps
-  `api.ErrMemoryStateLost`. GetActor must report that evidence too. An identified SUSPENDED actor
-  with authoritative generation-zero/empty-list evidence can report `ActorInfo.NoSnapshotHistory`
-  for first placement between CreateActor and its first ResumeActor. False means present or unknown
+  backend descriptor, not from a legacy `SnapshotRef.Memory` bit, because journals written before
+  this change recorded `Memory: true` on every Substrate suspend, including stateless actors.
+  Memory-required non-MEMORY evidence also wraps `api.ErrMemoryStateLost`. GetActor must report
+  that evidence too. An identified SUSPENDED actor with authoritative generation-zero/empty-list
+  evidence can report `ActorInfo.NoSnapshotHistory` for first placement between CreateActor and its
+  first ResumeActor. False means present or unknown
   history, not an exemption; borrowed fork snapshots and refused captures do not qualify. At the
   pinned Substrate, an unsourced `CreateActor` records the template's current golden tag as
   generation 1, so this exemption exists only when golden snapshots are disabled or unavailable.
   Capture never uses this exemption. These client checks can race lifecycle operations or router
-  ingress. Known limit: actors paused outside sessions may hold an actor-local checkpoint that
+  ingress. Known limit: the effective resume source can differ from the durable checkpoint the
+  adapter validated. Actors paused outside sessions may hold an actor-local checkpoint that
   Substrate prefers on resume, while the adapter reports only durable checkpoint evidence.
   Validation can falsely refuse recoverable local state or accept a fidelity that does not meet
   the backend's requirement. For example, local-only MEMORY can be refused as lost; older durable
-  VOLUMES can pass validation even when resume restores local MEMORY. The fidelity checks do not
-  cover this PAUSED case; sessions does not call `PauseActor`.
+  VOLUMES can pass validation even when resume restores local MEMORY. Likewise, when a durable
+  snapshot's recorded `ActorTemplate` UID differs from the actor's current template UID (for
+  example because the template was deleted and recreated under the same name), pinned Substrate
+  restores at VOLUMES scope: a memory-tier session can pass durable MEMORY validation yet still
+  cold-boot and lose RAM. The fidelity checks do not cover the PAUSED case, and sessions does not
+  call `PauseActor`.
   `Snapshot` and `Restore` do not create missing actors. When no actor exists (for example a fresh
   session before any `Create` reached `CreateActor`, and not a fork child, or an actor deleted
   outside the host) both fail with the control API's `NOT_FOUND` (substrate module pinned in

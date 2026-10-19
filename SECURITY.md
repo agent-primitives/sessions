@@ -28,8 +28,8 @@ following are especially useful:
 
 ## What is not in scope
 
-The reference implementation has no authentication, no authorization, and no transport security.
-Every gRPC path is plaintext, `IdentityRef` is carried but never enforced, and `project` is a filter
+The reference daemon has no authentication, no authorization, and no transport security.
+Its gRPC listeners are plaintext, `IdentityRef` is carried but never enforced, and `project` is a filter
 rather than a tenancy boundary. A host is not safe to expose to an untrusted network or to treat as
 multi-tenant.
 

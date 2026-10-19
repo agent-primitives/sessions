@@ -199,8 +199,10 @@ single-writer event-sourced controller, the durable hash-chained log, bring-your
 real-substrate conformance across both capability tiers all run today. Session-level suspend and resume
 use the `Placer` for both resumability tiers. See the
 [Substrate verification boundary](substrate-conformance.md#verification-boundary) for live-test coverage
-and limitations. There is no authentication, authorization, or transport security, and no managed
-control plane, enterprise identity and provenance, or confidential and GPU snapshots. See the Status
+and limitations. The reference daemon has no authentication, authorization, or transport security;
+custom Go hosts can opt into [caller authentication](security.md#optional-go-caller-authentication),
+not isolation. There is no managed control plane, enterprise identity and provenance, or confidential
+and GPU snapshots. See the Status
 section of the root README.
 
 ## Where is the wire format?

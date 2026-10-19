@@ -311,12 +311,19 @@ also require credentials; kubelet gRPC probes cannot send them. Hosts should ser
 reflection on a separate server/listener, with appropriate network access restrictions.
 `authn.Caller(ctx)` exposes the verified pair; request identity and forwarded headers do not establish
 it. Unary calls authenticate once at admission: credential expiry does not add a handler deadline,
-end the call, or remove its verified caller. The caller's own cancellation/deadline still applies.
+end the call, or remove its verified caller. The caller's own cancellation/deadline still applies,
+but the interceptor preserves the handler's returned result and status.
 Only streams get the earlier caller deadline or verified expiry; expiry reports `UNAUTHENTICATED`,
 while caller cancellation/deadlines retain their codes. Stream expiry overrides even a successful
 handler return; effects may already have completed. Handlers must cooperate with cancellation. There
 is no in-stream refresh, interruption of transport I/O already in progress, or rollback of an
-in-flight effect.
+in-flight effect. If expiry interrupts a running `Exec` harness and it returns an error, the controller
+journals a best-effort `ERROR`, unless stopped after an approval intent. Retrying `Exec` with inputs
+and a fresh credential starts a new turn, rather than automatically continuing the interrupted one;
+pending approvals still follow the recovery rules in spec §11.4 (`OPS-14`). An `ERROR` does not prevent
+later `Resume` recovery. Expiry before the harness runs need not journal an `ERROR`.
+Verification runs once per RPC: revocation before `ValidUntil` is not noticed by an admitted unary
+call or an open stream.
 
 Authentication alone is not isolation. Hosts still need authorization before disclosure/effects,
 TLS with server identity validation, and a compatible journal policy. None is assembled by these

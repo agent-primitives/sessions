@@ -91,11 +91,7 @@ func NewInterceptors(mode Mode, verifier CallerVerifier) (grpc.UnaryServerInterc
 		if err != nil {
 			return nil, err
 		}
-		resp, err := handler(ctx, req)
-		if mode == Required && ctx.Err() != nil {
-			return nil, status.FromContextError(ctx.Err()).Err()
-		}
-		return resp, err
+		return handler(ctx, req)
 	}
 	stream := func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		ctx, expiry, err := verify(ss.Context())

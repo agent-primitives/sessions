@@ -167,7 +167,7 @@ func TestReceiveReturningAfterExpiry(t *testing.T) {
 func TestUnaryAuthenticationAtAdmission(t *testing.T) {
 	var expiry time.Time
 	u, _, err := NewInterceptors(Required, verifierFunc(func(context.Context) (VerifiedCaller, error) {
-		expiry = time.Now().Add(10 * time.Millisecond)
+		expiry = time.Now().Add(200 * time.Millisecond)
 		return VerifiedCaller{testIdentity, expiry}, nil
 	}))
 	if err != nil {
@@ -196,16 +196,27 @@ func TestUnaryAuthenticationAtAdmission(t *testing.T) {
 }
 
 func TestUnaryCancellationDuringHandler(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	u, _, err := NewInterceptors(Required, verifierFunc(func(context.Context) (VerifiedCaller, error) {
-		return VerifiedCaller{testIdentity, time.Now().Add(time.Hour)}, nil
-	}))
-	if err != nil {
-		t.Fatal(err)
+	for _, mode := range []Mode{Off, Required} {
+		for _, handlerErr := range []error{nil, status.Error(codes.FailedPrecondition, "handler refused")} {
+			t.Run(string(mode)+"/"+status.Code(handlerErr).String(), func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				u, _, err := NewInterceptors(mode, verifierFunc(func(context.Context) (VerifiedCaller, error) {
+					return VerifiedCaller{testIdentity, time.Now().Add(time.Hour)}, nil
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				response, err := u(ctx, nil, nil, func(context.Context, any) (any, error) {
+					cancel()
+					return "completed", handlerErr
+				})
+				if response != "completed" || err != handlerErr {
+					t.Fatalf("handler result = (%v, %v), want (completed, %v)", response, err, handlerErr)
+				}
+			})
+		}
 	}
-	_, err = u(ctx, nil, nil, func(context.Context, any) (any, error) { cancel(); return nil, nil })
-	assertCode(t, err, codes.Canceled)
 }
 
 func TestCanceledVerification(t *testing.T) {

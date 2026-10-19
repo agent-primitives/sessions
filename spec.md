@@ -1401,11 +1401,18 @@ The reference implementation protects the integrity of the record, not access to
   Invalid identities/expiry or verifier errors return generic `UNAUTHENTICATED`, never an
   anonymous fallback. Only the interceptors install the private context read by `authn.Caller`.
 - Unary calls authenticate once at admission. Credential expiry does not add a handler deadline,
-  end the call, or remove its verified caller; caller cancellation/deadlines still apply.
+  end the call, or remove its verified caller; caller cancellation/deadlines still apply, but the
+  interceptor preserves the handler's returned result and status.
   Only authenticated stream contexts end at the earlier caller deadline or credential expiry. Expiry
   returns `UNAUTHENTICATED`; caller cancellation/deadlines retain their status codes. Cancellation
   is cooperative: no in-stream refresh, interruption of transport I/O already in progress, or undo
-  of in-flight effects is promised. Authentication alone is not isolation: these interceptors
+  of in-flight effects is promised. If expiry interrupts a running `Exec` harness and it returns an
+  error, the controller journals a best-effort `ERROR`, unless stopped after an approval intent.
+  Retrying `Exec` with inputs and a fresh credential starts a new turn, rather than automatically
+  continuing the interrupted one; pending approvals still follow `OPS-14`. An `ERROR` does not
+  prevent later `Resume` recovery (`EXE-6`). Expiry before the harness runs need not journal an
+  `ERROR`. Verification runs once per RPC, so revocation before `ValidUntil` is not noticed by an
+  admitted unary call or an open stream. Authentication alone is not isolation: these interceptors
   provide neither per-RPC authorization nor TLS, and the daemon has no required-mode switch.
 - `IdentityRef` (session identity, `Event.actor`, `ApproveRequest.identity`) is caller-supplied
   provenance. It MUST NOT be read as authenticated identity.

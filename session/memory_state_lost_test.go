@@ -971,17 +971,16 @@ func TestResumeWhoseActorIsReplacedAfterTheFailedResumeIsRefused(t *testing.T) {
 
 // The session's own actor can hold a newer snapshot than the journal's last SUSPEND names: the
 // SUSPEND append failed after the snapshot was taken, or another host woke and suspended it again.
-// When substrate then answers the resume with NOT_FOUND for that actor (a template volume it cannot
-// find), the actor still holds the session's RAM, so Resume keeps the resume error (INTERNAL) and a
-// retry restores it; only an actor with another UID than the journal recorded is FAILED_PRECONDITION.
-// Neither failed Resume journals anything.
+// Restore refuses that stale checkpoint before resuming (INTERNAL), without declaring the recorded
+// actor's memory lost. Another UID remains FAILED_PRECONDITION. Neither refusal journals anything;
+// recovery of the recorded actor requires an explicit new checkpoint, not retrying the stale ref.
 func TestResumeOfTheRecordedActorHoldingANewerSnapshot(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		replace bool
 		want    codes.Code
 	}{
-		{name: "the recorded actor suspended again keeps the resume error", want: codes.Internal},
+		{name: "the recorded actor suspended again refuses the stale checkpoint", want: codes.Internal},
 		{name: "a replacement holding a snapshot is lost", replace: true, want: codes.FailedPrecondition},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1038,18 +1037,25 @@ func TestResumeOfTheRecordedActorHoldingANewerSnapshot(t *testing.T) {
 			if got, err := store.Session(sess).Head(); err != nil || got != head {
 				t.Errorf("journal head after the failed resume = %d (err %v), want %d: nothing may be journaled", got, err, head)
 			}
+			if failed.Load() {
+				t.Fatal("stale checkpoint reached ResumeActor")
+			}
 			if tc.want == codes.FailedPrecondition {
 				if msg := status.Convert(err).Message(); !strings.Contains(msg, "cannot be restored") {
 					t.Errorf("error %q does not say the state cannot be restored", msg)
 				}
 				return
 			}
-			// The state was never lost: once substrate resumes the actor, the session continues.
+			ctl.resumeErr = nil
+			// An explicit checkpoint records the actor's current snapshot before it is restored.
+			if _, err := c.Suspend(ctx, &v1.SuspendRequest{Session: sess}); err != nil {
+				t.Fatalf("new checkpoint: %v", err)
+			}
 			if _, err := c.Resume(ctx, &v1.ResumeRequest{Session: sess}); err != nil {
-				t.Fatalf("retried resume: %v", err)
+				t.Fatalf("resume of new checkpoint: %v", err)
 			}
 			if err := execHi(c, sess); err != nil {
-				t.Fatalf("turn after the retried resume: %v", err)
+				t.Fatalf("turn after the new checkpoint: %v", err)
 			}
 		})
 	}

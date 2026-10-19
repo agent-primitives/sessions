@@ -95,6 +95,10 @@ type ActorInfo struct {
 	// SnapshotFidelity is the observed fidelity of Snapshot, not the template's preferred fidelity.
 	// A missing, unspecified or unrecognized value must be reported as SnapshotFidelityUnknown.
 	SnapshotFidelity SnapshotFidelity
+	// SnapshotNotReady reports that the newest snapshot has no completed durable copy. Clients
+	// must not expose an older completed generation instead. This is durable readiness evidence,
+	// not proof of the effective restore source (which may be node-local or template-downgraded).
+	SnapshotNotReady bool
 	// NoSnapshotHistory is positive control-plane evidence that no snapshot generation has ever
 	// been assigned and the snapshot list is empty. Only the adapter should set it from authoritative
 	// metadata. False means history is present or unknown, never permission to boot without a
@@ -482,6 +486,10 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 		suspendFinished(err, "error_kind", snapshotErrorKind(err, "actor_uid_missing"))
 		return api.SnapshotRef{}, err
 	}
+	if info.SnapshotNotReady {
+		suspendFinished(ErrSnapshotNotReady, "error_kind", "snapshot_not_ready")
+		return api.SnapshotRef{}, ErrSnapshotNotReady
+	}
 	// Check the completed snapshot, not the template's preferred fidelity. Substrate can return a
 	// different fidelity (for example a golden MEMORY snapshot), so configuration alone is not proof.
 	if err := b.requireCheckpoint(in.ID, info, memoryRequired); err != nil {
@@ -500,6 +508,9 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 // requireResumeCheckpoint permits a proven snapshot-less initial placement, not a refused capture.
 // A held ref never gets this exemption, even when another actor was created under the same name.
 func (b *Backend) requireResumeCheckpoint(name string, info ActorInfo, memory, allowFresh bool) error {
+	if info.SnapshotNotReady {
+		return ErrSnapshotNotReady
+	}
 	if allowFresh && info.NoSnapshotHistory && info.Snapshot == "" &&
 		info.SnapshotFidelity == SnapshotFidelityUnknown && (!b.volumesOnly || !memory) {
 		return nil
@@ -588,7 +599,22 @@ func (b *Backend) requireInstance(in api.Incarnation, uid string) error {
 		api.ErrMemoryStateLost, b.atespace, in.ID, uid, in.ComputeInstance)
 }
 
-// Restore brings the actor back from its snapshot onto a (possibly different) worker.
+// ErrSnapshotNotRestorable is returned by Restore when a held checkpoint is missing, no longer
+// matches the actor's durable snapshot, or the actor is not suspended. VOLUMES-only backends and
+// memory refs also require a URI (default stateless backends ignore the legacy memory bit).
+// No resume is attempted in these cases.
+// It does not imply permanent memory loss; wrapped causes retain their classifications.
+var ErrSnapshotNotRestorable = errors.New("substrate: snapshot is not restorable")
+
+// ErrSnapshotNotReady is returned by Snapshot, Restore or Create's suspended-actor attachment when
+// the newest snapshot has no completed durable copy. It wraps ErrSnapshotNotRestorable. Snapshot
+// returns no ref and Restore does not resume. Pending uploads may complete; local-only checkpoints
+// require inspection and an explicit durable checkpoint, not merely waiting.
+var ErrSnapshotNotReady = fmt.Errorf("%w: newest snapshot has no completed durable copy", ErrSnapshotNotRestorable)
+
+// Restore brings a suspended actor back from its held durable checkpoint.
+// Without a held checkpoint, default stateless backends and memory-tier Memory:false refs support
+// live recovery as-is. SnapshotRef.Memory is legacy evidence, not the descriptor's required fidelity.
 func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (api.Incarnation, error) {
 	return b.RestoreInstance(ctx, ref, nil)
 }
@@ -607,31 +633,10 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 
 	name := ref.Local
 	if name == "" {
-		return api.Incarnation{}, fmt.Errorf("substrate: snapshot ref missing actor name")
+		return api.Incarnation{}, fmt.Errorf("%w: snapshot ref missing actor name", ErrSnapshotNotRestorable)
 	}
-	// Restore admission follows the backend contract, not SnapshotRef.Memory, which reports the
-	// observed capture fidelity rather than the resumability tier required to continue the session.
-	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
-	if b.volumesOnly || memory {
-		info, getErr := b.ctl.GetActor(ctx, b.ref(name))
-		if getErr != nil {
-			if lost := b.memoryActorGone(ctx, ref, recorded, getErr); lost != nil {
-				return api.Incarnation{}, lost
-			}
-			return api.Incarnation{}, fmt.Errorf("substrate: get actor before restore: %w", getErr)
-		}
-		if info.Status == StatusSuspended {
-			if err := b.requireResumeCheckpoint(name, info, memory, ref.ExternalURI == "" && !memory); err != nil {
-				if recorded != nil {
-					// Classify loss/replacement first, without labeling that failure as bad fidelity.
-					cause := errors.New("substrate: actor could not restore the checkpoint")
-					if lost := b.memoryActorGone(ctx, ref, recorded, cause); lost != nil {
-						return api.Incarnation{}, lost
-					}
-				}
-				return api.Incarnation{}, err
-			}
-		}
+	if err := b.requireRestoreSnapshot(ctx, ref, recorded); err != nil {
+		return api.Incarnation{}, err
 	}
 	resumeFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "resume_actor",
 		"actor", name,
@@ -648,6 +653,57 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 	resumeFinished(nil, "actor_status", info.Status)
 	inc, err = b.incarnation(name, info)
 	return inc, err
+}
+
+// requireRestoreSnapshot checks the held checkpoint before ResumeActor, which otherwise selects
+// the actor's current snapshot itself (and is a no-op for RUNNING). This client-side check can race
+// a concurrent suspend/resume: only an atomic expected-snapshot precondition in Substrate can close
+// that window. SnapshotRef records memory vs non-memory, not ROOTFS vs VOLUMES.
+func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRef, recorded func() (string, error)) error {
+	info, err := b.ctl.GetActor(ctx, b.ref(ref.Local))
+	if err != nil {
+		if errors.Is(err, ErrActorNotFound) && b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
+			return fmt.Errorf("%w: %w: actor %s/%s no longer exists, so its in-RAM state cannot be restored: %w",
+				ErrSnapshotNotRestorable, api.ErrMemoryStateLost, b.atespace, ref.Local, err)
+		}
+		return fmt.Errorf("%w: get restore actor: %w", ErrSnapshotNotRestorable, err)
+	}
+	if info.SnapshotNotReady {
+		return ErrSnapshotNotReady
+	}
+	// Admission follows the descriptor, not the legacy SnapshotRef.Memory capture bit.
+	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+	if info.Status == StatusSuspended {
+		// Preserve fidelity admission even for no-held interrupted-turn recovery.
+		err = b.requireResumeCheckpoint(ref.Local, info, memory, ref.ExternalURI == "" && !memory)
+	}
+	if err == nil {
+		switch {
+		case ref.ExternalURI == "" && !b.volumesOnly && (!memory || !ref.Memory):
+			return nil // no held checkpoint: default legacy refs or memory live recovery
+		case ref.ExternalURI == "":
+			err = errors.New("snapshot ref missing external URI")
+		case info.Status != StatusSuspended:
+			err = fmt.Errorf("actor %s/%s is in state %v, want suspended", b.atespace, ref.Local, info.Status)
+		case info.Snapshot == "" || info.Snapshot != ref.ExternalURI:
+			err = fmt.Errorf("actor %s/%s does not hold the recorded snapshot", b.atespace, ref.Local)
+		default:
+			return nil
+		}
+	}
+	err = fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
+	// Refusing a stale ref is not itself proof of loss; distinguish a recorded replacement.
+	if memory && recorded != nil {
+		instance, readErr := recorded()
+		if readErr != nil {
+			return fmt.Errorf("%w: read recorded compute instance: %w", err, readErr)
+		}
+		if instance != "" && info.UID != instance {
+			return fmt.Errorf("%w: %w: actor %s/%s has UID %q, not the recorded instance %q (replaced), so its in-RAM state cannot be restored",
+				ErrSnapshotNotRestorable, api.ErrMemoryStateLost, b.atespace, ref.Local, info.UID, instance)
+		}
+	}
+	return err
 }
 
 // memoryActorGone reports, after resumeErr, that the actor holding a REQUIRES_MEMORY_SNAPSHOT
@@ -1082,8 +1138,12 @@ func substrateErrorKind(err error) string {
 		return "invalid_spec"
 	case errors.Is(err, ErrSnapshotSuperseded):
 		return "snapshot_superseded"
+	case errors.Is(err, ErrSnapshotNotReady):
+		return "snapshot_not_ready"
 	case errors.Is(err, api.ErrMemoryStateLost):
 		return "memory_state_lost"
+	case errors.Is(err, ErrSnapshotNotRestorable):
+		return "snapshot_not_restorable"
 	case errors.Is(err, api.ErrComputeBusy):
 		return "actor_busy"
 	default:

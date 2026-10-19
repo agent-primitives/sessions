@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -315,12 +316,10 @@ func decodeActorInfo(t *testing.T, wire []byte) substrate.ActorInfo {
 	return info
 }
 
-// The held snapshot is the one substrate restores and tags: the highest generation whose durable
-// copy is COMPLETED. A newer PENDING copy (suspend in flight), a node-local pause checkpoint and an
-// older completed generation are all skipped, whatever their order in the list. The newest
-// completed generation is the held one even without a URI: the result is then empty (the caller
-// refuses), never an older generation, since that is not the snapshot substrate would tag.
-func TestHeldSnapshotIsLatestCompletedDurable(t *testing.T) {
+// Pick the newest generation before readiness: pending/local-only state blocks older durable
+// state, regardless of list order. A completed newest generation without a URI also stays empty,
+// never exposing an older checkpoint that no longer represents the actor's latest state.
+func TestHeldSnapshotDoesNotFallBack(t *testing.T) {
 	const (
 		completed = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
 		pending   = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING
@@ -334,15 +333,18 @@ func TestHeldSnapshotIsLatestCompletedDurable(t *testing.T) {
 		{name: "none", want: ""},
 		{name: "only pending", snaps: []*atepb.Snapshot{durableSnapshot(1, "uri-1", pending)}, want: ""},
 		{name: "only local", snaps: []*atepb.Snapshot{local}, want: ""},
+		{name: "newer local blocks completed", snaps: []*atepb.Snapshot{durableSnapshot(2, "uri-2", completed), local}, want: ""},
+		{name: "pending first still blocks completed", snaps: []*atepb.Snapshot{durableSnapshot(3, "uri-3", pending), durableSnapshot(2, "uri-2", completed)}, want: ""},
+		{name: "equal generation pending last blocks completed", snaps: []*atepb.Snapshot{durableSnapshot(3, "uri-3", completed), durableSnapshot(3, "pending", pending)}, want: ""},
 		{name: "single completed", snaps: []*atepb.Snapshot{durableSnapshot(1, "uri-1", completed)}, want: "uri-1"},
 		{
-			name:  "newer pending is not held",
+			name:  "newer pending blocks older completed",
 			snaps: []*atepb.Snapshot{durableSnapshot(2, "uri-2", completed), durableSnapshot(3, "uri-3", pending)},
-			want:  "uri-2",
+			want:  "",
 		},
 		{
 			name:  "highest completed wins regardless of order",
-			snaps: []*atepb.Snapshot{durableSnapshot(4, "uri-4", completed), local, durableSnapshot(2, "uri-2", completed)},
+			snaps: []*atepb.Snapshot{durableSnapshot(4, "uri-4", completed), durableSnapshot(3, "uri-3", pending), durableSnapshot(2, "uri-2", completed)},
 			want:  "uri-4",
 		},
 		{
@@ -357,8 +359,8 @@ func TestHeldSnapshotIsLatestCompletedDurable(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := heldSnapshot(&atepb.ActorStatus{Snapshots: tc.snaps}).GetDurableSnapshot().GetObject().GetSnapshotUri(); got != tc.want {
-				t.Fatalf("heldSnapshot=%q want %q", got, tc.want)
+			if got := actorInfo(&atepb.Actor{Status: &atepb.ActorStatus{Snapshots: tc.snaps}}).Snapshot; got != tc.want {
+				t.Fatalf("held snapshot=%q want %q", got, tc.want)
 			}
 		})
 	}
@@ -415,6 +417,66 @@ func TestResumeActorReportsNotFoundAsSentinel(t *testing.T) {
 	}
 }
 
+// An asynchronous suspend must not turn a pending generation into an older or empty checkpoint.
+func TestPendingNewestSnapshotRefusesCaptureAndRestore(t *testing.T) {
+	for _, mode := range []string{"default", "volumes", "memory"} {
+		t.Run(mode, func(t *testing.T) {
+			a := runningActor()
+			a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
+			old := durableSnapshot(1, "old", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+			latest := durableSnapshot(2, "latest", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)
+			if mode == "volumes" {
+				old.Fidelity, latest.Fidelity = atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
+			}
+			a.Status.Snapshots = []*atepb.Snapshot{latest, old}
+			f := &fakeControl{actor: a}
+			desc := api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}
+			var opts []substrate.Option
+			switch mode {
+			case "volumes":
+				opts = append(opts, substrate.WithVolumesOnly())
+			case "memory":
+				desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
+			}
+			b := substrate.New(FromClient(f), "space", substrate.ObjectRef{Name: "echo"}, desc, opts...)
+			ref, err := b.Snapshot(t.Context(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+			if !errors.Is(err, substrate.ErrSnapshotNotReady) || !errors.Is(err, substrate.ErrSnapshotNotRestorable) || ref != (api.SnapshotRef{}) {
+				t.Fatalf("pending capture returned ref=%+v err=%v", ref, err)
+			}
+			for _, uri := range []string{"old", "latest", ""} {
+				f.calls = nil
+				_, err := b.Restore(t.Context(), api.SnapshotRef{Local: "sess-x", ExternalURI: uri, Memory: mode != "volumes"})
+				if !errors.Is(err, substrate.ErrSnapshotNotReady) || !reflect.DeepEqual(f.calls, []string{"get:sess-x"}) {
+					t.Fatalf("pending restore: err=%v calls=%v", err, f.calls)
+				}
+			}
+			f.calls = nil
+			if _, err := b.Create(t.Context(), &api.SessionSpec{SessionUID: "sess-x"}); !errors.Is(err, substrate.ErrSnapshotNotReady) || !reflect.DeepEqual(f.calls, []string{"get:sess-x"}) {
+				t.Fatalf("pending attach: err=%v calls=%v", err, f.calls)
+			}
+			if mode == "memory" {
+				f.calls = nil
+				_, err := b.Fork(t.Context(), api.SnapshotRef{Local: "sess-x", ExternalURI: "old", Memory: true}, api.ForkOpts{ChildSessionUID: "child"})
+				if !errors.Is(err, substrate.ErrSnapshotSuperseded) || !reflect.DeepEqual(f.calls, []string{"get:sess-x"}) {
+					t.Fatalf("pending fork: err=%v calls=%v", err, f.calls)
+				}
+			}
+			latest.DurableSnapshot.Status = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+			ref, err = b.Snapshot(t.Context(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+			if err != nil || ref.ExternalURI != "latest" {
+				t.Fatalf("completed capture: ref=%+v err=%v", ref, err)
+			}
+			// The fake does not transition actors on resume; inject a recognizable failure
+			// to prove completed upload now passes preflight and reaches ResumeActor.
+			f.resumeErr = errors.New("resume reached")
+			f.calls = nil
+			if _, err := b.Restore(t.Context(), ref); !errors.Is(err, f.resumeErr) || !slices.Contains(f.calls, "resume:space/sess-x") {
+				t.Fatalf("completed restore: err=%v calls=%v", err, f.calls)
+			}
+		})
+	}
+}
+
 // Fidelity must follow the selected completed generation, never the template or another entry.
 func TestSnapshotFidelityFollowsSelectedGeneration(t *testing.T) {
 	const completed = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
@@ -433,7 +495,7 @@ func TestSnapshotFidelityFollowsSelectedGeneration(t *testing.T) {
 			older := durableSnapshot(1, "older", completed)
 			selected := durableSnapshot(2, "selected", completed)
 			selected.Fidelity = tc.fidelity
-			pending := durableSnapshot(3, "pending", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)
+			pending := durableSnapshot(0, "pending", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)
 			a := runningActor()
 			a.Status.Snapshots = []*atepb.Snapshot{selected, pending, older}
 			ad := FromClient(&fakeControl{actor: a})
@@ -454,21 +516,22 @@ func TestSnapshotFidelityFollowsSelectedGeneration(t *testing.T) {
 func TestSnapshotFidelityDoesNotFallBackToAnotherEntry(t *testing.T) {
 	const completed = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
 	for _, tc := range []struct {
-		name    string
-		snaps   []*atepb.Snapshot
-		wantURI string
-		want    substrate.SnapshotFidelity
+		name     string
+		snaps    []*atepb.Snapshot
+		wantURI  string
+		want     substrate.SnapshotFidelity
+		notReady bool
 	}{
 		{name: "no snapshot", want: substrate.SnapshotFidelityUnknown},
-		{name: "no completed snapshot", snaps: []*atepb.Snapshot{durableSnapshot(2, "pending", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)}, want: substrate.SnapshotFidelityUnknown},
-		{name: "no durable snapshot", snaps: []*atepb.Snapshot{{Generation: 3, Fidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY}}, want: substrate.SnapshotFidelityUnknown},
+		{name: "no completed snapshot", snaps: []*atepb.Snapshot{durableSnapshot(2, "pending", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)}, want: substrate.SnapshotFidelityUnknown, notReady: true},
+		{name: "no durable snapshot", snaps: []*atepb.Snapshot{{Generation: 3, Fidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY}}, want: substrate.SnapshotFidelityUnknown, notReady: true},
 		{name: "tie uses later entry", snaps: []*atepb.Snapshot{durableSnapshot(2, "first", completed), {Generation: 2, Fidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, DurableSnapshot: &atepb.SnapshotStorage{Status: completed, Object: &atepb.ObjectSnapshot{SnapshotUri: "second"}}}}, wantURI: "second", want: substrate.SnapshotFidelityVolumes},
 		{name: "missing URI keeps selected fidelity", snaps: []*atepb.Snapshot{durableSnapshot(1, "older", completed), {Generation: 2, Fidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, DurableSnapshot: &atepb.SnapshotStorage{Status: completed}}}, want: substrate.SnapshotFidelityVolumes},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := actorInfo(&atepb.Actor{Status: &atepb.ActorStatus{Snapshots: tc.snaps}})
-			if got.Snapshot != tc.wantURI || got.SnapshotFidelity != tc.want {
-				t.Fatalf("info=%+v want URI=%q fidelity=%v", got, tc.wantURI, tc.want)
+			if got.Snapshot != tc.wantURI || got.SnapshotFidelity != tc.want || got.SnapshotNotReady != tc.notReady {
+				t.Fatalf("info=%+v want URI=%q fidelity=%v notReady=%v", got, tc.wantURI, tc.want, tc.notReady)
 			}
 		})
 	}

@@ -33,6 +33,9 @@ not provide.
 
 ### Fixed
 
+- Substrate Restore validates the exact held durable URI and suspended state before resume.
+  Newest pending/local-only snapshots no longer fall back to older completed generations:
+  capture returns no ref and recovery/attachment refuse with typed readiness errors.
 - Cancelling `Resume` while an approved `REQUIRES_APPROVAL` call is in flight no longer records a
   permanent `EXECUTOR_ERROR` receipt. When `Resume`'s context has ended and the executor's
   error is that context's error, no receipt, `ERROR` or `END` is written: the call stays pending and
@@ -84,6 +87,18 @@ not provide.
 
 ### Compatibility
 
+- Substrate held-ref Resume can now refuse after Exec, repeated Resume or a newer checkpoint;
+  inspect and explicitly Suspend again before Resume. Default stateless recovery still ignores
+  legacy Memory flags, including empty-URI refs; memory-tier no-held interrupted recovery remains
+  supported. Every Restore now reads the actor first, so control-read failures refuse too.
+  URI/state/readiness refusals remain INTERNAL; inherited fidelity and known loss retain
+  FAILED_PRECONDITION. After pending upload, retry Suspend on completion; local-only state needs
+  inspection/recheckpointing, not just waiting. Default PAUSED/local-only attachment now refuses;
+  strict memory may report not-ready/INTERNAL instead of lost memory. RUNNING/no-held Restore also
+  refuses newest local-only/not-ready state (Create can attach to RUNNING). No wire/journal changes.
+  Checks remain client-side and validate durable evidence, not effective restore source;
+  local preference and template-UID downgrade remain open in
+  [#192](https://github.com/agent-primitives/sessions/issues/192).
 - `model/openai` now refuses nonempty `ModelRequest.Params`, previously silently ignored. A turn
   interrupted under an older build whose harness sets Params fails if recovery must re-drive the
   model call; completed recorded model effects remain replayable without invoking the adapter.

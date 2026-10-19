@@ -397,7 +397,13 @@ func TestPlacerSessionOperationsRejectOverlap(t *testing.T) {
 					if err != nil || state != want {
 						t.Fatalf("outer %s left compute=%s, err=%v; want %s", outer, state, err, want)
 					}
-					// The same operation can retry after the outer call releases the session guard.
+					// A held checkpoint can only restore a suspended actor. Re-park after the
+					// successful outer Resume before testing that its session guard was released.
+					if outer == "Resume" && overlap == "Resume" {
+						if _, err := p.Suspend(ctx, log, "session"); err != nil {
+							t.Fatal(err)
+						}
+					}
 					if err := invoke(overlap, log, "session"); err != nil {
 						t.Fatalf("retry %s after %s: %v", overlap, outer, err)
 					}
@@ -627,7 +633,7 @@ func TestSuspendRetainsForkPinUntilExplicitStop(t *testing.T) {
 	if want := []string{"suspend:child", "delete:child", "untag:fork-child"}; !reflect.DeepEqual(ctl.calls, want) {
 		t.Fatalf("destructive teardown=%v want %v", ctl.calls, want)
 	}
-	if _, err := backend.Restore(ctx, ref); !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound) {
+	if _, err := backend.Restore(ctx, ref); !errors.Is(err, substrate.ErrSnapshotNotRestorable) || !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound) {
 		t.Fatalf("Stop must remain destructive, restore err=%v", err)
 	}
 	if a, exists := ctl.actors[siblingActor]; !exists || !a.worker || a.sourceTag != siblingTag || ctl.tags[siblingTag] != source {

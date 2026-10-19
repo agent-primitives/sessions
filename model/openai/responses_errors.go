@@ -19,6 +19,15 @@ func responsesHTTPError(resp *http.Response) error {
 	if err != nil || len(raw) > 16<<10 {
 		return errors.New(status)
 	}
+	return errors.New(status + providerErrorDetails(raw))
+}
+
+// providerErrorDetails is shared by Chat Completions and Responses. The fixed
+// code/param order makes diagnostics deterministic regardless of JSON key order.
+func providerErrorDetails(raw []byte) string {
+	if len(raw) > 16<<10 {
+		return ""
+	}
 	var envelope struct {
 		Error struct {
 			Code  json.RawMessage `json:"code"`
@@ -26,7 +35,7 @@ func responsesHTTPError(resp *http.Response) error {
 		} `json:"error"`
 	}
 	if json.Unmarshal(raw, &envelope) != nil {
-		return errors.New(status)
+		return ""
 	}
 	var fields []string
 	for _, field := range []struct {
@@ -57,9 +66,9 @@ func responsesHTTPError(resp *http.Response) error {
 		}
 	}
 	if len(fields) != 0 {
-		status += " (" + strings.Join(fields, ", ") + ")"
+		return " (" + strings.Join(fields, ", ") + ")"
 	}
-	return errors.New(status)
+	return ""
 }
 
 // Decoder and transport errors can contain peer payloads or credential-bearing URLs.

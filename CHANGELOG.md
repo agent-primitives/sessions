@@ -34,6 +34,10 @@ not provide.
 
 ### Security
 
+- Chat Completions status errors, including streaming calls and their journaled errors, now retain
+  only the model, HTTP status and bounded `error.code`/`error.param` identifiers, never provider
+  messages or raw response bodies. Identifier limits and ordering match the Responses adapter.
+  This change does not alter transport, body-read or decode errors.
 - `Exec`, `Resume` and replay reconstruction (`controller.Controller.Replay`, also `Outputs`) verify
   the journal's hash chain before using it and refuse one that fails with the new
   `controller.ErrJournalTampered`; the Sessions API reports `DATA_LOSS`. Before, a record changed in

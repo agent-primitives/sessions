@@ -91,27 +91,29 @@ func TestResponsesRefuseToolResponse(t *testing.T) {
 				{"Model", func() (api.ModelResponse, error) { return c.Model(t.Context(), req) }},
 				{"StreamModel", func() (api.ModelResponse, error) { return c.StreamModel(t.Context(), req, func(string) {}) }},
 			} {
-				got, err := path.call()
-				if tc.reason == "" {
-					if err != nil {
-						t.Fatalf("%s: err = %v, want accepted", path.name, err)
+				t.Run(path.name, func(t *testing.T) {
+					got, err := path.call()
+					if tc.reason == "" {
+						if err != nil {
+							t.Fatalf("err = %v, want accepted", err)
+						}
+						if len(got.Message.Parts) != len(tc.output) {
+							t.Fatalf("parts = %+v, want %d", got.Message.Parts, len(tc.output))
+						}
+						return
 					}
-					if len(got.Message.Parts) != len(tc.output) {
-						t.Fatalf("%s: parts = %+v, want %d", path.name, got.Message.Parts, len(tc.output))
+					if !errors.Is(err, openai.ErrUnsupportedPart) || !strings.Contains(err.Error(), tc.reason) {
+						t.Fatalf("err = %v, want ErrUnsupportedPart with %q", err, tc.reason)
 					}
-					continue
-				}
-				if !errors.Is(err, openai.ErrUnsupportedPart) || !strings.Contains(err.Error(), tc.reason) {
-					t.Fatalf("%s: err = %v, want ErrUnsupportedPart with %q", path.name, err, tc.reason)
-				}
-				for _, leaked := range []string{refusedName, refusedArg, refusedText, refusedID, "wipe-disk", "lookup"} {
-					if strings.Contains(err.Error(), leaked) {
-						t.Fatalf("%s: err = %q quotes provider value %q", path.name, err, leaked)
+					for _, leaked := range []string{refusedName, refusedArg, refusedText, refusedID, "wipe-disk", "lookup"} {
+						if strings.Contains(err.Error(), leaked) {
+							t.Fatalf("err = %q quotes provider value %q", err, leaked)
+						}
 					}
-				}
-				if !reflect.DeepEqual(got, api.ModelResponse{}) {
-					t.Fatalf("%s: refused completion returned %+v", path.name, got)
-				}
+					if !reflect.DeepEqual(got, api.ModelResponse{}) {
+						t.Fatalf("refused completion returned %+v", got)
+					}
+				})
 			}
 		})
 	}

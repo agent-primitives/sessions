@@ -416,7 +416,7 @@ fails the I0 check.
 The explicit Responses adapter (`model/openai.NewResponses`) maps function tools and preserves
 opaque reasoning across tool turns; see [its supported mapping and limits](responses-adapter.md). It
 refuses a completion that calls a tool the request did not offer, calls under NONE, calls a tool
-other than a named choice, or makes no call under REQUIRED, so your loop never receives that call.
+other than a named choice, or makes no call under REQUIRED, so your loop never receives that completion.
 The controller does not compare a `ToolCall` with the request's tools, so a custom model function
 must check this itself. The Chat Completions constructor (`openai.New`) still refuses tools, choices
 and tool parts. Approval mediation does not add a complete application tool loop: a custom harness,

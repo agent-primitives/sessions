@@ -244,6 +244,17 @@ golden exists yet). Capture itself never uses the exemption. A backend's own suc
 → ResumeActor path remains unchanged. These client-side checks are not atomic and do not fence
 traffic directly to the router.
 
+**Known limit — actors paused outside sessions:** the adapter maps Substrate PAUSED to suspended
+but reports only the latest completed durable checkpoint. At the pinned Substrate, resume prefers
+an actor-local checkpoint when one exists. Validation can falsely refuse recoverable local state
+or accept a local checkpoint whose fidelity does not meet the backend's requirement. For example,
+a local-only MEMORY checkpoint can be refused as `api.ErrMemoryStateLost` even though it is
+recoverable; an older durable VOLUMES checkpoint can pass `WithVolumesOnly()` validation while
+resume actually restores a local MEMORY checkpoint.
+Sessions does not call `PauseActor`; these fidelity checks do not cover actors paused by an
+operator or another client. Durable checkpoint evidence is not proof of the effective resume
+source in that case.
+
 The option **validates the result; it does not configure Substrate**. Configure the ActorTemplate
 with `snapshotConfig.preferredFidelity: SNAPSHOT_FIDELITY_VOLUMES`, at least one mounted `durable-dir`
 volume, and `goldenSnapshotConfig.mode: GOLDEN_SNAPSHOT_MODE_DISABLED`. Substrate defaults to MEMORY
@@ -263,8 +274,8 @@ snapshot contents, fresh process identity or stale-credential revocation; those 
 
 Every successful `SuspendActor` leaves the actor holding a new external snapshot: a new generation in
 `Actor.status.snapshots` whose durable copy is `COMPLETED`. The adapter reports the highest such
-generation's URI and fidelity as the held snapshot, the same one `ResumeActor` restores and
-`CreateTag` copies.
+generation's URI and fidelity as the held snapshot, which `CreateTag` copies and durable resume
+restores; an actor-local pause checkpoint takes precedence on resume, as noted above.
 `CreateTag{source_actor}` copies the snapshot a SUSPENDED actor holds into tag-owned storage, and
 `CreateActor{source_tag}` seeds a new actor from that copy. That is the compute half of a session
 fork.

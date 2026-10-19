@@ -1251,7 +1251,12 @@ The reference host takes it as `placement.Backend` in
   pinned Substrate, an unsourced `CreateActor` records the template's current golden tag as
   generation 1, so this exemption exists only when golden snapshots are disabled or unavailable.
   Capture never uses this exemption. These client checks can race lifecycle operations or router
-  ingress.
+  ingress. Known limit: actors paused outside sessions may hold an actor-local checkpoint that
+  Substrate prefers on resume, while the adapter reports only durable checkpoint evidence.
+  Validation can falsely refuse recoverable local state or accept a fidelity that does not meet
+  the backend's requirement. For example, local-only MEMORY can be refused as lost; older durable
+  VOLUMES can pass validation even when resume restores local MEMORY. The fidelity checks do not
+  cover this PAUSED case; sessions does not call `PauseActor`.
   `Snapshot` and `Restore` do not create missing actors. When no actor exists (for example a fresh
   session before any `Create` reached `CreateActor`, and not a fork child, or an actor deleted
   outside the host) both fail with the control API's `NOT_FOUND` (substrate module pinned in

@@ -217,8 +217,9 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 
 // heldSnapshot returns the external snapshot the actor holds: the highest-generation entry of
 // ActorStatus.snapshots whose durable copy is COMPLETED, or nil when there is none. URI and fidelity
-// are read from this same entry. That is the snapshot substrate restores on ResumeActor and copies
-// on CreateTag (findLatestDurableSnapshot in substrate's cmd/ateapi/internal/controlapi/snapshot_helpers.go).
+// are read from this same entry. Substrate copies it on CreateTag and uses it for durable resume
+// (findLatestDurableSnapshot in substrate's cmd/ateapi/internal/controlapi/snapshot_helpers.go).
+// A node-local pause checkpoint takes precedence on resume and is not reported by this helper.
 // Comparing its URI before and after a tag proves which snapshot the tag took. The entry is picked
 // by the same rule (on equal generations the later entry wins) before its URI is read: if that entry
 // has no URI, actorInfo reports an empty handle rather than naming an older completed generation

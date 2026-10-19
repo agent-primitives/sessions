@@ -72,7 +72,10 @@ not provide.
   disabled or absent.
   Fork children and refused captures do not qualify. Capture never uses the exemption; VOLUMES-only
   plus a memory requirement refuses before suspension. These are client-side guards, not atomic
-  lifecycle preconditions or protection against direct router traffic.
+  lifecycle preconditions or protection against direct router traffic. Known limit: actors paused
+  outside sessions can resume an actor-local checkpoint instead of the validated durable one,
+  causing false recovery refusals or accepting a fidelity that does not meet the backend's
+  memory-required or VOLUMES-only contract.
 - `runtime/substrate` now reports `SnapshotRef.Memory` from the completed snapshot's observed
   fidelity instead of always reporting true. The adapter carries the selected generation's URI
   and fidelity together in `ActorInfo.Snapshot` and the new `ActorInfo.SnapshotFidelity`. ROOTFS

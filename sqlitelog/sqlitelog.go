@@ -438,8 +438,9 @@ func (s *Store) Session(uid string) *Log { return &Log{store: s, session: uid} }
 
 // Log is one session's durable, single-writer, hash-chained event log.
 type Log struct {
-	store   *Store
-	session string
+	store        *Store
+	session      string
+	forkMetadata *SessionMeta // only fresh policy-enabled fork handles; nil for ordinary access
 }
 
 // Log satisfies the controller's error-returning event-log contract.
@@ -457,9 +458,16 @@ func (l *Log) Head() (int64, error) {
 // NewFence advances and returns this session's fencing token. A new incarnation calls it to take
 // over; appends carrying an older token are rejected with eventlog.ErrFenced.
 func (l *Log) NewFence() (int64, error) {
+	if l.forkMetadata != nil {
+		return l.forkFence()
+	}
+	return l.newFence(l.store.db)
+}
+
+func (l *Log) newFence(db fenceQuerier) (int64, error) {
 	var fence int64
 	now := time.Now().UnixNano()
-	err := l.store.db.QueryRow(
+	err := db.QueryRow(
 		`INSERT INTO sessions(session, fence, project, created_at, updated_at)
 		 VALUES(?, 1, ?, ?, ?)
 		 ON CONFLICT(session) DO UPDATE SET

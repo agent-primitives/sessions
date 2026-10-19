@@ -169,7 +169,10 @@ flowchart LR
 - `SES-18`: Pre-policy sessions MUST retain existing behavior even if policy is configured later,
   including sessions with no events. The reference SQLite host records a host-owned eligibility bit
   on session creation; migration leaves old rows unset. Fork inherits that bit with `model`, rather
-  than opting an old session into today's policy. No old event or hash is rewritten.
+  than opting an old session into today's policy. For policy-enabled children, the inherited route,
+  default and eligibility MUST commit with the first child row, before fan-out finalization: a later
+  clone failure or interruption MUST NOT leave a runnable legacy child. No old event or hash is
+  rewritten.
 
 ### 5.2 Two-axis state
 

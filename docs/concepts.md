@@ -123,7 +123,9 @@ checks but does not erase the invocation's recorded default.
 
 No configured policy means existing behavior. Pre-policy sessions, including zero-event sessions,
 remain on that behavior even after a policy is configured; fork inherits this eligibility alongside
-`model`. SQLite schema v6 records this host-owned bit without changing old events or hashes. Stop
+`model`. For policy-enabled forks, inherited metadata commits atomically with the first child fence,
+so a later clone failure cannot expose a child without model admission. SQLite schema v6 records
+this host-owned bit without changing old events or hashes. Stop
 all older hosts and embedded CLI writers before the first upgraded open, and back up first if
 rollback is required: older binaries refuse schema v6 at open, but already-open older writers do
 not implement these semantics. There is no downgrade migration. The reference daemon has no binding

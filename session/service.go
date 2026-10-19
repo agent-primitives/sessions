@@ -874,24 +874,6 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	if len(childNames) != 0 && len(childNames) != count {
 		return nil, status.Errorf(codes.InvalidArgument, "child_names has %d entries, want 0 or exactly count (%d)", len(childNames), count)
 	}
-	children := make([]placement.ForkChild, 0, count)
-	for i := 0; i < count; i++ {
-		uid := newUID()
-		children = append(children, placement.ForkChild{UID: uid, Log: s.store.Session(uid)})
-	}
-	// The fan-out is all-or-nothing: Placer.Fork rolls back everything it provisioned on failure,
-	// so children_created stays 0 rather than reporting compute that no longer exists.
-	if err := placer.Fork(ctx, parent, req.GetSession(), children, atSeq); err != nil {
-		return nil, forkError(err)
-	}
-	childrenCreated = len(children)
-	// Child metadata is written only after the fan-out commits. Placer.forkSource refuses an
-	// unplaceable fork with no side effects at all, and registering children first would turn that
-	// into a listing full of phantom sessions the caller was never given UIDs for and cannot
-	// delete. Children inherit the parent's project, harness, and model: a fork is the same
-	// workload branched, so it must stay in the tenant that owns the parent rather than landing in
-	// the service default that copying the log would otherwise give it. The name is deliberately
-	// not inherited; see child_names in the proto.
 	parentInfo, err := s.store.SessionInfo(req.GetSession())
 	if err != nil {
 		return nil, sessionStoreError(err, req.GetSession())
@@ -900,29 +882,42 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "fork labels: %v", err)
 	}
-	out := make([]*v1.Session, 0, len(children))
-	for i, child := range children {
+	children := make([]placement.ForkChild, 0, count)
+	metadata := make([]sqlitelog.SessionMeta, 0, count)
+	for i := 0; i < count; i++ {
+		uid := newUID()
 		var name string
 		if len(childNames) != 0 {
 			name = childNames[i]
 		}
-		if err := s.store.PutSession(sqlitelog.SessionMeta{
-			UID:         child.UID,
-			Project:     parentInfo.Project,
-			Name:        name,
-			Harness:     parentInfo.Harness,
-			Model:       parentInfo.Model,
-			ModelPolicy: parentInfo.ModelPolicy,
-			ParentUID:   req.GetSession(),
-			ForkSeq:     atSeq,
-			// A child inherits the parent's annotations and origin, because it is the same
-			// workload branched and its external context did not change. Labels come from the
-			// request instead, so callers can distinguish branches. Identity is not inherited;
-			// per-child principals are unsupported and rejected before placement.
-			Annotations: parentInfo.Annotations,
-			Origin:      parentInfo.Origin,
-			Labels:      childLabels,
-		}); err != nil {
+		meta := sqlitelog.SessionMeta{
+			UID: uid, Project: parentInfo.Project, Name: name,
+			Harness: parentInfo.Harness, Model: parentInfo.Model, ModelPolicy: parentInfo.ModelPolicy,
+			ParentUID: req.GetSession(), ForkSeq: atSeq,
+			// Identity is not inherited; per-child principals are rejected before placement.
+			Annotations: parentInfo.Annotations, Origin: parentInfo.Origin, Labels: childLabels,
+		}
+		log := s.store.Session(uid)
+		if meta.ModelPolicy {
+			// First child-row visibility must include its inherited route/default and policy bit,
+			// even if a later clone fails or the process exits before fan-out finalization.
+			log = s.store.ForkSession(meta)
+		}
+		metadata = append(metadata, meta)
+		children = append(children, placement.ForkChild{UID: uid, Log: log})
+	}
+	// The fan-out is all-or-nothing: Placer.Fork rolls back everything it provisioned on failure,
+	// so children_created stays 0 rather than reporting compute that no longer exists.
+	if err := placer.Fork(ctx, parent, req.GetSession(), children, atSeq); err != nil {
+		return nil, forkError(err)
+	}
+	childrenCreated = len(children)
+	// Finalize metadata after the fan-out as before. Policy-enabled children already inherited it
+	// atomically at their first fence; legacy children retain their existing publication behavior.
+	// Neither handle construction nor a refused/unprovisioned fork creates phantom rows.
+	out := make([]*v1.Session, 0, len(children))
+	for i, child := range children {
+		if err := s.store.PutSession(metadata[i]); err != nil {
 			return nil, status.Errorf(codes.Internal, "fork: record child %q: %v", child.UID, err)
 		}
 		info, err := s.store.SessionInfo(child.UID)

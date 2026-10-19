@@ -55,11 +55,11 @@ not provide.
   The reference daemon remains unauthenticated and unenforced; authentication alone is not isolation,
   and there is no daemon required-mode switch.
 - SQLite schema v5 follows approval v3 and deletion v4, adding indexed exact caller issuer/subject
-  ownership and an off-mode journal authorization marker. Legacy and unenforced RPC-created sessions remain
-  unbound; ordinary metadata writes and copied history cannot assign or replace owners. No events
-  or hashes are rewritten, and no wire fields change. Older hosts refuse v5 at open time; this host
-  also refuses required, unknown or missing authorization markers at v5 because it cannot enforce
-  caller access. Stop all older writers before the first v5 open, following the
+  ownership and an off-mode journal authorization marker. Legacy and unenforced RPC-created sessions
+  remain unbound; ordinary metadata writes and copied history cannot assign or replace owners.
+  No events or hashes are rewritten, and no wire fields change. Older hosts refuse v5 at open time;
+  this host also refuses required, unknown or missing authorization markers at v5 because it cannot
+  enforce caller access. Stop all older writers before the first v5 open, following the
   [rollout order](#sqlite-v4-rollout). Back up first. The default Sessions service remains
   unauthenticated and unenforced.
 - The new authorization options do not activate required-mode deployment. Journals still require an
@@ -67,6 +67,8 @@ not provide.
   enforced Approve clears request actor without claiming verified audit. Owned fork publication,
   versioned approval audit, journal policy/startup validation, daemon activation and TLS remain
   unavailable. No wire fields, canonical event format, schema version or default behavior change.
+  `NewHarnessRegistry` now accepts variadic options: ordinary calls remain source-compatible, but
+  function-value assignments using its previous exact signature must wrap or adapt the constructor.
 - Embedders using `controller.WithToolExecutor` or `placement.WithToolExecutor` must now declare
   durable dedup to keep `Resume` re-driving an interrupted tool call, including a call whose
   executor returned an error the harness did not handle. `Resume` re-runs a turn's trailing

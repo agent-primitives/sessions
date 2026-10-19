@@ -160,8 +160,9 @@ id is what the harness says about itself, so it does not authenticate the harnes
 ## Deletion is not erasure or containment
 
 Any caller that can reach the default Sessions service can permanently tombstone a known UID:
-Delete has no additional authorization unless the host installs `WithAuthorization`. `PENDING` acknowledges durable intent only until #88 provides authoritative ownership
-and cleanup. Actors, snapshots and fork-child pins remain retained indefinitely; Delete does not
+Delete has no additional authorization unless the host installs `WithAuthorization`. `PENDING`
+acknowledges durable intent only until #88 provides authoritative ownership and cleanup. Actors,
+snapshots and fork-child pins remain retained indefinitely; Delete does not
 call Stop, reclaim resources or stop an actor's independent external activity. The retained metadata
 and journal are audit evidence, not a complete inventory of resources to clean up.
 
@@ -177,11 +178,11 @@ See [deletion semantics](concepts.md#permanent-soft-deletion).
 
 `REQUIRES_APPROVAL` is supported only for stateless replay. The RPC/SDK commits a decision without
 compute or an executor call; explicit Resume performs recovery. CLI approve/deny do both, and a
-recovery failure leaves the decision committed. The default Sessions service has no caller enforcement;
-custom hosts can require an independent approve permission (below). There is no tool/resource policy
-evaluator, approval timeout, expiry, automatic decision or implemented Cancel path. Unresolved
-requests and suspended snapshots/handles are retained indefinitely; operators must manage retained
-resources outside these APIs.
+recovery failure leaves the decision committed. The default Sessions service has no caller
+enforcement; custom hosts can require an independent approve permission (below). There is no
+tool/resource policy evaluator, approval timeout, expiry, automatic decision or implemented Cancel
+path. Unresolved requests and suspended snapshots/handles are retained indefinitely; operators must
+manage retained resources outside these APIs.
 
 A custom host executor must authorize tools/resources itself and durably deduplicate by **session UID
 plus idempotency key**, storing the original receipt across host restarts. Resume re-drives an
@@ -267,9 +268,10 @@ Given the above, there is one safe shape for this release:
 `IdentityRef` provenance. Trusted Go hosts can atomically create an owned session through
 `sqlitelog.Store.CreateOwnedSession`, including active-harness admission. Existing UIDs cannot be
 claimed, even when unbound or deleted. Metadata updates, fencing and appended/copied history do
-not assign or replace owners. Legacy sessions and sessions created by unenforced RPCs remain unbound;
-ownership is not inferred from provenance. Unbound sessions are denied by `OwnerAuthorizer`, not treated as public.
-Owner metadata is not hash-chain attested; database writers are trusted.
+not assign or replace owners. Legacy sessions and sessions created by unenforced RPCs remain
+unbound; ownership is not inferred from provenance. Unbound sessions are denied by
+`OwnerAuthorizer`, not treated as public. Owner metadata is not hash-chain attested; database
+writers are trusted.
 
 The host-side `api.Authorizer` contract has an owner-only implementation. `OwnerAuthorizer` grants
 only ordinary session actions to an exact owner; create, approval decisions, audience minting and
@@ -285,11 +287,11 @@ for enforcement ([#127](https://github.com/agent-primitives/sessions/issues/127)
 it, since nil retains the full project listing. Its unsigned cursors are not caller-bound credentials.
 
 The daemon does not install these contracts. Custom hosts can opt into the RPC checks below,
-but that is not a deployable required mode. SQLite schema v5 carries an off-mode authorization marker; this host refuses required, unknown or missing markers even at the same
-schema version. There is
-no supported switch to enable required mode. The marker is checked only at Open. Changing it
-requires stopping every writer, including embedded CLI processes, then restarting all hosts with
-binaries that support the new mode; already-open hosts do not recheck it.
+but that is not a deployable required mode. SQLite schema v5 carries an off-mode authorization
+marker; this host refuses required, unknown or missing markers even at the same schema version.
+There is no supported switch to enable required mode. The marker is checked only at Open.
+Changing it requires stopping every writer, including embedded CLI processes, then restarting all
+hosts with binaries that support the new mode; already-open hosts do not recheck it.
 Owner identifiers are retained metadata: deletion is not erasure. Do not expose a host on an
 untrusted network.
 
@@ -339,13 +341,14 @@ off-mode history. Historical decisions with a nonempty actor are not identical r
 normalization. Verified attribution and caller-bound retries require a versioned journal contract.
 
 **This is not cross-host isolation or supported required-mode activation.** Journals remain marked
-`off`, so unenforced hosts and CLI processes can still read/write owned sessions, create unbound rows,
-and bypass these checks. Do not share an enforcement test journal with them. Owned Fork remains
-refused before discovery or effects until ownership can be reserved before the first copied record.
-Complete activation also needs verified approval audit, an immutable journal policy marker and startup
-validation, a daemon required switch, and TLS assembly with server identity validation
+`off`, so unenforced hosts and CLI processes can still read/write owned sessions, create unbound
+rows, and bypass these checks. Do not share an enforcement test journal with them. Owned Fork
+remains refused before discovery or effects until ownership can be reserved before the first copied
+record. Complete activation also needs verified approval audit, an immutable journal policy marker
+and startup validation, a daemon required switch, and TLS assembly with server identity validation
 ([#127](https://github.com/agent-primitives/sessions/issues/127)). Registry stays on its separate,
-opt-in loopback listener; there is no same-pod/self-dial exemption or implicit credential forwarding.
+opt-in loopback listener; there is no same-pod/self-dial exemption or implicit credential
+forwarding.
 
 ## Optional Go caller authentication
 

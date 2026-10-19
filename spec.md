@@ -710,7 +710,8 @@ invokes no harness and stays a no-op without one.
 
 - `APR-5`: `Approve` MUST be `INVALID_ARGUMENT` when `session`, `execution_id`, or `tool_call_id`
   is empty, `request_seq <= 0`, or `approved` is absent. An unknown session is `NOT_FOUND`.
-  Opt-in authorization (§17) precedes validation and hides inaccessible sessions as `PERMISSION_DENIED`.
+  Opt-in authorization (§17) precedes validation and hides inaccessible sessions as
+  `PERMISSION_DENIED`.
 - `APR-6`: A decision MUST target the selected request: the last gated call of the latest
   execution, owned by this session (not copied before a `LIFECYCLE_FORK`), not completed, and
   without a receipt. Otherwise `FAILED_PRECONDITION`.
@@ -1447,10 +1448,10 @@ The reference implementation protects the integrity of the record, not access to
 - `IdentityRef` (session identity, `Event.actor`, `ApproveRequest.identity`) is caller-supplied
   provenance. It MUST NOT be read as authenticated identity.
 - `project` is a listing filter, not a tenancy boundary.
-- On the default service, any caller can delete any session it can name, irreversibly. Deletion is neither erasure nor
-  access revocation: the journal, `config`, and metadata stay readable through `GetSession` and
-  `Replay` (`OPS-33`), and compute and snapshots are retained until an operator reclaims them
-  (`OPS-35`).
+- On the default service, any caller can delete any session it can name, irreversibly. Deletion is
+  neither erasure nor access revocation: the journal, `config`, and metadata stay readable through
+  `GetSession` and `Replay` (`OPS-33`), and compute and snapshots are retained until an operator
+  reclaims them (`OPS-35`).
 - The harness is trusted code. Host mediation is a determinism mechanism, not containment; isolation
   comes from the runtime backend, and `runtime/local` has none.
 - The harness does not authenticate the host, and a harness registered by address is whatever

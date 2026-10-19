@@ -171,8 +171,9 @@ CLI approve and deny do both, and say "decision committed" if recovery fails. Ge
 Exec frames expose the pending tuple at their captured cursor. A decision clears that reference, but
 new input stays blocked until its receipt commits. Identity is not authorization; custom hosts can
 require independent [approve permission](security.md#optional-go-rpc-authorization). There is no
-tool/resource policy hook, timeout or expiry. Snapshots and unresolved requests are retained indefinitely, and Cancel
-remains `UNIMPLEMENTED`. DeleteSession commits permanent intent without reclaiming resources.
+tool/resource policy hook, timeout or expiry. Snapshots and unresolved requests are retained
+indefinitely, and Cancel remains `UNIMPLEMENTED`. DeleteSession commits permanent intent without
+reclaiming resources.
 Tool calls align with the MCP shape (name plus structured arguments), but approval alone is not a
 complete MCP/provider integration. The daemon's default Chat Completions adapter does not map tools;
 Responses tools require an explicitly composed Go host. See
@@ -202,9 +203,10 @@ use the `Placer` for both resumability tiers. See the
 [Substrate verification boundary](substrate-conformance.md#verification-boundary) for live-test coverage
 and limitations. The reference daemon has no authentication, authorization, or transport security;
 custom Go hosts can opt into [caller authentication](security.md#optional-go-caller-authentication)
-and [RPC authorization](security.md#optional-go-rpc-authorization), not complete required-mode isolation. There is no managed control plane, enterprise identity and provenance, or confidential
-and GPU snapshots. See the Status
-section of the root README.
+and [RPC authorization](security.md#optional-go-rpc-authorization), not complete required-mode
+isolation.
+There is no managed control plane, enterprise identity and provenance, or confidential and GPU
+snapshots. See the Status section of the root README.
 
 ## Where is the wire format?
 

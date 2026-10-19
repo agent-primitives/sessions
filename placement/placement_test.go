@@ -416,7 +416,7 @@ func (c *cloningControl) SuspendActor(ctx context.Context, a substrate.ActorRef)
 		race()
 	}
 	c.calls = append(c.calls, "suspend:"+a.Name)
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot, UID: "uid-" + a.Name}, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: "uid-" + a.Name}, nil
 }
 
 func (c *cloningControl) ResumeActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -428,7 +428,7 @@ func (c *cloningControl) ResumeActor(_ context.Context, a substrate.ActorRef) (s
 // what a stateful fork checks the parent against around its tag. It is not recorded in calls: the
 // backend's own tests pin that bracket, and these tests are about the Placer's ordering.
 func (c *cloningControl) GetActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot, UID: "uid-" + a.Name}, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: "uid-" + a.Name}, nil
 }
 
 func (c *cloningControl) TagActor(_ context.Context, source substrate.ActorRef, tag substrate.SnapshotID) error {
@@ -593,11 +593,10 @@ func TestForkOfMemoryHarnessAtHistoricalSeqIsRefused(t *testing.T) {
 	}
 }
 
-// A memory-capable runtime whose checkpoint yields no external handle cannot clone: the substrate
-// adapter reports none against an ate-api older than f03327bd. The Placer records the checkpoint it
-// took, then refuses as unplaceable before tagging, so no child is cloned from a snapshot it cannot
-// name and the caller gets FAILED_PRECONDITION rather than the backend's ErrNoSnapshotToClone.
-func TestForkOfMemoryHarnessWithoutExternalHandleIsUnplaceable(t *testing.T) {
+// A memory checkpoint with no durable handle is refused by the backend before the Placer records
+// SUSPEND or tags a source. An older ate-api that reports no held snapshot cannot produce a usable
+// memory checkpoint, even if the control call itself succeeds.
+func TestForkOfMemoryHarnessWithoutExternalHandleRefusesCheckpoint(t *testing.T) {
 	store, err := sqlitelog.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -616,24 +615,61 @@ func TestForkOfMemoryHarnessWithoutExternalHandleIsUnplaceable(t *testing.T) {
 
 	ctl := &cloningControl{} // every suspend reports no held snapshot
 	err = memorySubstratePlacer(ctl).Fork(context.Background(), parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, head)
-	if !errors.Is(err, placement.ErrUnplaceable) || errors.Is(err, substrate.ErrNoSnapshotToClone) {
-		t.Fatalf("err=%v want ErrUnplaceable, not ErrNoSnapshotToClone", err)
+	if !errors.Is(err, placement.ErrUnplaceable) || !errors.Is(err, api.ErrInvalidCheckpoint) || errors.Is(err, substrate.ErrNoSnapshotToClone) {
+		t.Fatalf("err=%v want ErrUnplaceable wrapping ErrInvalidCheckpoint, not ErrNoSnapshotToClone", err)
 	}
 	for _, c := range ctl.calls {
 		if strings.HasPrefix(c, "tag:") || strings.HasPrefix(c, "clone:") {
 			t.Fatalf("a fork with no external handle must not tag or clone, got %v", ctl.calls)
 		}
 	}
-	recs, _ := parent.Read(1)
-	last := recs[len(recs)-1].Event
-	if last.Kind != api.EventLifecycle || last.Lifecycle == nil || last.Lifecycle.Kind != api.LifecycleSuspend {
-		t.Fatalf("the checkpoint the fork took must be recorded as a SUSPEND event, got %v", last.Kind)
+	if got, _ := parent.Head(); got != head {
+		t.Fatalf("a refused checkpoint must not append SUSPEND: head=%d want %d", got, head)
 	}
 	if h, _ := child.Head(); h != 0 {
 		t.Fatalf("a refused fork must not write the child log, head=%d", h)
 	}
 	if err := parent.Verify(); err != nil {
 		t.Fatalf("verify parent: %v", err)
+	}
+}
+
+// Other runtimes can still return a successful memory checkpoint without a cloneable URI, even
+// though substrate now refuses it. Keep the Placer's independent validation covered.
+type checkpointWithoutURI struct{ placement.Backend }
+
+func (b checkpointWithoutURI) Snapshot(_ context.Context, in api.Incarnation, _ api.SnapshotKind) (api.SnapshotRef, error) {
+	return api.SnapshotRef{Local: in.ID, Memory: true}, nil
+}
+
+func TestForkOfMemoryHarnessWithoutExternalHandleIsUnplaceable(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	parent, child := store.Session("parent"), store.Session("child")
+	fence, err := parent.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parent.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "hi")}); err != nil {
+		t.Fatal(err)
+	}
+	ctl := &cloningControl{}
+	backend := substrate.New(ctl, "space", substrate.ObjectRef{Name: "counter"},
+		api.Descriptor{ID: "mem", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}})
+	p := placement.New(checkpointWithoutURI{Backend: backend}, echoagent.Model)
+	err = p.Fork(context.Background(), parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, 1)
+	if !errors.Is(err, placement.ErrUnplaceable) || errors.Is(err, substrate.ErrNoSnapshotToClone) {
+		t.Fatalf("err=%v want ErrUnplaceable, not ErrNoSnapshotToClone", err)
+	}
+	if len(ctl.calls) != 0 {
+		t.Fatalf("an unusable checkpoint must not tag or clone: %v", ctl.calls)
+	}
+	assertSuspendRef(t, parent, api.SnapshotRef{Local: "parent", Memory: true})
+	if head, _ := child.Head(); head != 0 {
+		t.Fatalf("a refused fork must not write the child log: head=%d", head)
 	}
 }
 

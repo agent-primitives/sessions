@@ -85,12 +85,13 @@ func TestResponsesStreamEqualsNonstream(t *testing.T) {
 					data = data[n:]
 				}
 			})
-			want, err := c.Model(t.Context(), api.ModelRequest{})
+			req := api.ModelRequest{Tools: []api.ToolDefinition{{Name: "first"}, {Name: "second"}}}
+			want, err := c.Model(t.Context(), req)
 			if err != nil {
 				t.Fatal(err)
 			}
 			var chunks []string
-			got, err := c.StreamModel(t.Context(), api.ModelRequest{}, func(s string) { chunks = append(chunks, s) })
+			got, err := c.StreamModel(t.Context(), req, func(s string) { chunks = append(chunks, s) })
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -160,7 +161,7 @@ func TestResponsesStreamFailures(t *testing.T) {
 				t.Fatal("test fixture mutation did not match")
 			}
 			c := newResponses(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, changed) })
-			if _, err := c.StreamModel(t.Context(), api.ModelRequest{}, nil); err == nil {
+			if _, err := c.StreamModel(t.Context(), api.ModelRequest{Tools: []api.ToolDefinition{{Name: "first"}, {Name: "second"}}}, nil); err == nil {
 				t.Fatal("conflicting stream accepted")
 			}
 		})

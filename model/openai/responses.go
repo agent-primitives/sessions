@@ -47,5 +47,12 @@ func (c *ResponsesClient) Model(ctx context.Context, req api.ModelRequest) (api.
 	if len(raw) > 32<<20 {
 		return api.ModelResponse{}, fmt.Errorf("openai responses: response exceeds 32 MiB")
 	}
-	return decodeResponses(model, raw)
+	result, err := decodeResponses(model, raw)
+	if err != nil {
+		return api.ModelResponse{}, err
+	}
+	if err := validateCompletionToolCalls(result.Message.Parts, req.Tools, req.ToolChoice); err != nil {
+		return api.ModelResponse{}, fmt.Errorf("openai responses: %w", err)
+	}
+	return result, nil
 }

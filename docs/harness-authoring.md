@@ -399,7 +399,8 @@ For ordinary `CONTROLLER_MEDIATED` calls, an executor Go error still leaves no f
 an immediately following reported result remains ambiguous under the existing correlation rules.
 Over `Harness.Connect`, an ordinary sink tool-call error ends the turn; this direct-sink fallback
 does not add a general handle-and-continue wire protocol. Approved gated calls instead record an
-`EXECUTOR_ERROR` receipt, which can be passed to the model for continuation.
+`EXECUTOR_ERROR` receipt, which the harness must render into `ToolResult.Content` before the next
+model call.
 
 #### Approval-gated calls
 
@@ -417,9 +418,9 @@ On decided Resume, rebuild the same call from the original inputs/config and kee
 The bridge delivers the committed decision before the correlated receipt, even when that receipt is
 already journaled. A denial supplies `APPROVAL_DENIED` with `IsError=true` and never invokes the
 executor. An approved call can return success or a durable `EXECUTOR_ERROR` receipt, not an unrecorded
-executor Go error. Feed that receipt back as the tool result the model saw; do not forge approval
-request/decision or host receipt fields with `sink.Report`. A missing executor is a recoverable host
-precondition, not an executor-failure receipt.
+executor Go error. Render the receipt into `ToolResult.Content` before the next model call; do not
+forge approval request/decision or host receipt fields with `sink.Report`. A missing executor is a
+recoverable host precondition, not an executor-failure receipt.
 
 The gate serializes sink operations across decision/effect/receipt handling. Observer/model/executor
 callbacks must not re-enter the same sink: re-entry can deadlock the serialized operation. Recorded
@@ -462,11 +463,41 @@ The input hash (I0) covers the tools, the tool choice, and every tool part, so o
 request from the recorded completion exactly as you did live. A changed definition, choice, or argument
 fails the I0 check.
 
-The explicit Responses adapter (`model/openai.NewResponses`) maps function tools and preserves opaque
-reasoning across tool turns; see [its supported mapping and limits](responses-adapter.md). The Chat
-Completions constructor (`openai.New`) still refuses tools, choices and tool parts. Approval mediation
-does not add a complete application tool loop: a custom harness, model adapter and durably deduplicating
-host executor still supply those parts.
+The bundled Chat Completions adapter (`model/openai`) maps tool definitions to function tools,
+AUTO/NONE/REQUIRED choices (including a named REQUIRED choice), assistant text followed by tool calls,
+and one `ToolResult` per `tool` message. Schemas are sent unchanged: nil omits `parameters`, while an
+explicit empty schema sends `{}`. Function arguments are JSON objects normalized to the API's
+JSON-native map/float64 domain; malformed, null, scalar or array arguments and integers outside
+±2^53 are refused rather than silently rounded. Argument decoder errors report only a syntax or
+type/range category, not raw argument values.
+Calls normally require a `tool_calls` finish reason. A named REQUIRED choice also accepts `stop`
+for exactly one complete function call matching that name; AUTO and unnamed REQUIRED do not.
+Completed calls must still name an offered tool, NONE still forbids any tool call, and REQUIRED
+still requires at least one. Truncated, filtered or missing-finish tool completions are still
+refused.
+
+Set `ToolResult.Content` explicitly to text parts: this is the model-facing result, concatenated into
+the tool message's content. Receipt fields such as `Output`, URI/digest, error and approval status
+are not extra model text. If any durable receipt data exists without Content, the adapter refuses
+rather than inventing or silently emptying a result; render that data into Content in your harness.
+File/data parts, non-text result Content, execution metadata on assistant calls, duplicate tool names,
+invalid choices (including named choices for unoffered tools), nonempty completion refusals and
+nonempty `ModelRequest.Params` are also refused. Top-level opaque reasoning remains journal-only and
+is not resent, as before. No tool schema rewriting or implicit tool execution is added.
+
+Streaming assembles argument fragments by tool-call index, preserves stable call IDs/names and
+returns the same finalized parts and usage as nonstreaming. The public callback still carries only
+text, never tool JSON. A finish-bearing frame's own delta is processed before the completion is
+validated and frozen. Later semantic deltas or a contradictory finish reason refuse the completion;
+trailing usage, role-only/empty deltas and repeated identical finish reasons remain allowed.
+EOF without `[DONE]` remains supported, as do text-only responses without a finish reason.
+The journal retains the original neutral request hash and finalized responses,
+not HTTP payloads or deltas. Pure replay and recovery of completed recorded effects use those parts
+and usage without provider calls; an unanswered model intent retains its existing recovery policy.
+A custom harness and host executor still supply the application loop and durable deduplication.
+
+The explicit Responses adapter (`model/openai.NewResponses`) also maps function tools and preserves
+opaque reasoning across tool turns; see [its supported mapping and limits](responses-adapter.md).
 
 ## Reference harness 1: stateless replay (`harness/echoagent`)
 

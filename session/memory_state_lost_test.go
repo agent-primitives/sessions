@@ -297,7 +297,7 @@ func (failingHarness) Run(context.Context, *api.Start, api.EventSink) error { re
 
 // newMemoryHost serves one REQUIRES_MEMORY_SNAPSHOT substrate harness, "mem", on ctl and store, as one
 // agentsessionsd host would; the harness each turn reaches is har.
-func newMemoryHost(t *testing.T, ctl *actorControl, store *sqlitelog.Store, har api.Harness) v1.SessionsClient {
+func newMemoryHost(t *testing.T, ctl substrate.ControlClient, store *sqlitelog.Store, har api.Harness) v1.SessionsClient {
 	t.Helper()
 	desc, err := echoagent.Harness{}.Describe(context.Background())
 	if err != nil {

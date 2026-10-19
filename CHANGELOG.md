@@ -69,6 +69,8 @@ not provide.
   unavailable. No wire fields, canonical event format, schema version or default behavior change.
   `NewHarnessRegistry` now accepts variadic options: ordinary calls remain source-compatible, but
   function-value assignments using its previous exact signature must wrap or adapt the constructor.
+  Mutation deletion admission precedes owner lookup: verified callers who know a UID can receive
+  `ABORTED` during deletion even without ownership; this grants no access.
 - Embedders using `controller.WithToolExecutor` or `placement.WithToolExecutor` must now declare
   durable dedup to keep `Resume` re-driving an interrupted tool call, including a call whose
   executor returned an error the harness did not handle. `Resume` re-runs a turn's trailing

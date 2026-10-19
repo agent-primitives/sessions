@@ -302,6 +302,8 @@ message Delta {
 
 // Default hosts do not authorize callers. Go hosts may opt into per-RPC authorization, which
 // precedes validation and hides inaccessible sessions as PERMISSION_DENIED (see docs/security.md).
+// Mutation deletion admission may return ABORTED before owner lookup, even for a verified non-owner
+// who knows the UID; this discloses deletion in progress but grants no access.
 // Those hosts require independent read+approve permissions, owned creation and owner-filtered
 // listing; owned Fork refuses until owner-before-log publication is available. Required-mode
 // deployment, verified approval audit and transport assembly are not provided by these checks.

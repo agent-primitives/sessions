@@ -322,11 +322,23 @@ Checks precede runtime IO, fences, stream frames and approval repair:
 
 Global actions use empty UID/owner. Create and auto-create insert the verified caller as immutable
 owner; they never claim existing rows. The service passes stored owners, not request provenance,
-to the policy. Unknown and unbound UIDs and owner-policy refusals all return the same generic
-`PERMISSION_DENIED`. Only `errors.Is(err, api.ErrPermissionDenied)` is a policy denial; unexpected
-policy/store failures and required-mode `INTERNAL` diagnostics are sanitized. Caller cancellation
+to the policy. Once deletion admission permits the owner lookup, unknown and unbound UIDs and
+owner-policy refusals all return the same generic `PERMISSION_DENIED`. Only
+`errors.Is(err, api.ErrPermissionDenied)` is a policy denial; unexpected policy/store failures and
+required-mode `INTERNAL` diagnostics are sanitized. Caller cancellation
 and deadlines retain their codes. Custom policies own any additional sharing rules; listing remains
 owner-only, not a list of arbitrary grants.
+
+Mutation owner lookups for Exec, Suspend, Resume, Fork, Approve and DeleteSession first acquire
+shared deletion admission. A mutation overlapping Delete returns `ABORTED` before the lookup or
+policy call instead of queueing behind SQLite; a failed Delete cannot release queued mutations to
+run. Authentication still runs first. A verified caller who already knows a UID can therefore
+observe `ABORTED` while an authorized deletion is in progress, even if that caller does not own
+the session. This narrow disclosure grants no access; outside deletion contention, inaccessible
+sessions still return `PERMISSION_DENIED`. Verified requests hold shared admission during the owner
+query before policy runs, so even a later-denied request can make a concurrent Delete return
+`ABORTED`. This is host-local admission contention, not deletion or write authority. GetSession and
+Replay remain unguarded audit reads; Cancel is unchanged.
 
 `api.OwnerAllowlistAuthorizer` delegates ordinary session actions to `OwnerAuthorizer` and adds
 explicit exact issuer/subject allowlists via `Allow map[api.Action][]api.CallerIdentity` for create,

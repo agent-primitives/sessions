@@ -242,6 +242,52 @@ type replayAuthStream struct{ rpcStream }
 
 func (s *replayAuthStream) Send(m *pb.LogRecord) error { return s.SendMsg(m) }
 
+// Deletion admission precedes owner lookup only for mutations. A verified foreign
+// caller who knows the UID can observe contention, but never gain mutation authority.
+func TestAuthorizationDeletionAdmissionDisclosure(t *testing.T) {
+	store := openStore(t, ":memory:")
+	r, b := publicGateRegistry(t, &publicGateHarness{}, nil)
+	if err := store.CreateOwnedSession(sqlitelog.SessionMeta{UID: "owned", Harness: "gate"}, authOwner, false); err != nil {
+		t.Fatal(err)
+	}
+	svc := session.NewService(store, r, session.WithAuthorization(api.OwnerAuthorizer{}))
+	foreign := callerContext(t, api.CallerIdentity{Issuer: "issuer", Subject: "foreign"})
+	request := &pb.DeleteSessionRequest{Uid: "owned"}
+	for _, busy := range []bool{false, true, false} {
+		check := func() error {
+			want := codes.PermissionDenied
+			if busy {
+				want = codes.Aborted
+			}
+			_, err := svc.DeleteSession(foreign, request)
+			if status.Code(err) != want {
+				t.Errorf("foreign Delete, busy=%v: %v, want %v", busy, err, want)
+			}
+			if busy && !errors.Is(err, placement.ErrSessionBusy) {
+				t.Errorf("deletion contention lost busy cause: %v", err)
+			}
+			if _, err := svc.DeleteSession(t.Context(), request); status.Code(err) != codes.Unauthenticated {
+				t.Errorf("unverified Delete: %v", err)
+			}
+			if _, err := svc.GetSession(foreign, &pb.GetSessionRequest{Uid: "owned"}); status.Code(err) != codes.PermissionDenied {
+				t.Errorf("foreign audit read: %v", err)
+			}
+			return nil
+		}
+		if busy {
+			if err := r.WithSessionGuard("owned", check); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			_ = check()
+		}
+	}
+	info, err := store.SessionInfo("owned")
+	if err != nil || info.DeletionState != api.DeletionActive || info.LastSeq != 0 || b.ioCounts() != ([4]int32{}) {
+		t.Fatalf("foreign refusal changed state or performed IO: %+v %v", info, err)
+	}
+}
+
 func TestAuthorizationOwnedCreationAndPaging(t *testing.T) {
 	store := openStore(t, ":memory:")
 	r, _ := publicGateRegistry(t, &publicGateHarness{}, nil)

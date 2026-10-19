@@ -20,7 +20,7 @@ import (
 // decisions remain available while compute is unavailable or the recorded route is unserved.
 func (s *Service) Approve(ctx context.Context, req *v1.ApproveRequest) (response *v1.ApproveResponse, err error) {
 	defer s.auth.internalError(&err)
-	if err := s.authorize(ctx, req.GetSession(), api.ActionRead, api.ActionApprove); err != nil {
+	if err := s.authorizeMutation(ctx, req.GetSession(), api.ActionRead, api.ActionApprove); err != nil {
 		return nil, err
 	}
 	ctx = observability.EnsureRequestID(ctx)

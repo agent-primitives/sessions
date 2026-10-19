@@ -580,7 +580,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	defer s.auth.internalError(&err)
 	ctx := observability.EnsureRequestID(stream.Context())
 	if req.GetSession() != "" {
-		if err := s.authorize(ctx, req.GetSession(), api.ActionExec); err != nil {
+		if err := s.authorizeMutation(ctx, req.GetSession(), api.ActionExec); err != nil {
 			return err
 		}
 	}
@@ -872,7 +872,7 @@ const MaxForkChildren = 128
 // identical state rather than from N separate re-derivations that can drift.
 func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.ForkResponse, err error) {
 	defer s.auth.internalError(&err)
-	if err := s.authorize(ctx, req.GetSession(), api.ActionFork); err != nil {
+	if err := s.authorizeMutation(ctx, req.GetSession(), api.ActionFork); err != nil {
 		return nil, err
 	}
 	if err := s.auth.global(ctx, api.ActionCreate); err != nil {
@@ -1024,7 +1024,7 @@ func forkError(err error) error {
 // in a SUSPEND lifecycle event (§5.1) and frees the worker via the Runtime SPI.
 func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session *v1.Session, err error) {
 	defer s.auth.internalError(&err)
-	if err := s.authorize(ctx, req.GetSession(), api.ActionSuspend); err != nil {
+	if err := s.authorizeMutation(ctx, req.GetSession(), api.ActionSuspend); err != nil {
 		return nil, err
 	}
 	ctx = observability.EnsureRequestID(ctx)
@@ -1075,7 +1075,7 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 // completed sessions retain the stored session default.
 func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v1.Session, err error) {
 	defer s.auth.internalError(&err)
-	if err := s.authorize(ctx, req.GetSession(), api.ActionResume, api.ActionExec); err != nil {
+	if err := s.authorizeMutation(ctx, req.GetSession(), api.ActionResume, api.ActionExec); err != nil {
 		return nil, err
 	}
 	ctx = observability.EnsureRequestID(ctx)

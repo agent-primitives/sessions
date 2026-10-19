@@ -711,7 +711,7 @@ invokes no harness and stays a no-op without one.
 - `APR-5`: `Approve` MUST be `INVALID_ARGUMENT` when `session`, `execution_id`, or `tool_call_id`
   is empty, `request_seq <= 0`, or `approved` is absent. An unknown session is `NOT_FOUND`.
   Opt-in authorization (§17) precedes validation and hides inaccessible sessions as
-  `PERMISSION_DENIED`.
+  `PERMISSION_DENIED`, subject to the earlier deletion exclusion (`OPS-30`).
 - `APR-6`: A decision MUST target the selected request: the last gated call of the latest
   execution, owned by this session (not copied before a `LIFECYCLE_FORK`), not completed, and
   without a receipt. Otherwise `FAILED_PRECONDITION`.
@@ -1435,8 +1435,17 @@ The reference implementation protects the integrity of the record, not access to
   The first `OwnerAllowlistAuthorizer` policy composes ordinary owner checks with exact-caller
   allowlists for create/list/approve/registry actions. Ownership alone MUST NOT authorize approve;
   with this policy an approver must also own the session. Unknown actions and mint remain denied.
-- Required RPC checks MUST hide unknown/unbound sessions and owner-policy refusals uniformly as
-  generic `PERMISSION_DENIED`. Only `api.ErrPermissionDenied` (possibly wrapped) is policy denial;
+- Mutation owner lookups for Exec, Suspend, Resume, Fork, Approve and DeleteSession MUST acquire
+  deletion admission (`OPS-30`) after authentication but before the lookup or policy evaluation.
+  Contention MUST return `ABORTED` without waiting for SQL, even for a verified non-owner who
+  knows the UID. This can disclose that deletion is in progress, but grants no access. The read
+  admission MUST end before policy evaluation and the mutation's own guarded phase. A metadata read
+  whose policy later denies it can also make a concurrent Delete return `ABORTED` while holding
+  admission; it gains no write authority. Get/Replay remain unguarded audit reads; Cancel is
+  unchanged.
+- Once deletion admission permits the owner lookup, required RPC checks MUST hide unknown/unbound
+  sessions and owner-policy refusals uniformly as generic `PERMISSION_DENIED`. Only
+  `api.ErrPermissionDenied` (possibly wrapped) is policy denial;
   unexpected policy/store failures MUST be sanitized `INTERNAL`. Caller cancellation/deadlines
   retain their codes. Enforced Approve ignores request actor and stores an empty actor, not a
   verified audit identity. It normalizes before retry comparison; historical nonempty actors are

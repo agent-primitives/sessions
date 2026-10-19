@@ -10,11 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/authn"
 	"github.com/agent-primitives/sessions/harness/echoagent"
 	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/runtime/local"
@@ -64,6 +66,9 @@ func deleteRaceMutation(ctx context.Context, c v1.SessionsClient, op, uid, overr
 		return err
 	case "Approve":
 		_, err := c.Approve(ctx, publicDecision(uid))
+		return err
+	case "Delete":
+		_, err := c.DeleteSession(ctx, &v1.DeleteSessionRequest{Uid: uid})
 		return err
 	default:
 		panic("unknown mutation")
@@ -261,8 +266,17 @@ func TestDeleteWinsBeforeEachMutationAcrossPlacers(t *testing.T) {
 // sole connection. Otherwise a blocked Delete queues valid requests until writer release, and
 // they either report a delayed tombstone error or run after a failed Delete instead of Aborted.
 func TestDeleteSameServiceBusyBeforeMetadataLookup(t *testing.T) {
-	for _, outcome := range []string{"commit", "store-failure"} {
-		t.Run(outcome, func(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		authorized bool
+		failStore  bool
+	}{
+		{name: "commit"},
+		{name: "store-failure", failStore: true},
+		{name: "authorized-commit", authorized: true},
+		{name: "authorized-store-failure", authorized: true, failStore: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			defer cancel()
 			path := filepath.Join(t.TempDir(), "journal.db")
@@ -270,12 +284,23 @@ func TestDeleteSameServiceBusyBeforeMetadataLookup(t *testing.T) {
 			db := deletionSQL(t, path)
 			r, backends := deleteRaceRegistry(t)
 			// One client, Service and Store for Delete and every competing mutation.
-			client := serveRegistry(t, store, r)
+			svc := session.NewService(store, r)
+			var opts []grpc.ServerOption
+			if tc.authorized {
+				policy := api.OwnerAllowlistAuthorizer{Allow: map[api.Action][]api.CallerIdentity{api.ActionApprove: {authOwner}, api.ActionCreate: {authOwner}}}
+				svc = session.NewService(store, r, session.WithAuthorization(policy))
+				unary, stream, err := authn.NewInterceptors(authn.Required, callerVerifier{authOwner})
+				if err != nil {
+					t.Fatal(err)
+				}
+				opts = []grpc.ServerOption{grpc.ChainUnaryInterceptor(unary), grpc.ChainStreamInterceptor(stream)}
+			}
+			client := serveSessions(t, svc, opts...)
 			uid := "same-store"
-			if err := store.PutSession(sqlitelog.SessionMeta{UID: uid, Harness: "recorded"}); err != nil {
+			if err := store.CreateOwnedSession(sqlitelog.SessionMeta{UID: uid, Harness: "recorded"}, authOwner, false); err != nil {
 				t.Fatal(err)
 			}
-			if outcome == "store-failure" {
+			if tc.failStore {
 				if _, err := db.Exec("CREATE TRIGGER fail_delete BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'intent failure'); END"); err != nil {
 					t.Fatal(err)
 				}
@@ -301,10 +326,10 @@ func TestDeleteSameServiceBusyBeforeMetadataLookup(t *testing.T) {
 					runtime.Gosched()
 				}
 			}()
-			// Contention can only come from Delete. Probe-induced Delete refusals retry;
-			// after acquisition its BEGIN stays blocked until this test releases writer.
+			// Read contention proves exclusive deletion admission, not a brief owner lookup.
+			// Probe-induced Delete refusals retry; its BEGIN then waits for writer release.
 			for {
-				err := r.WithSessionGuard(uid, func() error { return nil })
+				err := r.WithSessionRead(uid, func() error { return nil })
 				if errors.Is(err, placement.ErrSessionBusy) {
 					break
 				}
@@ -324,16 +349,17 @@ func TestDeleteSameServiceBusyBeforeMetadataLookup(t *testing.T) {
 				op  string
 				err error
 			}
-			results := make(chan result, 5)
-			for _, op := range []string{"Exec", "Fork", "Suspend", "Resume", "Approve"} {
+			ops := []string{"Exec", "Fork", "Suspend", "Resume", "Approve", "Delete"}
+			results := make(chan result, len(ops))
+			for _, op := range ops {
 				go func() { results <- result{op, deleteRaceMutation(ctx, client, op, uid, "")} }()
 			}
-			// This deadline only bounds a failed test; success is receipt of all five
+			// This deadline only bounds a failed test; success is receipt of all six
 			// Aborted replies while the independent writer lock is still held.
 			wait, stopWait := context.WithTimeout(ctx, 2*time.Second)
 			defer stopWait()
 			received := 0
-			for received < 5 {
+			for received < len(ops) {
 				select {
 				case got := <-results:
 					received++
@@ -341,7 +367,7 @@ func TestDeleteSameServiceBusyBeforeMetadataLookup(t *testing.T) {
 						t.Errorf("%s before writer release=%v, want Aborted", got.op, got.err)
 					}
 				case <-wait.Done():
-					t.Errorf("only %d/5 mutations returned before writer release; same-Store metadata reads blocked before busy admission", received)
+					t.Errorf("only %d/%d mutations returned before writer release; same-Store metadata reads blocked before busy admission", received, len(ops))
 					goto releaseWriter
 				}
 			}
@@ -359,13 +385,13 @@ func TestDeleteSameServiceBusyBeforeMetadataLookup(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := codes.OK
-			if outcome == "store-failure" {
+			if tc.failStore {
 				want = codes.Internal
 			}
 			if err := <-deleted; status.Code(err) != want {
 				t.Errorf("Delete outcome=%v, want %v", err, want)
 			}
-			for received < 5 {
+			for received < len(ops) {
 				select {
 				case got := <-results:
 					received++
@@ -377,7 +403,7 @@ func TestDeleteSameServiceBusyBeforeMetadataLookup(t *testing.T) {
 				}
 			}
 			assertDeleteNoEffects(t, backends)
-			if outcome == "store-failure" {
+			if tc.failStore {
 				if !reflect.DeepEqual(before, sessionDeleteRaw(t, db)) {
 					t.Error("failed Delete or delayed mutation changed raw state")
 				}

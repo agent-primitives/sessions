@@ -7,6 +7,7 @@ import (
 	"github.com/agent-primitives/sessions/api"
 	pb "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/authn"
+	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/sqlitelog"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -79,6 +80,16 @@ func (a *authorization) global(ctx context.Context, action api.Action) error {
 	return a.check(ctx, api.AuthorizationRequest{Caller: caller, Action: action})
 }
 func (s *Service) authorize(ctx context.Context, uid string, actions ...api.Action) error {
+	return s.authorizeWith(ctx, uid, s.store.SessionInfo, actions...)
+}
+
+// Mutation owner lookups obey deletion admission before waiting for SQL. The read
+// hold ends before policy evaluation and before the mutation's own guarded phase.
+func (s *Service) authorizeMutation(ctx context.Context, uid string, actions ...api.Action) error {
+	return s.authorizeWith(ctx, uid, s.mutationSessionInfo, actions...)
+}
+
+func (s *Service) authorizeWith(ctx context.Context, uid string, lookup func(string) (sqlitelog.SessionInfo, error), actions ...api.Action) error {
 	if s.auth == nil {
 		return nil
 	}
@@ -86,7 +97,10 @@ func (s *Service) authorize(ctx context.Context, uid string, actions ...api.Acti
 	if err != nil {
 		return err
 	}
-	info, err := s.store.SessionInfo(uid)
+	info, err := lookup(uid)
+	if errors.Is(err, placement.ErrSessionBusy) {
+		return err // mutationSessionInfo already maps deletion contention to ABORTED.
+	}
 	if errors.Is(err, sqlitelog.ErrSessionNotFound) {
 		return authorizationError(ctx, api.ErrPermissionDenied)
 	}

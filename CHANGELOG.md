@@ -51,17 +51,21 @@ not provide.
 
 ### Compatibility
 
-- `model/openai` now refuses nonempty `ModelRequest.Params`, previously silently ignored. Unmapped
-  parts/choices and malformed or incomplete tool calls fail closed. Tool results require explicit
-  text Content when receipt data is populated; the adapter does not guess text from Output/error
-  metadata or fetch external URIs. A named REQUIRED choice also accepts `stop` for exactly one
-  complete matching function call; AUTO and unnamed REQUIRED still require `tool_calls`.
-  Streaming validates and freezes a completion after processing the finish-bearing frame's own
-  delta, refusing later semantic deltas or contradictory finish reasons while allowing trailing usage.
-  Text-only missing-finish responses and EOF without `[DONE]` remain supported. Response, stream
-  chunk and argument decode errors retain only syntax or type/range diagnostics and declared field
-  names, never raw provider values.
-  It does not register/execute tools or add executor deduplication.
+- `model/openai` now refuses nonempty `ModelRequest.Params`, previously silently ignored. A turn
+  interrupted under an older build whose harness sets Params fails if recovery must re-drive the
+  model call; completed recorded model effects remain replayable without invoking the adapter.
+  Unmapped parts/choices, duplicate tool names, nonempty completion refusals and malformed or
+  incomplete tool calls fail closed. Integer arguments outside ±2^53 are refused rather than
+  rounded. Tool results require explicit text Content when receipt data is populated; the
+  adapter does not guess text from Output/error metadata or fetch external URIs. A named
+  REQUIRED choice also accepts `stop` for exactly one complete matching function call; AUTO and
+  unnamed REQUIRED still require `tool_calls`. Streaming validates and freezes a completion
+  after processing the finish-bearing frame's own delta, refusing later semantic deltas or
+  contradictory finish reasons while allowing trailing usage. Text-only missing-finish responses
+  and EOF without `[DONE]` remain supported. Response, stream chunk and argument decode errors
+  retain only syntax or type/range diagnostics and declared field names, never raw provider
+  values or toolchain-dependent slice indexes. It does not register/execute tools or add
+  executor deduplication.
 
 - SQLite schema v5 follows approval v3 and deletion v4, adding indexed exact caller issuer/subject
   ownership and an off-mode journal authorization marker. Legacy and RPC-created sessions remain

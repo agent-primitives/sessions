@@ -192,31 +192,36 @@ func TestModelRejectsUnmappedToolSemantics(t *testing.T) {
 		r.ID = "c1"
 		return api.ModelRequest{Messages: []api.Message{{Role: "tool", Parts: []api.Part{{ToolResult: &r}}}}}
 	}
-	for name, req := range map[string]api.ModelRequest{
-		"unnamed tool":      {Tools: []api.ToolDefinition{{InputSchema: map[string]any{}}}},
-		"schema":            {Tools: []api.ToolDefinition{{Name: "weather", InputSchema: map[string]any{"bad": make(chan int)}}}},
-		"choice":            {ToolChoice: &api.ToolChoice{Mode: "NEW_MODE"}},
-		"name default":      {ToolChoice: &api.ToolChoice{Name: "weather"}},
-		"name auto":         {ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceAuto, Name: "weather"}},
-		"name none":         {ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceNone, Name: "weather"}},
-		"params":            {Params: map[string]string{"unmapped": "true"}},
-		"output":            result(api.ToolResult{Output: map[string]any{}}),
-		"URI":               result(api.ToolResult{OutputURI: "file://result"}),
-		"digest":            result(api.ToolResult{OutputDigest: "sha256:digest"}),
-		"error flag":        result(api.ToolResult{IsError: true}),
-		"error":             result(api.ToolResult{Error: "failed"}),
-		"code":              result(api.ToolResult{Code: api.ToolResultCodeApprovalDenied}),
-		"request seq":       result(api.ToolResult{ApprovalRequestSeq: 1}),
-		"decision seq":      result(api.ToolResult{ApprovalDecisionSeq: 2}),
-		"nested file":       result(api.ToolResult{Content: []api.Part{{File: &api.FilePart{MIME: "image/png"}}}}),
-		"mixed part":        {Messages: []api.Message{{Parts: []api.Part{{Text: &api.TextPart{Text: "x"}, File: &api.FilePart{}}}}}},
-		"args":              {Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{ID: "c1", Tool: "weather", Args: map[string]any{"bad": make(chan int)}}}}}}},
-		"interleaved text":  {Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{ID: "c1", Tool: "weather"}}, {Text: &api.TextPart{Text: "late"}}}}}},
-		"multiple results":  {Messages: []api.Message{{Role: "tool", Parts: []api.Part{{ToolResult: &api.ToolResult{ID: "c1"}}, {ToolResult: &api.ToolResult{ID: "c2"}}}}}},
-		"missing result ID": {Messages: []api.Message{{Role: "tool", Parts: []api.Part{{ToolResult: &api.ToolResult{}}}}}},
-		"call metadata": {Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{
+	for name, tc := range map[string]struct {
+		req    api.ModelRequest
+		reason string
+	}{
+		"unnamed tool":      {api.ModelRequest{Tools: []api.ToolDefinition{{InputSchema: map[string]any{}}}}, "empty or duplicate tool name"},
+		"schema":            {api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather", InputSchema: map[string]any{"bad": make(chan int)}}}}, "encode request"},
+		"choice":            {api.ModelRequest{ToolChoice: &api.ToolChoice{Mode: "NEW_MODE"}}, "tool choice mode"},
+		"name default":      {api.ModelRequest{ToolChoice: &api.ToolChoice{Name: "weather"}}, "named tool choice requires REQUIRED"},
+		"name auto":         {api.ModelRequest{ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceAuto, Name: "weather"}}, "named tool choice requires REQUIRED"},
+		"name none":         {api.ModelRequest{ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceNone, Name: "weather"}}, "named tool choice requires REQUIRED"},
+		"params":            {api.ModelRequest{Params: map[string]string{"unmapped": "true"}}, "Params"},
+		"output":            {result(api.ToolResult{Output: map[string]any{}}), "requires model-facing Content"},
+		"URI":               {result(api.ToolResult{OutputURI: "file://result"}), "requires model-facing Content"},
+		"digest":            {result(api.ToolResult{OutputDigest: "sha256:digest"}), "requires model-facing Content"},
+		"error flag":        {result(api.ToolResult{IsError: true}), "requires model-facing Content"},
+		"error":             {result(api.ToolResult{Error: "failed"}), "requires model-facing Content"},
+		"code":              {result(api.ToolResult{Code: api.ToolResultCodeApprovalDenied}), "requires model-facing Content"},
+		"request seq":       {result(api.ToolResult{ApprovalRequestSeq: 1}), "requires model-facing Content"},
+		"decision seq":      {result(api.ToolResult{ApprovalDecisionSeq: 2}), "requires model-facing Content"},
+		"nested file":       {result(api.ToolResult{Content: []api.Part{{File: &api.FilePart{MIME: "image/png"}}}}), "Content must be text-only"},
+		"mixed part":        {api.ModelRequest{Messages: []api.Message{{Parts: []api.Part{{Text: &api.TextPart{Text: "x"}, File: &api.FilePart{}}}}}}, "exactly one known content field"},
+		"args":              {api.ModelRequest{Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{ID: "c1", Tool: "weather", Args: map[string]any{"bad": make(chan int)}}}}}}}, "encode tool arguments"},
+		"interleaved text":  {api.ModelRequest{Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{ID: "c1", Tool: "weather"}}, {Text: &api.TextPart{Text: "late"}}}}}}, "text after a tool call"},
+		"multiple results":  {api.ModelRequest{Messages: []api.Message{{Role: "tool", Parts: []api.Part{{ToolResult: &api.ToolResult{ID: "c1"}}, {ToolResult: &api.ToolResult{ID: "c2"}}}}}}, "requires one tool result"},
+		"missing result ID": {api.ModelRequest{Messages: []api.Message{{Role: "tool", Parts: []api.Part{{ToolResult: &api.ToolResult{}}}}}}, "tool result ID is required"},
+		"call metadata": {api.ModelRequest{Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{
 			ID: "c1", Tool: "weather", Mediation: api.MediationControllerMediated, IdempotencyKey: "key",
-		}}}}}},
+		}}}}}}, "no execution metadata"},
+		"duplicate tools":      {api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}, {Name: "weather"}}}, "empty or duplicate tool name"},
+		"unknown named choice": {api.ModelRequest{Tools: []api.ToolDefinition{{Name: "other"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceRequired, Name: "weather"}}, "named tool choice requires REQUIRED and an offered tool"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var called atomic.Bool
@@ -224,6 +229,7 @@ func TestModelRejectsUnmappedToolSemantics(t *testing.T) {
 				called.Store(true)
 				_, _ = io.WriteString(w, completion("x"))
 			})
+			req := tc.req
 			if req.Messages == nil {
 				req.Messages = []api.Message{*api.TextMessage("user", "weather?")}
 			}
@@ -234,8 +240,8 @@ func TestModelRejectsUnmappedToolSemantics(t *testing.T) {
 				} else {
 					_, err = c.Model(t.Context(), req)
 				}
-				if !errors.Is(err, openai.ErrUnsupportedPart) {
-					t.Fatalf("stream=%v: err = %v, want ErrUnsupportedPart", stream, err)
+				if !errors.Is(err, openai.ErrUnsupportedPart) || !strings.Contains(err.Error(), tc.reason) {
+					t.Fatalf("stream=%v: err = %v, want ErrUnsupportedPart with %q", stream, err, tc.reason)
 				}
 			}
 			if called.Load() {

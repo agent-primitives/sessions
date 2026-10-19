@@ -205,6 +205,7 @@ func TestToolArgumentErrorsDoNotExposePayload(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		for _, tc := range []struct{ name, args, private string }{
 			{"range", `{"private":987654321098765432109876543210e10000}`, "987654321098765432109876543210e10000"},
+			{"big integer", `{"id":1234567890123456789}`, "1234567890123456789"},
 			{"syntax", `{"private":"fixture-private-value",}`, "fixture-private-value"},
 			{"type", `"fixture-private-value"`, "fixture-private-value"},
 		} {
@@ -289,9 +290,50 @@ func TestDecodeErrorsDoNotExposePayload(t *testing.T) {
 	}
 }
 
+// A refusal is not an empty successful completion, even under a forced tool choice.
+func TestToolCompletionRefusal(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		for _, refusal := range []string{`null`, `""`, `"private refusal"`} {
+			t.Run(fmt.Sprintf("stream=%t/refusal=%s", streaming, refusal), func(t *testing.T) {
+				key := "message"
+				if streaming {
+					key = "delta"
+				}
+				body := fmt.Sprintf(`{"choices":[{"%s":{"refusal":%s,"content":"must not emit"},"finish_reason":"stop"}]}`, key, refusal)
+				c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+					if streaming {
+						fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", body)
+					} else {
+						fmt.Fprint(w, body)
+					}
+				})
+				req := api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceRequired, Name: "weather"}}
+				var got api.ModelResponse
+				var err error
+				var chunks strings.Builder
+				if streaming {
+					got, err = c.StreamModel(t.Context(), req, func(s string) { chunks.WriteString(s) })
+				} else {
+					got, err = c.Model(t.Context(), req)
+				}
+				if refusal != `"private refusal"` {
+					if err != nil || got.Message.Text() != "must not emit" {
+						t.Fatalf("empty refusal: response=%+v err=%v", got, err)
+					}
+					return
+				}
+				if !errors.Is(err, openai.ErrUnsupportedPart) || !strings.Contains(err.Error(), "refusal") || strings.Contains(err.Error(), "private refusal") || len(got.Message.Parts) != 0 || chunks.Len() != 0 {
+					t.Fatalf("response=%+v chunks=%q err=%v, want payload-free refusal and no completion", got, chunks.String(), err)
+				}
+			})
+		}
+	}
+}
+
 func TestModelRefusesMalformedToolCompletions(t *testing.T) {
 	for _, tc := range []struct{ name, id, kind, args, finish string }{
 		{"invalid JSON", "c", "function", "{", "tool_calls"},
+		{"big integer", "c", "function", `{"id":1234567890123456789}`, "tool_calls"},
 		{"null", "c", "function", "null", "tool_calls"},
 		{"array", "c", "function", "[]", "tool_calls"},
 		{"scalar", "c", "function", `"x"`, "tool_calls"},
@@ -341,6 +383,7 @@ func TestStreamCompletionFreezesAtFinish(t *testing.T) {
 		{"reasoning", final, `{"choices":[{"delta":{"reasoning_content":"after"}}]}`},
 		{"tool", final, `{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":""}}]}}]}`},
 		{"legacy", final, `{"choices":[{"delta":{"function_call":{"name":"weather","arguments":"{}"}}}]}`},
+		{"refusal", final, `{"choices":[{"delta":{"refusal":"private refusal"}}]}`},
 		{"contradictory reason", textFinal, `{"choices":[{"delta":{},"finish_reason":"length"}]}`},
 		{"content with repeated reason", textFinal, `{"choices":[{"delta":{"content":"after"},"finish_reason":"stop"}]}`},
 	} {

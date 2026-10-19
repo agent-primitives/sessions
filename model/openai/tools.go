@@ -8,12 +8,35 @@ import (
 	"github.com/agent-primitives/sessions/api"
 )
 
-func toChatTools(defs []api.ToolDefinition) ([]chatToolDefinition, error) {
+// validateTools keeps tool identity and choice admission identical across both adapters.
+func validateTools(defs []api.ToolDefinition, choice *api.ToolChoice) error {
+	names := map[string]bool{}
+	for _, def := range defs {
+		if def.Name == "" || names[def.Name] {
+			return fmt.Errorf("empty or duplicate tool name")
+		}
+		names[def.Name] = true
+	}
+	if choice == nil {
+		return nil
+	}
+	if choice.Name != "" {
+		if choice.Mode != api.ToolChoiceRequired || !names[choice.Name] {
+			return fmt.Errorf("named tool choice requires REQUIRED and an offered tool")
+		}
+		return nil
+	}
+	switch choice.Mode {
+	case "", api.ToolChoiceAuto, api.ToolChoiceNone, api.ToolChoiceRequired:
+		return nil
+	default:
+		return fmt.Errorf("unsupported tool choice mode")
+	}
+}
+
+func toChatTools(defs []api.ToolDefinition) []chatToolDefinition {
 	var tools []chatToolDefinition
 	for _, def := range defs {
-		if def.Name == "" {
-			return nil, fmt.Errorf("%w: tool name is required", ErrUnsupportedPart)
-		}
 		tool := chatToolDefinition{Type: "function"}
 		tool.Function.Name, tool.Function.Description = def.Name, def.Description
 		if def.InputSchema != nil {
@@ -21,31 +44,21 @@ func toChatTools(defs []api.ToolDefinition) ([]chatToolDefinition, error) {
 		}
 		tools = append(tools, tool)
 	}
-	return tools, nil
+	return tools
 }
 
-func toChatToolChoice(choice *api.ToolChoice) (any, error) {
+// The request builder validates choices before either endpoint-specific mapping.
+func toChatToolChoice(choice *api.ToolChoice) any {
 	if choice == nil {
-		return nil, nil
+		return nil
 	}
 	if choice.Name != "" {
-		if choice.Mode != api.ToolChoiceRequired {
-			return nil, fmt.Errorf("%w: named tool choice requires REQUIRED", ErrUnsupportedPart)
-		}
-		return map[string]any{"type": "function", "function": map[string]string{"name": choice.Name}}, nil
+		return map[string]any{"type": "function", "function": map[string]string{"name": choice.Name}}
 	}
-	switch choice.Mode {
-	case "":
-		return nil, nil
-	case api.ToolChoiceAuto:
-		return "auto", nil
-	case api.ToolChoiceNone:
-		return "none", nil
-	case api.ToolChoiceRequired:
-		return "required", nil
-	default:
-		return nil, fmt.Errorf("%w: unknown tool choice mode", ErrUnsupportedPart)
+	if choice.Mode == "" {
+		return nil
 	}
+	return strings.ToLower(string(choice.Mode))
 }
 
 // Top-level reasoning remains journal-only provider state. Every other part must have a faithful
@@ -146,12 +159,9 @@ func toolCallParts(calls []chatToolCall) ([]api.Part, error) {
 		if call.Type != "function" || call.ID == "" || call.Function.Name == "" || ids[call.ID] {
 			return nil, fmt.Errorf("%w: completion tool call requires function type and unique ID/name", ErrUnsupportedPart)
 		}
-		var args map[string]any
-		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-			return nil, fmt.Errorf("%w: decode tool arguments: %s", ErrUnsupportedPart, jsonDecodeDetail(err))
-		}
-		if args == nil {
-			return nil, fmt.Errorf("%w: tool arguments must be a JSON object", ErrUnsupportedPart)
+		args, err := toolArguments(call.Function.Arguments)
+		if err != nil {
+			return nil, fmt.Errorf("%w: decode tool arguments: %v", ErrUnsupportedPart, err)
 		}
 		parts = append(parts, api.Part{ToolCall: &api.ToolCall{ID: call.ID, Tool: call.Function.Name, Args: args}})
 		ids[call.ID] = true

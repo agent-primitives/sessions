@@ -391,6 +391,9 @@ func (c *Client) StreamModel(ctx context.Context, req api.ModelRequest, onChunk 
 		}
 		choice := chunk.Choices[0]
 		d := choice.Delta
+		if d.Refusal != "" {
+			return api.ModelResponse{}, fmt.Errorf("%w: completion refusal is not supported", ErrUnsupportedPart)
+		}
 		if finishReason != "" {
 			// A terminal choice freezes semantic output, but not trailing usage.
 			// Refuse before appending fragments or exposing text to the callback.
@@ -449,7 +452,17 @@ func jsonDecodeDetail(err error) string {
 	}
 	detail := "JSON value has the wrong type or is out of range"
 	if typeError, ok := err.(*json.UnmarshalTypeError); ok && typeError.Field != "" {
-		detail += " for field " + typeError.Field
+		// Go 1.27 added slice indexes to Field. Keep journaled diagnostics stable
+		// across toolchains by retaining only the statically declared field path.
+		var fields []string
+		for _, field := range strings.Split(typeError.Field, ".") {
+			if field != "" && strings.Trim(field, "0123456789") != "" {
+				fields = append(fields, field)
+			}
+		}
+		if len(fields) != 0 {
+			detail += " for field " + strings.Join(fields, ".")
+		}
 	}
 	return detail
 }
@@ -466,14 +479,11 @@ func (c *Client) buildRequest(req api.ModelRequest, stream bool) (string, []byte
 	if len(req.Params) != 0 {
 		return model, nil, fmt.Errorf("%w: Params are not mapped to Chat Completions", ErrUnsupportedPart)
 	}
-	tools, err := toChatTools(req.Tools)
-	if err != nil {
-		return model, nil, err
+	if err := validateTools(req.Tools, req.ToolChoice); err != nil {
+		return model, nil, fmt.Errorf("%w: %v", ErrUnsupportedPart, err)
 	}
-	choice, err := toChatToolChoice(req.ToolChoice)
-	if err != nil {
-		return model, nil, err
-	}
+	tools := toChatTools(req.Tools)
+	choice := toChatToolChoice(req.ToolChoice)
 	msgs, err := toChatMessages(req.Messages)
 	if err != nil {
 		return model, nil, err
@@ -524,6 +534,9 @@ func statusError(model string, code int, raw []byte) error {
 // finalized parts. Reasoning is recorded only when supplied; tool arguments enter the existing
 // JSON-native map domain (float64 numbers), not a lexical JSON/whitespace representation.
 func toModelResponse(model string, message chatCompletionMessage, usage api.Usage) (api.ModelResponse, error) {
+	if message.Refusal != "" {
+		return api.ModelResponse{}, fmt.Errorf("%w: completion refusal is not supported", ErrUnsupportedPart)
+	}
 	if legacyFunctionCall(message.FunctionCall) {
 		return api.ModelResponse{}, fmt.Errorf("%w: legacy function_call is not supported", ErrUnsupportedPart)
 	}
@@ -562,6 +575,7 @@ type chatChunk struct {
 	Choices []struct {
 		Delta struct {
 			Content          string          `json:"content"`
+			Refusal          string          `json:"refusal"`
 			ReasoningContent string          `json:"reasoning_content"`
 			ToolCalls        []chatToolDelta `json:"tool_calls"`
 			FunctionCall     json.RawMessage `json:"function_call"`
@@ -580,6 +594,7 @@ type chatMessage struct {
 
 type chatCompletionMessage struct {
 	Content string `json:"content"`
+	Refusal string `json:"refusal"`
 	// Compatible endpoints may supply reasoning text; never synthesize it when absent.
 	ReasoningContent string          `json:"reasoning_content"`
 	ToolCalls        []chatToolCall  `json:"tool_calls"`

@@ -762,12 +762,13 @@ invokes no harness and stays a no-op without one.
   as after a crash and the next recovery calls the executor again with the recorded call. The host
   decides by the recovery context's state when the executor returns, not by which context ended the
   call, and matches the error by kind. An error returned while the recovery context is live and
-  before its deadline MUST become an `EXECUTOR_ERROR` receipt, including the error from cancelling
-  that per-call context or from its deadline. A cancellation error returned after the recovery
-  context was cancelled, or a deadline error returned after its deadline passed, MUST NOT be
-  receipted, even when the per-call deadline expired first. Any other error MUST become an
-  `EXECUTOR_ERROR` receipt, including one unrelated to either context returned after the recovery
-  ended. A missing executor is `FAILED_PRECONDITION` and leaves the decision recoverable.
+  before its deadline MUST become an `EXECUTOR_ERROR` receipt, including the error from cancelling a
+  context the harness narrowed for that one call (`api.Harness`) or from its deadline. A
+  cancellation error returned after the recovery context was cancelled, or a deadline error returned
+  after its deadline passed, MUST NOT be receipted, even when that per-call deadline expired first.
+  Any other error MUST become an `EXECUTOR_ERROR` receipt, including one unrelated to either context
+  returned after the recovery ended. A missing executor is `FAILED_PRECONDITION` and leaves the
+  decision recoverable.
 - `APR-15`: An inherited unresolved gate (copied by a fork) MUST be refused with
   `FAILED_PRECONDITION`. A reference inherited through fork cannot authorize an effect in the child.
 - Requests and snapshots are retained indefinitely.

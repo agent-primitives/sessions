@@ -186,6 +186,42 @@ func TestModelRejectsUnsupportedParts(t *testing.T) {
 	}
 }
 
+func TestModelRequestEncodingErrorsDoNotExposePayload(t *testing.T) {
+	const private = "fixture-private-value"
+	for _, tc := range []struct {
+		name, want string
+		req        api.ModelRequest
+	}{
+		{"arguments", "encode tool arguments", api.ModelRequest{Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{ID: "c1", Tool: "weather", Args: map[string]any{"private": json.Number(private)}}}}}}}},
+		{"schema", "encode request", api.ModelRequest{Messages: []api.Message{*api.TextMessage("user", "weather?")}, Tools: []api.ToolDefinition{{Name: "weather", InputSchema: map[string]any{"private": json.Number(private)}}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var called atomic.Bool
+			c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				called.Store(true)
+				_, _ = io.WriteString(w, completion("x"))
+			})
+			for _, stream := range []bool{false, true} {
+				var err error
+				if stream {
+					_, err = c.StreamModel(t.Context(), tc.req, func(string) {})
+				} else {
+					_, err = c.Model(t.Context(), tc.req)
+				}
+				if !errors.Is(err, openai.ErrUnsupportedPart) || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("stream=%v: err = %v, want ErrUnsupportedPart with %q", stream, err, tc.want)
+				}
+				if strings.Contains(err.Error(), private) {
+					t.Fatalf("stream=%v: encoding error leaked private value: %v", stream, err)
+				}
+			}
+			if called.Load() {
+				t.Fatal("sent a request despite unencodable content")
+			}
+		})
+	}
+}
+
 // Refuse unsupported semantics before HTTP; never silently empty a result or ignore a choice.
 func TestModelRejectsUnmappedToolSemantics(t *testing.T) {
 	result := func(r api.ToolResult) api.ModelRequest {

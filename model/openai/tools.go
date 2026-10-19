@@ -105,7 +105,7 @@ func toChatMessages(msgs []api.Message) ([]chatMessage, error) {
 				if args == nil {
 					args = map[string]any{}
 				}
-				encoded, err := json.Marshal(args)
+				encoded, err := responsesMarshal(args)
 				if err != nil {
 					return nil, fmt.Errorf("%w: encode tool arguments: %w", ErrUnsupportedPart, err)
 				}

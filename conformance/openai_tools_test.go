@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -23,10 +24,20 @@ type openaiToolReport struct {
 	responses []api.ModelResponse
 }
 type openaiToolHarness struct{ reports chan openaiToolReport }
+type openaiDirectErrorHarness struct{ run func(context.Context) error }
 
 func (openaiToolHarness) Describe(context.Context) (api.Descriptor, error) {
 	return api.Descriptor{ID: "openai-tools", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, nil
 }
+
+func (openaiDirectErrorHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "openai-request-privacy"}, nil
+}
+
+func (h openaiDirectErrorHarness) Run(ctx context.Context, _ *api.Start, _ api.EventSink) error {
+	return h.run(ctx)
+}
+
 func (h openaiToolHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
 	var report openaiToolReport
 	defer func() { h.reports <- report }() // Run executes on the remote server's goroutine.
@@ -134,6 +145,82 @@ func assertOpenAICompletionRefused(t *testing.T, streaming bool, body, private, 
 	}
 	if err := journal.Verify(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOpenAIRequestEncodingPrivacy(t *testing.T) {
+	const private = "fixture-private-value"
+	for _, tc := range []struct {
+		name, want string
+		req        api.ModelRequest
+	}{
+		{"arguments", "encode tool arguments", api.ModelRequest{Messages: []api.Message{{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{ID: "call-1", Tool: "lookup", Args: map[string]any{"private": json.Number(private)}}}}}}}},
+		{"schema", "encode request", api.ModelRequest{Messages: []api.Message{*api.TextMessage("user", "weather?")}, Tools: []api.ToolDefinition{{Name: "lookup", InputSchema: map[string]any{"private": json.Number(private)}}}}},
+	} {
+		for _, streaming := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, streaming), func(t *testing.T) {
+				var providerCalls atomic.Int64
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					providerCalls.Add(1)
+					t.Error("request reached provider")
+				}))
+				defer server.Close()
+				client, err := openai.New(openai.WithBaseURL(server.URL), openai.WithModel("test-model"), openai.WithHTTPClient(server.Client()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				store, _ := openFile(t)
+				defer store.Close()
+				journal := store.Session("request-privacy")
+				c, err := controller.New(journal, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = c.Exec(t.Context(), openaiDirectErrorHarness{run: func(ctx context.Context) error {
+					if streaming {
+						_, err := client.StreamModel(ctx, tc.req, nil)
+						return err
+					}
+					_, err := client.Model(ctx, tc.req)
+					return err
+				}}, nil, 0)
+				if !errors.Is(err, openai.ErrUnsupportedPart) || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("err=%v, want ErrUnsupportedPart with %q", err, tc.want)
+				}
+				if strings.Contains(err.Error(), private) {
+					t.Fatalf("returned error leaked private value: %v", err)
+				}
+				records, err := journal.Read(1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				errorsRecorded := 0
+				for _, record := range records {
+					switch record.Event.Kind {
+					case api.EventModelCall, api.EventOutput, api.EventToolCall, api.EventToolResult, api.EventEnd:
+						t.Fatalf("encoding failure recorded %s", record.Event.Kind)
+					case api.EventError:
+						errorsRecorded++
+						if record.Event.Err == nil {
+							t.Fatal("ERROR has no description")
+						}
+						description := record.Event.Err.Description
+						if !strings.Contains(description, tc.want) {
+							t.Fatalf("journal ERROR=%q, want %q", description, tc.want)
+						}
+						if strings.Contains(description, private) {
+							t.Fatalf("journal ERROR leaked private value: %s", description)
+						}
+					}
+				}
+				if errorsRecorded != 1 || providerCalls.Load() != 0 {
+					t.Fatalf("errors=%d providerCalls=%d", errorsRecorded, providerCalls.Load())
+				}
+				if err := journal.Verify(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
 	}
 }
 

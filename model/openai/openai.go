@@ -507,7 +507,7 @@ func (c *Client) buildRequest(req api.ModelRequest, stream bool) (string, []byte
 		body.Stream = true
 		body.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
-	raw, err := json.Marshal(body)
+	raw, err := responsesMarshal(body)
 	if err != nil {
 		return model, nil, fmt.Errorf("%w: encode request: %w", ErrUnsupportedPart, err)
 	}

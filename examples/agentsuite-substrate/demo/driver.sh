@@ -309,13 +309,29 @@ items = d if isinstance(d, list) else d.get("actors", d.get("items", []))
 print(" ".join(a["metadata"]["name"] for a in items if a["metadata"]["name"].startswith("sess-")))'
 }
 
+# template_state: "present", or "absent" when the ate API answers NotFound, for an ActorTemplate in
+# the demo's atespace. Any other failure to read it (the API down, access denied) is printed and
+# returns 1, so it is never taken for a missing template.
+template_state() {
+	local out
+	if out="$("${ATE[@]}" get actor-template "$1" -a "${ATESPACE}" 2>&1)"; then
+		echo present
+	elif [[ "${out}" == *"code = NotFound"* ]]; then
+		echo absent
+	else
+		printf '%s\n' "${out}" >&2
+		log "${out}"
+		return 1
+	fi
+}
+
 # ================================================================================================
 # reset: what show created on the cluster, removed, so show can run again: every session's actor
 # (named sess-…; the templates' golden actors are left alone) and the stateless tier's ActorTemplate.
 # The journals keep the earlier sessions; show only reads its own.
 # ================================================================================================
 reset() {
-	local names n t
+	local names n t found
 	names="$(session_actors)"
 	for n in ${names}; do
 		"${ATE[@]}" delete actor "${n}" -a "${ATESPACE}" --any-state 2>&1 | tee -a "${STEP_LOG}"
@@ -327,14 +343,16 @@ reset() {
 	names="$(session_actors)"
 	if [[ -n "${names}" ]]; then fail "session actors are still there: ${names}"; fi
 	t="$(template_name)"
-	if "${ATE[@]}" get actor-template "${t}" -a "${ATESPACE}" >/dev/null 2>&1; then
+	found="$(template_state "${t}")" || fail "cannot tell whether ActorTemplate ${t} exists"
+	if [[ "${found}" == present ]]; then
 		"${ATE[@]}" delete actor-template "${t}" -a "${ATESPACE}" 2>&1 | tee -a "${STEP_LOG}"
 	fi
 	for _ in $(seq 60); do
-		"${ATE[@]}" get actor-template "${t}" -a "${ATESPACE}" >/dev/null 2>&1 || break
+		[[ "${found}" == absent ]] && break
 		sleep 2
+		found="$(template_state "${t}")" || fail "cannot tell whether ActorTemplate ${t} exists"
 	done
-	if "${ATE[@]}" get actor-template "${t}" -a "${ATESPACE}" >/dev/null 2>&1; then fail "ActorTemplate ${t} is still there"; fi
+	[[ "${found}" == absent ]] || fail "ActorTemplate ${t} is still there"
 	echo "RESET OK: no session actors, no ActorTemplate ${t}" | tee -a "${STEP_LOG}"
 }
 

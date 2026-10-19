@@ -724,17 +724,23 @@ func TestDriverSetupRemovesAnEarlierResetLog(t *testing.T) {
 }
 
 // driver.sh reset deletes the session actors (sess-…) in the demo's atespace, leaves the golden
-// actors, and prints RESET OK only once none is left; a session actor still listed after its wait
-// fails the reset.
+// actors, deletes the stateless tier's ActorTemplate, and prints RESET OK only once none of them is
+// left; a session actor or the template still there after its wait fails the reset. Only a NotFound
+// answer counts as the template being gone: any other error reading it fails the reset.
 func TestDriverResetChecksTheSessionActorsAreGone(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		env      []string
-		wantCode int
-		wantOut  string
+		name        string
+		env         []string
+		wantCode    int
+		wantOut     string
+		wantTmplDel bool // reset deletes ActorTemplate tmpl-1
 	}{
 		{name: "the actors go", wantOut: "RESET OK: no session actors, no ActorTemplate tmpl-1"},
 		{name: "an actor stays", env: []string{"STUB_ACTORS_STAY=1"}, wantCode: 1, wantOut: "DEMO FAILED: session actors are still there: sess-a sess-b"},
+		{name: "the template goes", env: []string{"STUB_TEMPLATE=present"}, wantOut: "RESET OK: no session actors, no ActorTemplate tmpl-1", wantTmplDel: true},
+		{name: "the template stays", env: []string{"STUB_TEMPLATE=stays"}, wantCode: 1, wantOut: "DEMO FAILED: ActorTemplate tmpl-1 is still there", wantTmplDel: true},
+		{name: "the template cannot be read", env: []string{"STUB_TEMPLATE=error"}, wantCode: 1, wantOut: "DEMO FAILED: cannot tell whether ActorTemplate tmpl-1 exists"},
+		{name: "the template cannot be read after its delete", env: []string{"STUB_TEMPLATE=error-after-delete"}, wantCode: 1, wantOut: "DEMO FAILED: cannot tell whether ActorTemplate tmpl-1 exists", wantTmplDel: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newStubs(t)
@@ -746,7 +752,9 @@ func TestDriverResetChecksTheSessionActorsAreGone(t *testing.T) {
 				t.Fatal(err)
 			}
 			// get actors lists two session actors and a golden one until a delete is logged (or
-			// always, with STUB_ACTORS_STAY); the stateless template does not exist.
+			// always, with STUB_ACTORS_STAY). get actor-template answers NotFound, as kubectl-ate
+			// does at substrate 96dffb2, unless STUB_TEMPLATE says the template is there (until its
+			// delete is logged, or always) or cannot be read.
 			stub(t, filepath.Join(s.work, "bin"), "kubectl-ate", `echo "kubectl-ate $*" >>"$STUB_DIR/calls"
 case " $* " in
 *" get actors "*)
@@ -756,7 +764,21 @@ case " $* " in
 		echo '{"actors": [{"metadata": {"name": "golden-1"}}]}'
 	fi
 	;;
-*" get actor-template "*) exit 1 ;;
+*" get actor-template "*)
+	deleted=
+	if grep -q "delete actor-template" "$STUB_DIR/calls"; then deleted=1; fi
+	case "${STUB_TEMPLATE:-}" in
+	stays) echo tmpl-1; exit 0 ;;
+	present | error-after-delete) [ -n "$deleted" ] || { echo tmpl-1; exit 0; } ;;
+	esac
+	case "${STUB_TEMPLATE:-}" in error | error-after-delete)
+		echo 'Error: failed to get actor template "tmpl-1": rpc error: code = Unavailable desc = connection refused' >&2
+		exit 1
+		;;
+	esac
+	echo 'Error: failed to get actor template "tmpl-1": rpc error: code = NotFound desc = ActorTemplate agentsuite-demo/tmpl-1 not found' >&2
+	exit 1
+	;;
 esac
 `)
 			code, out, calls := s.runArgs(t, "demo/driver.sh", []string{"reset"}, tc.env...)
@@ -765,6 +787,9 @@ esac
 			}
 			if !strings.Contains(out, tc.wantOut) {
 				t.Errorf("output does not contain %q:\n%s", tc.wantOut, out)
+			}
+			if strings.Contains(tc.wantOut, "cannot tell") && !strings.Contains(out, "code = Unavailable desc = connection refused") {
+				t.Errorf("output does not show the error reading the template:\n%s", out)
 			}
 			if tc.wantCode != 0 && strings.Contains(out, "RESET OK") {
 				t.Errorf("a failed reset printed RESET OK:\n%s", out)
@@ -776,6 +801,9 @@ esac
 			}
 			if strings.Contains(calls, "delete actor golden-1") {
 				t.Errorf("reset deleted the golden actor:\n%s", calls)
+			}
+			if got := strings.Contains(calls, "delete actor-template tmpl-1 "); got != tc.wantTmplDel {
+				t.Errorf("reset deleted ActorTemplate tmpl-1: %v, want %v\ncalls:\n%s", got, tc.wantTmplDel, calls)
 			}
 		})
 	}

@@ -206,6 +206,8 @@ func validateCompletionToolCalls(parts []api.Part, defs []api.ToolDefinition, ch
 		if calls == 0 {
 			return fmt.Errorf("%w: completion omitted a required tool call", ErrUnsupportedPart)
 		}
+	default:
+		return fmt.Errorf("%w: unsupported tool choice mode", ErrUnsupportedPart)
 	}
 	return nil
 }

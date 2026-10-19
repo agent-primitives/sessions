@@ -228,10 +228,15 @@ func TestResponsesChoicesEffortsAndEmptyResult(t *testing.T) {
 }
 
 func TestResponsesCompletionToolChoiceValidation(t *testing.T) {
-	call := func(name string) string {
-		return fmt.Sprintf(`{"status":"completed","output":[{"type":"function_call","id":"fc","call_id":"c","name":%q,"arguments":"{}"}]}`, name)
+	call := func(names ...string) string {
+		items := make([]string, 0, len(names))
+		for i, name := range names {
+			items = append(items, fmt.Sprintf(`{"type":"function_call","id":"fc_%d","call_id":"c_%d","name":%q,"arguments":"{}"}`, i, i, name))
+		}
+		return `{"status":"completed","output":[` + strings.Join(items, ",") + `]}`
 	}
 	text := `{"status":"completed","output":[{"type":"message","id":"m","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello","annotations":[]}]}]}`
+	empty := `{"status":"completed","output":[]}`
 	for _, streaming := range []bool{false, true} {
 		for _, tc := range []struct {
 			name, body, want string
@@ -242,10 +247,13 @@ func TestResponsesCompletionToolChoiceValidation(t *testing.T) {
 		}{
 			{name: "named match", body: call("weather"), req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceRequired, Name: "weather"}}, wantOK: true, wantLen: 1},
 			{name: "auto unoffered", body: call("fixture-private-tool"), req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceAuto}}, want: "unoffered tool", private: []string{"fixture-private-tool"}},
+			{name: "auto second unoffered", body: call("weather", "fixture-private-tool"), req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceAuto}}, want: "unoffered tool", private: []string{"fixture-private-tool"}},
 			{name: "named mismatch", body: call("fixture-private-tool"), req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "fixture-private-choice"}, {Name: "fixture-private-tool"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceRequired, Name: "fixture-private-choice"}}, want: "named tool choice", private: []string{"fixture-private-tool", "fixture-private-choice"}},
+			{name: "named second mismatch", body: call("fixture-private-choice", "fixture-private-tool"), req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "fixture-private-choice"}, {Name: "fixture-private-tool"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceRequired, Name: "fixture-private-choice"}}, want: "named tool choice", private: []string{"fixture-private-tool", "fixture-private-choice"}},
 			{name: "none tool call", body: call("weather"), req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceNone}}, want: "ToolChoiceNone"},
 			{name: "named text only", body: text, req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceRequired, Name: "weather"}}, want: "required tool call"},
 			{name: "required text only", body: text, req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceRequired}}, want: "required tool call"},
+			{name: "required empty output", body: empty, req: api.ModelRequest{Tools: []api.ToolDefinition{{Name: "weather"}}, ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceRequired}}, want: "required tool call"},
 		} {
 			t.Run(fmt.Sprintf("stream=%t/%s", streaming, tc.name), func(t *testing.T) {
 				c := newResponses(t, func(w http.ResponseWriter, _ *http.Request) {

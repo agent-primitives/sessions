@@ -50,8 +50,9 @@ const DefaultPath = "/chat/completions"
 const defaultTimeout = 2 * time.Minute
 
 // ErrUnsupportedPart reports unmapped request semantics or malformed/unsupported tool content.
-// Refusing rather than dropping it keeps the neutral request and recorded completion faithful
-// to the supported Chat Completions mapping.
+// Both Client and ResponsesClient return it for request-side tools/tool-choice violations and for
+// malformed or unsupported tool completions. Refusing rather than dropping content keeps the
+// neutral request and recorded completion faithful to the supported protocol mapping.
 var ErrUnsupportedPart = errors.New("openai: unsupported content part")
 
 // Client calls an OpenAI-compatible Chat Completions endpoint.

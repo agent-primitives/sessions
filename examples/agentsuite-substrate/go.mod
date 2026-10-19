@@ -2,6 +2,8 @@ module github.com/agent-primitives/sessions/examples/agentsuite-substrate
 
 go 1.27.0
 
+toolchain go1.27.2
+
 require (
 	github.com/agent-primitives/sessions v0.0.0
 	github.com/agent-substrate/substrate v0.4.1-0.20261013053953-96dffb287919

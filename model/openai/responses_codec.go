@@ -379,7 +379,23 @@ func responsesOutputText(raw []byte, requireText bool) (string, error) {
 	return *p.Text, nil
 }
 
-func decodeResponses(model string, raw []byte) (api.ModelResponse, error) {
+// decodeResponses decodes a completed response and refuses it, rather than returning any part of
+// it, when its tool calls break the request's tool constraints (see checkToolResponse).
+func decodeResponses(model string, req api.ModelRequest, raw []byte) (api.ModelResponse, error) {
+	resp, err := decodeResponsesOutput(model, raw)
+	if err != nil {
+		return api.ModelResponse{}, err
+	}
+	if err := checkToolResponse(req.Tools, req.ToolChoice, resp.Message.Parts); err != nil {
+		return api.ModelResponse{}, fmt.Errorf("openai responses: %w", err)
+	}
+	return resp, nil
+}
+
+// decodeResponsesOutput validates and decodes a completed response's structure. It does not see
+// the request, so it cannot check tool constraints: Model and StreamModel return a completion only
+// through decodeResponses.
+func decodeResponsesOutput(model string, raw []byte) (api.ModelResponse, error) {
 	fail := func(err error) (api.ModelResponse, error) {
 		return api.ModelResponse{}, fmt.Errorf("openai responses: %w", err)
 	}

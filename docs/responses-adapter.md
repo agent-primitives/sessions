@@ -50,6 +50,10 @@ client has a two-minute timeout. There are no automatic retries or model/protoco
 - Assistant function calls, using the provider's `call_id` as the neutral tool-call ID, not its
   output-item `id`. Arguments must be JSON objects. Integer arguments beyond the exactly representable
   ±2^53 domain refuse rather than silently rounding; neutral structured values use float64.
+- Completions that break the request's tool constraints refuse with `ErrUnsupportedPart`, and no
+  part of them is returned: a call to a tool not in `Tools` (any call when no tools are offered), a
+  call to a tool other than a named choice, any call under NONE, or no call under REQUIRED, named
+  or not. The error does not quote the returned tool name, arguments or text.
 - Tool-result text from `ToolResult.Content`, joined in order and correlated by result ID. Empty
   text is supported, but empty tool messages and absent result content refuse; they are not replaced
   by receipt metadata, `Output`, `Error` or a URI.
@@ -115,8 +119,9 @@ reflect user-chosen key names, so do not use sensitive names in request structur
 deadline errors from transport/success-body processing remain discoverable with `errors.Is`. Constructor
 configuration errors and explicit `Endpoint()` inspection still require the caller's usual redaction.
 
-EOF without completion, failed/incomplete responses, provider errors, malformed/conflicting events
-and cancellation fail the call. Text already shown to a caller remains provisional on failure; no
-partial executable tool call or successful completion is returned. Deltas are not journaled. The same
-finalized message and usage are returned by the streaming and nonstreaming paths, and replay emits
-no deltas or provider requests.
+EOF without completion, failed/incomplete responses, provider errors, malformed/conflicting events,
+cancellation and a completed response that breaks the request's tool constraints fail the call. Text
+already shown to a caller remains provisional on failure; no partial executable tool call or
+successful completion is returned. Deltas are not journaled. The same finalized message and usage
+are returned by the streaming and nonstreaming paths, and replay emits no deltas or provider
+requests.

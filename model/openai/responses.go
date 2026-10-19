@@ -47,5 +47,5 @@ func (c *ResponsesClient) Model(ctx context.Context, req api.ModelRequest) (api.
 	if len(raw) > 32<<20 {
 		return api.ModelResponse{}, fmt.Errorf("openai responses: response exceeds 32 MiB")
 	}
-	return decodeResponses(model, raw)
+	return decodeResponses(model, req, raw)
 }

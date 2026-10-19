@@ -88,7 +88,7 @@ func TestResponsesOrderedToolsAndReasoning(t *testing.T) {
 		posted, _ = io.ReadAll(r.Body)
 		_, _ = fmt.Fprintf(w, `{"status":"completed","output":[%s,%s,{"type":"message","id":"msg_2","role":"assistant","status":"completed","content":[{"type":"output_text","text":"done","annotations":[]}]}],"usage":null}`, reasoning, call)
 	})
-	first, err := c.Model(t.Context(), api.ModelRequest{Model: "explicit"})
+	first, err := c.Model(t.Context(), api.ModelRequest{Model: "explicit", Tools: []api.ToolDefinition{{Name: "lookup"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,6 +190,10 @@ func TestResponsesChoicesEffortsAndEmptyResult(t *testing.T) {
 			var posted map[string]any
 			c := newResponses(t, func(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewDecoder(r.Body).Decode(&posted)
+				if mode == api.ToolChoiceRequired {
+					_, _ = io.WriteString(w, `{"status":"completed","output":[{"type":"function_call","id":"fc","call_id":"c2","name":"f","arguments":"{}"}]}`)
+					return
+				}
 				_, _ = io.WriteString(w, responsesText)
 			})
 			_, err := c.Model(t.Context(), api.ModelRequest{Tools: []api.ToolDefinition{{Name: "f"}}, ToolChoice: &api.ToolChoice{Mode: mode}, Messages: []api.Message{{Role: "tool", Parts: []api.Part{{ToolResult: &api.ToolResult{ID: "c", Content: []api.Part{{Text: &api.TextPart{Text: ""}}}}}}}}})
@@ -242,7 +246,7 @@ func TestResponsesOutputRefusals(t *testing.T) {
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
 			c := newResponses(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) })
-			got, err := c.Model(t.Context(), api.ModelRequest{})
+			got, err := c.Model(t.Context(), api.ModelRequest{Tools: []api.ToolDefinition{{Name: "f"}}})
 			if err == nil || !reflect.DeepEqual(got, api.ModelResponse{}) {
 				t.Fatalf("response=%+v err=%v", got, err)
 			}
@@ -259,7 +263,7 @@ func TestResponsesArgumentNumberBoundaries(t *testing.T) {
 			c := newResponses(t, func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = fmt.Fprintf(w, `{"status":"completed","output":[{"type":"function_call","id":"fc","call_id":"c","name":"f","arguments":%q}]}`, `{"nested":[{"n":`+tc.number+`}]}`)
 			})
-			got, err := c.Model(t.Context(), api.ModelRequest{})
+			got, err := c.Model(t.Context(), api.ModelRequest{Tools: []api.ToolDefinition{{Name: "f"}}})
 			if (err == nil) != tc.ok {
 				t.Fatalf("err=%v, success want %v", err, tc.ok)
 			}

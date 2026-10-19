@@ -50,7 +50,7 @@ func (c *ResponsesClient) StreamModel(ctx context.Context, req api.ModelRequest,
 						if err := ctx.Err(); err != nil {
 							return api.ModelResponse{}, err
 						}
-						return decodeResponses(model, completed)
+						return decodeResponses(model, req, completed)
 					}
 				}
 			}
@@ -391,7 +391,7 @@ func responsesJSONEqual(a, b []byte) bool {
 func (s *responsesStream) validateFinal(raw []byte) error {
 	// Decode with the shared final codec before reconciling observations; this
 	// validates status, usage and every output item even if no deltas arrived.
-	if _, err := decodeResponses("", raw); err != nil {
+	if _, err := decodeResponsesOutput("", raw); err != nil {
 		return err
 	}
 	var final struct {

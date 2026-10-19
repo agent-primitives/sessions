@@ -22,6 +22,12 @@ not provide.
 - Socket executor write/read errors, including journaled approval receipts, no longer expose
   the Unix socket path.
 - Tool-executor refusal receipts no longer reference an issue number.
+- The Responses client (`model/openai.NewResponses`, `Model` and `StreamModel`) refuses a completion
+  whose tool calls break the request's `Tools` or `ToolChoice`, with `ErrUnsupportedPart` and no
+  partial completion: a call to a tool that was not offered (any call when none are offered), a call
+  to a tool other than a named choice, any call under NONE, or no call under REQUIRED, named or not.
+  It returned these with a nil error, so a harness could forward to the host a call the request did
+  not allow. The error does not quote the returned name, arguments or text.
 - `sqlitelog.Open` now uses `BEGIN IMMEDIATE` for `file:` URIs and paths with a `?` query, not
   only plain paths, so concurrent writers from separate stores on one database wait for the write
   lock (up to the 5s busy timeout) instead of failing with `SQLITE_BUSY`. A non-empty `_txlock`
@@ -46,6 +52,11 @@ not provide.
 
 ### Compatibility
 
+- Responses completions that break the request's tool constraints, accepted before this change, now
+  fail the model call. The live turn records its MODEL_CALL but no completion, as for any failed
+  model call, and a `Resume` that re-drives a MODEL_CALL left without a completion applies the same
+  check. Replay of completed turns, and `Resume` serving a recorded completion, do not call the
+  adapter, so journals that already recorded such a completion still replay.
 - Optional `authn` interceptors reject unverified calls in required mode and expire authenticated
   streams. Unary authentication is admission-only; credential expiry does not end an admitted call.
   The reference daemon remains unauthenticated and unenforced; authentication alone is not isolation,

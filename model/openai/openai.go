@@ -52,7 +52,9 @@ const defaultTimeout = 2 * time.Minute
 // ErrUnsupportedPart reports request content this provider cannot represent: a content part, or the
 // tools and tool choice offered to the model. It is returned rather than dropped: the log records
 // the request the harness built, so silently sending less than that would make the journal describe
-// a call that never happened, and replay would reproduce the wrong thing.
+// a call that never happened, and replay would reproduce the wrong thing. ResponsesClient also
+// returns it, instead of the completion, when the completion's tool calls break the request's Tools
+// or ToolChoice.
 var ErrUnsupportedPart = errors.New("openai: unsupported content part")
 
 // Client calls an OpenAI-compatible Chat Completions endpoint.

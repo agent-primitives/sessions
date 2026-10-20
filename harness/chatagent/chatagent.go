@@ -52,8 +52,12 @@ func (h Harness) Run(ctx context.Context, start *api.Start, sink api.EventSink) 
 	}
 	// History precedes this turn; current inputs belong in the request exactly once.
 	messages = append(messages, start.Inputs...)
+	model := start.Model
+	if model == "" {
+		model = h.Model
+	}
 	_, err = sink.Model(ctx, api.ModelRequest{
-		Model:    h.Model,
+		Model:    model,
 		Messages: messages,
 	})
 	return err

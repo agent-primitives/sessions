@@ -436,7 +436,12 @@ type Session struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Metadata *ResourceMetadata      `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
 	Harness  string                 `protobuf:"bytes,2,opt,name=harness,proto3" json:"harness,omitempty"`
-	Model    string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"` // model-agnostic id
+	// Optional model-agnostic session default. New sessions apply the selected route's host-owned
+	// policy when configured, including overrides from an initially unconfigured route. Empty uses
+	// its explicit default. Without current policy this is metadata; genuine pre-policy sessions
+	// retain legacy behavior even when policy is added later. HarnessDescriptor.models never defines
+	// the default. Policy is host embedder configuration, not Sessions clients or daemon configuration.
+	Model string `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
 	// Every Session reply uses the same append-transaction projection at last_seq: no events
 	// before deletion reports EXEC_PENDING; a valid owned unanswered host approval request in the
 	// latest first-seen execution reports EXEC_AWAITING; other histories retain EXEC_COMPLETED.

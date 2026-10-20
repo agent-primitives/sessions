@@ -221,11 +221,13 @@ func (x *ToolSpec) GetMediation() Mediation {
 }
 
 type HarnessDescriptor struct {
-	state        protoimpl.MessageState `protogen:"open.v1"`
-	Id           string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Models       []string               `protobuf:"bytes,2,rep,name=models,proto3" json:"models,omitempty"` // model-agnostic: supported/required model ids
-	Tools        []*ToolSpec            `protobuf:"bytes,3,rep,name=tools,proto3" json:"tools,omitempty"`
-	Capabilities *Capabilities          `protobuf:"bytes,4,opt,name=capabilities,proto3" json:"capabilities,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Model-agnostic supported/required model IDs, never a source of the default. When the host
+	// explicitly enables model policy, every declared ID must belong to its allowed set.
+	Models       []string      `protobuf:"bytes,2,rep,name=models,proto3" json:"models,omitempty"`
+	Tools        []*ToolSpec   `protobuf:"bytes,3,rep,name=tools,proto3" json:"tools,omitempty"`
+	Capabilities *Capabilities `protobuf:"bytes,4,opt,name=capabilities,proto3" json:"capabilities,omitempty"`
 	// Stable, opaque implementation replay-compatibility version, owned by the harness author.
 	// Change it when deterministic execution or config interpretation changes. Hosts record it
 	// in ExecutionStart and compare known recorded versions exactly on replay/recovery.
@@ -402,6 +404,10 @@ type Start struct {
 	Inputs        []*Message       `protobuf:"bytes,3,rep,name=inputs,proto3" json:"inputs,omitempty"`
 	Identity      *IdentityContext `protobuf:"bytes,4,opt,name=identity,proto3" json:"identity,omitempty"`
 	ResumeFromSeq int64            `protobuf:"varint,5,opt,name=resume_from_seq,json=resumeFromSeq,proto3" json:"resume_from_seq,omitempty"`
+	// Host-resolved effective default for an explicitly policy-enabled invocation. Empty retains
+	// existing harness semantics. Replay/resume restore the exact recorded ExecutionStart.model,
+	// including empty, rather than today's policy or HarnessDescriptor.models.
+	Model         string `protobuf:"bytes,6,opt,name=model,proto3" json:"model,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -469,6 +475,13 @@ func (x *Start) GetResumeFromSeq() int64 {
 		return x.ResumeFromSeq
 	}
 	return 0
+}
+
+func (x *Start) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
 }
 
 type Cancel struct {
@@ -787,13 +800,14 @@ const file_harness_proto_rawDesc = "" +
 	"\x0fDescribeRequest\"v\n" +
 	"\x0fIdentityContext\x12;\n" +
 	"\tprincipal\x18\x01 \x01(\v2\x1d.agentsessions.v1.IdentityRefR\tprincipal\x12&\n" +
-	"\x0fcan_mint_tokens\x18\x02 \x01(\bR\rcanMintTokens\"\xec\x01\n" +
+	"\x0fcan_mint_tokens\x18\x02 \x01(\bR\rcanMintTokens\"\x82\x02\n" +
 	"\x05Start\x12\x16\n" +
 	"\x06config\x18\x01 \x01(\fR\x06config\x121\n" +
 	"\ahistory\x18\x02 \x03(\v2\x17.agentsessions.v1.EventR\ahistory\x121\n" +
 	"\x06inputs\x18\x03 \x03(\v2\x19.agentsessions.v1.MessageR\x06inputs\x12=\n" +
 	"\bidentity\x18\x04 \x01(\v2!.agentsessions.v1.IdentityContextR\bidentity\x12&\n" +
-	"\x0fresume_from_seq\x18\x05 \x01(\x03R\rresumeFromSeq\" \n" +
+	"\x0fresume_from_seq\x18\x05 \x01(\x03R\rresumeFromSeq\x12\x14\n" +
+	"\x05model\x18\x06 \x01(\tR\x05model\" \n" +
 	"\x06Cancel\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\"\x9c\x03\n" +
 	"\x0fControllerFrame\x12\x18\n" +

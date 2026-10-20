@@ -19,7 +19,7 @@ import (
 // StreamModel emits provisional text deltas only. The authoritative completed
 // response, not the accumulated chunks, is returned for durable recording.
 func (c *ResponsesClient) StreamModel(ctx context.Context, req api.ModelRequest, onChunk func(string)) (api.ModelResponse, error) {
-	model, body, err := c.buildResponsesRequest(req, true)
+	model, body, err := c.buildResponsesRequest(ctx, req, true)
 	if err != nil {
 		return api.ModelResponse{}, err
 	}

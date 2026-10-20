@@ -140,6 +140,9 @@ type Event struct {
 // A nil count cannot establish completeness and is rejected when reconstructing this invocation.
 // Executions without this event reconstruct with empty config and a zero cursor (legacy defaults).
 type ExecutionStart struct {
+	// Model is the effective default under an explicit host policy. Empty keeps pre-policy
+	// semantics, including unvalidated model requests. Omit it to preserve old journal hashes.
+	Model          string `json:",omitempty"`
 	Config         []byte
 	ResumeFromSeq  int64
 	InputCount     *int64

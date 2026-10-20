@@ -9,6 +9,12 @@ not provide.
 
 ### Added
 
+- Go embedders can configure per-route model defaults and allowed IDs with
+  `placement.WithModelPolicy`. Registration validates the descriptor against policy; new sessions
+  validate their default at creation (`INVALID_ARGUMENT`) and Exec/Resume (`FAILED_PRECONDITION`).
+  Live model-policy refusals are execution-fatal; replay keeps recorded defaults and results.
+  Stock Chat Completions and Responses calls send the exact validated model ID. Daemon bindings
+  and model-to-deployment mappings are not included. See [model defaults](spec.md#model-defaults).
 - Opt-in embedded Sessions and registry RPC authorization with verified callers, independent approve
   permission, exact-caller allowlists, owned creation and SQL owner-filtered pagination. Inputless
   Exec approval recovery requires resume as well as exec; ordinary Exec can restore suspended
@@ -84,6 +90,17 @@ not provide.
 
 ### Compatibility
 
+- SQLite schema v6 adds model-admission flags for new sessions; genuine pre-policy sessions,
+  including empty sessions, remain legacy. Fork inherits admission metadata atomically. Existing
+  journal bytes, hashes and `ModelCall` format are unchanged. Before upgrading, stop every older
+  host and embedded CLI writer and back up for rollback, following the
+  [rollout order](#sqlite-v4-rollout). Older builds refuse v6 at open, but already-open older
+  writers do not enforce model policy. There is no downgrade migration. Auditors must use the
+  current protobuf descriptor: pre-v6 descriptors drop `ExecutionStart.model` and report
+  policy-enabled turns as tampered. Policy-enabled registration requires a successful bounded
+  Describe, including at startup; a failed stored route needs a restart after its endpoint is
+  restored. Unconfigured registration remains probe-free. See
+  [model defaults](spec.md#model-defaults).
 - `model/openai` now refuses nonempty `ModelRequest.Params`, previously silently ignored. A turn
   interrupted under an older build whose harness sets Params fails if recovery must re-drive the
   model call; completed recorded model effects remain replayable without invoking the adapter.

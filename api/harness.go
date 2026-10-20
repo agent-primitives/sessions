@@ -22,7 +22,7 @@ type Harness interface {
 type Descriptor struct {
 	ID           string
 	Version      string   // stable author-owned replay version; empty is supported as unknown
-	Models       []string // model-agnostic: supported/required model ids
+	Models       []string // supported/required IDs; a subset of explicit host policy, never its default
 	Tools        []ToolSpec
 	Capabilities Capabilities
 }
@@ -68,6 +68,9 @@ type Start struct {
 	ExecutionID string
 	// SessionUID carries the ControllerFrame session envelope for tool/approval correlation.
 	// Model-only callers that do not use that envelope may leave it empty.
+	// Model is the host-resolved default for a policy-enabled execution. Empty retains the
+	// harness's existing default. Replay/resume restore the recorded value, not today's policy.
+	Model         string    `json:",omitempty"`
 	SessionUID    string    `json:",omitempty"`
 	Config        []byte    // opaque per-execution config; journaled verbatim and restored on replay/resume
 	History       []Event   // every event before this execution's start, also after a memory restore
@@ -124,6 +127,8 @@ type EventSink interface {
 // the first three carry `json:",omitempty"`: a request that does not use them hashes exactly as it
 // did before they existed, and logs recorded earlier keep replaying.
 type ModelRequest struct {
+	// Model may override Start.Model within host policy. Empty resolves to that default only
+	// for policy-aware invocations; old invocations retain their original requests and hashes.
 	Model    string
 	Messages []Message // context (history + new input) sent to the model
 	Params   map[string]string

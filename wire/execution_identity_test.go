@@ -44,8 +44,8 @@ func TestExecutionStartIdentityFieldsAffectHashButPreserveLegacyHash(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(canonical), "harness") {
-		t.Fatalf("absent legacy identity emitted: %s", canonical)
+	if strings.Contains(string(canonical), "harness") || strings.Contains(string(canonical), `"model"`) {
+		t.Fatalf("absent legacy identity/default emitted: %s", canonical)
 	}
 	start.Harness = "alias"
 	withName, err := canon.HashRecord("", 1, event)

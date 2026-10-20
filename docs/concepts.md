@@ -94,6 +94,55 @@ The cursor and lifecycle status are derived rather than caller-writable:
   correlation and `last_seq` are read atomically; rendering does not decode the journal. Later
   appends do not change an earlier captured response, including one with a zero cursor.
 
+### Model defaults
+
+A Go embedder can attach `api.ModelPolicy{Default, Allowed}` with
+`placement.WithModelPolicy` to each harness route. The host's explicit default must be nonempty
+and allowed. The harness's `Descriptor.Models` is a subset declaration, never a source of defaults
+or authority to widen the allowed set. Registration checks that subset before committing a new
+registration or serving a route; an empty declaration is valid. A policy-enabled route must answer
+bounded `Describe` at registration, including startup: a static failure refuses startup, and a
+failed stored registration stays unavailable until restart. Unconfigured routes do not gain this
+probe. Aliases of one Placer share its policy.
+
+For every new session, `Session.model` is a validated default whenever its selected route has
+policy: empty selects the binding's explicit default, nonempty must be allowed (`INVALID_ARGUMENT`
+at creation before persistence). Metadata keeps the requested value. Each new execution resolves
+it against the selected route, including a restricted harness override from an initially
+unconfigured route, refusing a disallowed stored default with `FAILED_PRECONDITION` before compute
+is provisioned. Later policy activation on the original route
+also applies to these modern sessions. The effective default is delivered in `Start.Model` and
+recorded in `ExecutionStart.model`. An empty per-call model uses that effective default; an explicit
+per-call ID may override it within the allowed set. Existing `ModelCall.model` and `input_hash`
+record the effective request; no new per-call record format is introduced. For these invocations,
+the stock Chat Completions and Responses adapters send that exact model ID, including `echo`,
+instead of substituting their configured fallback. The recorded default retains this behavior on
+recovery even if policy is removed. No model-to-deployment mapping is provided; the host must serve
+the selected ID. Direct adapter calls and pre-policy invocations retain the existing empty/`echo`
+fallback.
+
+An invalid live model request is **execution-fatal even if the harness catches the error**. It calls
+no provider, appends no new `MODEL_CALL` (an existing trailing intent remains recorded), refuses
+later effects, and ends with best-effort `ERROR`, not
+`END`. This prevents a handled but unrecorded refusal from making a successful turn unreplayable.
+Both plain and streaming providers use the same admission. Recorded replay/recovery prefixes use
+their original default and per-call hashes, not today's policy. Only new live effects or an
+unanswered model-intent re-drive check the current allowlist. Removing policy disables membership
+checks but does not erase the invocation's recorded default.
+
+An unconfigured route keeps existing model behavior. Genuine pre-policy sessions, including
+zero-event sessions, stay legacy even after policy is configured. SQLite v6 stores independent
+flags in `model_policy`: bit 0 is creation-time policy opt-in, bit 1 marks all new service-created
+sessions; zero remains legacy and bit 0 alone also marks a session eligible. Fork inherits both
+flags alongside `model`; modern child metadata commits with its first fence, even for
+unconfigured parents, so a later clone failure cannot expose a legacy child. Unknown flag bits
+fail Get/List reads. No old
+event or hash changes. Stop all older hosts and embedded CLI readers/writers before upgrading and
+back up for rollback. Older binaries refuse v6 at open, but already-open old
+writers do not enforce admission. There is no downgrade migration. The reference daemon has no
+binding policy configuration yet; see
+[embedder composition](harness-authoring.md#host-owned-model-policy).
+
 ### How exec_state is derived
 
 Every Session reply — Create, Get, List, Fork, Resume, Suspend, Approve, Delete and Exec frames

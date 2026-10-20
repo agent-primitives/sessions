@@ -25,7 +25,7 @@ the micro-VM path end to end.
 
 The same workflow also exercises the long-running, PVC-backed Sessions composition described in
 [`production-shaped-kind.md`](production-shaped-kind.md): `agentctl --server` drives a chat harness
-inside a gVisor actor, the control-plane pod is replaced, and the session continues from the durable
+inside a micro-VM actor, the control-plane pod is replaced, and the session continues from the durable
 journal.
 
 ## Neutrality by construction

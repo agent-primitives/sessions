@@ -405,20 +405,23 @@ jobs:
         run: hack/run-e2e-job.sh 'TestHarnessStreamIdlePastRouteTimeout' "${E2E_IMAGE}" 1200
 
       - name: Build the production-shaped images
+        if: needs.changes.outputs.decision != 'skip'
         run: |
           {
             echo "CONTROL_IMG=$(cd integrations/substrate && ko build ./cmd/controlplane)"
             echo "MODELSTUB_IMG=$(cd integrations/substrate && ko build ./cmd/modelstub)"
-            echo "ATEOM_GVISOR_IMG=$(cd _substrate && ko build ./cmd/ateom-gvisor)"
           } >> "$GITHUB_ENV"
 
-      - name: Deploy the chat gVisor WorkerPool
+      - name: Deploy the chat microVM WorkerPool
+        if: needs.changes.outputs.decision != 'skip'
         run: |
-          sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor#${ATEOM_GVISOR_IMG}#" \
+          sed -e "s#WORKER_IMAGE#${ATEOM_MV_IMG}#" \
+              -e "s#SANDBOX_CLASS#microvm#g" \
             deploy/substrate/kind/chat-workerpool.yaml | kubectl --context kind-kind apply -f -
           hack/wait-worker-pool.sh chat-harness
 
       - name: Deploy the deterministic smoke model
+        if: needs.changes.outputs.decision != 'skip'
         run: |
           kubectl --context kind-kind create configmap agentsessions-model -n ate-agentsessions \
             --from-literal=project=smoke \
@@ -433,16 +436,20 @@ jobs:
             -n ate-agentsessions --timeout=300s
 
       - name: Deploy Sessions and provision its chat ActorTemplate through ate-api
+        if: needs.changes.outputs.decision != 'skip'
         run: |
-          sed -e "s#ghcr.io/aramase/agentsessions/controlplane:latest#${CONTROL_IMG}#" \
+          sed -e "s#ghcr.io/agent-primitives/sessions/controlplane:latest#${CONTROL_IMG}#" \
               -e "s#HARNESS_IMAGE#${HARNESS_IMAGE}#" \
+              -e "s#SANDBOX_CLASS#microvm#g" \
+              -e "s#SANDBOX_CONFIG#microvm#g" \
             deploy/substrate/kind/control-plane.yaml | kubectl --context kind-kind apply -f -
           kubectl --context kind-kind rollout status deployment/agentsessions \
             -n ate-agentsessions --timeout=660s
 
       - name: Production-shaped restart smoke
+        if: needs.changes.outputs.decision != 'skip'
         timeout-minutes: 16
-        run: EXPECT_MODELSTUB=1 hack/smoke-production-kind.sh
+        run: PROJECT=smoke EXPECT_MODELSTUB=1 hack/smoke-production-kind.sh
 
       - name: Apply the counter micro-VM WorkerPool
         if: needs.changes.outputs.decision != 'skip'

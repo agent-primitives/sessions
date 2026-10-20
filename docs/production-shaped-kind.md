@@ -2,28 +2,14 @@
 
 This example runs the complete client-to-harness path in a kind cluster:
 
-```text
-agentctl --server
-        |
-        | Sessions gRPC
-        v
-agentsessions Deployment
-  - session.Service
-  - placement.Registry and Placer
-  - SQLite journal on a PersistentVolume
-  - host-side OpenAI-compatible model client
-        |
-        +---- model provider HTTP API
-        |
-        | agent-substrate Control API
-        v
-gVisor substrate actor
-  - harnessnode
-  - chatagent
-        |
-        | Harness.Connect
-        v
-agentsessions controller
+```mermaid
+flowchart TD
+    CLI["agentctl --server"] -->|"Sessions gRPC"| CP["Sessions control plane<br/>Service, Placer, controller, model client"]
+    CP --> Journal[("SQLite journal on PersistentVolume")]
+    CP -->|"Provider HTTP API"| Provider["Model provider"]
+    CP -->|"Control gRPC over verified TLS"| API["Substrate ate-api<br/>templates and actor lifecycle"]
+    CP -->|"Harness.Connect over h2c<br/>ate-target-actor metadata"| Router["atenet-router"]
+    Router -->|"Proxied harness stream"| Actor["microVM or gVisor actor<br/>harnessnode + chatagent"]
 ```
 
 It is **production-shaped, not production-ready**. It demonstrates the intended process boundaries,
@@ -37,7 +23,7 @@ The `agentsessions` Deployment is the persistent control plane. It hosts the Ses
 controller, substrate-backed Placer, model client, and SQLite journal. The journal is mounted from a
 single-node hostPath PersistentVolume so replacing the pod does not replace the session record.
 
-`harnessnode` runs separately in a gVisor actor selected by the `chat-harness` ActorTemplate. It runs
+`harnessnode` runs separately in a microVM or gVisor actor selected by the `chat-harness` ActorTemplate. It runs
 the provider-neutral `chatagent` harness. The actor receives only the configured model name; model
 endpoint configuration and credentials remain in the control-plane pod. Every model request travels
 back through `EventSink.Model` and is executed by the host-side model client.
@@ -49,19 +35,40 @@ must match the requested image, model, and sandbox configuration; otherwise star
 Harness connections use the atenet-router Service with `ate-target-actor` routing metadata, never
 direct worker pod IPs.
 
+This example's `controlplane` binary provisions its own chat ActorTemplate and serves only chat.
+For an existing ActorTemplate, the general-purpose
+[`integrations/substrate/cmd/agentsessionsd`](substrate-conformance.md#running-sessions-on-substrate-with-agentsessionsd)
+build instead adds Substrate through the neutral daemon's backend hook; it does not provision templates.
+
 ## Prerequisites
 
 - Docker
 - Go
 - `kubectl`
 - `ko`
+- Python 3 (checks whether KVM can create a VM)
 - GNU `timeout` (on macOS, install GNU coreutils and make `timeout` available on PATH)
 - Either the optional in-cluster Ollama deployment, or another OpenAI-compatible endpoint reachable
   from inside the kind cluster
 
 The setup script checks out the substrate revision pinned by
 [`integrations/substrate/go.mod`](../integrations/substrate/go.mod) into the ignored `_substrate/`
-directory. That checkout manages its pinned `kind` binary and recreates the selected cluster.
+directory. The default revision is read from the substrate workflow, kept aligned with that module.
+That checkout manages its pinned `kind` binary and recreates the selected cluster. A custom
+`SUBSTRATE_DIR` must be clean and already at the requested revision; setup does not fetch or switch it.
+
+### Sandbox selection
+
+Local setup defaults to microVM (Kata + Cloud Hypervisor) when `/dev/kvm` can actually create a VM.
+Otherwise it prints a fallback notice and uses gVisor. Explicit `SANDBOX_CLASS=microvm` requires
+usable KVM and fails early if unavailable; `SANDBOX_CLASS=gvisor` opts out regardless of KVM.
+Only missing/unusable KVM triggers automatic fallback: asset installation or startup failures remain
+errors. CI explicitly selects microVM and cannot fall back.
+
+For microVM, setup stages Substrate's pinned runtime assets and installs its `microvm` SandboxConfig
+without deploying the counter demo. `SANDBOX_CONFIG` overrides the template's config name (defaults
+to `microvm` or `gvisor-default`); a custom config must already exist. Images default to
+`linux/$(go env GOARCH)` so an arm64 development host gets matching harness and worker images.
 
 ### Credential-free real model with Ollama
 
@@ -128,7 +135,7 @@ The deployment contains:
 - One `agentsessions` replica with `Recreate` rollout strategy.
 - A statically bound `ReadWriteOnce` hostPath volume for `/data/agentsessions.db`.
 - A projected service-account token used to authenticate to ate-api.
-- A two-worker gVisor pool and `chat-harness` ActorTemplate.
+- A two-worker pool for the selected sandbox class and `chat-harness` ActorTemplate.
 - Router-mediated harness connections, with no direct worker-ingress exception.
 - Optionally, an in-cluster Ollama Deployment and persistent model cache.
 
@@ -188,6 +195,7 @@ With the modelstub, the two-turn chain contains ten records, including an `EXECU
 turn. Readiness probes have a three-second per-call deadline and a thirty-second overall deadline;
 the complete smoke is bounded to fifteen minutes. Override `PROBE_TIMEOUT_SECONDS`,
 `READY_TIMEOUT_SECONDS`, or `SMOKE_TIMEOUT_SECONDS` when a slower environment needs more time.
+Set `PROJECT` for the smoke to match the deployment's project; CI uses `PROJECT=smoke`.
 
 The second turn proves continuation after control-plane restart. The stateless chat harness receives
 the committed first turn as history and the current input separately. The existing substrate actor
@@ -224,7 +232,8 @@ The real-substrate conformance suite separately covers stateless replay and memo
   an access boundary.
 - The control plane verifies ate-api's TLS certificate using Substrate's projected service-DNS
   ClusterTrustBundle and authenticates with a separate audience-scoped service-account token.
-  The default Kubernetes API token is not mounted.
+  With `-ateapi-ca-file`, only certificates in that bundle are trusted, not the system root pool.
+  The default Kubernetes API token is not mounted. The bundle is read at startup, not hot-reloaded.
 - At the pinned Substrate revision, ate-api checks token issuer and audience, not service-account
   authorization. Any pod able to project a token for `api.ate-system.svc` can access the full Control
   API. The audience token is not least-privilege authorization or a tenant boundary.
@@ -237,6 +246,8 @@ The real-substrate conformance suite separately covers stateless replay and memo
   durable restart, not high availability or concurrent replicas.
 - The static hostPath volume survives pod replacement but belongs to the kind node and disappears
   with the cluster. It is not a portable or production storage class.
+- `-snapshot-location` sets the template snapshot storage prefix (default
+  `gs://ate-snapshots/agentsessions/`); the template name is appended.
 - The optional Ollama model cache uses the same kind-only hostPath approach and has no authentication;
   its ingress policy allows only control-plane pods on TCP 11434. The CI modelstub likewise allows
   only control-plane pods on TCP 8080, subject to CNI enforcement.

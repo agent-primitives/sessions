@@ -20,42 +20,45 @@ import (
 
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/aramase/agentsessions/controller"
-	"github.com/aramase/agentsessions/harness/chatagent"
-	ateadapter "github.com/aramase/agentsessions/integrations/substrate"
-	"github.com/aramase/agentsessions/internal/modelconfig"
-	"github.com/aramase/agentsessions/internal/sessionserver"
-	"github.com/aramase/agentsessions/internal/version"
-	"github.com/aramase/agentsessions/model/openai"
-	"github.com/aramase/agentsessions/placement"
-	runtimesubstrate "github.com/aramase/agentsessions/runtime/substrate"
-	"github.com/aramase/agentsessions/sqlitelog"
+	"github.com/agent-primitives/sessions/controller"
+	"github.com/agent-primitives/sessions/harness/chatagent"
+	ateadapter "github.com/agent-primitives/sessions/integrations/substrate"
+	"github.com/agent-primitives/sessions/internal/modelconfig"
+	"github.com/agent-primitives/sessions/internal/sessionserver"
+	"github.com/agent-primitives/sessions/internal/version"
+	"github.com/agent-primitives/sessions/model/openai"
+	"github.com/agent-primitives/sessions/placement"
+	runtimesubstrate "github.com/agent-primitives/sessions/runtime/substrate"
+	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 type config struct {
-	addr                     string
-	journal                  string
-	project                  string
-	model                    string
-	modelBaseURL             string
-	modelPath                string
-	modelAuthHeader          string
-	logLevel                 string
-	ateapiAddr               string
-	ateapiServerName         string
-	ateapiTokenFile          string
-	ateapiCAFile             string
-	ateapiInsecureSkipVerify bool
-	atespace                 string
-	templateAtespace         string
-	templateName             string
-	harnessImage             string
-	showVersion              bool
+	addr             string
+	journal          string
+	project          string
+	model            string
+	modelBaseURL     string
+	modelPath        string
+	modelAuthHeader  string
+	logLevel         string
+	ateapiAddr       string
+	ateapiServerName string
+	ateapiTokenFile  string
+	ateapiCAFile     string
+	atespace         string
+	templateAtespace string
+	templateName     string
+	harnessImage     string
+	sandboxClass     string
+	sandboxConfig    string
+	snapshotLocation string
+	showVersion      bool
 }
 
 func main() {
@@ -99,11 +102,13 @@ func parseConfig(args []string) (config, error) {
 	fs.StringVar(&cfg.ateapiServerName, "ateapi-server-name", "api.ate-system.svc", "TLS server name for ate-api")
 	fs.StringVar(&cfg.ateapiTokenFile, "ateapi-token-file", "/var/run/secrets/tokens/ateapi-token", "projected service-account token for ate-api")
 	fs.StringVar(&cfg.ateapiCAFile, "ateapi-ca-file", "", "PEM CA bundle for ate-api; empty uses system roots")
-	fs.BoolVar(&cfg.ateapiInsecureSkipVerify, "ateapi-insecure-skip-verify", false, "skip ate-api certificate verification (kind demo only)")
 	fs.StringVar(&cfg.atespace, "atespace", "agentsessions", "atespace that owns session actors")
 	fs.StringVar(&cfg.templateAtespace, "actor-template-atespace", "agentsessions", "atespace containing the chat ActorTemplate")
 	fs.StringVar(&cfg.templateName, "actor-template", "chat-harness", "chat ActorTemplate name")
 	fs.StringVar(&cfg.harnessImage, "harness-image", "", "digest-pinned harnessnode image for the chat ActorTemplate (required)")
+	fs.StringVar(&cfg.sandboxClass, "sandbox-class", "microvm", "actor sandbox class: microvm or gvisor")
+	fs.StringVar(&cfg.sandboxConfig, "sandbox-config", "", "SandboxConfig name; defaults to microvm or gvisor-default for the chosen class")
+	fs.StringVar(&cfg.snapshotLocation, "snapshot-location", "gs://ate-snapshots/agentsessions/", "snapshot storage prefix; the template name is appended")
 	fs.BoolVar(&cfg.showVersion, "version", false, "print the build version and exit")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
@@ -134,6 +139,21 @@ func parseConfig(args []string) (config, error) {
 	}
 	if !strings.Contains(cfg.harnessImage, "@sha256:") {
 		return config{}, fmt.Errorf("-harness-image must be pinned by digest")
+	}
+	switch cfg.sandboxClass {
+	case "microvm":
+		if cfg.sandboxConfig == "" {
+			cfg.sandboxConfig = "microvm"
+		}
+	case "gvisor":
+		if cfg.sandboxConfig == "" {
+			cfg.sandboxConfig = "gvisor-default"
+		}
+	default:
+		return config{}, fmt.Errorf("-sandbox-class %q: want microvm or gvisor", cfg.sandboxClass)
+	}
+	if strings.TrimSpace(cfg.sandboxConfig) == "" || strings.TrimSpace(cfg.snapshotLocation) == "" {
+		return config{}, fmt.Errorf("-sandbox-config and -snapshot-location must not be blank")
 	}
 	return cfg, nil
 }
@@ -200,10 +220,14 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 }
 
 func chatTemplate(cfg config) *atepb.ActorTemplate {
+	class := atepb.SandboxClass_SANDBOX_CLASS_MICROVM
+	if cfg.sandboxClass == "gvisor" {
+		class = atepb.SandboxClass_SANDBOX_CLASS_GVISOR
+	}
 	return &atepb.ActorTemplate{
 		Metadata: &atepb.ResourceMetadata{Atespace: cfg.templateAtespace, Name: cfg.templateName},
 		WorkerSelector: &atepb.Selector{MatchLabels: map[string]string{
-			"workload": "agentsessions-chat-gvisor",
+			"workload": "agentsessions-chat-" + cfg.sandboxClass,
 		}},
 		Containers: []*atepb.Container{{
 			Name: "harness", Image: cfg.harnessImage, Command: []string{"/ko-app/harnessnode"},
@@ -219,11 +243,14 @@ func chatTemplate(cfg config) *atepb.ActorTemplate {
 			}},
 		}},
 		SnapshotConfig: &atepb.SnapshotConfig{
-			OnCommit:        atepb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
-			StorageLocation: "gs://ate-snapshots/agentsessions/" + cfg.templateName + "/",
+			PreferredFidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+			StorageLocation:   strings.TrimRight(cfg.snapshotLocation, "/") + "/" + cfg.templateName + "/",
+			GoldenSnapshotConfig: &atepb.GoldenSnapshotConfig{
+				Mode: atepb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_ENABLED,
+			},
 		},
 		SandboxConfig: &atepb.SandboxConfig{
-			SandboxClass: atepb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor-default",
+			SandboxClass: class, ConfigName: cfg.sandboxConfig,
 		},
 	}
 }
@@ -274,29 +301,41 @@ func chatRegistry(runtime *runtimesubstrate.Backend, modelFn controller.ModelFun
 	return registry, nil
 }
 
-func dialATEAPI(cfg config) (*grpc.ClientConn, error) {
+func ateapiTLSConfig(cfg config) (*tls.Config, error) {
 	tlsConfig := &tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		ServerName:         cfg.ateapiServerName,
-		InsecureSkipVerify: cfg.ateapiInsecureSkipVerify, //nolint:gosec // explicit kind-only escape hatch
+		MinVersion: tls.VersionTLS12,
+		ServerName: cfg.ateapiServerName,
 	}
 	if cfg.ateapiCAFile != "" {
 		pem, err := os.ReadFile(cfg.ateapiCAFile)
 		if err != nil {
 			return nil, fmt.Errorf("read ate-api CA file %q: %w", cfg.ateapiCAFile, err)
 		}
-		roots, err := x509.SystemCertPool()
-		if err != nil || roots == nil {
-			roots = x509.NewCertPool()
-		}
+		roots := x509.NewCertPool()
 		if !roots.AppendCertsFromPEM(pem) {
 			return nil, fmt.Errorf("ate-api CA file %q contains no certificates", cfg.ateapiCAFile)
 		}
 		tlsConfig.RootCAs = roots
 	}
+	return tlsConfig, nil
+}
+
+var ateapiConnectParams = grpc.ConnectParams{
+	Backoff: backoff.Config{
+		BaseDelay: time.Second, Multiplier: 1.6, Jitter: 0.2, MaxDelay: 5 * time.Second,
+	},
+	MinConnectTimeout: 5 * time.Second,
+}
+
+func dialATEAPI(cfg config) (*grpc.ClientConn, error) {
+	tlsConfig, err := ateapiTLSConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
 	conn, err := grpc.NewClient(cfg.ateapiAddr,
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
 		grpc.WithPerRPCCredentials(&fileTokenCredentials{path: cfg.ateapiTokenFile}),
+		grpc.WithConnectParams(ateapiConnectParams),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dial ate-api %s: %w", cfg.ateapiAddr, err)

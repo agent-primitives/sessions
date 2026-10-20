@@ -10,11 +10,12 @@ metadata:
   name: chat-harness
   namespace: ate-agentsessions
   labels:
-    workload: agentsessions-chat-gvisor
+    workload: agentsessions-chat-SANDBOX_CLASS
 spec:
   replicas: 2
-  sandboxClass: gvisor
-  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+  sandboxClasses:
+    - name: SANDBOX_CLASS
+  workerImage: WORKER_IMAGE
   template:
     resources:
       limits:

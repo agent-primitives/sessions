@@ -81,7 +81,7 @@ spec:
               mountPath: /data
       containers:
         - name: controlplane
-          image: ghcr.io/aramase/agentsessions/controlplane:latest
+          image: ghcr.io/agent-primitives/sessions/controlplane:latest
           args:
             - --addr=:8080
             - --journal=/data/agentsessions.db
@@ -99,6 +99,8 @@ spec:
             - --actor-template-atespace=agentsessions
             - --actor-template=chat-harness
             - --harness-image=HARNESS_IMAGE
+            - --sandbox-class=SANDBOX_CLASS
+            - --sandbox-config=SANDBOX_CONFIG
           env:
             - name: PROJECT
               valueFrom:

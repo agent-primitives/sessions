@@ -27,6 +27,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/wire"
 )
 
@@ -70,8 +71,8 @@ func Record(prevHash string, seq int64, ev api.Event) ([]byte, error) {
 	return RecordProto(prevHash, seq, wire.EventToProto(ev))
 }
 
-// RecordProto preserves the received event's protobuf field presence when verifying a journal.
-func RecordProto(prevHash string, seq int64, ev proto.Message) ([]byte, error) {
+// RecordProto canonicalizes an event and its chain envelope, preserving protobuf field presence.
+func RecordProto(prevHash string, seq int64, ev *v1.Event) ([]byte, error) {
 	ej, err := marshalOpts.Marshal(ev)
 	if err != nil {
 		return nil, err
@@ -94,8 +95,8 @@ func HashRecord(prevHash string, seq int64, ev api.Event) (string, error) {
 	return HashRecordProto(prevHash, seq, wire.EventToProto(ev))
 }
 
-// HashRecordProto hashes a received event without a potentially lossy domain-type conversion.
-func HashRecordProto(prevHash string, seq int64, ev proto.Message) (string, error) {
+// HashRecordProto returns the lowercase-hex SHA-256 of RecordProto.
+func HashRecordProto(prevHash string, seq int64, ev *v1.Event) (string, error) {
 	b, err := RecordProto(prevHash, seq, ev)
 	if err != nil {
 		return "", err

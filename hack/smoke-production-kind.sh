@@ -22,6 +22,7 @@ NAMESPACE="${NAMESPACE:-ate-agentsessions}"
 LOCAL_PORT="${LOCAL_PORT:-18080}"
 EXPECT_MODELSTUB="${EXPECT_MODELSTUB:-0}"
 SERVER="127.0.0.1:${LOCAL_PORT}"
+PROJECT="${PROJECT:-default}"
 WORK="$(mktemp -d)"
 PF_PID=""
 
@@ -40,6 +41,12 @@ kubectl_kind() {
 	kubectl --context "${CONTEXT}" "$@"
 }
 
+agentctl() {
+	local command="$1"
+	shift
+	"${WORK}/agentctl" "${command}" --project "${PROJECT}" "$@"
+}
+
 start_forward() {
 	kubectl --context "${CONTEXT}" port-forward -n "${NAMESPACE}" service/agentsessions "${LOCAL_PORT}:8080" \
 		>"${WORK}/port-forward.log" 2>&1 &
@@ -56,7 +63,7 @@ start_forward() {
 		fi
 		if grep -q '^Forwarding from ' "${WORK}/port-forward.log" &&
 			timeout --kill-after=1s "$((remaining < PROBE_TIMEOUT_SECONDS ? remaining : PROBE_TIMEOUT_SECONDS))s" \
-				"${WORK}/agentctl" list --server "${SERVER}" >/dev/null 2>&1; then
+				"${WORK}/agentctl" list --project "${PROJECT}" --server "${SERVER}" >/dev/null 2>&1; then
 			return 0
 		fi
 		sleep 1
@@ -79,7 +86,7 @@ echo "==> build agentctl"
 start_forward
 
 echo "==> execute the first chat turn through Sessions"
-first="$("${WORK}/agentctl" exec --server "${SERVER}" --harness chat --input first)"
+first="$(agentctl exec --server "${SERVER}" --harness chat --input first)"
 echo "${first}"
 session="$(awk '$1 == "session" { print $2; exit }' <<<"${first}")"
 if [[ -z "${session}" ]]; then
@@ -89,8 +96,8 @@ fi
 if [[ "${EXPECT_MODELSTUB}" == "1" ]]; then
 	grep -q 'context=1 last=first' <<<"${first}"
 fi
-"${WORK}/agentctl" get --server "${SERVER}" --session "${session}"
-"${WORK}/agentctl" verify --server "${SERVER}" --session "${session}"
+agentctl get --server "${SERVER}" --session "${session}"
+agentctl verify --server "${SERVER}" --session "${session}"
 
 echo "==> replace the Sessions pod while retaining the PVC and substrate actor"
 old_pod="$(kubectl_kind get pods -n "${NAMESPACE}" -l app=agentsessions -o jsonpath='{.items[0].metadata.name}')"
@@ -105,18 +112,18 @@ fi
 start_forward
 
 echo "==> prove metadata and committed history survived"
-"${WORK}/agentctl" get --server "${SERVER}" --session "${session}"
-replay="$("${WORK}/agentctl" replay --server "${SERVER}" --session "${session}")"
+agentctl get --server "${SERVER}" --session "${session}"
+replay="$(agentctl replay --server "${SERVER}" --session "${session}")"
 echo "${replay}"
 grep -q 'first' <<<"${replay}"
 
 echo "==> continue the same chat session after restart"
-second="$("${WORK}/agentctl" exec --server "${SERVER}" --session "${session}" --input second)"
+second="$(agentctl exec --server "${SERVER}" --session "${session}" --input second)"
 echo "${second}"
 if [[ "${EXPECT_MODELSTUB}" == "1" ]]; then
 	grep -q 'context=3 last=second' <<<"${second}"
 fi
-"${WORK}/agentctl" verify --server "${SERVER}" --session "${session}"
+agentctl verify --server "${SERVER}" --session "${session}"
 
 echo "==> correlation evidence"
 kubectl_kind logs -n "${NAMESPACE}" "${new_pod}" --tail=200 | grep -F "session_uid=${session}"

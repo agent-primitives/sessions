@@ -14,7 +14,6 @@ ACTION="${1:-}"
 CLUSTER="${CLUSTER:-agentsessions-production}"
 CONTEXT="kind-${CLUSTER}"
 NAMESPACE="ate-agentsessions"
-SUBSTRATE_REF="${SUBSTRATE_REF:-fc0e3586a6de7cf1b896b948d05df7d5ef8b8870}"
 SUBSTRATE_DIR="${SUBSTRATE_DIR:-${ROOT}/_substrate}"
 KO_DOCKER_REPO="${KO_DOCKER_REPO:-localhost:5001}"
 KO_DEFAULTBASEIMAGE="${KO_DEFAULTBASEIMAGE:-gcr.io/distroless/static-debian13}"
@@ -50,9 +49,51 @@ render() {
 
 setup() {
 	# The pinned Substrate checkout runs its own kind version through hack/kind.sh.
-	for command in git docker kubectl ko; do
+	for command in git docker kubectl ko go python3; do
 		require_command "${command}"
 	done
+	SUBSTRATE_REF="${SUBSTRATE_REF:-$(sed -n 's/^  SUBSTRATE_REF: //p' "${ROOT}/.github/workflows/substrate-e2e.yml")}"
+	if [[ ! "${SUBSTRATE_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+		echo "SUBSTRATE_REF must be a full commit SHA" >&2
+		exit 2
+	fi
+	local kvm_error
+	if kvm_error="$(python3 - 2>&1 <<'PY'
+import fcntl
+import os
+import sys
+try:
+    fd = os.open("/dev/kvm", os.O_RDWR)
+    try:
+        if fcntl.ioctl(fd, 0xAE00, 0) != 12:
+            raise OSError("unsupported KVM API version")
+        vm = fcntl.ioctl(fd, 0xAE01, 0)
+        os.close(vm)
+    finally:
+        os.close(fd)
+except OSError as e:
+    print(e, file=sys.stderr)
+    sys.exit(1)
+PY
+	)"; then
+		SANDBOX_CLASS="${SANDBOX_CLASS:-microvm}"
+	else
+		if [[ "${SANDBOX_CLASS:-}" == "microvm" ]]; then
+			echo "microvm requires usable /dev/kvm: ${kvm_error}" >&2
+			exit 2
+		fi
+		if [[ -z "${SANDBOX_CLASS:-}" ]]; then
+			echo "KVM unavailable (${kvm_error}); falling back to gvisor." >&2
+			SANDBOX_CLASS=gvisor
+		fi
+	fi
+	case "${SANDBOX_CLASS}" in
+	microvm) SANDBOX_CONFIG="${SANDBOX_CONFIG:-microvm}" ;;
+	gvisor) SANDBOX_CONFIG="${SANDBOX_CONFIG:-gvisor-default}" ;;
+	*) echo "SANDBOX_CLASS must be microvm or gvisor" >&2; exit 2 ;;
+	esac
+	echo "==> selected sandbox: ${SANDBOX_CLASS} (${SANDBOX_CONFIG})"
+	export KO_DEFAULTPLATFORMS="${KO_DEFAULTPLATFORMS:-linux/$(go env GOARCH)}"
 	USE_OLLAMA="${USE_OLLAMA:-0}"
 	USE_MODELSTUB="${USE_MODELSTUB:-0}"
 	if [[ "${USE_OLLAMA}" == "1" && "${USE_MODELSTUB}" == "1" ]]; then
@@ -75,21 +116,36 @@ setup() {
 	MODEL_AUTH_HEADER="${MODEL_AUTH_HEADER:-Authorization}"
 	PROJECT="${PROJECT:-default}"
 
-	if [[ ! -d "${SUBSTRATE_DIR}/.git" ]]; then
-		git clone https://github.com/agent-substrate/substrate "${SUBSTRATE_DIR}"
+	if [[ "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${SUBSTRATE_DIR}")" == "${ROOT}/_substrate" ]]; then
+		if [[ ! -d "${SUBSTRATE_DIR}/.git" ]]; then
+			git clone https://github.com/agent-substrate/substrate "${SUBSTRATE_DIR}"
+		fi
+		if [[ -n "$(git -C "${SUBSTRATE_DIR}" status --porcelain)" ]]; then
+			echo "Refusing to change dirty Substrate checkout ${SUBSTRATE_DIR}" >&2
+			exit 2
+		fi
+		git -C "${SUBSTRATE_DIR}" fetch origin --quiet
+		git -C "${SUBSTRATE_DIR}" checkout --detach "${SUBSTRATE_REF}" --quiet
+	elif [[ "$(git -C "${SUBSTRATE_DIR}" rev-parse HEAD)" != "${SUBSTRATE_REF}" ]] ||
+		[[ -n "$(git -C "${SUBSTRATE_DIR}" status --porcelain)" ]]; then
+		echo "Custom SUBSTRATE_DIR must be clean and already at ${SUBSTRATE_REF}; it will not be fetched or checked out." >&2
+		exit 2
 	fi
-	git -C "${SUBSTRATE_DIR}" fetch origin --quiet
-	git -C "${SUBSTRATE_DIR}" checkout --detach "${SUBSTRATE_REF}" --quiet
 
 	echo "==> create kind cluster ${CLUSTER} and install pinned ate-system"
 	(cd "${SUBSTRATE_DIR}" && KIND_CLUSTER_NAME="${CLUSTER}" hack/create-kind-cluster.sh)
 	(cd "${SUBSTRATE_DIR}" && KIND_CLUSTER_NAME="${CLUSTER}" KUBECTL_CONTEXT="${CONTEXT}" hack/install-ate-kind.sh --deploy-ate-system)
+	if [[ "${SANDBOX_CLASS}" == "microvm" ]]; then
+		(cd "${SUBSTRATE_DIR}" && NO_DEV_ENV=true ATE_INSTALL_KIND=true BUCKET_NAME=ate-snapshots \
+			KO_DOCKER_REPO="${KO_DOCKER_REPO}" KUBECTL_CONTEXT="${CONTEXT}" \
+			hack/install-microvm-deps.sh --install)
+	fi
 
 	echo "==> build and publish control-plane, harness, and worker images"
 	export KO_DOCKER_REPO KO_DEFAULTBASEIMAGE
 	HARNESS_IMG="$(cd "${ROOT}" && ko build ./cmd/harnessnode)"
 	CONTROL_IMG="$(cd "${ROOT}/integrations/substrate" && ko build ./cmd/controlplane)"
-	ATEOM_IMG="$(cd "${SUBSTRATE_DIR}" && ko build ./cmd/ateom-gvisor)"
+	ATEOM_IMG="$(cd "${SUBSTRATE_DIR}" && ko build "./cmd/ateom-${SANDBOX_CLASS}")"
 	if [[ "${USE_MODELSTUB}" == "1" ]]; then
 		MODELSTUB_IMG="$(cd "${ROOT}/integrations/substrate" && ko build ./cmd/modelstub)"
 	fi
@@ -122,21 +178,24 @@ setup() {
 
 	echo "==> deploy chat worker pool"
 	render "${ROOT}/deploy/substrate/kind/chat-workerpool.yaml" \
-		"ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor" "${ATEOM_IMG}" |
+		"WORKER_IMAGE" "${ATEOM_IMG}" \
+		"SANDBOX_CLASS" "${SANDBOX_CLASS}" |
 		kubectl_kind apply -f -
 	KIND_CLUSTER_NAME="${CLUSTER}" "${ROOT}/hack/wait-worker-pool.sh" chat-harness "${NAMESPACE}"
 
 	echo "==> deploy persistent Sessions control plane"
 	render "${ROOT}/deploy/substrate/kind/control-plane.yaml" \
-		"ghcr.io/aramase/agentsessions/controlplane:latest" "${CONTROL_IMG}" \
-		"HARNESS_IMAGE" "${HARNESS_IMG}" |
+		"ghcr.io/agent-primitives/sessions/controlplane:latest" "${CONTROL_IMG}" \
+		"HARNESS_IMAGE" "${HARNESS_IMG}" \
+		"SANDBOX_CLASS" "${SANDBOX_CLASS}" \
+		"SANDBOX_CONFIG" "${SANDBOX_CONFIG}" |
 		kubectl_kind apply -f -
 	kubectl_kind rollout status deployment/agentsessions -n "${NAMESPACE}" --timeout=660s
 
 	echo
 	echo "Deployment ready. In another terminal:"
 	echo "  CLUSTER=${CLUSTER} ${ROOT}/hack/kind-production.sh port-forward"
-	echo "Then use: agentctl exec --server 127.0.0.1:8080 --harness chat --input 'hello'"
+	echo "Then use: agentctl exec --server 127.0.0.1:8080 --project '${PROJECT}' --harness chat --input 'hello'"
 }
 
 case "${ACTION}" in

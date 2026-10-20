@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc"
@@ -15,6 +19,75 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func TestSandboxAndSnapshotConfig(t *testing.T) {
+	for _, tc := range []struct {
+		class, custom, want string
+		enum                atepb.SandboxClass
+	}{
+		{"microvm", "", "microvm", atepb.SandboxClass_SANDBOX_CLASS_MICROVM},
+		{"gvisor", "", "gvisor-default", atepb.SandboxClass_SANDBOX_CLASS_GVISOR},
+		{"microvm", "custom-vm", "custom-vm", atepb.SandboxClass_SANDBOX_CLASS_MICROVM},
+		{"gvisor", "custom-gvisor", "custom-gvisor", atepb.SandboxClass_SANDBOX_CLASS_GVISOR},
+	} {
+		t.Run(tc.class+"/"+tc.want, func(t *testing.T) {
+			args := []string{"-model", "test", "-harness-image", "example/harness@sha256:" + strings.Repeat("a", 64),
+				"-sandbox-class", tc.class, "-snapshot-location", "gs://custom/snapshots"}
+			if tc.custom != "" {
+				args = append(args, "-sandbox-config", tc.custom)
+			}
+			cfg, err := parseConfig(args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec := chatTemplate(cfg)
+			if spec.GetSandboxConfig().GetSandboxClass() != tc.enum ||
+				spec.GetSandboxConfig().GetConfigName() != tc.want ||
+				spec.GetSnapshotConfig().GetPreferredFidelity() != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY ||
+				spec.GetWorkerSelector().GetMatchLabels()["workload"] != "agentsessions-chat-"+tc.class ||
+				spec.GetSnapshotConfig().GetStorageLocation() != "gs://custom/snapshots/chat-harness/" {
+				t.Fatalf("unexpected template: %v", spec)
+			}
+		})
+	}
+	for _, flag := range []string{"-sandbox-class=typo", "-sandbox-config= ", "-snapshot-location= ", "-ateapi-insecure-skip-verify"} {
+		if _, err := parseConfig([]string{"-model=test", "-harness-image=example/harness@sha256:" + strings.Repeat("a", 64), flag}); err == nil {
+			t.Fatalf("accepted invalid or removed flag %s", flag)
+		}
+	}
+}
+
+func TestATEAPITrustsOnlySuppliedBundle(t *testing.T) {
+	server := httptest.NewTLSServer(nil)
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	cert := server.Certificate()
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ateapiTLSConfig(config{ateapiCAFile: path, ateapiServerName: "api.ate-system.svc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.InsecureSkipVerify || cfg.ServerName != "api.ate-system.svc" {
+		t.Fatalf("unsafe TLS configuration: %+v", cfg)
+	}
+	wantRoots := x509.NewCertPool()
+	wantRoots.AddCert(cert)
+	if !cfg.RootCAs.Equal(wantRoots) {
+		t.Fatal("roots differ from supplied bundle")
+	}
+	if err := os.WriteFile(path, []byte("invalid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ateapiTLSConfig(config{ateapiCAFile: path}); err == nil {
+		t.Fatal("invalid bundle accepted")
+	}
+	if ateapiConnectParams.Backoff.MaxDelay > 5*time.Second ||
+		ateapiConnectParams.MinConnectTimeout > 5*time.Second {
+		t.Fatal("ate-api reconnection budget exceeds five seconds")
+	}
+}
+
 func TestParseConfigRequiresDeploymentInputs(t *testing.T) {
 	if _, err := parseConfig(nil); err == nil || !strings.Contains(err.Error(), "-model is required") {
 		t.Fatalf("error = %v, want missing model", err)
@@ -22,7 +95,6 @@ func TestParseConfigRequiresDeploymentInputs(t *testing.T) {
 	cfg, err := parseConfig([]string{
 		"-model", "test-model",
 		"-harness-image", "example/harness@sha256:" + strings.Repeat("a", 64),
-		"-ateapi-insecure-skip-verify",
 		"-atespace", "test-space",
 		"-actor-template", "test-chat",
 	})
@@ -32,8 +104,8 @@ func TestParseConfigRequiresDeploymentInputs(t *testing.T) {
 	if cfg.model != "test-model" || cfg.atespace != "test-space" || cfg.templateName != "test-chat" {
 		t.Fatalf("config = %+v", cfg)
 	}
-	if !cfg.ateapiInsecureSkipVerify {
-		t.Fatal("kind TLS override was not parsed")
+	if cfg.sandboxClass != "microvm" || cfg.sandboxConfig != "microvm" {
+		t.Fatalf("sandbox defaults = %s/%s", cfg.sandboxClass, cfg.sandboxConfig)
 	}
 	if _, err := parseConfig([]string{"-model", "test", "-log-level", "verbose"}); err == nil {
 		t.Fatal("invalid log level was accepted")
@@ -90,7 +162,8 @@ func TestEnsureAtespaceIsIdempotent(t *testing.T) {
 
 func TestEnsureChatTemplate(t *testing.T) {
 	cfg := config{templateAtespace: "templates", templateName: "chat", model: "test",
-		harnessImage: "example/harness@sha256:" + strings.Repeat("a", 64)}
+		harnessImage: "example/harness@sha256:" + strings.Repeat("a", 64),
+		sandboxClass: "microvm", sandboxConfig: "microvm", snapshotLocation: "gs://ate-snapshots/agentsessions/"}
 	for _, tc := range []struct {
 		name   string
 		code   codes.Code
@@ -99,6 +172,11 @@ func TestEnsureChatTemplate(t *testing.T) {
 	}{
 		{name: "create"},
 		{name: "existing", code: codes.AlreadyExists},
+		{name: "server-defaulted golden snapshots", mutate: func(t *atepb.ActorTemplate) {
+			t.SnapshotConfig.GoldenSnapshotConfig = &atepb.GoldenSnapshotConfig{
+				Mode: atepb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_ENABLED,
+			}
+		}},
 		{name: "create denied", code: codes.PermissionDenied, want: "create chat template"},
 		{name: "stale image", mutate: func(t *atepb.ActorTemplate) { t.Containers[0].Image = "stale" }, want: "immutable"},
 		{name: "stale model", mutate: func(t *atepb.ActorTemplate) { t.Containers[0].Env[1].Value = "stale" }, want: "immutable"},

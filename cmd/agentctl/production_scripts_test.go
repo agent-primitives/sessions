@@ -109,6 +109,7 @@ func TestProductionTeardownPreservesSharedRegistry(t *testing.T) {
 				if err := os.Mkdir(filepath.Join(substrate, "hack"), 0o700); err != nil {
 					t.Fatal(err)
 				}
+
 				if err := os.WriteFile(filepath.Join(substrate, "hack", "kind.sh"),
 					[]byte("#!/bin/bash\n[[ \"$PWD\" == \"$SUBSTRATE_DIR\" ]] || exit 1\nexec kind \"$@\"\n"), 0o700); err != nil {
 					t.Fatal(err)
@@ -127,6 +128,113 @@ func TestProductionTeardownPreservesSharedRegistry(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(dir, "docker-calls")); !os.IsNotExist(err) {
 				t.Fatal("teardown accessed the shared registry")
+			}
+		})
+	}
+}
+
+func TestProductionSetupSelectionAndCheckoutSafety(t *testing.T) {
+	for _, tc := range []struct {
+		name, class, kvm, revision, dirty, want string
+		fail                                    bool
+	}{
+		{name: "automatic microvm", kvm: "yes", want: "microvm"},
+		{name: "automatic fallback", kvm: "no", want: "gvisor"},
+		{name: "explicit microvm", class: "microvm", kvm: "yes", want: "microvm"},
+		{name: "explicit gvisor", class: "gvisor", kvm: "yes", want: "gvisor"},
+		{name: "explicit gvisor without KVM", class: "gvisor", kvm: "no", want: "gvisor"},
+		{name: "explicit microvm without KVM", class: "microvm", kvm: "no", fail: true},
+		{name: "invalid class", class: "typo", kvm: "yes", fail: true},
+		{name: "wrong custom revision", kvm: "yes", revision: strings.Repeat("b", 40), fail: true},
+		{name: "dirty custom checkout", kvm: "yes", dirty: " M owned-file", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := scriptFixture(t, map[string]string{
+				"python3": `if [[ "$1" == "-" ]]; then cat >/dev/null; [[ "$TEST_KVM" == yes ]]; else echo "$SUBSTRATE_DIR"; fi`,
+				"git": `case "$*" in
+				*"rev-parse HEAD") echo "${TEST_REVISION:-$TEST_PIN}" ;;
+				*"status --porcelain") echo "$TEST_DIRTY" ;;
+				*) echo "unsafe git command: $*" >&2; exit 1 ;;
+				esac`,
+				"go":     `[[ "$*" == "env GOARCH" ]] && echo arm64`,
+				"docker": "exit 0",
+				"ko":     `echo "$KO_DEFAULTPLATFORMS $*" >> "$TEST_FIXTURE/builds"; echo example/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`,
+				"kubectl": `echo "$*" >> "$TEST_FIXTURE/kubectl-calls"
+				if [[ "$*" == *"apply -f -"* ]]; then cat >> "$TEST_FIXTURE/manifests"; elif [[ "$*" == *"create"* ]]; then echo "{}"; elif [[ "$*" == *"jsonpath"* ]]; then echo worker=10.0.0.1; fi`,
+				"sleep": "exit 0",
+			})
+			substrate := t.TempDir()
+			if err := os.Mkdir(filepath.Join(substrate, "hack"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"create-kind-cluster.sh", "install-ate-kind.sh", "install-microvm-deps.sh"} {
+				if err := os.WriteFile(filepath.Join(substrate, "hack", name),
+					[]byte("#!/bin/bash\necho \"$0 $*\" >> \"$TEST_FIXTURE/installs\"\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			workflow, err := os.ReadFile("../../.github/workflows/substrate-e2e.yml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var pin string
+			for _, line := range strings.Split(string(workflow), "\n") {
+				if strings.HasPrefix(line, "  SUBSTRATE_REF: ") {
+					pin = strings.TrimPrefix(line, "  SUBSTRATE_REF: ")
+				}
+			}
+			t.Setenv("TEST_FIXTURE", dir)
+			t.Setenv("TEST_PIN", pin)
+			t.Setenv("TEST_REVISION", tc.revision)
+			t.Setenv("TEST_DIRTY", tc.dirty)
+			t.Setenv("TEST_KVM", tc.kvm)
+			t.Setenv("SUBSTRATE_DIR", substrate)
+			t.Setenv("SUBSTRATE_REF", "")
+			t.Setenv("SANDBOX_CLASS", tc.class)
+			t.Setenv("SANDBOX_CONFIG", "")
+			t.Setenv("KO_DEFAULTPLATFORMS", "")
+			t.Setenv("USE_MODELSTUB", "1")
+			t.Setenv("USE_OLLAMA", "0")
+			t.Setenv("MODEL_API_KEY", "")
+			t.Setenv("CLUSTER", "owned-selection-test")
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			out, err := exec.CommandContext(ctx, "bash", "../../hack/kind-production.sh", "setup").CombinedOutput()
+			if (err != nil) != tc.fail {
+				t.Fatalf("setup: %v\n%s", err, out)
+			}
+			if tc.fail {
+				if _, err := os.Stat(filepath.Join(dir, "installs")); !os.IsNotExist(err) {
+					t.Fatal("invalid setup changed a cluster")
+				}
+				return
+			}
+			manifests, err := os.ReadFile(filepath.Join(dir, "manifests"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantConfig := "microvm"
+			if tc.want == "gvisor" {
+				wantConfig = "gvisor-default"
+			}
+			for _, want := range []string{
+				"sandboxClasses:\n    - name: " + tc.want, "workload: agentsessions-chat-" + tc.want,
+				"--sandbox-class=" + tc.want, "--sandbox-config=" + wantConfig,
+			} {
+				if !strings.Contains(string(manifests), want) {
+					t.Fatalf("missing %q in rendered manifests", want)
+				}
+			}
+			builds, err := os.ReadFile(filepath.Join(dir, "builds"))
+			if err != nil || !strings.Contains(string(builds), "linux/arm64 build ./cmd/ateom-"+tc.want) {
+				t.Fatalf("wrong build platform or worker: %s %v", builds, err)
+			}
+			installs, err := os.ReadFile(filepath.Join(dir, "installs"))
+			if err != nil || strings.Contains(string(installs), "install-microvm-deps.sh") != (tc.want == "microvm") {
+				t.Fatalf("wrong microVM asset installation: %s %v", installs, err)
+			}
+			if tc.kvm == "no" && tc.class == "" && !strings.Contains(string(out), "falling back to gvisor") {
+				t.Fatal("fallback not announced")
 			}
 		})
 	}

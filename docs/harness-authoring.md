@@ -747,7 +747,7 @@ agentsessionsd --addr 127.0.0.1:8080 --model "$MODEL" --harness mine=127.0.0.1:8
 ```
 
 ```
-Sessions server listening harnesses="[chat echo mine]" default_harness=echo
+agentsessionsd listening harnesses="[chat echo mine]" default_harness=echo
 ```
 
 Sessions choose it by name, and everything else behaves as it does for a built-in harness:

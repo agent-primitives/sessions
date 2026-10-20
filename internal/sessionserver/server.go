@@ -1,8 +1,7 @@
 // Package sessionserver hosts the runtime-neutral Sessions gRPC service.
 //
-// A command supplies the harness registry because runtime composition is deployment-specific:
-// cmd/agentsessionsd uses runtime/local, while integrations/substrate/cmd/controlplane supplies a
-// remote runtime.
+// The production-shaped integration's controlplane command supplies its deployment-specific
+// harness registry. The general-purpose daemon lives separately in internal/agentsessionsd.
 package sessionserver
 
 import (
@@ -14,12 +13,12 @@ import (
 
 	"google.golang.org/grpc"
 
-	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/internal/version"
-	"github.com/aramase/agentsessions/observability"
-	"github.com/aramase/agentsessions/placement"
-	"github.com/aramase/agentsessions/session"
-	"github.com/aramase/agentsessions/sqlitelog"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/internal/version"
+	"github.com/agent-primitives/sessions/observability"
+	"github.com/agent-primitives/sessions/placement"
+	"github.com/agent-primitives/sessions/session"
+	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 // Config contains the runtime-neutral daemon settings.

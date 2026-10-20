@@ -198,12 +198,13 @@ appears in argv or a file, and a failed apply leaves the stored key unchanged.
 Deployment's pod template: a new or deleted key restarts the pod, which also drops its emptyDir
 journal, and an unchanged key leaves it running. It does not build or deploy the fake model. It
 points `agentsessionsd` at the endpoint, and the harness requests `AGENTSUITE_MODEL` instead of the
-fixture's `triage-model`: the ActorTemplate carries it as an env var, so each model gets its own
-template. `demo.sh` then skips the checks that depend on the fake's replies and counter, and does
-not port-forward the fake. It still checks the journal in both modes: the inputs in order, one model
-call per turn, the suspend and resume records, the fork child's prefix, and that the replay
-re-executed every completed turn; in real-provider mode it claims only those, not what the replies
-say. The replay still fails if the controller sees a model call.
+fixture's `triage-model` (a [demo stand-in](#gaps-this-poc-works-around)): the ActorTemplate carries
+it as an env var, so each model gets its own template. `demo.sh` then skips the checks that depend
+on the fake's replies and counter, and does not port-forward the fake. It still checks the journal
+in both modes: the inputs in order, one model call per turn, the suspend and resume records, the
+fork child's prefix, and that the replay re-executed every completed turn; in real-provider mode it
+claims only those, not what the replies say. The replay still fails if the controller sees a model
+call.
 
 The Secret, and so the running daemon, follows the latest `up.sh`. A real-provider `up.sh` without
 `MODEL_API_KEY` deletes any stored key, for endpoints that take none, so export `MODEL_API_KEY`
@@ -262,6 +263,13 @@ header has not been run against a live deployment.
 - **The AgentSessionsBinding is a draft.** kaimahi does not define the kind yet. `binding.json`
   follows the draft field list, and `snapshot.fidelity` replaces the draft's `onCommit`, which
   substrate no longer has.
+- **The model override is a demo stand-in.** With a real provider, `emit render -model` replaces
+  the agent's model with `AGENTSUITE_MODEL`, because the suites here pin placeholder model names
+  (`triage-model`, kaimahi's `example-model`), not a provider's model. It is not the intended
+  shape: the suite version pins the model, the host serves that model and picks the deployment, and
+  a different model is a new suite version. Without the override, the suite would pin a model the
+  provider serves, or the provider would serve the pinned name (for Azure OpenAI, a deployment of
+  that name).
 - **There is no build profile.** The image is the harness binary plus the agent layer on `scratch`.
   It is not built from the suite's build profile (`runtimeBase` and `harness` are placeholder
   digests), and nothing records that it came from the composition.

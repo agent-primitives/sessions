@@ -100,7 +100,9 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	# are the daemon's defaults.
 	MODEL_PATH="${AGENTSUITE_MODEL_PATH:-/chat/completions}"
 	MODEL_AUTH_HEADER="${AGENTSUITE_MODEL_AUTH_HEADER:-Authorization}"
-	# The harness requests the provider's model, not the fixture's.
+	# The harness requests the provider's model, not the fixture's: a demo stand-in, since the
+	# suites here pin placeholder models. The intended shape keeps the suite's model and has the
+	# host serve it; see "Gaps this PoC works around" in README.md.
 	HARNESS_MODEL="${MODEL_ID}"
 	# Each lands in a YAML plain scalar ("- -model=VALUE"): whitespace or a control character would
 	# change the YAML around it, a trailing ':' would turn the item into a map that kubectl refuses

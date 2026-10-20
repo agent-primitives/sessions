@@ -169,9 +169,11 @@ policy, and audit centrally in a custom executor. `REQUIRES_APPROVAL` parks a st
 for an explicit caller decision. RPC/SDK `Approve` commits only that decision; call `Resume` separately.
 CLI approve and deny do both, and say "decision committed" if recovery fails. Get/List and final paused
 Exec frames expose the pending tuple at their captured cursor. A decision clears that reference, but
-new input stays blocked until its receipt commits. Identity is not authorization; there is no policy
-hook, timeout or expiry. Snapshots and unresolved requests are retained indefinitely, and Cancel
-remains `UNIMPLEMENTED`. DeleteSession commits permanent intent without reclaiming resources.
+new input stays blocked until its receipt commits. Identity is not authorization; custom hosts can
+require independent [approve permission](security.md#optional-go-rpc-authorization). There is no
+tool/resource policy hook, timeout or expiry. Snapshots and unresolved requests are retained
+indefinitely, and Cancel remains `UNIMPLEMENTED`. DeleteSession commits permanent intent without
+reclaiming resources.
 Tool calls align with the MCP shape (name plus structured arguments). The bundled Chat Completions
 adapter maps function tools, tool choices, assistant tool calls and text tool results; see the
 [harness tool loop](harness-authoring.md#rule-6-carry-the-tool-loop-in-the-model-request).
@@ -206,10 +208,11 @@ real-substrate conformance across both capability tiers all run today. Session-l
 use the `Placer` for both resumability tiers. See the
 [Substrate verification boundary](substrate-conformance.md#verification-boundary) for live-test coverage
 and limitations. The reference daemon has no authentication, authorization, or transport security;
-custom Go hosts can opt into [caller authentication](security.md#optional-go-caller-authentication),
-not isolation. There is no managed control plane, enterprise identity and provenance, or confidential
-and GPU snapshots. See the Status
-section of the root README.
+custom Go hosts can opt into [caller authentication](security.md#optional-go-caller-authentication)
+and [RPC authorization](security.md#optional-go-rpc-authorization), not complete required-mode
+isolation.
+There is no managed control plane, enterprise identity and provenance, or confidential and GPU
+snapshots. See the Status section of the root README.
 
 ## Where is the wire format?
 

@@ -29,7 +29,7 @@ backends record external lifecycle calls such as actor creation, resume, suspend
 
 ## Enabling logs
 
-Library components default to a discard logger. The process that assembles them must inject one:
+Most library components default to a discard logger. The process that assembles them must inject one:
 
 <!-- doccheck: body(harness api.Harness, model controller.ModelFunc, store *sqlitelog.Store) -->
 ```go
@@ -41,6 +41,22 @@ if err != nil {
     return err
 }
 service := session.NewService(store, registry, session.WithLogger(logger))
+```
+
+`HarnessRegistry` instead defaults to `slog.Default()` (captured at construction), including for
+startup warnings and enforced-mode diagnostics. Configure it separately with
+`session.WithRegistryLogger`; `session.WithLogger` only configures the Sessions service. A nil
+registry logger uses the default too. An embedder can route both services to the same logger:
+
+<!-- doccheck: body(store *sqlitelog.Store, registry *placement.Registry, factory session.PlacerFactory) -->
+```go
+logger := slog.Default()
+registryService, err := session.NewHarnessRegistry(store, registry, factory,
+    session.WithRegistryLogger(logger))
+if err != nil {
+    return err
+}
+defer registryService.Close()
 ```
 
 Use `observability.UnaryServerInterceptor` and `observability.StreamServerInterceptor` on gRPC
@@ -58,6 +74,20 @@ Operational logs deliberately exclude:
 - tool arguments and results
 - fence-token values
 - snapshot URIs
-- raw error strings, which may contain payload data
+- raw error strings, which may contain payload data, except for the diagnostic-only case below
 
 Use `error_kind`, gRPC status, identifiers, counts, and durations for diagnosis.
+
+With optional Go RPC authorization enforced, `INTERNAL` diagnostics include `request_id`, `method`,
+`error_kind` and stable `error_category` before the wire error becomes a generic status:
+
+- Known trusted host/store errors log the full cause with `error_category=host`.
+- Model/provider/harness and other unknown-origin errors never log message text. Category is
+  `execution` for Exec/Resume, `runtime` for Suspend/Fork, or `external` for other methods.
+
+Unknown mixed execution/runtime phases fail closed. A store fault deep inside runtime is not
+trusted unless known at the service storage boundary. No heuristic redaction is used. This
+diagnostic-only exception does not permit request metadata, credentials or session payloads in
+logs, or raw errors in ordinary operational events. Trusted/off behavior is unchanged. Policies
+own their failure logs and metrics, without sensitive data; the service never logs raw policy
+causes. See [optional RPC authorization](security.md#optional-go-rpc-authorization).

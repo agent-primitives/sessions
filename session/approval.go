@@ -20,6 +20,10 @@ import (
 // decisions remain available while compute is unavailable or the recorded route is unserved.
 func (s *Service) Approve(ctx context.Context, req *v1.ApproveRequest) (response *v1.ApproveResponse, err error) {
 	ctx = observability.EnsureRequestID(ctx)
+	defer s.auth.internalError(ctx, s.logger, v1.Sessions_Approve_FullMethodName, &err)
+	if err := s.authorizeMutation(ctx, v1.Sessions_Approve_FullMethodName, req.GetSession(), api.ActionRead, api.ActionApprove); err != nil {
+		return nil, err
+	}
 	finish := observability.Start(ctx, s.logger, "session", "approve", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 	if req.GetSession() == "" || req.GetExecutionId() == "" || req.GetToolCallId() == "" || req.GetRequestSeq() <= 0 || req.Approved == nil {
@@ -39,9 +43,15 @@ func (s *Service) Approve(ctx context.Context, req *v1.ApproveRequest) (response
 		}
 		return nil, err
 	}
+	actor := wire.EventFromProto(&v1.Event{Actor: req.GetIdentity()}).Actor
+	if s.auth != nil {
+		// Request provenance is not a verified audit identity. Normalize it before
+		// comparison too; verified journal attribution needs a versioned contract.
+		actor = api.IdentityRef{}
+	}
 	decision, err := s.registry.Approve(ctx, s.store.Session(uid), uid, api.ApprovalDecision{
 		ExecutionID: req.GetExecutionId(), ToolCallID: req.GetToolCallId(), RequestSeq: req.GetRequestSeq(),
-		Approved: req.GetApproved(), Reason: req.GetReason(), Identity: wire.EventFromProto(&v1.Event{Actor: req.GetIdentity()}).Actor,
+		Approved: req.GetApproved(), Reason: req.GetReason(), Identity: actor,
 	})
 	if err != nil {
 		return nil, approvalError(err)
@@ -66,6 +76,6 @@ func approvalError(err error) error {
 	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, placement.ErrCheckpointing), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
 		return status.Error(codes.Aborted, err.Error())
 	default:
-		return status.Errorf(codes.Internal, "approve: %v", err)
+		return hostInternalError("approve: %v", err)
 	}
 }

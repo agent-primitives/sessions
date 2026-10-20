@@ -45,7 +45,21 @@ const (
 // HarnessRegistry manages the harnesses a host can place sessions on. It is an admin API: a caller
 // that can register a harness decides where the host sends session history and whose model calls it
 // pays for. Keep it off the Sessions listener and control access to it.
-// See docs/security.md#operator-access for operator setup and CLI usage.
+// Go hosts may opt into WithRegistryAuthorization for verified callers and distinct global
+// registry.read/list/register/retire permissions, including read before observed Describe.
+// The Go SPI AuthorizationRequest.Method string carries the full originating RPC path, including
+// direct handler calls; global checks have empty UID/Owner. No protobuf AuthorizationRequest
+// message or Method wire field exists. Policies own failure logs/metrics; services never log raw
+// policy causes.
+// Enforced-mode INTERNAL diagnostics include request_id, method, error_kind and stable
+// error_category. Known trusted host/store errors log the full cause with error_category=host.
+// Model/provider/harness and other unknown-origin errors never log message text; registry calls use
+// error_category=external. Unknown mixed origins fail closed, without heuristic redaction. Only
+// store faults known at the service storage boundary qualify as trusted. Request metadata,
+// credentials and session payloads remain excluded. Trusted/off behavior is unchanged; the daemon
+// remains unenforced.
+// See docs/security.md#operator-access for operator setup and CLI usage, and
+// docs/security.md#optional-go-rpc-authorization for the opt-in contract and deployment limits.
 type HarnessRegistryClient interface {
 	// Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec,
 	// or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve
@@ -118,7 +132,21 @@ func (c *harnessRegistryClient) RetireHarness(ctx context.Context, in *RetireHar
 // HarnessRegistry manages the harnesses a host can place sessions on. It is an admin API: a caller
 // that can register a harness decides where the host sends session history and whose model calls it
 // pays for. Keep it off the Sessions listener and control access to it.
-// See docs/security.md#operator-access for operator setup and CLI usage.
+// Go hosts may opt into WithRegistryAuthorization for verified callers and distinct global
+// registry.read/list/register/retire permissions, including read before observed Describe.
+// The Go SPI AuthorizationRequest.Method string carries the full originating RPC path, including
+// direct handler calls; global checks have empty UID/Owner. No protobuf AuthorizationRequest
+// message or Method wire field exists. Policies own failure logs/metrics; services never log raw
+// policy causes.
+// Enforced-mode INTERNAL diagnostics include request_id, method, error_kind and stable
+// error_category. Known trusted host/store errors log the full cause with error_category=host.
+// Model/provider/harness and other unknown-origin errors never log message text; registry calls use
+// error_category=external. Unknown mixed origins fail closed, without heuristic redaction. Only
+// store faults known at the service storage boundary qualify as trusted. Request metadata,
+// credentials and session payloads remain excluded. Trusted/off behavior is unchanged; the daemon
+// remains unenforced.
+// See docs/security.md#operator-access for operator setup and CLI usage, and
+// docs/security.md#optional-go-rpc-authorization for the opt-in contract and deployment limits.
 type HarnessRegistryServer interface {
 	// Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec,
 	// or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve

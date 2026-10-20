@@ -1108,7 +1108,21 @@ returns FAILED_PRECONDITION.
 HarnessRegistry manages the harnesses a host can place sessions on. It is an admin API: a caller
 that can register a harness decides where the host sends session history and whose model calls it
 pays for. Keep it off the Sessions listener and control access to it.
-See docs/security.md#operator-access for operator setup and CLI usage.
+Go hosts may opt into WithRegistryAuthorization for verified callers and distinct global
+registry.read/list/register/retire permissions, including read before observed Describe.
+The Go SPI AuthorizationRequest.Method string carries the full originating RPC path, including
+direct handler calls; global checks have empty UID/Owner. No protobuf AuthorizationRequest
+message or Method wire field exists. Policies own failure logs/metrics; services never log raw
+policy causes.
+Enforced-mode INTERNAL diagnostics include request_id, method, error_kind and stable
+error_category. Known trusted host/store errors log the full cause with error_category=host.
+Model/provider/harness and other unknown-origin errors never log message text; registry calls use
+error_category=external. Unknown mixed origins fail closed, without heuristic redaction. Only
+store faults known at the service storage boundary qualify as trusted. Request metadata,
+credentials and session payloads remain excluded. Trusted/off behavior is unchanged; the daemon
+remains unenforced.
+See docs/security.md#operator-access for operator setup and CLI usage, and
+docs/security.md#optional-go-rpc-authorization for the opt-in contract and deployment limits.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
@@ -1136,9 +1150,10 @@ Each Exec is one execution/turn. Fork branches the log at a sequence.
 ### ApproveRequest
 Approve supplies an explicit decision for one unresolved request in a stateless execution.
 All tuple fields are required and request_seq must be positive. A decision resolves only a
-request owned by this session, not an inherited parent request. Identity is recorded on the
-decision&#39;s Event.actor as provenance, never checked as authorization. No policy hook, expiry,
-automatic decision, or Cancel semantics are implied by this API.
+request owned by this session, not an inherited parent request. By default identity is recorded
+on the decision&#39;s Event.actor as unverified provenance. An opt-in enforcing Go host ignores it,
+normalizing the actor to empty before append/retry comparison; verified audit is not available.
+No tool/resource policy hook, expiry, automatic decision, or Cancel semantics are implied.
 
 
 | Field | Type | Label | Description |
@@ -1633,7 +1648,29 @@ flattened lifecycle enum, because collapsing them loses which axis actually move
 <a name="agentsessions-v1-Sessions"></a>
 
 ### Sessions
-
+Default hosts do not authorize callers. Go hosts may opt into per-RPC authorization, requiring
+verified callers before validation and hiding unknown sessions and policy refusals uniformly as
+PERMISSION_DENIED (see docs/security.md#optional-go-rpc-authorization). Existing unbound rows
+reach custom policies with a zero Owner; OwnerAuthorizer denies them, but custom policies may
+allow them. Go SPI AuthorizationRequest.Method carries the full originating RPC path as a string,
+including direct handler calls and compound/recovery/global checks. No protobuf
+AuthorizationRequest message or Method wire field exists. Inputless Exec approval recovery
+retains the Exec method for resume checks. Ordinary Exec restores suspended compute with exec
+alone; Resume requires resume&#43;exec.
+Mutation deletion probes acquire and release admission before owner SQL or policy evaluation.
+They never lease SQL and can race a later Delete; later mutation guards remain authoritative. An
+exclusive Delete present at the probe returns ABORTED even for a verified non-owner who knows the
+UID; this discloses deletion in progress but grants no access.
+Enforcing hosts require independent read&#43;approve permissions, owned creation and owner-filtered
+listing; owned Fork refuses until owner-before-log publication is available. Policies own failure
+logs/metrics; services never log raw policy causes. Enforced-mode INTERNAL diagnostics include
+request_id, method, error_kind and stable error_category. Known trusted host/store errors log the
+full cause with error_category=host. Model/provider/harness and other unknown-origin errors never
+log message text: category is execution for Exec/Resume, runtime for Suspend/Fork, external for
+other methods. Mixed phases fail closed; store faults inside runtime are not trusted unless known
+at the service storage boundary. No heuristic redaction is used. Request metadata, credentials
+and session payloads remain excluded. Trusted/off behavior is unchanged. These checks do not
+provide required-mode deployment, verified approval audit or transport assembly.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
@@ -1643,7 +1680,7 @@ flattened lifecycle enum, because collapsing them loses which axis actually move
 | DeleteSession | [DeleteSessionRequest](#agentsessions-v1-DeleteSessionRequest) | [Session](#agentsessions-v1-Session) | DeleteSession commits irreversible soft-deletion intent for a known UID. The host atomically appends a session-scoped, host-owned LIFECYCLE_DELETE (empty execution_id), advances the writer fence and marks PENDING. Metadata, the UID and the hash-chained journal are retained forever; the UID cannot be reused. Children and their copied prefixes are unaffected: no cascade or data erasure is promised. ListSessions hides the UID; GetSession and raw Sessions.Replay remain read-only audit access, without reconstructing or running a harness. Valid mutation requests against PENDING fail with FAILED_PRECONDITION before routing, recovery or compute effects: Exec, Fork (including historical at_seq), Resume, Suspend and Approve are refused, including exact historical decision retries. Pending approval metadata grants no permission. Until ownership and cleanup land (#88), OK &#43; PENDING acknowledges durable intent only. No Runtime.Stop, actor/pin release, physical snapshot GC or TERMINATED transition is attempted or promised. Execution and compute reporting stay independent. The retained journal is audit evidence, not a complete or authoritative cleanup-target inventory; the allocation ownership and cleanup-target schema belong to #88, not an inferred default harness or owner. Repeated PENDING deletion returns the identical Session: no timestamp, update_time, journal, fence or compute-projection changes. Clients must inspect deletion_state, not infer reclamation from an OK status. Empty uid is INVALID_ARGUMENT; an unknown nonempty uid is NOT_FOUND without creating a row. Overlap with a mutation in the same Registry/host is ABORTED before mutation, without canceling the holder; retry after it finishes. Storage faults are INTERNAL, cancellation/deadline retain CANCELLED/DEADLINE_EXCEEDED. An error or lost reply after intent commits cannot undo the hidden PENDING tombstone or erase its audit evidence: use GetSession or retry to learn the outcome. Admission serialization is local to one Registry/host. Durable fences block subsequent writes from this build&#39;s writers; already-open older binaries do not enforce tombstones. A separate host can provision compute before its first fence; cross-host exclusion of compute effects is not guaranteed. Operators still need runtime-side resource reconciliation. |
 | Exec | [ExecRequest](#agentsessions-v1-ExecRequest) | [ExecUpdate](#agentsessions-v1-ExecUpdate) stream | Exec runs one execution/turn. The live stream carries committed LogRecords plus ephemeral Deltas; Replay re-delivers committed records only (read-only). |
 | Replay | [ReplayRequest](#agentsessions-v1-ReplayRequest) | [LogRecord](#agentsessions-v1-LogRecord) stream | Raw read-only audit: remains available for tombstoned UIDs, including LIFECYCLE_DELETE records. Unlike controller replay, this does not reconstruct or run the harness. |
-| Approve | [ApproveRequest](#agentsessions-v1-ApproveRequest) | [ApproveResponse](#agentsessions-v1-ApproveResponse) | Implemented durable approval decisions for STATELESS_REPLAY executions. OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple, approved value, reason and identity returns the existing decision, even after resolution. A changed decision/reason/identity for that request is FAILED_PRECONDITION, never an overwrite. INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created for a non-stateless execution; Approve does not Describe or resolve a harness. ABORTED: local contention, append-CAS conflict or superseded fence; retry after reading the session. Identity is provenance only; this method provides no authorization, policy hook, expiry, implicit Resume, or Cancel behavior. |
+| Approve | [ApproveRequest](#agentsessions-v1-ApproveRequest) | [ApproveResponse](#agentsessions-v1-ApproveResponse) | Implemented durable approval decisions for STATELESS_REPLAY executions. OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple, approved value, reason and identity returns the existing decision, even after resolution. A changed decision/reason/identity for that request is FAILED_PRECONDITION, never an overwrite. INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created for a non-stateless execution; Approve does not Describe or resolve a harness. ABORTED: local contention, append-CAS conflict or superseded fence; retry after reading the session. Identity is unverified provenance, ignored by an enforcing Go host. Independent read&#43;approve permission checks are opt-in; this method implies no tool/resource policy hook, expiry, implicit Resume, or Cancel behavior. |
 | Cancel | [CancelRequest](#agentsessions-v1-CancelRequest) | [Session](#agentsessions-v1-Session) | In-flight control: cancel the running execution. Not implemented: the server returns UNIMPLEMENTED. |
 | Suspend | [SuspendRequest](#agentsessions-v1-SuspendRequest) | [Session](#agentsessions-v1-Session) | Compute-layer durability. There is no warm Pause: no Runtime backend implements a node-local warm checkpoint, so a session goes straight from live to a cold snapshot. Suspend routes an owned unreceipted approval to its recorded harness; inherited approvals and ordinary sessions use their stored default. An unserved recorded name is FAILED_PRECONDITION, with no fallback. cold, free worker |
 | Resume | [ResumeRequest](#agentsessions-v1-ResumeRequest) | [Session](#agentsessions-v1-Session) | A recorded override where either harness is REQUIRES_MEMORY_SNAPSHOT is FAILED_PRECONDITION before compute changes or journal repair, as for Exec admission. Otherwise an unresolved owned approval returns its current paused Session without runtime IO. A call-only cut repairs the request; neither outcome proves cold compute. After a decision, recovery uses the recorded invocation and SnapshotRef. It may park at another gate (without RESUME), or finish and commit RESUME. A missing executor is FAILED_PRECONDITION and leaves the decision recoverable. Approved executor failures are durable EXECUTOR_ERROR receipts, available to the harness for continuation, not transport failures. Snapshots and unresolved requests are retained indefinitely; there is no approval expiry or automatic decision. |

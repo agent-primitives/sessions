@@ -121,10 +121,10 @@ func startRegistryHostWith(t *testing.T, path string, factory session.PlacerFact
 }
 
 // serveSessions serves svc in-process and returns a client for it.
-func serveSessions(t *testing.T, svc v1.SessionsServer) v1.SessionsClient {
+func serveSessions(t *testing.T, svc v1.SessionsServer, opts ...grpc.ServerOption) v1.SessionsClient {
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(opts...)
 	v1.RegisterSessionsServer(srv, svc)
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)

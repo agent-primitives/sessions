@@ -9,6 +9,15 @@ not provide.
 
 ### Added
 
+- Opt-in embedded Sessions and registry RPC authorization with verified callers, independent approve
+  permission, exact-caller allowlists, owned creation and SQL owner-filtered pagination. Inputless
+  Exec approval recovery requires resume as well as exec; ordinary Exec can restore suspended
+  compute with exec alone, while Resume always requires both. Policy requests carry the originating
+  RPC path in Go `AuthorizationRequest.Method`, including compound/recovery/global checks and direct
+  handler calls. Existing unbound rows reach custom policies with a zero Owner; `OwnerAuthorizer`
+  still denies them. `session.WithRegistryLogger` routes registry diagnostics and startup warnings
+  to an embedder-supplied logger. See the
+  [action mapping and limits](docs/security.md#optional-go-rpc-authorization).
 - `model/openai` maps Chat Completions function tools and tool choices, assistant tool-call parts
   and text `ToolResult.Content`. Streaming assembles indexed argument deltas into finalized tool
   parts without emitting tool JSON through the text callback. Replay and completed-effect recovery
@@ -88,13 +97,38 @@ not provide.
   The reference daemon remains unauthenticated and unenforced; authentication alone is not isolation,
   and there is no daemon required-mode switch.
 - SQLite schema v5 follows approval v3 and deletion v4, adding indexed exact caller issuer/subject
-  ownership and an off-mode journal authorization marker. Legacy and RPC-created sessions remain
-  unbound; ordinary metadata writes and copied history cannot assign or replace owners. No events
-  or hashes are rewritten, and no wire fields change. Older hosts refuse v5 at open time; this host
-  also refuses required, unknown or missing authorization markers at v5 because it cannot enforce
-  caller access. Stop all older writers before the first v5 open, following the
-  [rollout order](#sqlite-v4-rollout). Back up first. Sessions RPCs remain unauthenticated and
-  unenforced.
+  ownership and an off-mode journal authorization marker. Legacy and unenforced RPC-created sessions
+  remain unbound; ordinary metadata writes and copied history cannot assign or replace owners.
+  No events or hashes are rewritten, and no wire fields change. Older hosts refuse v5 at open time;
+  this host also refuses required, unknown or missing authorization markers at v5 because it cannot
+  enforce caller access. Stop all older writers before the first v5 open, following the
+  [rollout order](#sqlite-v4-rollout). Back up first. The default Sessions service remains
+  unauthenticated and unenforced.
+- The new authorization options do not activate required-mode deployment. Journals still require an
+  off marker and unenforced writers can bypass embedded checks. Enforced Fork refuses before IO;
+  enforced Approve clears request actor without claiming verified audit. Owned fork publication,
+  versioned approval audit, journal policy/startup validation, daemon activation and TLS remain
+  unavailable. No wire fields, canonical event format, schema version or default behavior change.
+  `NewHarnessRegistry` now accepts variadic options: ordinary calls remain source-compatible, but
+  function-value assignments using its previous exact signature must wrap or adapt the constructor.
+  `session.WithRegistryLogger` routes registry startup warnings and enforced-mode diagnostics to the
+  embedder's logger, independently of the Sessions service's `WithLogger`; absent or nil, it uses
+  `slog.Default()` captured at construction.
+  Go policy requests identify the full originating RPC path in `AuthorizationRequest.Method`;
+  built-in owner policies still decide by action. This is a Go SPI contract, not a protobuf message
+  or field. Mutation deletion probes acquire and release admission
+  before owner SQL; no admission is held during the query or policy call. A probe can race a later
+  Delete; subsequent guards remain authoritative. Verified callers who know a UID can receive
+  `ABORTED` if exclusive deletion is present at the probe, even without ownership; this grants no
+  access. Policies own failure logs/metrics; services never log raw policy causes. Enforced-mode
+  `INTERNAL` diagnostics include `request_id`, `method`, `error_kind` and stable `error_category`.
+  Known trusted host/store errors log the full cause with category `host`. Model/provider/harness
+  and other unknown-origin errors never log message text: category is `execution` for Exec/Resume,
+  `runtime` for Suspend/Fork, or `external` otherwise. Unknown mixed phases fail closed; store
+  faults inside runtime are not trusted unless known at the service storage boundary. No heuristic
+  redaction is used. Request metadata, credentials and session payloads remain excluded;
+  trusted/off behavior is unchanged. See the
+  [diagnostic-only log exception](docs/observability.md#data-policy).
 - Embedders using `controller.WithToolExecutor` or `placement.WithToolExecutor` must now declare
   durable dedup to keep `Resume` re-driving an interrupted tool call, including a call whose
   executor returned an error the harness did not handle. `Resume` re-runs a turn's trailing

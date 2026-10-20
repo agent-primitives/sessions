@@ -24,6 +24,7 @@ import (
 
 	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/authn"
 	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
 	"github.com/agent-primitives/sessions/observability"
@@ -39,6 +40,7 @@ type Service struct {
 	registry       *placement.Registry
 	logger         *slog.Logger
 	defaultProject string
+	auth           *authorization
 	// afterPinCheck, when set by a test, runs between the pin check and the override lookup in
 	// placerFor, so a test can land a registration in that window.
 	afterPinCheck func()
@@ -123,6 +125,7 @@ func sessionProto(info sqlitelog.SessionInfo) (*v1.Session, error) {
 		out.PendingApproval = &v1.ApprovalRef{ExecutionId: ref.ExecutionID, ToolCallId: ref.ToolCallID, RequestSeq: ref.RequestSeq}
 	}
 	if err := applyMetadata(out, info); err != nil {
+		// Decode errors can quote caller-supplied stored values, not host diagnostics.
 		return nil, status.Errorf(codes.Internal, "session %q: %v", info.UID, err)
 	}
 	return out, nil
@@ -155,6 +158,10 @@ func execStateOf(info sqlitelog.SessionInfo) v1.ExecState {
 // survive a restart; compute is still provisioned lazily on first Exec.
 func (s *Service) CreateSession(ctx context.Context, req *v1.CreateSessionRequest) (session *v1.Session, err error) {
 	ctx = observability.EnsureRequestID(ctx)
+	defer s.auth.internalError(ctx, s.logger, v1.Sessions_CreateSession_FullMethodName, &err)
+	if err := s.auth.global(ctx, v1.Sessions_CreateSession_FullMethodName, api.ActionCreate); err != nil {
+		return nil, err
+	}
 	finish := observability.Start(ctx, s.logger, "session", "create")
 	uid := newUID()
 	defer func() { finish(err, "error_kind", serviceErrorKind(err), "session_uid", uid) }()
@@ -164,7 +171,7 @@ func (s *Service) CreateSession(ctx context.Context, req *v1.CreateSessionReques
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "session metadata: %v", err)
 	}
-	return s.createSession(uid, sqlitelog.SessionMeta{
+	return s.createSession(ctx, uid, sqlitelog.SessionMeta{
 		UID:         uid,
 		Project:     spec.GetMetadata().GetProject(),
 		Name:        spec.GetMetadata().GetName(),
@@ -180,7 +187,7 @@ func (s *Service) CreateSession(ctx context.Context, req *v1.CreateSessionReques
 // createSession applies the server defaults and persists the metadata row. Exec's auto-create goes
 // through here too, so a session it makes is indistinguishable from one CreateSession made and the
 // two cannot drift apart.
-func (s *Service) createSession(uid string, meta sqlitelog.SessionMeta) (*v1.Session, error) {
+func (s *Service) createSession(ctx context.Context, uid string, meta sqlitelog.SessionMeta) (*v1.Session, error) {
 	if meta.Project == "" {
 		meta.Project = s.defaultProject
 	}
@@ -195,18 +202,31 @@ func (s *Service) createSession(uid string, meta sqlitelog.SessionMeta) (*v1.Ses
 	// A new session is the one thing a retired harness refuses. The check runs in the insert's
 	// transaction, so once RetireHarness has returned no new session can land on the harness, even
 	// one whose create started first. A name that is not static must have a registration row.
-	if err := s.store.PutSessionOnActiveHarness(meta, !s.registry.Static(meta.Harness)); err != nil {
+	var insertErr error
+	if s.auth != nil {
+		owner, err := s.auth.caller(ctx)
+		if err != nil {
+			return nil, err
+		}
+		insertErr = s.store.CreateOwnedSession(meta, owner, !s.registry.Static(meta.Harness))
+	} else {
+		insertErr = s.store.PutSessionOnActiveHarness(meta, !s.registry.Static(meta.Harness))
+	}
+	if err := insertErr; err != nil {
+		if errors.Is(err, sqlitelog.ErrSessionExists) {
+			return nil, status.Error(codes.AlreadyExists, "session already exists")
+		}
 		if errors.Is(err, sqlitelog.ErrHarnessRetired) {
 			return nil, status.Errorf(codes.FailedPrecondition, "create session: %v; it takes no new sessions, while existing sessions on it keep running", err)
 		}
 		if errors.Is(err, sqlitelog.ErrHarnessNameCollision) {
 			return nil, status.Errorf(codes.FailedPrecondition, "create session: %v in this journal; sessions on it are refused", err)
 		}
-		return nil, status.Errorf(codes.Internal, "create session: %v", err)
+		return nil, hostInternalError("create session: %v", err)
 	}
 	info, err := s.store.SessionInfo(uid)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "create session: %v", err)
+		return nil, hostInternalError("create session: %v", err)
 	}
 	return sessionProto(info)
 }
@@ -214,6 +234,10 @@ func (s *Service) createSession(uid string, meta sqlitelog.SessionMeta) (*v1.Ses
 // GetSession returns the session's stored metadata and current log cursor.
 func (s *Service) GetSession(ctx context.Context, req *v1.GetSessionRequest) (session *v1.Session, err error) {
 	ctx = observability.EnsureRequestID(ctx)
+	defer s.auth.internalError(ctx, s.logger, v1.Sessions_GetSession_FullMethodName, &err)
+	if err := s.authorize(ctx, v1.Sessions_GetSession_FullMethodName, req.GetUid(), api.ActionRead); err != nil {
+		return nil, err
+	}
 	finish := observability.Start(ctx, s.logger, "session", "get", "session_uid", req.GetUid())
 	defer func() {
 		finish(err, "error_kind", serviceErrorKind(err))
@@ -239,6 +263,10 @@ func (s *Service) GetSession(ctx context.Context, req *v1.GetSessionRequest) (se
 // caller quietly re-reading page one forever.
 func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest) (resp *v1.ListSessionsResponse, err error) {
 	ctx = observability.EnsureRequestID(ctx)
+	defer s.auth.internalError(ctx, s.logger, v1.Sessions_ListSessions_FullMethodName, &err)
+	if err := s.auth.global(ctx, v1.Sessions_ListSessions_FullMethodName, api.ActionList); err != nil {
+		return nil, err
+	}
 	var returned int
 	finish := observability.Start(ctx, s.logger, "session", "list",
 		"project", req.GetProject(),
@@ -252,16 +280,17 @@ func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest)
 	if project == "" {
 		project = s.defaultProject
 	}
-	page, err := s.store.ListSessions(sqlitelog.ListOptions{
-		Project:   project,
-		PageSize:  int(req.GetPageSize()),
-		PageToken: req.GetPageToken(),
-	})
+	opts := sqlitelog.ListOptions{Project: project, PageSize: int(req.GetPageSize()), PageToken: req.GetPageToken()}
+	if s.auth != nil {
+		caller, _ := authn.Caller(ctx)
+		opts.Owner = &caller
+	}
+	page, err := s.store.ListSessions(opts)
 	if err != nil {
 		if errors.Is(err, sqlitelog.ErrInvalidPageToken) {
 			return nil, status.Errorf(codes.InvalidArgument, "page_token: %v", err)
 		}
-		return nil, status.Errorf(codes.Internal, "list sessions: %v", err)
+		return nil, hostInternalError("list sessions: %v", err)
 	}
 	out := make([]*v1.Session, 0, len(page.Sessions))
 	for _, info := range page.Sessions {
@@ -478,7 +507,7 @@ func (s *Service) checkStatic(name string) error {
 	case errors.Is(err, sqlitelog.ErrHarnessNotFound):
 		return nil
 	default:
-		return status.Errorf(codes.Internal, "resolve harness: %v", err)
+		return hostInternalError("resolve harness: %v", err)
 	}
 }
 
@@ -499,7 +528,7 @@ func (s *Service) isRegistered(name string) (bool, error) {
 	case errors.Is(err, sqlitelog.ErrHarnessNotFound):
 		return false, nil
 	default:
-		return false, status.Errorf(codes.Internal, "resolve harness: %v", err)
+		return false, hostInternalError("resolve harness: %v", err)
 	}
 }
 
@@ -512,7 +541,7 @@ func harnessError(err error) error {
 	if errors.Is(err, placement.ErrUnknownHarness) {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
-	return status.Errorf(codes.Internal, "resolve harness: %v", err)
+	return hostInternalError("resolve harness: %v", err)
 }
 
 // mutationRead protects an entire SQL read phase before it can wait for the Store's
@@ -543,13 +572,19 @@ func sessionStoreError(err error, uid string) error {
 	if errors.Is(err, sqlitelog.ErrSessionNotFound) {
 		return status.Errorf(codes.NotFound, "session %q not found", uid)
 	}
-	return status.Errorf(codes.Internal, "session %q: %v", uid, err)
+	return hostInternalError("session %q: %v", uid, err)
 }
 
 // Exec runs one turn against the session's durable log (CAS-guarded by expected_last_seq) and
 // streams the committed LogRecords produced by the turn.
 func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err error) {
 	ctx := observability.EnsureRequestID(stream.Context())
+	defer s.auth.internalError(ctx, s.logger, v1.Sessions_Exec_FullMethodName, &err)
+	if req.GetSession() != "" {
+		if err := s.authorizeMutation(ctx, v1.Sessions_Exec_FullMethodName, req.GetSession(), api.ActionExec); err != nil {
+			return err
+		}
+	}
 	var recordsSent, deltasSent int
 	finish := observability.Start(ctx, s.logger, "session", "exec",
 		"session_uid", req.GetSession(),
@@ -566,8 +601,17 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	uid := req.GetSession()
 	var sess *v1.Session
 	if uid == "" {
+		if err := s.auth.global(ctx, v1.Sessions_Exec_FullMethodName, api.ActionCreate); err != nil {
+			return err
+		}
 		uid = newUID()
-		created, err := s.createSession(uid, sqlitelog.SessionMeta{UID: uid, Harness: req.GetHarness()})
+		if s.auth != nil {
+			caller, _ := authn.Caller(ctx)
+			if err := s.auth.check(ctx, api.AuthorizationRequest{Caller: caller, Owner: caller, SessionUID: uid, Method: v1.Sessions_Exec_FullMethodName, Action: api.ActionExec}); err != nil {
+				return err
+			}
+		}
+		created, err := s.createSession(ctx, uid, sqlitelog.SessionMeta{UID: uid, Harness: req.GetHarness()})
 		if err != nil {
 			return err
 		}
@@ -616,7 +660,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		var err error
 		headBefore, err = log.Head()
 		if err != nil {
-			return status.Errorf(codes.Internal, "head: %v", err)
+			return hostInternalError("head: %v", err)
 		}
 		if sess == nil {
 			info, err := s.store.SessionInfo(uid)
@@ -633,6 +677,14 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 			return withStatusCause(codes.Aborted, err)
 		}
 		return err
+	}
+
+	if recoveryInfo != nil {
+		// Recovery can repair and Resume the parked turn. Policy runs outside admission
+		// and reuses the immutable owner already captured by the read phase.
+		if err := s.authorizeOwner(ctx, v1.Sessions_Exec_FullMethodName, uid, recoveryInfo.Owner, api.ActionResume); err != nil {
+			return err
+		}
 	}
 
 	// Unset expected_last_seq means "append at the current head": the single-writer check is opt-in,
@@ -714,7 +766,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 			} else if req.ExpectedLastSeq != nil {
 				head, err := log.Head()
 				if err != nil {
-					refused = status.Errorf(codes.Internal, "head: %v", err)
+					refused = hostInternalError("head: %v", err)
 				} else if head != req.GetExpectedLastSeq() {
 					refused = status.Error(codes.Aborted, eventlog.ErrConflict.Error())
 				}
@@ -754,7 +806,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	if recordsSent == 0 {
 		recs, err := log.Read(headBefore + 1)
 		if err != nil {
-			return status.Errorf(codes.Internal, "read: %v", err)
+			return hostInternalError("read: %v", err)
 		}
 		for _, r := range recs {
 			if err := stream.Send(&v1.ExecUpdate{Update: &v1.ExecUpdate_Record{Record: eventlog.RecordToProto(r)}}); err != nil {
@@ -780,6 +832,10 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 // Replay re-delivers committed records from from_seq (read-only; audit / provenance).
 func (s *Service) Replay(req *v1.ReplayRequest, stream v1.Sessions_ReplayServer) (err error) {
 	ctx := observability.EnsureRequestID(stream.Context())
+	defer s.auth.internalError(ctx, s.logger, v1.Sessions_Replay_FullMethodName, &err)
+	if err := s.authorize(ctx, v1.Sessions_Replay_FullMethodName, req.GetSession(), api.ActionRead); err != nil {
+		return err
+	}
 	var recordsSent int
 	finish := observability.Start(ctx, s.logger, "session", "replay",
 		"session_uid", req.GetSession(),
@@ -796,7 +852,7 @@ func (s *Service) Replay(req *v1.ReplayRequest, stream v1.Sessions_ReplayServer)
 	}
 	recs, err := s.store.Session(req.GetSession()).Read(from)
 	if err != nil {
-		return status.Errorf(codes.Internal, "read: %v", err)
+		return hostInternalError("read: %v", err)
 	}
 	for _, r := range recs {
 		if to := req.GetToSeq(); to != 0 && r.Seq > to {
@@ -821,6 +877,18 @@ const MaxForkChildren = 128
 // identical state rather than from N separate re-derivations that can drift.
 func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.ForkResponse, err error) {
 	ctx = observability.EnsureRequestID(ctx)
+	defer s.auth.internalError(ctx, s.logger, v1.Sessions_Fork_FullMethodName, &err)
+	if err := s.authorizeMutation(ctx, v1.Sessions_Fork_FullMethodName, req.GetSession(), api.ActionFork); err != nil {
+		return nil, err
+	}
+	if err := s.auth.global(ctx, v1.Sessions_Fork_FullMethodName, api.ActionCreate); err != nil {
+		return nil, err
+	}
+	if s.auth != nil {
+		// Copied records can create unbound child rows before metadata publication.
+		// Owned forks need an atomic owner-before-log reservation seam.
+		return nil, status.Error(codes.FailedPrecondition, "owned fork publication is unavailable")
+	}
 	var childrenCreated int
 	finish := observability.Start(ctx, s.logger, "session", "fork",
 		"parent_session_uid", req.GetSession(),
@@ -841,7 +909,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		if atSeq <= 0 {
 			h, err := parent.Head()
 			if err != nil {
-				return status.Errorf(codes.Internal, "head: %v", err)
+				return hostInternalError("head: %v", err)
 			}
 			atSeq = h
 		}
@@ -911,7 +979,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 			Origin:      parentInfo.Origin,
 			Labels:      childLabels,
 		}); err != nil {
-			return nil, status.Errorf(codes.Internal, "fork: record child %q: %v", child.UID, err)
+			return nil, hostInternalError("fork: record child %q: %v", child.UID, err)
 		}
 		info, err := s.store.SessionInfo(child.UID)
 		if err != nil {
@@ -961,6 +1029,10 @@ func forkError(err error) error {
 // in a SUSPEND lifecycle event (§5.1) and frees the worker via the Runtime SPI.
 func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session *v1.Session, err error) {
 	ctx = observability.EnsureRequestID(ctx)
+	defer s.auth.internalError(ctx, s.logger, v1.Sessions_Suspend_FullMethodName, &err)
+	if err := s.authorizeMutation(ctx, v1.Sessions_Suspend_FullMethodName, req.GetSession(), api.ActionSuspend); err != nil {
+		return nil, err
+	}
 	finish := observability.Start(ctx, s.logger, "session", "suspend", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 
@@ -1008,6 +1080,10 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 // completed sessions retain the stored session default.
 func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v1.Session, err error) {
 	ctx = observability.EnsureRequestID(ctx)
+	defer s.auth.internalError(ctx, s.logger, v1.Sessions_Resume_FullMethodName, &err)
+	if err := s.authorizeMutation(ctx, v1.Sessions_Resume_FullMethodName, req.GetSession(), api.ActionResume, api.ActionExec); err != nil {
+		return nil, err
+	}
 	finish := observability.Start(ctx, s.logger, "session", "resume", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 

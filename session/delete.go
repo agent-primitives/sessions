@@ -20,6 +20,10 @@ import (
 // contact runtime resources; the retained compute projection is not a cleanup claim.
 func (s *Service) DeleteSession(ctx context.Context, req *v1.DeleteSessionRequest) (session *v1.Session, err error) {
 	ctx = observability.EnsureRequestID(ctx)
+	defer s.auth.internalError(ctx, s.logger, v1.Sessions_DeleteSession_FullMethodName, &err)
+	if err := s.authorizeMutation(ctx, v1.Sessions_DeleteSession_FullMethodName, req.GetUid(), api.ActionDelete); err != nil {
+		return nil, err
+	}
 	uid := req.GetUid()
 	finish := observability.Start(ctx, s.logger, "session", "delete", "session_uid", uid)
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
@@ -66,7 +70,11 @@ func deleteError(err error, uid string) error {
 	case errors.Is(err, context.DeadlineExceeded):
 		code = codes.DeadlineExceeded
 	}
-	return withStatusCause(code, fmt.Errorf("delete session %q: %w", uid, err))
+	mapped := withStatusCause(code, fmt.Errorf("delete session %q: %w", uid, err))
+	if code == codes.Internal {
+		return &hostFailure{mapped}
+	}
+	return mapped
 }
 func deletedSessionError(info sqlitelog.SessionInfo) error {
 	if info.DeletionState == api.DeletionActive {

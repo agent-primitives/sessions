@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -89,6 +90,58 @@ func TestRefusedCheckpointIsFailedPreconditionAndStaysCold(t *testing.T) {
 					t.Fatal(err)
 				}
 			})
+		}
+	}
+}
+
+// Developer journey A4: a memory-tier session on a template that only gives VOLUMES fidelity is
+// refused on Suspend and on the Resume and Exec that follow, as is a Fork of another such session,
+// and the status message alone names the session, the actor, and the required and observed
+// fidelity.
+func TestCheckpointRefusalNamesSessionActorAndFidelity(t *testing.T) {
+	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	c := newMemoryHost(t, checkpointControl{actorControl: ctl}, store, echoagent.Harness{})
+	sess, parent := mustCreate(t, c), mustCreate(t, c)
+	for _, s := range []string{sess, parent} {
+		if err := execHi(c, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, suspendErr := c.Suspend(t.Context(), &v1.SuspendRequest{Session: sess})
+	_, resumeErr := c.Resume(t.Context(), &v1.ResumeRequest{Session: sess})
+	execErr := execHi(c, sess)
+	_, forkErr := c.Fork(t.Context(), &v1.ForkRequest{Session: parent, Count: 1})
+	for operation, tc := range map[string]struct {
+		session string
+		err     error
+	}{
+		"suspend": {sess, suspendErr},
+		"resume":  {sess, resumeErr},
+		"exec":    {sess, execErr},
+		"fork":    {parent, forkErr},
+	} {
+		sess, err := tc.session, tc.err
+		st := status.Convert(err)
+		if st.Code() != codes.FailedPrecondition {
+			t.Fatalf("%s: %v, want FAILED_PRECONDITION", operation, err)
+		}
+		for _, want := range []string{
+			operation + `: session "` + sess + `"`,
+			"actor space/" + sess + ":",
+			"required MEMORY",
+			"observed VOLUMES",
+		} {
+			if !strings.Contains(st.Message(), want) {
+				t.Errorf("%s: %q does not contain %q", operation, st.Message(), want)
+			}
+		}
+		if strings.Count(st.Message(), `session "`+sess+`"`) != 1 {
+			t.Errorf("%s: %q names the session more than once", operation, st.Message())
 		}
 	}
 }

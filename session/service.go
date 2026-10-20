@@ -593,13 +593,13 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 				}
 				state, inspectErr := controller.InspectApproval(log, 0)
 				if inspectErr != nil {
-					return execError(inspectErr)
+					return execError(uid, inspectErr)
 				}
 				if state != nil && !state.Completed {
 					if len(req.GetInputs()) == 0 {
 						recoveryInfo = &info
 					} else if !state.Inherited && state.Receipt == nil {
-						return execError(controller.ErrApprovalBlocked)
+						return execError(uid, controller.ErrApprovalBlocked)
 					}
 				}
 			} else if !errors.Is(lookupErr, sqlitelog.ErrSessionNotFound) {
@@ -745,9 +745,9 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 			return refused
 		}
 		if recoveryInfo != nil {
-			return resumeError(operationErr)
+			return resumeError(uid, operationErr)
 		}
-		return execError(operationErr)
+		return execError(uid, operationErr)
 	}
 	// A turn that committed records the observer never saw would leave the caller with a partial
 	// view, so the log stays the authority on what the stream owed.
@@ -871,7 +871,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	// The fan-out is all-or-nothing: Placer.Fork rolls back everything it provisioned on failure,
 	// so children_created stays 0 rather than reporting compute that no longer exists.
 	if err := placer.Fork(ctx, parent, req.GetSession(), children, atSeq); err != nil {
-		return nil, forkError(err)
+		return nil, forkError(req.GetSession(), err)
 	}
 	childrenCreated = len(children)
 	// Child metadata is written only after the fan-out commits. Placer.forkSource refuses an
@@ -933,8 +933,8 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 // its in-RAM state (api.ErrMemoryStateLost). A concurrent writer that invalidated the fork point, a
 // parent that no longer holds the snapshot the fork took (api.ErrSnapshotSuperseded), compute busy
 // with another operation (api.ErrComputeBusy), or another stateful fork that is checkpointing the
-// parent is Aborted, so the caller knows a retry is meaningful.
-func forkError(err error) error {
+// parent is Aborted, so the caller knows a retry is meaningful. parent is the forked session's UID.
+func forkError(parent string, err error) error {
 	switch {
 	case errors.Is(err, eventlog.ErrDeleted):
 		return withStatusCause(codes.FailedPrecondition, err)
@@ -943,7 +943,10 @@ func forkError(err error) error {
 		return status.Error(codes.DataLoss, err.Error())
 	case errors.Is(err, placement.ErrSessionBusy):
 		return status.Error(codes.Aborted, err.Error())
-	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, api.ErrMemoryStateLost), errors.Is(err, api.ErrInvalidCheckpoint):
+	case errors.Is(err, api.ErrInvalidCheckpoint):
+		return checkpointRefusal("fork", parent, err)
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch),
+		errors.Is(err, api.ErrMemoryStateLost):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return status.Error(codes.Unavailable, err.Error())
@@ -992,7 +995,7 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 		if refused != nil && err == refused {
 			return nil, refused
 		}
-		return nil, suspendError(err)
+		return nil, suspendError(uid, err)
 	}
 	// The SUSPEND append already moved the stored compute_state projection, so re-reading is
 	// what keeps the response and a subsequent ListSessions from disagreeing.
@@ -1051,7 +1054,7 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 		if refused != nil && err == refused {
 			return nil, refused
 		}
-		return nil, resumeError(err)
+		return nil, resumeError(uid, err)
 	}
 	info, err = s.store.SessionInfo(uid)
 	if err != nil {
@@ -1060,17 +1063,20 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	return sessionProto(info)
 }
 
-func suspendError(err error) error {
+// suspendError maps a Suspend failure on session uid to its public status.
+func suspendError(uid string, err error) error {
 	switch {
 	case errors.Is(err, eventlog.ErrDeleted):
 		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, placement.ErrCheckpointing), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced),
 		errors.Is(err, api.ErrComputeBusy):
 		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, api.ErrInvalidCheckpoint):
+		return checkpointRefusal("suspend", uid, err)
 	// api.ErrMemoryStateLost: the compute the session's turns ran on is gone or replaced; retrying
 	// cannot help.
 	case errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, controller.ErrReplayDiverged),
-		errors.Is(err, api.ErrMemoryStateLost), errors.Is(err, api.ErrInvalidCheckpoint):
+		errors.Is(err, api.ErrMemoryStateLost):
 		return status.Errorf(codes.FailedPrecondition, "suspend: %v", err)
 	case errors.Is(err, placement.ErrUnknownHarness):
 		return harnessError(err)
@@ -1079,7 +1085,9 @@ func suspendError(err error) error {
 	}
 }
 
-func resumeError(err error) error {
+// resumeError maps a Resume failure on session uid, including Exec's recovery of an interrupted
+// turn, to its public status.
+func resumeError(uid string, err error) error {
 	switch {
 	case errors.Is(err, eventlog.ErrDeleted):
 		return withStatusCause(codes.FailedPrecondition, err)
@@ -1098,8 +1106,10 @@ func resumeError(err error) error {
 		return status.Errorf(codes.FailedPrecondition, "resume: %v; the incomplete turn never reached the harness and you should call Exec again with all inputs", err)
 	case errors.Is(err, controller.ErrInvalidExecutionLog):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
+	case errors.Is(err, api.ErrInvalidCheckpoint):
+		return checkpointRefusal("resume", uid, err)
 	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrStatefulOverride), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch),
-		errors.Is(err, api.ErrMemoryStateLost), errors.Is(err, api.ErrInvalidCheckpoint):
+		errors.Is(err, api.ErrMemoryStateLost):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
 	case errors.Is(err, placement.ErrUnknownHarness):
 		return harnessError(err)
@@ -1126,7 +1136,15 @@ func admissionInterruptedCode(err error) codes.Code {
 	return codes.Canceled
 }
 
-func execError(err error) error {
+// checkpointRefusal reports a runtime's api.ErrInvalidCheckpoint refusal of op on session uid as
+// FAILED_PRECONDITION. The runtime's error names the compute and the required and observed
+// fidelity; only the session layer knows the session, so it adds the UID here.
+func checkpointRefusal(op, uid string, err error) error {
+	return status.Errorf(codes.FailedPrecondition, "%s: session %q: %v", op, uid, err)
+}
+
+// execError maps an Exec failure on session uid to its public status.
+func execError(uid string, err error) error {
 	switch {
 	case errors.Is(err, eventlog.ErrDeleted):
 		return withStatusCause(codes.FailedPrecondition, err)
@@ -1135,8 +1153,10 @@ func execError(err error) error {
 		return status.Error(codes.DataLoss, err.Error())
 	case errors.Is(err, placement.ErrSessionBusy):
 		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, api.ErrInvalidCheckpoint):
+		return checkpointRefusal("exec", uid, err)
 	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport), errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrStatefulOverride), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch),
-		errors.Is(err, api.ErrMemoryStateLost), errors.Is(err, api.ErrInvalidCheckpoint):
+		errors.Is(err, api.ErrMemoryStateLost):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return status.Error(codes.Unavailable, err.Error())

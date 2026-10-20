@@ -60,6 +60,10 @@ not provide.
 
 - `agentsessionsd` now logs at Warn for tool-executor routes that cannot dispatch because
   `durable_dedup` is false or unknown.
+- Substrate checkpoint fidelity refusals now name the actor (`atespace/name`), and the Suspend,
+  Resume, Exec and Fork `FAILED_PRECONDITION` messages name the session UID, so the CLI output
+  alone identifies the session, actor, and, for a refused observed checkpoint, the required and
+  observed fidelity. Codes and wrapped errors are unchanged.
 
 ### Compatibility
 

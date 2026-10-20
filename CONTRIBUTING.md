@@ -34,7 +34,7 @@ Run these before pushing; they are the same gates the `ci` workflow enforces.
 | Proto lint | `buf lint` |
 | Go blocks in docs (`docs` workflow, every pull request) | `go run ./hack/doccheck` |
 | Release build (`release-check`, on changes to Go, `Dockerfile`, `LICENSE`, `README.md`, `.goreleaser.yaml`, `.ko.yaml`) | `goreleaser check`, then `goreleaser release --snapshot --clean --skip=sbom` (needs `ko`; publishes nothing) and a check that `dist/artifacts.json` lists the `agentsessionsd` and `harnessnode` ko images; `docker build` of `Dockerfile` after `CGO_ENABLED=0 GOOS=linux go build -o agentnode ./cmd/agentnode` |
-| Fuzzing (30s per target; nightly longer) | `./hack/fuzz.sh <dir> 30s` for each `<dir>` in `./hack/fuzz.sh --packages` |
+| Fuzzing (30s per target; nightly longer) | `./hack/fuzz.sh <dir> 30s` for each `<dir>` in `./hack/fuzz.sh --packages`; `hack/fuzz-test.sh` checks the one failure `fuzz.sh` lets pass, the Go 1.26 fuzzing coordinator's own deadline ([golang/go#75804](https://github.com/golang/go/issues/75804)) |
 
 Two gates catch stale generated files, and both fail the build rather than regenerating for you:
 

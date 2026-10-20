@@ -13,7 +13,7 @@ import (
 
 func TestResumeModelPolicyErrorPreservesCause(t *testing.T) {
 	for _, cause := range []error{api.ErrModelNotAllowed, api.ErrInvalidModelPolicy} {
-		err := resumeError(fmt.Errorf("model redrive: %w", cause))
+		err := resumeError("sess-model", fmt.Errorf("model redrive: %w", cause))
 		if status.Code(err) != codes.FailedPrecondition || !errors.Is(err, cause) {
 			t.Errorf("resume model admission lost code/cause: %v", err)
 		}
@@ -22,7 +22,7 @@ func TestResumeModelPolicyErrorPreservesCause(t *testing.T) {
 
 func TestExecModelPolicyErrorPreservesCause(t *testing.T) {
 	for _, cause := range []error{api.ErrModelNotAllowed, api.ErrInvalidModelPolicy} {
-		err := execError(fmt.Errorf("selected route: %w", cause))
+		err := execError("sess-model", fmt.Errorf("selected route: %w", cause))
 		if status.Code(err) != codes.FailedPrecondition || !errors.Is(err, cause) {
 			t.Fatalf("exec model admission lost code/cause: %v", err)
 		}

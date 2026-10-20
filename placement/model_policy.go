@@ -69,8 +69,8 @@ func (p *Placer) ValidateModelPolicy(ctx context.Context) error {
 }
 
 // WithSessionModel opts a new execution into this route's model policy using a session's model.
-// The Sessions service supplies it only for sessions created with an explicit policy. Omitting
-// the option preserves old sessions, including ones created before their first event existed.
+// The Sessions service supplies it for eligible modern sessions, including those created on
+// unconfigured routes. Omitting the option preserves genuine pre-policy sessions, even empty ones.
 // An empty model uses the explicit policy default; a route without policy remains unchanged.
 func WithSessionModel(model string) ExecOption {
 	return func(c *execConfig) { c.sessionModel = &model }

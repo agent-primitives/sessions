@@ -157,12 +157,13 @@ flowchart LR
   registration. An empty declaration is valid and never widens that set. The reference host bounds
   this `Describe` to 10 seconds; failure refuses registration without exposing peer diagnostics.
   A policy mismatch is `FAILED_PRECONDITION`; a failed policy Describe is `UNAVAILABLE`, unless the
-  caller's cancellation/deadline caused it (`CANCELLED`/`DEADLINE_EXCEEDED`). A policy-enabled static
-  route can therefore refuse startup, and a failed stored route remains unservable until restart. Routes
-  without policy retain their existing no-probe registration behavior.
+  caller's cancellation/deadline caused it (`CANCELLED`/`DEADLINE_EXCEEDED`). A policy-enabled
+  static route can therefore refuse startup, and a failed stored route remains unservable until
+  restart. Routes without policy retain their existing no-probe registration behavior.
 - `SES-17`: Every newly created session MUST be eligible for selected-route model admission,
-  independently of whether its creation route currently has policy. At `CreateSession`, a configured
-  policy MUST reject a nonempty `Session.model` outside its allowed set with `INVALID_ARGUMENT`,
+  independently of whether its creation route currently has policy. Model admission runs after
+  any §17 authorization. At `CreateSession`, a configured policy MUST reject a nonempty
+  `Session.model` outside its allowed set with `INVALID_ARGUMENT`,
   before persistence. Empty means that route's explicit default; metadata keeps the requested value,
   including empty. New executions MUST apply any current selected-route policy, including a harness
   override from an initially unconfigured route, and reject a disallowed session default with
@@ -176,7 +177,8 @@ flowchart LR
   All new service-created sessions set bit 1; normal metadata updates MUST NOT clear either
   flag. Fork inherits both flags with `model`, never marking a legacy child as new. For modern
   children, inherited route/default/admission metadata MUST commit with the first child row, before
-  fan-out finalization: a later clone failure or interruption MUST NOT leave a runnable legacy child.
+  fan-out finalization: a later clone failure or interruption MUST NOT leave a runnable legacy
+  child.
   No old event or hash is rewritten. Unsupported flag bits refuse Get/List reads rather than
   silently disabling admission.
 

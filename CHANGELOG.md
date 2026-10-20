@@ -94,10 +94,10 @@ not provide.
   including empty sessions, remain legacy. Fork inherits admission metadata atomically. Existing
   journal bytes, hashes and `ModelCall` format are unchanged. Before upgrading, stop every older
   host and embedded CLI writer and back up for rollback, following the
-  [rollout order](#sqlite-v4-rollout). Older builds refuse v6 at open, but already-open older writers
-  do not enforce model policy. There is no downgrade migration. Auditors must use the current
-  protobuf descriptor: pre-v6 descriptors drop `ExecutionStart.model` and report policy-enabled
-  turns as tampered. Policy-enabled registration requires a successful bounded Describe, including
+  [rollout order](#sqlite-v4-rollout). Older builds refuse v6 at open, but already-open older
+  writers do not enforce model policy. There is no downgrade migration. Auditors must use the
+  current protobuf descriptor: pre-v6 descriptors drop `ExecutionStart.model` and report
+  policy-enabled turns as tampered. Policy-enabled registration requires a successful bounded Describe, including
   at startup; a failed stored route needs a restart after its endpoint is restored. Unconfigured
   registration remains probe-free. See [model defaults](spec.md#model-defaults).
 - `model/openai` now refuses nonempty `ModelRequest.Params`, previously silently ignored. A turn

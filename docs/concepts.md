@@ -133,13 +133,15 @@ checks but does not erase the invocation's recorded default.
 An unconfigured route keeps existing model behavior. Genuine pre-policy sessions, including
 zero-event sessions, stay legacy even after policy is configured. SQLite v6 stores independent
 flags in `model_policy`: bit 0 is creation-time policy opt-in, bit 1 marks all new service-created
-sessions; zero remains legacy and old value 1 remains eligible. Fork inherits both flags alongside
-`model`; modern child metadata commits with its first fence, even for unconfigured parents, so a
-later clone failure cannot expose a legacy child. Unknown flag bits fail Get/List reads. No old
+sessions; zero remains legacy and bit 0 alone also marks a session eligible. Fork inherits both
+flags alongside `model`; modern child metadata commits with its first fence, even for
+unconfigured parents, so a later clone failure cannot expose a legacy child. Unknown flag bits
+fail Get/List reads. No old
 event or hash changes. Stop all older hosts and embedded CLI readers/writers before upgrading and
 back up for rollback. Older binaries refuse v6 at open, but already-open old
-writers do not enforce admission. There is no downgrade migration. The reference daemon has no binding
-policy configuration yet; see [embedder composition](harness-authoring.md#host-owned-model-policy).
+writers do not enforce admission. There is no downgrade migration. The reference daemon has no
+binding policy configuration yet; see
+[embedder composition](harness-authoring.md#host-owned-model-policy).
 
 ### How exec_state is derived
 

@@ -12,7 +12,7 @@ import (
 func TestSessionModelPolicyPersistsAcrossUpsertsAndReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "journal.db")
 	s := mustOpen(t, path)
-	// Fork creates the child row by appending events before it attaches inherited metadata.
+	// This manual legacy-style fixture creates a row before upserting admission metadata.
 	log := s.Session("child")
 	fence, err := log.NewFence()
 	if err != nil {

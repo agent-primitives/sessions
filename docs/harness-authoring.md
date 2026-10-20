@@ -107,16 +107,17 @@ The Sessions service marks all new sessions as eligible, including creation on a
 route. It validates `Session.model` when creation has policy, keeps empty metadata empty, and
 resolves each new execution's effective default against current selected-route policy. A restricted
 override or later policy activation cannot inherit an unconfigured-route bypass. Genuine pre-policy
-sessions keep legacy behavior; the separate creation-time opt-in flag is not the eligibility test. Direct Placer callers use
-`placement.WithSessionModel(model)` on `Exec` to opt in; omitting it keeps legacy behavior.
+sessions keep legacy behavior; the separate creation-time opt-in flag is not the eligibility test.
+Direct Placer callers use `placement.WithSessionModel(model)` on `Exec` to opt in; omitting it keeps
+legacy behavior.
 Standalone controllers can use `controller.WithModelPolicy` and `controller.WithModelDefault`.
 The reference daemon does not yet expose binding policy configuration.
 
 Use a nonempty `Start.Model` as your default; empty retains your existing choice. An empty
 `ModelRequest.Model` also resolves to the recorded default for policy-aware turns. Explicit per-call
 models may differ within the host's allowed set. An invalid live request is execution-fatal even
-if caught: no provider call or new `MODEL_CALL`, later effects refused, best-effort `ERROR`, no `END`.
-An existing trailing model intent remains recorded when its re-drive is refused.
+if caught: no provider call or new `MODEL_CALL`, later effects refused, best-effort `ERROR`,
+no `END`. An existing trailing model intent remains recorded when its re-drive is refused.
 Replay and recorded recovery effects use their original default/hash independently of today's
 policy; only new live effects and unanswered model-intent re-drives check the current allowlist.
 The stock Chat Completions and Responses adapters send the exact validated model ID for these

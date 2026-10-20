@@ -309,6 +309,90 @@ func TestExecSessionModelSelectedRoute(t *testing.T) {
 	}
 }
 
+// A forbidden model must not reveal admission results to a caller denied by authorization.
+func TestModelPolicyAdmissionAfterAuthorization(t *testing.T) {
+	for _, tc := range []struct {
+		name, method string
+		denied       bool
+		want         codes.Code
+	}{
+		{"denied_create", "CreateSession", true, codes.PermissionDenied},
+		{"denied_exec", "Exec", true, codes.PermissionDenied},
+		{"allowed_create", "CreateSession", false, codes.InvalidArgument},
+		{"allowed_exec", "Exec", false, codes.FailedPrecondition},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openStore(t, ":memory:")
+			b := &publicGateBackend{Backend: local.New(sessionPolicyHarness{})}
+			t.Cleanup(func() { _ = b.Close() })
+			var calls atomic.Int32
+			p := placement.New(b, func(context.Context, api.ModelRequest) (api.ModelResponse, error) {
+				calls.Add(1)
+				return api.ModelResponse{}, nil
+			}, placement.WithModelPolicy(api.ModelPolicy{Default: "chosen", Allowed: []string{"chosen"}}))
+			r, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": p})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CreateOwnedSession(sqlitelog.SessionMeta{
+				UID: "owned", Harness: "echo", Model: "forbidden", ModelPolicyEligible: true,
+			}, authOwner, false); err != nil {
+				t.Fatal(err)
+			}
+			var actions []api.Action
+			svc := session.NewService(store, r, session.WithAuthorization(policyFunc(func(_ context.Context, q api.AuthorizationRequest) error {
+				actions = append(actions, q.Action)
+				if tc.denied {
+					return api.ErrPermissionDenied
+				}
+				return nil
+			})))
+			ctx := callerContext(t, authOwner)
+			before := b.ioCounts()
+			stream := &rpcStream{ctx: ctx}
+			switch tc.method {
+			case "CreateSession":
+				_, err = svc.CreateSession(ctx, &v1.CreateSessionRequest{Session: &v1.Session{Model: "forbidden"}})
+			case "Exec":
+				err = svc.Exec(&v1.ExecRequest{Session: "owned"}, stream)
+			}
+			if status.Code(err) != tc.want {
+				t.Fatalf("%s forbidden model: %v, want %v", tc.method, err, tc.want)
+			}
+			if tc.denied {
+				if status.Convert(err).Message() != "permission denied" || errors.Is(err, api.ErrModelNotAllowed) {
+					t.Fatalf("denied caller received model admission details: %v", err)
+				}
+			} else if !errors.Is(err, api.ErrModelNotAllowed) {
+				t.Fatalf("authorized caller did not reach model admission: %v", err)
+			}
+			if len(actions) != 1 {
+				t.Fatalf("authorization actions=%v, want one", actions)
+			}
+			wantFrames := 0
+			if !tc.denied && tc.method == "Exec" {
+				// Exec reports the existing session before running authorized placement admission.
+				wantFrames = 1
+				if len(stream.sent) == 1 && stream.sent[0].(*v1.ExecUpdate).GetSession() == nil {
+					t.Fatal("model refusal sent a non-session frame")
+				}
+			}
+			head, headErr := store.Session("owned").Head()
+			page, listErr := store.ListSessions(sqlitelog.ListOptions{})
+			after := b.ioCounts()
+			// Authorized admission may Describe; denied calls must not reach even that probe.
+			if !tc.denied {
+				before[0] = after[0]
+			}
+			if headErr != nil || listErr != nil || head != 0 || len(page.Sessions) != 1 ||
+				calls.Load() != 0 || after != before || len(stream.sent) != wantFrames {
+				t.Fatalf("refused call had effects: head=%d page=%+v calls=%d io=%v, errors=%v/%v",
+					head, page, calls.Load(), b.ioCounts(), headErr, listErr)
+			}
+		})
+	}
+}
+
 func TestCreateSessionModelPolicyPreservesCause(t *testing.T) {
 	store := openStore(t, ":memory:")
 	svc := session.NewService(store, sessionPolicyRegistry(t, true))

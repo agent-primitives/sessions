@@ -266,8 +266,8 @@ header has not been run against a live deployment.
 - **The model override is a demo stand-in.** With a real provider, `emit render -model` replaces
   the agent's model with `AGENTSUITE_MODEL`, because the suites here pin placeholder model names
   (`triage-model`, kaimahi's `example-model`), not a provider's model. It is not the intended
-  shape: the suite version pins the model, the host serves that model and picks the deployment, and
-  a different model is a new suite version. Without the override, the suite would pin a model the
+  shape: the suite version pins the model, the binding says where the host serves it, and a
+  different model is a new suite version. Without the override, the suite would pin a model the
   provider serves, or the provider would serve the pinned name (for Azure OpenAI, a deployment of
   that name).
 - **There is no build profile.** The image is the harness binary plus the agent layer on `scratch`.

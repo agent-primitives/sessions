@@ -1108,7 +1108,21 @@ returns FAILED_PRECONDITION.
 HarnessRegistry manages the harnesses a host can place sessions on. It is an admin API: a caller
 that can register a harness decides where the host sends session history and whose model calls it
 pays for. Keep it off the Sessions listener and control access to it.
-See docs/security.md#operator-access for operator setup and CLI usage.
+Go hosts may opt into WithRegistryAuthorization for verified callers and distinct global
+registry.read/list/register/retire permissions, including read before observed Describe.
+The Go SPI AuthorizationRequest.Method string carries the full originating RPC path, including
+direct handler calls; global checks have empty UID/Owner. No protobuf AuthorizationRequest
+message or Method wire field exists. Policies own failure logs/metrics; services never log raw
+policy causes.
+Enforced-mode INTERNAL diagnostics include request_id, method, error_kind and stable
+error_category. Known trusted host/store errors log the full cause with error_category=host.
+Model/provider/harness and other unknown-origin errors never log message text; registry calls use
+error_category=external. Unknown mixed origins fail closed, without heuristic redaction. Only
+store faults known at the service storage boundary qualify as trusted. Request metadata,
+credentials and session payloads remain excluded. Trusted/off behavior is unchanged; the daemon
+remains unenforced.
+See docs/security.md#operator-access for operator setup and CLI usage, and
+docs/security.md#optional-go-rpc-authorization for the opt-in contract and deployment limits.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
@@ -1634,13 +1648,29 @@ flattened lifecycle enum, because collapsing them loses which axis actually move
 <a name="agentsessions-v1-Sessions"></a>
 
 ### Sessions
-Default hosts do not authorize callers. Go hosts may opt into per-RPC authorization, which
-precedes validation and hides inaccessible sessions as PERMISSION_DENIED (see docs/security.md).
-Mutation deletion admission may return ABORTED before owner lookup, even for a verified non-owner
-who knows the UID; this discloses deletion in progress but grants no access.
-Those hosts require independent read&#43;approve permissions, owned creation and owner-filtered
-listing; owned Fork refuses until owner-before-log publication is available. Required-mode
-deployment, verified approval audit and transport assembly are not provided by these checks.
+Default hosts do not authorize callers. Go hosts may opt into per-RPC authorization, requiring
+verified callers before validation and hiding unknown sessions and policy refusals uniformly as
+PERMISSION_DENIED (see docs/security.md#optional-go-rpc-authorization). Existing unbound rows
+reach custom policies with a zero Owner; OwnerAuthorizer denies them, but custom policies may
+allow them. Go SPI AuthorizationRequest.Method carries the full originating RPC path as a string,
+including direct handler calls and compound/recovery/global checks. No protobuf
+AuthorizationRequest message or Method wire field exists. Inputless Exec approval recovery
+retains the Exec method for resume checks. Ordinary Exec restores suspended compute with exec
+alone; Resume requires resume&#43;exec.
+Mutation deletion probes acquire and release admission before owner SQL or policy evaluation.
+They never lease SQL and can race a later Delete; later mutation guards remain authoritative. An
+exclusive Delete present at the probe returns ABORTED even for a verified non-owner who knows the
+UID; this discloses deletion in progress but grants no access.
+Enforcing hosts require independent read&#43;approve permissions, owned creation and owner-filtered
+listing; owned Fork refuses until owner-before-log publication is available. Policies own failure
+logs/metrics; services never log raw policy causes. Enforced-mode INTERNAL diagnostics include
+request_id, method, error_kind and stable error_category. Known trusted host/store errors log the
+full cause with error_category=host. Model/provider/harness and other unknown-origin errors never
+log message text: category is execution for Exec/Resume, runtime for Suspend/Fork, external for
+other methods. Mixed phases fail closed; store faults inside runtime are not trusted unless known
+at the service storage boundary. No heuristic redaction is used. Request metadata, credentials
+and session payloads remain excluded. Trusted/off behavior is unchanged. These checks do not
+provide required-mode deployment, verified approval audit or transport assembly.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|

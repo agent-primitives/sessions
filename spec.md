@@ -1473,31 +1473,48 @@ The reference implementation protects the integrity of the record, not access to
   minting, first stream frame and approval repair. The action mapping is Get/Replay → read,
   Exec → exec, Suspend → suspend, Resume → resume+exec, Delete → delete, Cancel → cancel then
   `UNIMPLEMENTED`, Approve → read+approve. Inputless Exec entering approval-recovery Resume also
-  MUST check resume; ordinary Exec does not. Create MUST check global create before inserting the
-  verified caller as immutable owner; auto-create Exec also checks exec on the prospective UID
-  before insertion. Fork checks parent fork and global create but MUST refuse `FAILED_PRECONDITION`
-  before discovery/effects until owner-before-log child publication is available.
+  MUST check resume; ordinary Exec, including restoration of suspended compute, requires only exec.
+  The Resume RPC MUST check resume+exec even for a no-op. Create MUST check global create before
+  inserting the verified caller as immutable owner; auto-create Exec also checks exec on the
+  prospective UID before insertion. Fork checks parent fork and global create but MUST refuse
+  `FAILED_PRECONDITION` before discovery/effects until owner-before-log child publication is
+  available.
 - ListSessions MUST check global list and filter exact verified owner in SQL before keyset paging.
   Registry uses distinct global registry.read/list/register/retire actions, including read before
   observed Describe. Global actions carry empty UID/owner; requests cannot supply ownership.
+  Every Go `api.AuthorizationRequest.Method` MUST carry the full originating RPC path, including
+  direct handler calls and compound, recovery and global checks. For example, an inputless Exec
+  checking resume retains `/agentsessions.v1.Sessions/Exec`, not the Resume path. This is a Go SPI
+  field, not a protobuf message or wire field.
   The first `OwnerAllowlistAuthorizer` policy composes ordinary owner checks with exact-caller
   allowlists for create/list/approve/registry actions. Ownership alone MUST NOT authorize approve;
   with this policy an approver must also own the session. Unknown actions and mint remain denied.
-- Mutation owner lookups for Exec, Suspend, Resume, Fork, Approve and DeleteSession MUST acquire
-  deletion admission (`OPS-30`) after authentication but before the lookup or policy evaluation.
-  Contention MUST return `ABORTED` without waiting for SQL, even for a verified non-owner who
-  knows the UID. This can disclose that deletion is in progress, but grants no access. The read
-  admission MUST end before policy evaluation and the mutation's own guarded phase. A metadata read
-  whose policy later denies it can also make a concurrent Delete return `ABORTED` while holding
-  admission; it gains no write authority. Get/Replay remain unguarded audit reads; Cancel is
-  unchanged.
-- Once deletion admission permits the owner lookup, required RPC checks MUST hide unknown/unbound
-  sessions and owner-policy refusals uniformly as generic `PERMISSION_DENIED`. Only
-  `api.ErrPermissionDenied` (possibly wrapped) is policy denial;
-  unexpected policy/store failures MUST be sanitized `INTERNAL`. Caller cancellation/deadlines
-  retain their codes. Enforced Approve ignores request actor and stores an empty actor, not a
-  verified audit identity. It normalizes before retry comparison; historical nonempty actors are
-  not identical retries. Verified caller audit and caller-bound retries remain unavailable.
+- Mutation owner lookups for Exec, Suspend, Resume, Fork, Approve and DeleteSession MUST probe
+  deletion admission (`OPS-30`) after authentication. The probe MUST acquire and release shared
+  admission before owner SQL or policy evaluation; it MUST NOT lease SQL. An exclusive Delete
+  present at the probe MUST return `ABORTED` without waiting for SQL, even for a verified non-owner
+  who knows the UID. This can disclose deletion in progress, but grants no access. The probe can
+  race a later Delete; subsequent mutation guards remain authoritative. Owner queries, including
+  later-denied queries, MUST NOT hold admission while waiting for SQL. Get/Replay remain unguarded
+  audit reads; Cancel is unchanged.
+- Once the deletion probe permits owner lookup, unknown sessions and policy refusals MUST return
+  the same generic `PERMISSION_DENIED`. Existing unbound rows MUST reach the policy with a zero
+  `Owner`; `OwnerAuthorizer` denies them, but custom policies MAY allow them. Only
+  `api.ErrPermissionDenied` (possibly wrapped) is policy denial; unexpected policy/store failures
+  MUST be sanitized `INTERNAL`. Caller cancellation/deadlines retain their codes. Policies own
+  their failure logs and metrics; services MUST NOT log raw policy causes. In enforced mode only,
+  `INTERNAL` diagnostics MUST include `request_id`, `method`, `error_kind` and stable
+  `error_category`. Known trusted host/store errors MUST log the full cause with category `host`.
+  Model/provider/harness and other unknown-origin errors MUST NOT log message text: category MUST
+  be `execution` for Exec/Resume, `runtime` for Suspend/Fork, or `external` for other methods.
+  Unknown mixed execution/runtime phases MUST fail closed; store faults inside runtime MUST NOT
+  qualify as trusted unless known at the service storage boundary. No heuristic redaction is used.
+  Request metadata, credentials and session payloads remain excluded; trusted/off behavior is
+  unchanged. This diagnostic-only exception does not permit sensitive data in errors; see
+  [log data policy](docs/observability.md#data-policy).
+  Enforced Approve ignores request actor and stores an empty actor, not a verified audit identity.
+  It normalizes before retry comparison; historical nonempty actors are not identical retries.
+  Verified caller audit and caller-bound retries remain unavailable.
 - Embedded enforcement still opens off-marked journals: unenforced hosts and CLI writers can bypass
   it. It is not cross-host isolation or supported required-mode deployment. Activation still needs
   owned fork reservation, versioned verified approval audit, journal policy/startup validation,
@@ -1541,6 +1558,9 @@ The reference implementation protects the integrity of the record, not access to
 - CI runs `buf lint` on every change to the protos and `buf breaking` (`FILE` rules) against the
   most recent `v*` release tag. The gate armed at the first tag (v0.1.0) and is active now.
 - Generated Go stubs and `docs/api-reference.md` MUST match the protos; CI fails on drift.
+- Optional embedded RPC authorization identifies the full originating RPC path in Go
+  `api.AuthorizationRequest.Method`; built-in owner policies still decide by action. This Go SPI
+  contract changes no protobuf fields, canonical events, journal schema or default daemon enforcement.
 - A server built before `ResumeRequest.expected_last_seq` (`OPS-29`) ignores the field, and the
   API has no capability query. A client cannot learn from the API that the check ran; it needs to
   know which server version is deployed.

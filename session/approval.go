@@ -19,11 +19,11 @@ import (
 // Approve commits only the supplied decision. It deliberately does not resolve a harness:
 // decisions remain available while compute is unavailable or the recorded route is unserved.
 func (s *Service) Approve(ctx context.Context, req *v1.ApproveRequest) (response *v1.ApproveResponse, err error) {
-	defer s.auth.internalError(&err)
-	if err := s.authorizeMutation(ctx, req.GetSession(), api.ActionRead, api.ActionApprove); err != nil {
+	ctx = observability.EnsureRequestID(ctx)
+	defer s.auth.internalError(ctx, s.logger, v1.Sessions_Approve_FullMethodName, &err)
+	if err := s.authorizeMutation(ctx, v1.Sessions_Approve_FullMethodName, req.GetSession(), api.ActionRead, api.ActionApprove); err != nil {
 		return nil, err
 	}
-	ctx = observability.EnsureRequestID(ctx)
 	finish := observability.Start(ctx, s.logger, "session", "approve", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 	if req.GetSession() == "" || req.GetExecutionId() == "" || req.GetToolCallId() == "" || req.GetRequestSeq() <= 0 || req.Approved == nil {
@@ -76,6 +76,6 @@ func approvalError(err error) error {
 	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, placement.ErrCheckpointing), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
 		return status.Error(codes.Aborted, err.Error())
 	default:
-		return status.Errorf(codes.Internal, "approve: %v", err)
+		return hostInternalError("approve: %v", err)
 	}
 }

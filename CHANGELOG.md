@@ -11,7 +11,11 @@ not provide.
 
 - Opt-in embedded Sessions and registry RPC authorization with verified callers, independent approve
   permission, exact-caller allowlists, owned creation and SQL owner-filtered pagination. Inputless
-  Exec approval recovery requires resume as well as exec. See the
+  Exec approval recovery requires resume as well as exec; ordinary Exec can restore suspended
+  compute with exec alone, while Resume always requires both. Policy requests carry the originating
+  RPC path in Go `AuthorizationRequest.Method`, including compound/recovery/global checks and direct
+  handler calls. Existing unbound rows reach custom policies with a zero Owner; `OwnerAuthorizer`
+  still denies them. See the
   [action mapping and limits](docs/security.md#optional-go-rpc-authorization).
 - `model/openai` maps Chat Completions function tools and tool choices, assistant tool-call parts
   and text `ToolResult.Content`. Streaming assembles indexed argument deltas into finalized tool
@@ -102,8 +106,21 @@ not provide.
   unavailable. No wire fields, canonical event format, schema version or default behavior change.
   `NewHarnessRegistry` now accepts variadic options: ordinary calls remain source-compatible, but
   function-value assignments using its previous exact signature must wrap or adapt the constructor.
-  Mutation deletion admission precedes owner lookup: verified callers who know a UID can receive
-  `ABORTED` during deletion even without ownership; this grants no access.
+  Go policy requests identify the full originating RPC path in `AuthorizationRequest.Method`;
+  built-in owner policies still decide by action. This is a Go SPI contract, not a protobuf message
+  or field. Mutation deletion probes acquire and release admission
+  before owner SQL; no admission is held during the query or policy call. A probe can race a later
+  Delete; subsequent guards remain authoritative. Verified callers who know a UID can receive
+  `ABORTED` if exclusive deletion is present at the probe, even without ownership; this grants no
+  access. Policies own failure logs/metrics; services never log raw policy causes. Enforced-mode
+  `INTERNAL` diagnostics include `request_id`, `method`, `error_kind` and stable `error_category`.
+  Known trusted host/store errors log the full cause with category `host`. Model/provider/harness
+  and other unknown-origin errors never log message text: category is `execution` for Exec/Resume,
+  `runtime` for Suspend/Fork, or `external` otherwise. Unknown mixed phases fail closed; store
+  faults inside runtime are not trusted unless known at the service storage boundary. No heuristic
+  redaction is used. Request metadata, credentials and session payloads remain excluded;
+  trusted/off behavior is unchanged. See the
+  [diagnostic-only log exception](docs/observability.md#data-policy).
 - Embedders using `controller.WithToolExecutor` or `placement.WithToolExecutor` must now declare
   durable dedup to keep `Resume` re-driving an interrupted tool call, including a call whose
   executor returned an error the harness did not handle. `Resume` re-runs a turn's trailing

@@ -23,6 +23,7 @@ import (
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/canon"
 	"github.com/agent-primitives/sessions/harnesswire"
+	"github.com/agent-primitives/sessions/observability"
 	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/sqlitelog"
 )
@@ -323,8 +324,9 @@ func validName(name string) error {
 
 // RegisterHarness stores a registration and makes it resolvable, or recognizes a repeat of one.
 func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterHarnessRequest) (_ *v1.RegisterHarnessResponse, err error) {
-	defer h.auth.internalError(&err)
-	if err := h.auth.global(ctx, api.ActionRegistryRegister); err != nil {
+	ctx = observability.EnsureRequestID(ctx)
+	defer h.auth.internalError(ctx, slog.Default(), v1.HarnessRegistry_RegisterHarness_FullMethodName, &err)
+	if err := h.auth.global(ctx, v1.HarnessRegistry_RegisterHarness_FullMethodName, api.ActionRegistryRegister); err != nil {
 		return nil, err
 	}
 	name, spec := req.GetName(), req.GetSpec()
@@ -352,7 +354,7 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 	if rec, err := h.store.Harness(name); err == nil && rec.SpecDigest != digest {
 		return nil, status.Errorf(codes.AlreadyExists, "harness %q holds spec %s, request is %s; registrations are immutable, use a new name", name, rec.SpecDigest, digest)
 	} else if err != nil && !errors.Is(err, sqlitelog.ErrHarnessNotFound) {
-		return nil, status.Errorf(codes.Internal, "register: %v", err)
+		return nil, hostInternalError("register: %v", err)
 	}
 	// Build the Placer before anything is stored, so a placement this host cannot serve is refused
 	// with nothing written. It is added only after the row commits: a Placer resolvable under a
@@ -372,7 +374,7 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 			if release != nil {
 				release()
 			}
-			return nil, status.Errorf(codes.Internal, "harness %q: %v", name, err)
+			return nil, hostInternalError("harness %q: %v", name, err)
 		}
 	}
 	rec, result, err := h.store.RegisterHarness(sqlitelog.HarnessRecord{
@@ -388,14 +390,14 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 		if errors.Is(err, sqlitelog.ErrHarnessNameReserved) {
 			return nil, status.Errorf(codes.AlreadyExists, "%v by a host sharing this journal and cannot be registered", err)
 		}
-		return nil, status.Errorf(codes.Internal, "register: %v", err)
+		return nil, hostInternalError("register: %v", err)
 	}
 	if placer != nil {
 		if err := h.registry.Add(name, placer); err != nil {
 			if release != nil {
 				release()
 			}
-			return nil, status.Errorf(codes.Internal, "register: %v", err)
+			return nil, hostInternalError("register: %v", err)
 		}
 		h.keep(release)
 	}
@@ -416,8 +418,9 @@ func registerOutcome(r sqlitelog.RegisterResult) v1.RegisterOutcome {
 
 // GetHarness returns one static or registered harness, optionally with what it reports right now.
 func (h *HarnessRegistry) GetHarness(ctx context.Context, req *v1.GetHarnessRequest) (_ *v1.HarnessRegistration, err error) {
-	defer h.auth.internalError(&err)
-	if err := h.auth.global(ctx, api.ActionRegistryRead); err != nil {
+	ctx = observability.EnsureRequestID(ctx)
+	defer h.auth.internalError(ctx, slog.Default(), v1.HarnessRegistry_GetHarness_FullMethodName, &err)
+	if err := h.auth.global(ctx, v1.HarnessRegistry_GetHarness_FullMethodName, api.ActionRegistryRead); err != nil {
 		return nil, err
 	}
 	name := req.GetName()
@@ -433,7 +436,7 @@ func (h *HarnessRegistry) GetHarness(ctx context.Context, req *v1.GetHarnessRequ
 			return nil, status.Errorf(codes.NotFound, "harness %q not found", name)
 		}
 		if err != nil {
-			return nil, status.Errorf(codes.Internal, "get: %v", err)
+			return nil, hostInternalError("get: %v", err)
 		}
 		out = h.registrationProto(rec)
 	}
@@ -469,8 +472,9 @@ func (h *HarnessRegistry) observe(ctx context.Context, out *v1.HarnessRegistrati
 
 // RetireHarness refuses new sessions on a registered harness. Existing sessions keep running.
 func (h *HarnessRegistry) RetireHarness(ctx context.Context, req *v1.RetireHarnessRequest) (_ *v1.HarnessRegistration, err error) {
-	defer h.auth.internalError(&err)
-	if err := h.auth.global(ctx, api.ActionRegistryRetire); err != nil {
+	ctx = observability.EnsureRequestID(ctx)
+	defer h.auth.internalError(ctx, slog.Default(), v1.HarnessRegistry_RetireHarness_FullMethodName, &err)
+	if err := h.auth.global(ctx, v1.HarnessRegistry_RetireHarness_FullMethodName, api.ActionRegistryRetire); err != nil {
 		return nil, err
 	}
 	name := req.GetName()
@@ -488,7 +492,7 @@ func (h *HarnessRegistry) RetireHarness(ctx context.Context, req *v1.RetireHarne
 		return nil, status.Errorf(codes.NotFound, "harness %q not found", name)
 	}
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "retire: %v", err)
+		return nil, hostInternalError("retire: %v", err)
 	}
 	return h.registrationProto(rec), nil
 }
@@ -496,8 +500,9 @@ func (h *HarnessRegistry) RetireHarness(ctx context.Context, req *v1.RetireHarne
 // ListHarnesses lists static and registered harnesses together in name order. Paging is keyset on
 // the name, so a registration made while a caller pages neither skips nor repeats an entry.
 func (h *HarnessRegistry) ListHarnesses(ctx context.Context, req *v1.ListHarnessesRequest) (_ *v1.ListHarnessesResponse, err error) {
-	defer h.auth.internalError(&err)
-	if err := h.auth.global(ctx, api.ActionRegistryList); err != nil {
+	ctx = observability.EnsureRequestID(ctx)
+	defer h.auth.internalError(ctx, slog.Default(), v1.HarnessRegistry_ListHarnesses_FullMethodName, &err)
+	if err := h.auth.global(ctx, v1.HarnessRegistry_ListHarnesses_FullMethodName, api.ActionRegistryList); err != nil {
 		return nil, err
 	}
 	size := int(req.GetPageSize())
@@ -516,7 +521,7 @@ func (h *HarnessRegistry) ListHarnesses(ctx context.Context, req *v1.ListHarness
 	// One extra row says whether another page exists.
 	recs, err := h.store.ListHarnesses(sqlitelog.HarnessListOptions{After: after, Limit: size + 1, IncludeRetired: req.GetIncludeRetired()})
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "list: %v", err)
+		return nil, hostInternalError("list: %v", err)
 	}
 	var static []string
 	for _, name := range h.registry.StaticNames() {

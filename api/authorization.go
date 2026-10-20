@@ -44,20 +44,29 @@ const (
 )
 
 // AuthorizationRequest carries the verified caller and trusted stored owner of
-// one session. It is not a request-supplied ownership assignment. Stateful Fork
+// one session. Owner is empty for legacy unbound sessions and global actions;
+// policies may authorize legacy history, but OwnerAuthorizer denies an empty owner.
+// It is not a request-supplied ownership assignment. Stateful Fork
 // requires a separate suspend check; Resume that drives effects also requires exec.
 type AuthorizationRequest struct {
 	Caller     CallerIdentity
 	Action     Action
 	SessionUID string
 	Owner      CallerIdentity
+	// Method is the full originating RPC name, for example
+	// "/agentsessions.v1.Sessions/Exec" (Sessions_Exec_FullMethodName in genpb).
+	// All checks for that RPC retain this value, including compound permissions,
+	// auto-creation and recovery. Direct Go handler calls populate it too.
+	// OwnerAuthorizer and OwnerAllowlistAuthorizer decide by Action, not Method.
+	Method string
 }
 
 // Authorizer decides one resource permission. A denial must precede disclosure or
 // effects. Listing needs an authorized storage query, not post-filtered pages.
 // Sessions and HarnessRegistry invoke it when their authorization option is set.
 // Return ErrPermissionDenied (possibly wrapped) for denial; other errors are host
-// failures, not policy denials.
+// failures, not policy denials. The policy owns logging and metrics for its own
+// failures: services sanitize them without logging the original policy error.
 type Authorizer interface {
 	Authorize(context.Context, AuthorizationRequest) error
 }

@@ -303,7 +303,12 @@ Custom hosts can pass `session.WithAuthorization(policy)` to `NewService` and
 request validation. A nil policy fails closed with `INTERNAL`, not back to off. Constructors without
 these options retain trusted-network behavior, even if authentication interceptors are installed.
 
-Checks precede runtime IO, fences, stream frames and approval repair:
+Checks precede runtime IO, fences, stream frames and approval repair. Each Go
+`api.AuthorizationRequest.Method` carries the full originating RPC path, for example
+`/agentsessions.v1.Sessions/Exec` or `/agentsessions.v1.HarnessRegistry/GetHarness`, including
+for direct handler calls. Compound, recovery and global checks retain that originating path:
+inputless Exec approval recovery checks `resume` with the Exec method, not the Resume method.
+`Method` is a Go SPI field, not a protobuf message or wire field.
 
 | RPC | Required actions |
 | --- | --- |
@@ -320,25 +325,38 @@ Checks precede runtime IO, fences, stream frames and approval repair:
 | ListSessions | global `list`, then exact verified-owner SQL filtering before keyset pagination |
 | GetHarness (including observe), ListHarnesses, RegisterHarness, RetireHarness | global `registry.read`, `registry.list`, `registry.register`, `registry.retire`, respectively |
 
+Ordinary Exec can restore suspended compute with `exec` alone; only inputless approval recovery
+adds `resume`. The Resume RPC always requires both `resume` and `exec`, even for a no-op.
+
 Global actions use empty UID/owner. Create and auto-create insert the verified caller as immutable
 owner; they never claim existing rows. The service passes stored owners, not request provenance,
-to the policy. Once deletion admission permits the owner lookup, unknown and unbound UIDs and
-owner-policy refusals all return the same generic `PERMISSION_DENIED`. Only
+to the policy. Existing unbound rows reach custom policies with a zero `Owner`; `OwnerAuthorizer`
+denies them, but a custom policy can allow them. Unknown UIDs and policy refusals return the same
+generic `PERMISSION_DENIED` once the deletion probe permits lookup. Only
 `errors.Is(err, api.ErrPermissionDenied)` is a policy denial; unexpected policy/store failures and
-required-mode `INTERNAL` diagnostics are sanitized. Caller cancellation
-and deadlines retain their codes. Custom policies own any additional sharing rules; listing remains
-owner-only, not a list of arbitrary grants.
+enforced RPC `INTERNAL` diagnostics are sanitized. Caller cancellation and deadlines retain their
+codes. Policies own their failure logs and metrics; the service never logs raw policy causes.
+In enforced mode only, `INTERNAL` diagnostics include `request_id`, `method`, `error_kind` and a
+stable `error_category`. Known trusted host/store errors log the full cause with category `host`.
+Model/provider/harness and other unknown-origin errors never log message text: category is
+`execution` for Exec/Resume, `runtime` for Suspend/Fork, or `external` for other methods. Unknown
+mixed execution/runtime phases fail closed; a store fault deep inside runtime is not trusted unless
+known at the service storage boundary. There is no heuristic redaction. Request metadata,
+credentials and session payloads remain excluded; trusted/off behavior is unchanged. This is a
+diagnostic-only exception to the [operational log data policy](observability.md#data-policy), not
+permission to put sensitive data in errors. Custom policies own any additional sharing rules;
+listing remains owner-only, not a list of arbitrary grants.
 
-Mutation owner lookups for Exec, Suspend, Resume, Fork, Approve and DeleteSession first acquire
-shared deletion admission. A mutation overlapping Delete returns `ABORTED` before the lookup or
-policy call instead of queueing behind SQLite; a failed Delete cannot release queued mutations to
-run. Authentication still runs first. A verified caller who already knows a UID can therefore
-observe `ABORTED` while an authorized deletion is in progress, even if that caller does not own
-the session. This narrow disclosure grants no access; outside deletion contention, inaccessible
-sessions still return `PERMISSION_DENIED`. Verified requests hold shared admission during the owner
-query before policy runs, so even a later-denied request can make a concurrent Delete return
-`ABORTED`. This is host-local admission contention, not deletion or write authority. GetSession and
-Replay remain unguarded audit reads; Cancel is unchanged.
+Mutation owner lookups for Exec, Suspend, Resume, Fork, Approve and DeleteSession first probe
+shared deletion admission after authentication. The probe acquires and immediately releases
+admission before owner SQL or policy evaluation; it never leases SQL. An exclusive Delete already
+in progress at the probe returns `ABORTED` before lookup or policy, even for a verified non-owner
+who knows the UID. This narrow disclosure grants no access. The tiny shared probe can also race
+an owner's Delete, briefly returning `ABORTED` to Delete; this is not an owner-query SQL hold. The
+probe can race a later Delete; the mutation's later guards remain authoritative. An owner query,
+including one later denied by policy, holds no admission while waiting for SQL and cannot keep
+Delete out that way. Outside probe contention, inaccessible sessions return `PERMISSION_DENIED`.
+GetSession and Replay remain unguarded audit reads; Cancel is unchanged.
 
 `api.OwnerAllowlistAuthorizer` delegates ordinary session actions to `OwnerAuthorizer` and adds
 explicit exact issuer/subject allowlists via `Allow map[api.Action][]api.CallerIdentity` for create,

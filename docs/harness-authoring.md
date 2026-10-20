@@ -394,11 +394,13 @@ add a general sink-concurrency or tool-validation contract.
 
 Clients discover the pending tuple from Session metadata, commit a decision using RPC/SDK
 Approve, then Resume explicitly. Both CLI `approve` and `deny` do those steps. Identity is
-provenance only, not policy/authentication, and there is no authorization hook, approval timeout
-or expiry. Snapshots and unresolved requests are retained indefinitely; Cancel remains
-unavailable. DeleteSession commits permanent intent without resource cleanup and refuses further
-decisions, including exact retries. See [client
-examples](interaction-model.md#approval-decisions-and-recovery) and [security.md](security.md).
+provenance only, not policy/authentication. Custom Go hosts can install
+[optional RPC authorization](security.md#optional-go-rpc-authorization), including independent
+approve permission; the default daemon remains unenforced. There is no tool/resource authorization
+hook, approval timeout or expiry. Snapshots and unresolved requests are retained indefinitely;
+Cancel remains unavailable. DeleteSession commits permanent intent without resource cleanup and
+refuses further decisions, including exact retries. See
+[client examples](interaction-model.md#approval-decisions-and-recovery).
 
 ### Rule 5: pass reasoning parts back verbatim
 

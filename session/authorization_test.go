@@ -181,6 +181,7 @@ func TestAuthorizationEveryGeneratedRPC(t *testing.T) {
 							t.Fatalf("actions=%v want %v", requests, want)
 						}
 						for i, q := range requests {
+							assertAuthorizationMethod(t, q, "/"+service.desc.ServiceName+"/"+name)
 							if q.Caller != authOwner || q.Action != want[i] {
 								t.Fatalf("request=%+v", q)
 							}
@@ -440,6 +441,7 @@ func TestAuthorizationAutoCreateChecksBothBeforeInsert(t *testing.T) {
 			store := openStore(t, ":memory:")
 			r, b := publicGateRegistry(t, &publicGateHarness{}, nil)
 			svc := session.NewService(store, r, session.WithAuthorization(policyFunc(func(_ context.Context, q api.AuthorizationRequest) error {
+				assertAuthorizationMethod(t, q, pb.Sessions_Exec_FullMethodName)
 				if q.Action == deny {
 					return api.ErrPermissionDenied
 				}
@@ -589,6 +591,7 @@ func TestAuthorizationExecRecoveryRequiresResume(t *testing.T) {
 			seedPublicGate(t, store.Session("owned"), "gate", cut)
 			var actions []api.Action
 			svc := session.NewService(store, r, session.WithAuthorization(policyFunc(func(ctx context.Context, q api.AuthorizationRequest) error {
+				assertAuthorizationMethod(t, q, pb.Sessions_Exec_FullMethodName)
 				actions = append(actions, q.Action)
 				if q.Action == api.ActionResume {
 					return api.ErrPermissionDenied

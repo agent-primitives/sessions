@@ -41,7 +41,9 @@ message ToolSpec {
 
 message HarnessDescriptor {
   string id = 1;
-  repeated string models = 2; // model-agnostic: supported/required model ids
+  // Model-agnostic supported/required model IDs, never a source of the default. When the host
+  // explicitly enables model policy, every declared ID must belong to its allowed set.
+  repeated string models = 2;
   repeated ToolSpec tools = 3;
   Capabilities capabilities = 4;
   // Stable, opaque implementation replay-compatibility version, owned by the harness author.
@@ -71,6 +73,10 @@ message Start {
   repeated Message inputs = 3;
   IdentityContext identity = 4;
   int64 resume_from_seq = 5;
+  // Host-resolved effective default for an explicitly policy-enabled invocation. Empty retains
+  // existing harness semantics. Replay/resume restore the exact recorded ExecutionStart.model,
+  // including empty, rather than today's policy or HarnessDescriptor.models.
+  string model = 6;
 }
 
 message Cancel {

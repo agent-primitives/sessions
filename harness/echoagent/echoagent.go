@@ -34,8 +34,12 @@ func (Harness) Run(ctx context.Context, s *api.Start, sink api.EventSink) error 
 	if n := len(s.Inputs); n > 0 {
 		text = s.Inputs[n-1].Text()
 	}
+	model := s.Model
+	if model == "" {
+		model = "echo"
+	}
 	_, err := sink.Model(ctx, api.ModelRequest{
-		Model:    "echo",
+		Model:    model,
 		Messages: []api.Message{*api.TextMessage("user", text)},
 	})
 	return err

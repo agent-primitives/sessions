@@ -660,7 +660,7 @@ func startToProto(s *api.Start) *v1.Start {
 	if s == nil {
 		return &v1.Start{}
 	}
-	out := &v1.Start{Config: s.Config, ResumeFromSeq: s.ResumeFromSeq, Inputs: messagesToProto(s.Inputs)}
+	out := &v1.Start{Config: s.Config, ResumeFromSeq: s.ResumeFromSeq, Inputs: messagesToProto(s.Inputs), Model: s.Model}
 	if len(s.History) > 0 {
 		out.History = make([]*v1.Event, len(s.History))
 		for i := range s.History {
@@ -671,7 +671,7 @@ func startToProto(s *api.Start) *v1.Start {
 }
 
 func startFromProto(p *v1.Start) *api.Start {
-	out := &api.Start{Config: p.GetConfig(), ResumeFromSeq: p.GetResumeFromSeq(), Inputs: messagesFromProto(p.GetInputs())}
+	out := &api.Start{Config: p.GetConfig(), ResumeFromSeq: p.GetResumeFromSeq(), Inputs: messagesFromProto(p.GetInputs()), Model: p.GetModel()}
 	if len(p.GetHistory()) > 0 {
 		out.History = make([]api.Event, 0, len(p.GetHistory()))
 		for _, e := range p.GetHistory() {

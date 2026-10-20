@@ -198,6 +198,8 @@ func WithSessionUID(sessionUID string) Option {
 type Controller struct {
 	log                eventlog.Store
 	model              ModelFunc
+	modelPolicy        *api.ModelPolicy
+	modelDefault       string
 	stream             StreamFunc
 	observer           Observer
 	startConfig        []byte
@@ -224,6 +226,11 @@ func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, erro
 	c := &Controller{log: log, model: model, logger: slog.New(slog.DiscardHandler)}
 	for _, o := range opts {
 		o(c)
+	}
+	if c.modelPolicy != nil {
+		if _, err := c.modelPolicy.Resolve(""); err != nil {
+			return nil, err
+		}
 	}
 	if c.tool != nil && c.sessionUID == "" {
 		return nil, ErrMissingSessionUID
@@ -313,6 +320,17 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		return err
 	}
 
+	model := ""
+	if c.modelPolicy != nil {
+		model, err = c.modelPolicy.Resolve(c.modelDefault)
+		if err != nil {
+			return err
+		}
+		if err := c.modelPolicy.ValidateDescriptor(desc); err != nil {
+			return err
+		}
+	}
+
 	// Record every invocation before inputs so recovery can detect partially committed turns.
 	config := bytes.Clone(c.startConfig)
 	last := expectedLastSeq
@@ -324,7 +342,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 			// Keep journaled bytes separate from Start.Config, which harness code can mutate.
 			Config: bytes.Clone(config), ResumeFromSeq: c.startResumeFromSeq, InputCount: &inputCount,
 			Harness: c.resolvedHarnessName(desc), HarnessVersion: desc.Version,
-			ComputeInstance: c.computeInstance,
+			ComputeInstance: c.computeInstance, Model: model,
 		},
 	})
 	if err != nil {
@@ -354,24 +372,31 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 	)
 	start := &api.Start{
 		ExecutionID:   executionID,
+		Model:         model,
 		SessionUID:    c.sessionUID,
 		History:       history,
 		Inputs:        inputs,
 		Config:        config,
 		ResumeFromSeq: c.startResumeFromSeq,
 	}
-	sink := &liveSink{c: c, executionID: executionID, guard: &sinkGuard{}, desc: &desc, har: har, calls: make(map[string]bool), runCtx: ctx}
+	sink := &liveSink{c: c, executionID: executionID, modelDefault: model, modelPolicy: c.invocationPolicy(model), guard: &sinkGuard{}, desc: &desc, har: har, calls: make(map[string]bool), runCtx: ctx}
 	runErr := har.Run(ctx, start, sink)
 	stop := sink.guard.close()
 	if stop != nil {
 		if runErr == nil || !errors.Is(stop, api.ErrApprovalParked) {
 			runErr = stop
 		}
-		runFinished(runErr, "error_kind", controllerErrorKind(runErr))
-		return runErr // no terminal/audit record past an open approval intent
+		if !errors.Is(stop, api.ErrModelNotAllowed) {
+			runFinished(runErr, "error_kind", controllerErrorKind(runErr))
+			return runErr // no terminal/audit record past an open approval intent
+		}
 	}
 	if err := runErr; err != nil {
-		runFinished(err, "error_kind", "harness_run_failed")
+		kind := "harness_run_failed"
+		if errors.Is(err, api.ErrModelNotAllowed) || errors.Is(err, api.ErrInvalidModelPolicy) {
+			kind = controllerErrorKind(err)
+		}
+		runFinished(err, "error_kind", kind)
 		// Best-effort: record the failure. If this append itself fails we still surface the
 		// original harness error to the caller.
 		_, _ = c.appendSeq(executionID, api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
@@ -436,7 +461,7 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 	for _, execution := range selected {
 		legacy := execution.legacyEnd > 0
 		effectCount += len(execution.stream)
-		sink := &replaySink{stream: execution.stream, legacy: legacy, guard: &sinkGuard{}, approvals: approvalEvidence(scan, execution.id), calls: make(map[string]bool)}
+		sink := &replaySink{stream: execution.stream, modelDefault: execution.model, legacy: legacy, guard: &sinkGuard{}, approvals: approvalEvidence(scan, execution.id), calls: make(map[string]bool)}
 		history := events[:execution.start]
 		invocationID := execution.id
 		if legacy {
@@ -460,6 +485,7 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 		}
 		start := &api.Start{
 			ExecutionID:   invocationID,
+			Model:         execution.model,
 			SessionUID:    c.sessionUID,
 			History:       history,
 			Inputs:        execution.inputs,
@@ -636,6 +662,8 @@ func controllerErrorKind(err error) string {
 	switch {
 	case err == nil:
 		return ""
+	case errors.Is(err, api.ErrModelNotAllowed), errors.Is(err, api.ErrInvalidModelPolicy):
+		return "model_policy_refused"
 	case errors.Is(err, eventlog.ErrConflict):
 		return "conflict"
 	case errors.Is(err, eventlog.ErrFenced):

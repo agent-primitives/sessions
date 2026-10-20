@@ -1111,11 +1111,18 @@ func (x *Origin) GetAttributes() map[string]string {
 // completion (text, reasoning, and tool_call parts) is recorded separately as an EVENT_OUTPUT
 // message. Under STATELESS_REPLAY the harness never calls a provider directly.
 type ModelCall struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	Model     string                 `protobuf:"bytes,1,opt,name=model,proto3" json:"model,omitempty"`
-	Params    map[string]string      `protobuf:"bytes,2,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	InputHash string                 `protobuf:"bytes,3,opt,name=input_hash,json=inputHash,proto3" json:"input_hash,omitempty"` // §7/§9.1: required for STATELESS_REPLAY so the I0 check can run
-	Id        string                 `protobuf:"bytes,4,opt,name=id,proto3" json:"id,omitempty"`                                // correlation id for the served ModelResult
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// On new policy-enabled turns, an empty request model resolves to Start.model; explicit per-call
+	// overrides are allowed within the host's allowed set. Membership is checked before invoking
+	// the provider. Rejection is execution-fatal even if caught: the provider is not invoked, no new
+	// MODEL_CALL is appended, and subsequent effects are refused. An existing trailing intent remains
+	// recorded. Without policy, existing semantics apply.
+	// Replay uses recorded invocation state, not today's default. The recorded ModelCall format
+	// is unchanged; admitted policy-enabled calls record the resolved model in this field.
+	Model     string            `protobuf:"bytes,1,opt,name=model,proto3" json:"model,omitempty"`
+	Params    map[string]string `protobuf:"bytes,2,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	InputHash string            `protobuf:"bytes,3,opt,name=input_hash,json=inputHash,proto3" json:"input_hash,omitempty"` // §7/§9.1: required for STATELESS_REPLAY so the I0 check can run
+	Id        string            `protobuf:"bytes,4,opt,name=id,proto3" json:"id,omitempty"`                                // correlation id for the served ModelResult
 	// messages is the request context the host needs to INVOKE the model on the live path. It is
 	// wire-only: the host records the call with input_hash alone (messages stripped), since the
 	// recorded form only needs the hash to re-check I0 on replay.
@@ -2030,8 +2037,13 @@ type ExecutionStart struct {
 	// turn, the clone the marker recorded in Lifecycle.compute_instance): the state is gone. Empty
 	// means not recorded, and such a turn is not compared.
 	ComputeInstance string `protobuf:"bytes,6,opt,name=compute_instance,json=computeInstance,proto3" json:"compute_instance,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Host-resolved effective default for this explicitly policy-enabled invocation. Empty retains
+	// existing harness semantics and is omitted from the canonical event, preserving old hashes.
+	// Replay/resume restore this exact value, including empty, into Start.model; they never
+	// re-resolve it from current session metadata, host policy, or HarnessDescriptor.models.
+	Model         string `protobuf:"bytes,7,opt,name=model,proto3" json:"model,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ExecutionStart) Reset() {
@@ -2102,6 +2114,13 @@ func (x *ExecutionStart) GetHarnessVersion() string {
 func (x *ExecutionStart) GetComputeInstance() string {
 	if x != nil {
 		return x.ComputeInstance
+	}
+	return ""
+}
+
+func (x *ExecutionStart) GetModel() string {
+	if x != nil {
+		return x.Model
 	}
 	return ""
 }
@@ -2633,7 +2652,7 @@ const file_common_proto_rawDesc = "" +
 	"\x0eLIFECYCLE_FORK\x10\x03\x12\x16\n" +
 	"\x12LIFECYCLE_BASELINE\x10\x04\x12\x14\n" +
 	"\x10LIFECYCLE_CANCEL\x10\x05\x12\x14\n" +
-	"\x10LIFECYCLE_DELETE\x10\x06\"\xf4\x01\n" +
+	"\x10LIFECYCLE_DELETE\x10\x06\"\x8a\x02\n" +
 	"\x0eExecutionStart\x12\x16\n" +
 	"\x06config\x18\x01 \x01(\fR\x06config\x12&\n" +
 	"\x0fresume_from_seq\x18\x02 \x01(\x03R\rresumeFromSeq\x12$\n" +
@@ -2641,7 +2660,8 @@ const file_common_proto_rawDesc = "" +
 	"inputCount\x88\x01\x01\x12\x18\n" +
 	"\aharness\x18\x04 \x01(\tR\aharness\x12'\n" +
 	"\x0fharness_version\x18\x05 \x01(\tR\x0eharnessVersion\x12)\n" +
-	"\x10compute_instance\x18\x06 \x01(\tR\x0fcomputeInstanceB\x0e\n" +
+	"\x10compute_instance\x18\x06 \x01(\tR\x0fcomputeInstance\x12\x14\n" +
+	"\x05model\x18\a \x01(\tR\x05modelB\x0e\n" +
 	"\f_input_count\"\xb8\a\n" +
 	"\x05Event\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12*\n" +

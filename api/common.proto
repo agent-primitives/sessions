@@ -130,6 +130,13 @@ enum Mediation {
 // completion (text, reasoning, and tool_call parts) is recorded separately as an EVENT_OUTPUT
 // message. Under STATELESS_REPLAY the harness never calls a provider directly.
 message ModelCall {
+  // On new policy-enabled turns, an empty request model resolves to Start.model; explicit per-call
+  // overrides are allowed within the host's allowed set. Membership is checked before invoking
+  // the provider. Rejection is execution-fatal even if caught: the provider is not invoked, no new
+  // MODEL_CALL is appended, and subsequent effects are refused. An existing trailing intent remains
+  // recorded. Without policy, existing semantics apply.
+  // Replay uses recorded invocation state, not today's default. The recorded ModelCall format
+  // is unchanged; admitted policy-enabled calls record the resolved model in this field.
   string model = 1;
   map<string, string> params = 2;
   string input_hash = 3; // §7/§9.1: required for STATELESS_REPLAY so the I0 check can run
@@ -322,6 +329,11 @@ message ExecutionStart {
   // turn, the clone the marker recorded in Lifecycle.compute_instance): the state is gone. Empty
   // means not recorded, and such a turn is not compared.
   string compute_instance = 6;
+  // Host-resolved effective default for this explicitly policy-enabled invocation. Empty retains
+  // existing harness semantics and is omitted from the canonical event, preserving old hashes.
+  // Replay/resume restore this exact value, including empty, into Start.model; they never
+  // re-resolve it from current session metadata, host policy, or HarnessDescriptor.models.
+  string model = 7;
 }
 
 // ---- Event ----

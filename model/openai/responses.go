@@ -28,7 +28,7 @@ func (c *ResponsesClient) Endpoint() string { return c.client.Endpoint() }
 
 // Model performs one stateless Responses call. It satisfies controller.ModelFunc.
 func (c *ResponsesClient) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
-	model, body, err := c.buildResponsesRequest(req, false)
+	model, body, err := c.buildResponsesRequest(ctx, req, false)
 	if err != nil {
 		return api.ModelResponse{}, err
 	}

@@ -129,6 +129,11 @@ func NewRegistry(defaultHarness string, placers map[string]*Placer, opts ...Regi
 		}
 	}
 	for name, p := range placers {
+		if err := p.ValidateModelPolicy(context.Background()); err != nil {
+			return nil, fmt.Errorf("placement: harness %q model policy: %w", name, err)
+		}
+	}
+	for name, p := range placers {
 		p.guard = r.guard
 		p.sessions = r.sessions
 		p.registry = r
@@ -160,8 +165,36 @@ func (r *Registry) Add(name string, p *Placer) error {
 	if r.Reserved(name) {
 		return fmt.Errorf("%w: %q is reserved for a static harness", ErrHarnessExists, name)
 	}
+	r.mu.RLock()
+	err := r.checkAdd(name, p)
+	r.mu.RUnlock()
+	if err != nil {
+		return err
+	}
+	// Describe may perform slow IO; existing routes must remain usable during admission.
+	policyErr := p.ValidateModelPolicy(context.Background())
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// A registration may have claimed the name during IO. Recheck all admission state
+	// under the publication lock before changing the Placer's shared coordination.
+	if err := r.checkAdd(name, p); err != nil {
+		return err
+	}
+	if policyErr != nil {
+		return fmt.Errorf("placement: harness %q model policy: %w", name, policyErr)
+	}
+	if p.sessions != r.sessions {
+		p.guard = r.guard
+		p.sessions = r.sessions
+		p.registry = r
+	}
+	r.byName[name] = p
+	return nil
+}
+
+// checkAdd requires r.mu to be held for reading or writing.
+func (r *Registry) checkAdd(name string, p *Placer) error {
 	if _, ok := r.byName[name]; ok {
 		return fmt.Errorf("%w: %q", ErrHarnessExists, name)
 	}
@@ -175,11 +208,7 @@ func (r *Registry) Add(name string, p *Placer) error {
 		if p.sessions.busy() || p.guard.busy() {
 			return fmt.Errorf("placement: harness %q: placer has an operation in progress", name)
 		}
-		p.guard = r.guard
-		p.sessions = r.sessions
-		p.registry = r
 	}
-	r.byName[name] = p
 	return nil
 }
 

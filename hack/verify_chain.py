@@ -50,6 +50,9 @@ START_GOLDENS = [
     ({"execution_id": "exec-default", "kind": "EVENT_EXECUTION_START",
       "execution_start": {"input_count": "2"}},
      "f06c25ee5b3673ee23b8f91883c7f1c6c5682d94986caf5bc067908a61b2ac4f"),
+    ({"execution_id": "exec-default", "kind": "EVENT_EXECUTION_START",
+      "execution_start": {"input_count": "0", "model": "primary"}},
+     "df4bd519be21ef293d2e30b191679a2e7bede7613854b486753ba6bb0bfc6e20"),
 ]
 
 # An OUTPUT whose assistant message carries a tool_call part (canon.toolCallGoldenEvent). Its

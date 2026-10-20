@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/internal/modelcall"
 )
 
 // liveSink is the host-mediated EventSink for a live turn: it invokes each nondeterministic op and
@@ -13,6 +14,8 @@ import (
 type liveSink struct {
 	c              *Controller
 	executionID    string
+	modelDefault   string
+	modelPolicy    *api.ModelPolicy
 	legacyRecovery bool
 	guard          *sinkGuard
 	desc           *api.Descriptor
@@ -46,6 +49,10 @@ func (s *liveSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelRe
 }
 
 func (s *liveSink) model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+	req = modelRequest(req, s.modelDefault)
+	if err := s.validateModel(req); err != nil {
+		return api.ModelResponse{}, err
+	}
 	if _, err := s.append(api.Event{
 		Kind:      api.EventModelCall,
 		ModelCall: &api.ModelCall{Model: req.Model, InputHash: hashModelInput(req), ID: newID()},
@@ -60,6 +67,11 @@ func (s *liveSink) model(ctx context.Context, req api.ModelRequest) (api.ModelRe
 // after the MODEL_CALL in the execution's effect stream is the correlation. It is reused verbatim
 // when Resume re-drives a call cut before its completion was recorded.
 func (s *liveSink) completeModel(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+	if err := s.validateModel(req); err != nil {
+		return api.ModelResponse{}, err
+	}
+	// The recorded invocation default, not today's policy, owns selection during recovery.
+	ctx = modelcall.WithExactModel(ctx, s.modelDefault != "")
 	resp, err := s.c.invokeModel(ctx, s.executionID, req)
 	if err != nil {
 		return api.ModelResponse{}, err
@@ -219,14 +231,15 @@ func (s *liveSink) usage(_ context.Context, u api.Usage) error {
 // enforces the I0 model-input-hash check. A deterministic harness requests the recorded model,
 // output, tool, and usage events in the same order.
 type replaySink struct {
-	stream    []api.Event
-	i         int
-	outputs   []string
-	legacy    bool
-	failure   error // Tool evidence rejection remains fatal even if the harness handles the error.
-	guard     *sinkGuard
-	approvals map[string]*ApprovalState
-	calls     map[string]bool // gated IDs matched during this invocation, not all scanned history
+	modelDefault string
+	stream       []api.Event
+	i            int
+	outputs      []string
+	legacy       bool
+	failure      error // Tool evidence rejection remains fatal even if the harness handles the error.
+	guard        *sinkGuard
+	approvals    map[string]*ApprovalState
+	calls        map[string]bool // gated IDs matched during this invocation, not all scanned history
 }
 
 var _ api.EventSink = (*replaySink)(nil)
@@ -259,6 +272,7 @@ func (s *replaySink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 	if err := ctx.Err(); err != nil {
 		return api.ModelResponse{}, err
 	}
+	req = modelRequest(req, s.modelDefault)
 	mc, ok := s.nextOf(api.EventModelCall)
 	if !ok {
 		return api.ModelResponse{}, s.diverged(errors.New("replay: expected a recorded model call, found none"))

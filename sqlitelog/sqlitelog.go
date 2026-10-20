@@ -85,8 +85,9 @@ CREATE INDEX IF NOT EXISTS sessions_project_created
 // SchemaVersion is the schema shape this build writes, stamped into PRAGMA user_version so a
 // build can identify a database without inspecting its columns. Version 1 is what v0.1.0 through
 // v0.1.2 shipped. Version 2 adds the harness registry; version 3 adds approval reporting;
-// version 4 adds permanent deletion intent; version 5 adds caller ownership and an authorization marker.
-const SchemaVersion = 5
+// version 4 adds permanent deletion intent; version 5 adds caller ownership and an authorization marker;
+// version 6 records explicit session model-policy eligibility.
+const SchemaVersion = 6
 
 // migrations[i] moves a database from version i+1 to i+2, inside the migration transaction. The
 // array length is tied to SchemaVersion, so bumping one without the other does not compile.
@@ -95,6 +96,13 @@ var migrations = [SchemaVersion - 1]func(*sql.Tx) error{
 	migrateV2ToV3,
 	migrateV3ToV4,
 	migrateV4ToV5,
+	migrateV5ToV6,
+}
+
+// migrateV5ToV6 leaves every existing session on legacy model semantics, including empty logs.
+func migrateV5ToV6(tx *sql.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE sessions ADD COLUMN model_policy INTEGER NOT NULL DEFAULT 0`)
+	return err
 }
 
 // migrateV3ToV4 adds the deletion columns. deletion_completed_at is reserved for resource cleanup
@@ -430,8 +438,9 @@ func (s *Store) Session(uid string) *Log { return &Log{store: s, session: uid} }
 
 // Log is one session's durable, single-writer, hash-chained event log.
 type Log struct {
-	store   *Store
-	session string
+	store        *Store
+	session      string
+	forkMetadata *SessionMeta // only fresh policy-enabled fork handles; nil for ordinary access
 }
 
 // Log satisfies the controller's error-returning event-log contract.
@@ -449,9 +458,16 @@ func (l *Log) Head() (int64, error) {
 // NewFence advances and returns this session's fencing token. A new incarnation calls it to take
 // over; appends carrying an older token are rejected with eventlog.ErrFenced.
 func (l *Log) NewFence() (int64, error) {
+	if l.forkMetadata != nil {
+		return l.forkFence()
+	}
+	return l.newFence(l.store.db)
+}
+
+func (l *Log) newFence(db fenceQuerier) (int64, error) {
 	var fence int64
 	now := time.Now().UnixNano()
-	err := l.store.db.QueryRow(
+	err := db.QueryRow(
 		`INSERT INTO sessions(session, fence, project, created_at, updated_at)
 		 VALUES(?, 1, ?, ?, ?)
 		 ON CONFLICT(session) DO UPDATE SET

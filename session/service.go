@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -193,12 +194,20 @@ func (s *Service) createSession(ctx context.Context, uid string, meta sqlitelog.
 	}
 	if meta.Harness == "" {
 		meta.Harness = s.registry.Default()
-	} else if _, err := s.registry.For(meta.Harness); err != nil {
-		// Reject at create rather than at first Exec. Storing an unservable harness would make
-		// the session listable but permanently unrunnable, and the failure would surface later
-		// somewhere that looks unrelated.
+	}
+	// Reject an unservable harness or model before storing even an empty session.
+	placer, err := s.registry.For(meta.Harness)
+	if err != nil {
 		return nil, harnessError(err)
 	}
+	_, configured, err := placer.ResolveModel(meta.Model)
+	if err != nil {
+		return nil, withStatusCause(codes.InvalidArgument, fmt.Errorf("create session: %w", err))
+	}
+	meta.ModelPolicy = configured
+	// Birth, not the creation route's policy, distinguishes modern sessions from legacy ones.
+	// A later restricted override must enforce admission even if this route is unconfigured.
+	meta.ModelPolicyEligible = true
 	// A new session is the one thing a retired harness refuses. The check runs in the insert's
 	// transaction, so once RetireHarness has returned no new session can land on the harness, even
 	// one whose create started first. A name that is not static must have a registration row.
@@ -600,6 +609,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	// goes through CreateSession.
 	uid := req.GetSession()
 	var sess *v1.Session
+	var modelPolicy, modelPolicyEligible bool
 	if uid == "" {
 		if err := s.auth.global(ctx, v1.Sessions_Exec_FullMethodName, api.ActionCreate); err != nil {
 			return err
@@ -662,11 +672,13 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		if err != nil {
 			return hostInternalError("head: %v", err)
 		}
+		info, err := s.store.SessionInfo(uid)
+		if err != nil {
+			return sessionStoreError(err, uid)
+		}
+		modelPolicy = info.ModelPolicy
+		modelPolicyEligible = info.ModelPolicyEligible || modelPolicy
 		if sess == nil {
-			info, err := s.store.SessionInfo(uid)
-			if err != nil {
-				return sessionStoreError(err, uid)
-			}
 			sess, err = sessionProto(info)
 			return err
 		}
@@ -744,6 +756,9 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		placement.WithHarness(harness),
 		placement.WithObserver(observer),
 		placement.WithStart(req.GetConfig(), req.GetResumeFromSeq()),
+	}
+	if modelPolicyEligible {
+		execOpts = append(execOpts, placement.WithSessionModel(sess.GetModel()))
 	}
 	if d := req.GetDeadlineUnix(); d > 0 {
 		execOpts = append(execOpts, placement.WithDeadline(time.Unix(d, 0)))
@@ -931,24 +946,6 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	if len(childNames) != 0 && len(childNames) != count {
 		return nil, status.Errorf(codes.InvalidArgument, "child_names has %d entries, want 0 or exactly count (%d)", len(childNames), count)
 	}
-	children := make([]placement.ForkChild, 0, count)
-	for i := 0; i < count; i++ {
-		uid := newUID()
-		children = append(children, placement.ForkChild{UID: uid, Log: s.store.Session(uid)})
-	}
-	// The fan-out is all-or-nothing: Placer.Fork rolls back everything it provisioned on failure,
-	// so children_created stays 0 rather than reporting compute that no longer exists.
-	if err := placer.Fork(ctx, parent, req.GetSession(), children, atSeq); err != nil {
-		return nil, forkError(req.GetSession(), err)
-	}
-	childrenCreated = len(children)
-	// Child metadata is written only after the fan-out commits. Placer.forkSource refuses an
-	// unplaceable fork with no side effects at all, and registering children first would turn that
-	// into a listing full of phantom sessions the caller was never given UIDs for and cannot
-	// delete. Children inherit the parent's project, harness, and model: a fork is the same
-	// workload branched, so it must stay in the tenant that owns the parent rather than landing in
-	// the service default that copying the log would otherwise give it. The name is deliberately
-	// not inherited; see child_names in the proto.
 	parentInfo, err := s.store.SessionInfo(req.GetSession())
 	if err != nil {
 		return nil, sessionStoreError(err, req.GetSession())
@@ -957,28 +954,43 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "fork labels: %v", err)
 	}
-	out := make([]*v1.Session, 0, len(children))
-	for i, child := range children {
+	children := make([]placement.ForkChild, 0, count)
+	metadata := make([]sqlitelog.SessionMeta, 0, count)
+	for i := 0; i < count; i++ {
+		uid := newUID()
 		var name string
 		if len(childNames) != 0 {
 			name = childNames[i]
 		}
-		if err := s.store.PutSession(sqlitelog.SessionMeta{
-			UID:       child.UID,
-			Project:   parentInfo.Project,
-			Name:      name,
-			Harness:   parentInfo.Harness,
-			Model:     parentInfo.Model,
-			ParentUID: req.GetSession(),
-			ForkSeq:   atSeq,
-			// A child inherits the parent's annotations and origin, because it is the same
-			// workload branched and its external context did not change. Labels come from the
-			// request instead, so callers can distinguish branches. Identity is not inherited;
-			// per-child principals are unsupported and rejected before placement.
-			Annotations: parentInfo.Annotations,
-			Origin:      parentInfo.Origin,
-			Labels:      childLabels,
-		}); err != nil {
+		meta := sqlitelog.SessionMeta{
+			UID: uid, Project: parentInfo.Project, Name: name,
+			Harness: parentInfo.Harness, Model: parentInfo.Model, ModelPolicy: parentInfo.ModelPolicy,
+			ModelPolicyEligible: parentInfo.ModelPolicyEligible,
+			ParentUID:           req.GetSession(), ForkSeq: atSeq,
+			// Identity is not inherited; per-child principals are rejected before placement.
+			Annotations: parentInfo.Annotations, Origin: parentInfo.Origin, Labels: childLabels,
+		}
+		log := s.store.Session(uid)
+		if meta.ModelPolicy || meta.ModelPolicyEligible {
+			// First child-row visibility must include its inherited route/default and policy bit,
+			// even if a later clone fails or the process exits before fan-out finalization.
+			log = s.store.ForkSession(meta)
+		}
+		metadata = append(metadata, meta)
+		children = append(children, placement.ForkChild{UID: uid, Log: log})
+	}
+	// The fan-out is all-or-nothing: Placer.Fork rolls back everything it provisioned on failure,
+	// so children_created stays 0 rather than reporting compute that no longer exists.
+	if err := placer.Fork(ctx, parent, req.GetSession(), children, atSeq); err != nil {
+		return nil, forkError(req.GetSession(), err)
+	}
+	childrenCreated = len(children)
+	// Finalize metadata after the fan-out as before. Modern children already inherited admission
+	// metadata atomically at their first fence; legacy children retain their publication behavior.
+	// Neither handle construction nor a refused/unprovisioned fork creates phantom rows.
+	out := make([]*v1.Session, 0, len(children))
+	for i, child := range children {
+		if err := s.store.PutSession(metadata[i]); err != nil {
 			return nil, hostInternalError("fork: record child %q: %v", child.UID, err)
 		}
 		info, err := s.store.SessionInfo(child.UID)
@@ -1169,6 +1181,8 @@ func suspendError(uid string, err error) error {
 // turn, to its public status.
 func resumeError(uid string, err error) error {
 	switch {
+	case errors.Is(err, api.ErrModelNotAllowed), errors.Is(err, api.ErrInvalidModelPolicy):
+		return withStatusCause(codes.FailedPrecondition, fmt.Errorf("resume: %w", err))
 	case errors.Is(err, eventlog.ErrDeleted):
 		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, eventlog.ErrTampered):
@@ -1228,6 +1242,8 @@ func checkpointRefusal(op, uid string, err error) error {
 // execError maps an Exec failure on session uid to its public status.
 func execError(uid string, err error) error {
 	switch {
+	case errors.Is(err, api.ErrModelNotAllowed), errors.Is(err, api.ErrInvalidModelPolicy):
+		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, eventlog.ErrDeleted):
 		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, eventlog.ErrTampered):

@@ -139,6 +139,23 @@ func TestDefaultExecutionStartGoldenVectors(t *testing.T) {
 	}
 }
 
+// Independent literal/hash also published by hack/verify_chain.py; this default is host-owned
+// invocation evidence, while the earlier empty-model golden vectors must remain unchanged.
+func TestModelDefaultCanonicalVector(t *testing.T) {
+	event := api.Event{ExecutionID: "exec-default", Kind: api.EventExecutionStart,
+		ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(0), Model: "primary"}}
+	const want = `{"event":{"execution_id":"exec-default","execution_start":{"input_count":"0","model":"primary"},"kind":"EVENT_EXECUTION_START"},"prev_hash":"","seq":"1"}`
+	const wantHash = "df4bd519be21ef293d2e30b191679a2e7bede7613854b486753ba6bb0bfc6e20"
+	got, err := canon.Record("", 1, event)
+	if err != nil || string(got) != want {
+		t.Fatalf("model default canonical bytes = %s, %v; want %s", got, err, want)
+	}
+	hash, err := canon.HashRecord("", 1, event)
+	if err != nil || hash != wantHash {
+		t.Fatalf("model default hash = %s, %v; want %s", hash, err, wantHash)
+	}
+}
+
 func TestGoldenVector(t *testing.T) {
 	got, err := canon.HashRecord("", 1, goldenEvent())
 	if err != nil {

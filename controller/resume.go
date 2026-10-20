@@ -169,13 +169,14 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		}
 	}
 	sink := &resumeSink{
-		live:      liveSink{c: c, executionID: execution.id, legacyRecovery: legacy, guard: &sinkGuard{}, har: har, desc: desc, calls: make(map[string]bool), runCtx: ctx},
+		live:      liveSink{c: c, executionID: execution.id, modelDefault: execution.model, modelPolicy: c.invocationPolicy(execution.model), legacyRecovery: legacy, guard: &sinkGuard{}, har: har, desc: desc, calls: make(map[string]bool), runCtx: ctx},
 		stream:    execution.stream,
 		approvals: approvalEvidence(scan, execution.id),
 	}
 	recordedEffectCount = len(execution.stream)
 	start := &api.Start{
 		ExecutionID:   invocationID,
+		Model:         execution.model,
 		SessionUID:    c.sessionUID,
 		Inputs:        execution.inputs,
 		History:       events[:execution.start],
@@ -188,7 +189,9 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		if runErr == nil || !errors.Is(stop, api.ErrApprovalParked) {
 			runErr = stop
 		}
-		return true, runErr // open approval intent cannot be followed by ERROR/END
+		if !errors.Is(stop, api.ErrModelNotAllowed) {
+			return true, runErr // open approval intent cannot be followed by ERROR/END
+		}
 	}
 	if sink.failure != nil {
 		runErr = sink.failure
@@ -261,6 +264,7 @@ func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 	if err := ctx.Err(); err != nil {
 		return api.ModelResponse{}, err
 	}
+	req = modelRequest(req, s.live.modelDefault)
 	if s.i < len(s.stream) {
 		mc, ok := s.recordedNext(api.EventModelCall)
 		if !ok {

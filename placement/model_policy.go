@@ -6,6 +6,8 @@ import (
 	"slices"
 
 	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/observability"
 )
 
 // WithModelPolicy opts this harness route into host-owned model admission. Aliases of the same
@@ -36,7 +38,8 @@ func (p *Placer) ResolveModel(model string) (effective string, configured bool, 
 // It provisions nothing, bounds Describe as execution admission does, and caches the result for
 // this immutable Placer so pre-commit registration and Registry.Add cannot disagree on a second
 // probe. A failed Placer, including a cancelled check, must be rebuilt to retry. Unconfigured
-// routes perform no IO. Describe diagnostics omit peer messages, paths and endpoints.
+// routes perform no IO. Describe diagnostics retain correlation and classification, never backend
+// messages, paths or endpoints, including errors from in-process harnesses.
 func (p *Placer) ValidateModelPolicy(ctx context.Context) error {
 	if p.modelPolicy == nil {
 		return nil
@@ -46,17 +49,20 @@ func (p *Placer) ValidateModelPolicy(ctx context.Context) error {
 			p.policyError = err
 			return
 		}
+		ctx = observability.EnsureRequestID(ctx)
 		dctx, cancel := context.WithTimeout(ctx, describeTimeout)
 		defer cancel()
 		desc, err := p.Describe(dctx)
 		if err != nil {
-			// Registration/load errors can reach clients and logs. Classify the boundary without
-			// retaining a peer's potentially private transport details or payload in diagnostics.
+			// Backend errors have unknown origin, even in-process or when wrapping a store
+			// sentinel. Keep the diagnostic structured, not the potentially private cause.
 			if ctx.Err() != nil {
 				p.policyError = fmt.Errorf("%w: model policy Describe: %w", ErrAdmissionInterrupted, ctx.Err())
 			} else {
 				p.policyError = fmt.Errorf("%w: model policy Describe failed", ErrHarnessUnavailable)
 			}
+			observability.Logger(ctx, p.logger).ErrorContext(ctx, "model policy Describe failed",
+				"method", v1.Harness_Describe_FullMethodName, "error_kind", placementErrorKind(p.policyError), "error_category", "external")
 			return
 		}
 		p.policyError = p.modelPolicy.ValidateDescriptor(desc)

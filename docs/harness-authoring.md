@@ -100,7 +100,8 @@ Policy-enabled registration bounds `Describe` to 10 seconds and fails closed bef
 mutation. A remote static route can refuse startup if unreachable; a failed stored route stays
 unavailable until restart. Build a fresh Placer to retry a failed admission. The factory itself
 still must not dial or provision; `HarnessRegistry` checks the policy after construction and before
-persisting a new registration. No-policy registration remains unchanged and does not probe.
+persisting a new registration. No-policy registration remains probe-free. A registration cancelled
+while waiting for another registration's admission returns without building or persisting its route.
 
 The Sessions service marks all new sessions as eligible, including creation on an unconfigured
 route. It validates `Session.model` when creation has policy, keeps empty metadata empty, and
@@ -117,7 +118,12 @@ models may differ within the host's allowed set. An invalid live request is exec
 if caught: no provider call or `MODEL_CALL`, later effects refused, best-effort `ERROR`, no `END`.
 Replay and recorded recovery effects use their original default/hash independently of today's
 policy; only new live effects and unanswered model-intent re-drives check the current allowlist.
-Old sessions/journals stay unchanged; see [model defaults](concepts.md#model-defaults).
+The stock Chat Completions and Responses adapters send the exact validated model ID for these
+invocations, including `echo`; their configured fallback is not a deployment mapping. Hosts must
+serve the selected ID. A provider refusal leaves an unanswered model intent for recovery, not a
+silently substituted call. Direct adapter calls and pre-policy invocations keep their existing
+empty/`echo` fallback. Old sessions/journals stay unchanged; see
+[model defaults](concepts.md#model-defaults).
 
 ## Run: drive one turn
 

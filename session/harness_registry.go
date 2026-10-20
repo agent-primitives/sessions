@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
-	"sync"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -23,6 +22,8 @@ import (
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/canon"
 	"github.com/agent-primitives/sessions/harnesswire"
+	"github.com/agent-primitives/sessions/internal/ctxlock"
+	"github.com/agent-primitives/sessions/observability"
 	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/sqlitelog"
 )
@@ -62,8 +63,9 @@ type HarnessRegistry struct {
 	factory  PlacerFactory
 
 	// mu serializes RegisterHarness, so building a Placer, storing the row and adding the Placer
-	// happen as one step per name within this process.
-	mu       sync.Mutex
+	// happen as one step per name within this process. Waiting must honor caller cancellation:
+	// policy admission may hold this gate across a remote Describe. Close also takes the gate.
+	mu       ctxlock.Mutex
 	releases []func()
 }
 
@@ -80,11 +82,13 @@ func NewHarnessRegistry(store *sqlitelog.Store, registry *placement.Registry, fa
 	if store == nil || registry == nil || factory == nil {
 		return nil, errors.New("session: NewHarnessRegistry needs a store, a registry and a factory")
 	}
+	ctx := observability.EnsureRequestID(context.Background())
 	if err := ReserveStaticHarnessNames(store, registry); err != nil {
+		logHarnessRegistryStoreError(ctx, "NewHarnessRegistry", err)
 		return nil, err
 	}
 	h := &HarnessRegistry{store: store, registry: registry, factory: factory}
-	if err := forEachRegistration(store, h.load); err != nil {
+	if err := forEachRegistration(ctx, store, func(rec sqlitelog.HarnessRecord) error { return h.load(ctx, rec) }); err != nil {
 		h.Close()
 		return nil, err
 	}
@@ -112,11 +116,12 @@ func ReserveStaticHarnessNames(store *sqlitelog.Store, registry *placement.Regis
 }
 
 // forEachRegistration calls fn for every stored registration, retired ones included, in name order.
-func forEachRegistration(store *sqlitelog.Store, fn func(sqlitelog.HarnessRecord) error) error {
+func forEachRegistration(ctx context.Context, store *sqlitelog.Store, fn func(sqlitelog.HarnessRecord) error) error {
 	after := ""
 	for {
 		recs, err := store.ListHarnesses(sqlitelog.HarnessListOptions{After: after, Limit: sqlitelog.MaxPageSize, IncludeRetired: true})
 		if err != nil {
+			logHarnessRegistryStoreError(ctx, "NewHarnessRegistry", err)
 			return err
 		}
 		for _, rec := range recs {
@@ -131,20 +136,20 @@ func forEachRegistration(store *sqlitelog.Store, fn func(sqlitelog.HarnessRecord
 	}
 }
 
-func (h *HarnessRegistry) load(rec sqlitelog.HarnessRecord) error {
+func (h *HarnessRegistry) load(ctx context.Context, rec sqlitelog.HarnessRecord) error {
 	spec, err := storedSpec(rec.Spec)
 	if err != nil {
-		return h.unavailable(rec.Name, err)
+		return h.unavailable(ctx, rec.Name, err)
 	}
 	p, release, err := h.factory(rec.Name, spec)
 	if err == nil {
-		err = checkPlacer(context.Background(), p, spec)
+		err = checkPlacer(ctx, p, spec)
 	}
 	if err != nil {
 		if release != nil {
 			release()
 		}
-		return h.unavailable(rec.Name, err)
+		return h.unavailable(ctx, rec.Name, err)
 	}
 	if err := h.registry.Add(rec.Name, p); err != nil {
 		if release != nil {
@@ -153,18 +158,32 @@ func (h *HarnessRegistry) load(rec sqlitelog.HarnessRecord) error {
 		if errors.Is(err, placement.ErrHarnessExists) {
 			return err
 		}
-		return h.unavailable(rec.Name, err)
+		return h.unavailable(ctx, rec.Name, err)
 	}
 	h.keep(release)
 	return nil
 }
 
-func (h *HarnessRegistry) unavailable(name string, cause error) error {
+func (h *HarnessRegistry) unavailable(ctx context.Context, name string, cause error) error {
 	if err := h.registry.MarkUnavailable(name, cause); err != nil {
 		return err
 	}
-	slog.Warn("stored harness cannot be served on this host", "harness", name, "error", cause)
+	// Factory/runtime errors may carry peer payloads. A wrapped storage sentinel does not
+	// establish trust; only direct store calls below retain a full cause in operator logs.
+	observability.Logger(ctx, slog.Default()).WarnContext(ctx, "stored harness cannot be served on this host",
+		"harness", name, "method", "NewHarnessRegistry", "error_kind", "harness_unservable", "error_category", "external")
 	return nil
+}
+
+func logHarnessRegistryStoreError(ctx context.Context, method string, err error) {
+	observability.Logger(ctx, slog.Default()).ErrorContext(ctx, "harness registry store operation failed",
+		"method", method, "error_kind", "internal", "error_category", "host", "error", err)
+}
+
+func logHarnessRegistryExternalError(ctx context.Context, err error) {
+	observability.Logger(ctx, slog.Default()).ErrorContext(ctx, "harness registration admission failed",
+		"method", v1.HarnessRegistry_RegisterHarness_FullMethodName,
+		"error_kind", serviceErrorKind(err), "error_category", "external")
 }
 
 // checkPlacer refuses what a PlacerFactory returned when it cannot serve the spec as registered: no
@@ -190,7 +209,7 @@ func (h *HarnessRegistry) keep(release func()) {
 // Close releases every Placer the factory built. Call it after the servers that route through the
 // registry have stopped.
 func (h *HarnessRegistry) Close() {
-	h.mu.Lock()
+	_ = h.mu.Lock(context.Background()) // Close must drain the active registration before release.
 	defer h.mu.Unlock()
 	for _, release := range h.releases {
 		release()
@@ -321,6 +340,7 @@ func validName(name string) error {
 
 // RegisterHarness stores a registration and makes it resolvable, or recognizes a repeat of one.
 func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterHarnessRequest) (*v1.RegisterHarnessResponse, error) {
+	ctx = observability.EnsureRequestID(ctx)
 	name, spec := req.GetName(), req.GetSpec()
 	if err := validName(name); err != nil {
 		return nil, err
@@ -339,13 +359,21 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 		return nil, status.Errorf(codes.InvalidArgument, "spec is %d bytes in canonical form; the limit is %d", len(canonical), maxSpecBytes)
 	}
 
-	h.mu.Lock()
+	if err := h.mu.Lock(ctx); err != nil {
+		return nil, registrationInterrupted(err)
+	}
 	defer h.mu.Unlock()
+	// Lock may succeed with a cancelled context. An expired caller must not build or store anything,
+	// including a route without model policy (which does not inspect the context itself).
+	if err := ctx.Err(); err != nil {
+		return nil, registrationInterrupted(err)
+	}
 	// Fail a conflicting spec before building anything for it. The store checks again under its
 	// write lock, which is what holds against another process.
 	if rec, err := h.store.Harness(name); err == nil && rec.SpecDigest != digest {
 		return nil, status.Errorf(codes.AlreadyExists, "harness %q holds spec %s, request is %s; registrations are immutable, use a new name", name, rec.SpecDigest, digest)
 	} else if err != nil && !errors.Is(err, sqlitelog.ErrHarnessNotFound) {
+		logHarnessRegistryStoreError(ctx, v1.HarnessRegistry_RegisterHarness_FullMethodName, err)
 		return nil, status.Errorf(codes.Internal, "register: %v", err)
 	}
 	// Build the Placer before anything is stored, so a placement this host cannot serve is refused
@@ -358,7 +386,9 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 			if release != nil {
 				release()
 			}
-			return nil, status.Errorf(codes.FailedPrecondition, "harness %q: %v", name, err)
+			err = status.Errorf(codes.FailedPrecondition, "harness %q: %v", name, err)
+			logHarnessRegistryExternalError(ctx, err)
+			return nil, err
 		}
 		if err := checkPlacer(ctx, placer, spec); err != nil {
 			// Storing the row would report CREATED for a name no session can use, or one whose
@@ -375,8 +405,18 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 			case errors.Is(err, placement.ErrAdmissionInterrupted):
 				code = admissionInterruptedCode(err)
 			}
-			return nil, withStatusCause(code, fmt.Errorf("harness %q: %w", name, err))
+			err = withStatusCause(code, fmt.Errorf("harness %q: %w", name, err))
+			logHarnessRegistryExternalError(ctx, err)
+			return nil, err
 		}
+	}
+	// Describe may return success despite cancellation. Fence the immutable write as well as
+	// admission to serialization, and release any uncommitted factory resources.
+	if err := ctx.Err(); err != nil {
+		if release != nil {
+			release()
+		}
+		return nil, registrationInterrupted(err)
 	}
 	rec, result, err := h.store.RegisterHarness(sqlitelog.HarnessRecord{
 		Name: name, UID: newHarnessUID(), Spec: string(canonical), SpecDigest: digest,
@@ -391,6 +431,7 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 		if errors.Is(err, sqlitelog.ErrHarnessNameReserved) {
 			return nil, status.Errorf(codes.AlreadyExists, "%v by a host sharing this journal and cannot be registered", err)
 		}
+		logHarnessRegistryStoreError(ctx, v1.HarnessRegistry_RegisterHarness_FullMethodName, err)
 		return nil, status.Errorf(codes.Internal, "register: %v", err)
 	}
 	if placer != nil {
@@ -403,6 +444,11 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 		h.keep(release)
 	}
 	return &v1.RegisterHarnessResponse{Harness: h.registrationProto(rec), Outcome: registerOutcome(result)}, nil
+}
+
+func registrationInterrupted(cause error) error {
+	return withStatusCause(admissionInterruptedCode(cause),
+		fmt.Errorf("%w: register: %w", placement.ErrAdmissionInterrupted, cause))
 }
 
 func registerOutcome(r sqlitelog.RegisterResult) v1.RegisterOutcome {

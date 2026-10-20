@@ -2,6 +2,7 @@ package openai
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,11 +20,8 @@ func responsesUnsupported(format string, args ...any) error {
 	return fmt.Errorf("%w: Responses: %s", ErrUnsupportedPart, fmt.Sprintf(format, args...))
 }
 
-func (c *ResponsesClient) buildResponsesRequest(req api.ModelRequest, stream bool) (string, []byte, error) {
-	model := req.Model
-	if model == "" || model == "echo" {
-		model = c.client.model
-	}
+func (c *ResponsesClient) buildResponsesRequest(ctx context.Context, req api.ModelRequest, stream bool) (string, []byte, error) {
+	model := c.client.requestModel(ctx, req.Model)
 	body := map[string]any{"model": model, "store": false, "include": []string{"reasoning.encrypted_content"}}
 	if stream {
 		body["stream"] = true

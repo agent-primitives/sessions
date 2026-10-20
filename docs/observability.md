@@ -29,7 +29,8 @@ backends record external lifecycle calls such as actor creation, resume, suspend
 
 ## Enabling logs
 
-Library components default to a discard logger. The process that assembles them must inject one:
+Placement, controller and runtime components default to a discard logger. The process that
+assembles them must inject one. HarnessRegistry diagnostics use `slog.Default()`.
 
 <!-- doccheck: body(harness api.Harness, model controller.ModelFunc, store *sqlitelog.Store) -->
 ```go
@@ -58,6 +59,20 @@ Operational logs deliberately exclude:
 - tool arguments and results
 - fence-token values
 - snapshot URIs
-- raw error strings, which may contain payload data
+- raw peer error strings, which may contain payload data
+
+Model-policy `Describe` failures retain `request_id`, `method`, `error_kind` and the stable
+`error_category=external` in the configured Placer logger, never the backend's message, path or
+endpoint. This includes in-process harnesses and errors wrapping storage sentinels. Registration
+and startup failures are also correlated in HarnessRegistry's default logger. Only errors known
+at its direct store boundary include the full cause with `error_category=host`; arbitrary factory
+and runtime errors stay `external` without message text. Startup diagnostics create a correlation
+ID when there is no RPC context. Public policy-Describe errors remain sanitized.
+
+For an unavailable stored route, the administrative registry metadata's `unservable_reason` retains
+its existing diagnostic detail, including factory/configuration errors. This administrative
+channel can contain sensitive details: keep it access-controlled and do not forward its contents
+to general logs. The startup summary deliberately omits that raw cause; host-built parsing errors
+can still quote untrusted stored values.
 
 Use `error_kind`, gRPC status, identifiers, counts, and durations for diagnosis.

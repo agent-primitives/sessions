@@ -462,8 +462,10 @@ func TestOperatorRegistryLifecycleRealBinaries(t *testing.T) {
 	for _, line := range strings.Split(daemon.out.String(), "\n") {
 		if strings.Contains(line, "stored harness cannot be served on this host") && strings.Contains(line, "harness=mine") {
 			found = true
-			if !strings.HasPrefix(line, "time=") || !strings.Contains(line, "level=WARN") || !strings.Contains(line, "requires -model") {
-				t.Fatalf("registry warning did not use daemon handler: %s", line)
+			if !strings.HasPrefix(line, "time=") || !strings.Contains(line, "level=WARN") ||
+				!strings.Contains(line, "request_id=") || !strings.Contains(line, "error_kind=harness_unservable") ||
+				!strings.Contains(line, "error_category=external") || strings.Contains(line, "requires -model") {
+				t.Fatalf("registry warning lost structured, payload-free diagnostics: %s", line)
 			}
 		}
 	}

@@ -17,7 +17,11 @@ not provide.
   `Descriptor.Models` is a subset, never infers its default, and fails closed on a bounded Describe
   failure. Per-call overrides are allowed within policy. An invalid live model request is
   execution-fatal even if caught: no provider call or `MODEL_CALL`, later effects refused,
-  best-effort `ERROR` and no `END`. Daemon binding configuration is not included.
+  best-effort `ERROR` and no `END`. Stock Chat Completions and Responses calls send the exact
+  validated model ID, including `echo`, rather than substituting their configured fallback.
+  Policy-Describe failures retain correlated, message-free operator diagnostics; direct registry
+  store failures retain their trusted cause. Daemon bindings and model-to-deployment mappings are
+  not included.
 - `model/openai` maps Chat Completions function tools and tool choices, assistant tool-call parts
   and text `ToolResult.Content`. Streaming assembles indexed argument deltas into finalized tool
   parts without emitting tool JSON through the text callback. Replay and completed-effect recovery
@@ -77,7 +81,10 @@ not provide.
   sessions, including zero-event sessions, remain legacy; fork inherits both flags atomically. Existing journal bytes,
   hashes and `ModelCall` format are unchanged. Replay/resume restore the recorded effective default;
   recorded results ignore today's allowlist, while new live effects and unanswered model-intent
-  re-drives check current policy when configured. No policy keeps existing model behavior. Before
+  re-drives check current policy when configured. A recorded nonempty model default retains exact
+  adapter selection even after policy removal; direct adapter calls and pre-policy invocations
+  keep the existing empty/`echo` fallback. Cancelled registrations no longer wait behind another
+  route's policy Describe or persist after cancellation observed before commit. Before
   upgrading, stop every older host and embedded CLI writer and back up for rollback, following the
   [rollout order](#sqlite-v4-rollout). Older builds refuse v6 at open, but already-open older writers
   do not enforce model policy. There is no downgrade migration. Policy-enabled remote registration

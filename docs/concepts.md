@@ -113,7 +113,12 @@ unconfigured route, before compute is provisioned. Later policy activation on th
 also applies to these modern sessions. The effective default is delivered in `Start.Model` and
 recorded in `ExecutionStart.model`. An empty per-call model uses that effective default; an explicit
 per-call ID may override it within the allowed set. Existing `ModelCall.model` and `input_hash`
-record the effective request; no new per-call record format is introduced.
+record the effective request; no new per-call record format is introduced. For these invocations,
+the stock Chat Completions and Responses adapters send that exact model ID, including `echo`,
+instead of substituting their configured fallback. The recorded default retains this behavior on
+recovery even if policy is removed. No model-to-deployment mapping is provided; the host must serve
+the selected ID. Direct adapter calls and pre-policy invocations retain the existing empty/`echo`
+fallback.
 
 An invalid live model request is **execution-fatal even if the harness catches the error**. It calls
 no provider, appends no `MODEL_CALL`, refuses later effects, and ends with best-effort `ERROR`, not

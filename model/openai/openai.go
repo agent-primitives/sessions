@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/internal/modelcall"
 )
 
 // DefaultBaseURL is the public OpenAI endpoint. Any compatible service works by overriding it.
@@ -143,9 +144,11 @@ func WithHTTPClient(h *http.Client) Option {
 }
 
 // New builds a Client. A default model is required to identify fallback provider calls and usage.
-// The journal still hashes the original neutral request: callers needing an explicit MODEL_CALL
-// identity should set Model rather than rely on fallback. A non-absolute base URL, invalid path,
-// or query parameter set in both the base URL and path is an error.
+// Direct calls and pre-policy invocations use it for empty or "echo" requests; the journal still
+// hashes the original neutral request. Controller invocations with a recorded model default send
+// the selected model literally, including "echo", without fallback or deployment mapping.
+// A non-absolute base URL, invalid path, or query parameter set in both the base URL and path
+// is an error.
 func New(opts ...Option) (*Client, error) {
 	c := &Client{
 		baseURL: DefaultBaseURL,
@@ -287,7 +290,7 @@ func origin(u *url.URL) string {
 // ctx carries the turn's cancellation and deadline through to the HTTP request, so a cancelled
 // execution abandons an in-flight completion rather than leaving it to finish unobserved.
 func (c *Client) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
-	model, body, err := c.buildRequest(req, false)
+	model, body, err := c.buildRequest(ctx, req, false)
 	if err != nil {
 		return api.ModelResponse{}, err
 	}
@@ -335,7 +338,7 @@ func (c *Client) Model(ctx context.Context, req api.ModelRequest) (api.ModelResp
 // host records. That split is deliberate: the chunks are a view of the call in progress, and the
 // journal must not depend on whether anyone was watching.
 func (c *Client) StreamModel(ctx context.Context, req api.ModelRequest, onChunk func(string)) (api.ModelResponse, error) {
-	model, body, err := c.buildRequest(req, true)
+	model, body, err := c.buildRequest(ctx, req, true)
 	if err != nil {
 		return api.ModelResponse{}, err
 	}
@@ -482,15 +485,19 @@ func jsonDecodeDetail(err error) string {
 	return detail
 }
 
+// requestModel preserves policy-selected literals while retaining the legacy placeholder fallback
+// for direct calls and invocations without a recorded model default. Both protocols share it.
+func (c *Client) requestModel(ctx context.Context, requested string) string {
+	if !modelcall.ExactModel(ctx) && (requested == "" || requested == "echo") {
+		return c.model
+	}
+	return requested
+}
+
 // buildRequest resolves the model and encodes the body. Both call paths share it so a streamed turn
 // and a non-streamed one cannot disagree about what was sent.
-func (c *Client) buildRequest(req api.ModelRequest, stream bool) (string, []byte, error) {
-	model := req.Model
-	if model == "" || model == "echo" {
-		// "echo" is the reference harness's placeholder id. Treating it as "unset" lets the sample
-		// harnesses run against a real endpoint without every one of them hard-coding a model.
-		model = c.model
-	}
+func (c *Client) buildRequest(ctx context.Context, req api.ModelRequest, stream bool) (string, []byte, error) {
+	model := c.requestModel(ctx, req.Model)
 	if len(req.Params) != 0 {
 		return model, nil, fmt.Errorf("%w: Params are not mapped to Chat Completions", ErrUnsupportedPart)
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/internal/modelcall"
 )
 
 // liveSink is the host-mediated EventSink for a live turn: it invokes each nondeterministic op and
@@ -69,6 +70,8 @@ func (s *liveSink) completeModel(ctx context.Context, req api.ModelRequest) (api
 	if err := s.validateModel(req); err != nil {
 		return api.ModelResponse{}, err
 	}
+	// The recorded invocation default, not today's policy, owns selection during recovery.
+	ctx = modelcall.WithExactModel(ctx, s.modelDefault != "")
 	resp, err := s.c.invokeModel(ctx, s.executionID, req)
 	if err != nil {
 		return api.ModelResponse{}, err

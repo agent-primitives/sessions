@@ -355,7 +355,9 @@ func TestUpClusterPhase(t *testing.T) {
 			name: "a failed kind listing changes nothing", env: []string{"STUB_KIND_LIST_FAIL=1", "STUB_CLUSTERS=" + cluster},
 			node: "node-0", owned: "node-0", setup: "node-0 installed",
 			wantCode: 1, wantOut: "kind get clusters failed",
-			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl", "go "},
+			// up.sh builds cmd/emit to check its inputs; the build of kubectl-ate is the first go
+			// command past the kind listing.
+			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl", "./cmd/kubectl-ate"},
 			wantOwned: "node-0", wantSetup: "node-0 installed",
 		},
 		{
@@ -518,6 +520,20 @@ func TestUpClusterPhase(t *testing.T) {
 				t.Errorf("setup-cluster record = %q, want %q", got, tc.wantSetup)
 			}
 		})
+	}
+}
+
+// --substrate-only does not use the suite, so it does not check the composition: kaimahi's minimal
+// suite, which has no linux/arm64 composition, still brings substrate up on an arm64 Docker host.
+func TestUpSubstrateOnlySkipsTheCompositionCheck(t *testing.T) {
+	s := newStubs(t)
+	s.node(t, "node-1")
+	s.record(t, "created-cluster", "node-1")
+	s.record(t, "setup-cluster", "node-1 installed")
+	code, out, calls := s.runArgs(t, "up.sh", []string{"--substrate-only"}, "STUB_CLUSTERS="+cluster,
+		"AGENTSUITE_DEMO_SUITE=suites/kaimahi-minimal", "AGENTSUITE_DEMO_AGENT=writer")
+	if code != pastClusterPhase || strings.Contains(out, "does not render") {
+		t.Fatalf("up.sh --substrate-only exit %d, want %d past the cluster\noutput:\n%s\ncalls:\n%s", code, pastClusterPhase, out, calls)
 	}
 }
 
@@ -1018,7 +1034,12 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 		{
 			name:    "an emit that does not build",
 			env:     func(*testing.T) []string { return append(provider, "STUB_EMIT_BUILD_FAIL=1") },
-			wantOut: "cannot build cmd/emit to check AGENTSUITE_MODEL_BASE_URL and AGENTSUITE_MODEL: cmd/emit/main.go:1:1: expected 'package', found broken; nothing was changed",
+			wantOut: "cannot build cmd/emit to check the model settings and the composition: cmd/emit/main.go:1:1: expected 'package', found broken; nothing was changed",
+		},
+		{
+			name:    "an emit that does not build, with the fake model",
+			env:     func(*testing.T) []string { return []string{"STUB_EMIT_BUILD_FAIL=1"} },
+			wantOut: "cannot build cmd/emit to check the model settings and the composition: cmd/emit/main.go:1:1: expected 'package', found broken; nothing was changed",
 		},
 		{
 			name:    "a base URL without a model",
@@ -1221,6 +1242,20 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			name:    "micro-VM on a Docker host without KVM",
 			env:     func(*testing.T) []string { return []string{"STUB_NO_KVM=1"} },
 			wantOut: "AGENTSUITE_DEMO_SANDBOX=microvm needs /dev/kvm in the Docker host, and 'docker run --device /dev/kvm' failed; set AGENTSUITE_DEMO_SANDBOX=gvisor on a host without KVM (an arm64 Mac); nothing was changed",
+		},
+		{
+			// kaimahi's minimal suite has a linux/amd64 composition only; the stub Docker host is
+			// arm64.
+			name: "a suite with no composition for the Docker host's platform",
+			env: func(*testing.T) []string {
+				return []string{"AGENTSUITE_DEMO_SUITE=suites/kaimahi-minimal", "AGENTSUITE_DEMO_AGENT=writer"}
+			},
+			wantOut: "AGENTSUITE_DEMO_SUITE=suites/kaimahi-minimal, AGENTSUITE_DEMO_AGENT=writer on linux/arm64 with binding-microvm.json does not render the stateless tier: emit: ",
+		},
+		{
+			name:    "an agent the suite lacks",
+			env:     func(*testing.T) []string { return []string{"AGENTSUITE_DEMO_AGENT=nobody"} },
+			wantOut: "AGENTSUITE_DEMO_SUITE=suite, AGENTSUITE_DEMO_AGENT=nobody on linux/arm64 with binding-microvm.json does not render the stateless tier: emit: ",
 		},
 		{
 			name:    "a template tier to skip that is not a tier",

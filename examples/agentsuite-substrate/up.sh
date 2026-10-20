@@ -77,6 +77,12 @@ unfilled() {
 	echo "${left}"
 }
 
+# cmd/emit checks the model settings and the composition below. A build failure is not a verdict on
+# either, so it is reported as such.
+if ! reason="$(cd "${HERE}" && go build -o "${WORK}/bin/emit" ./cmd/emit 2>&1)"; then
+	refuse "cannot build cmd/emit to check the model settings and the composition: ${reason}"
+fi
+
 # Only AGENTSUITE_MODEL_BASE_URL selects a real provider. Any other provider setting without it is a
 # provider run that lost its URL: going on would switch to the fake model, delete the stored key and
 # replace the daemon's pod, dropping its emptyDir journal.
@@ -130,11 +136,8 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	# The Deployment recreates its pod, and the journal is an emptyDir, so letting such a value
 	# through would delete the running daemon's sessions and leave a pod that never starts. emit
 	# check-model builds the client with the daemon's own constructor, and also requires http(s).
-	# It is built first and run as a binary: go run would append its own "exit status 1" to the
-	# reason, and a build failure is not a verdict on the values.
-	if ! reason="$(cd "${HERE}" && go build -o "${WORK}/bin/emit" ./cmd/emit 2>&1)"; then
-		refuse "cannot build cmd/emit to check AGENTSUITE_MODEL_BASE_URL and AGENTSUITE_MODEL: ${reason}"
-	fi
+	# It is built above and run as a binary: go run would append its own "exit status 1" to the
+	# reason.
 	# With a key, check-model refuses a plain-http URL whose host is not loopback, localhost or a
 	# *.svc or *.svc.cluster.local name (a trusted-network exception: a name check, not proof the
 	# traffic stays in the cluster), as the daemon would. It is told only that a key is set, never
@@ -170,6 +173,24 @@ fi
 BINDING_ATESPACE="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("atespace", ""))' "${HERE}/${BINDING_FILE}")"
 if [[ "${BINDING_ATESPACE}" != "${ATESPACE}" ]]; then
 	refuse "${BINDING_FILE} names atespace '${BINDING_ATESPACE}', but the demo deploys into atespace ${ATESPACE}"
+fi
+
+# Render both tiers now, as the steps after the cluster will (a placeholder digest stands in for the
+# harness image built there), so an agent the suite lacks, a suite with no linux/${ARCH} composition
+# (kaimahi's minimal suite on arm64) or a binding a tier refuses stops the run before the cluster
+# changes. --substrate-only does not use the suite, so it is not checked.
+if ! ${SUBSTRATE_ONLY}; then
+	PRECHECK="$(mktemp -d)"
+	placeholder="localhost:5001/agentsuite-harness@sha256:$(printf '%064d' 0)"
+	for tier in stateless memory; do
+		if ! reason="$(cd "${HERE}" && "${WORK}/bin/emit" render -suite "${SUITE_DIR}" -agent "${AGENT}" \
+			-platform "linux/${ARCH}" -binding "${BINDING_FILE}" -image "${placeholder}" \
+			-model "${HARNESS_MODEL}" -tier "${tier}" -out "${PRECHECK}/${tier}" 2>&1)"; then
+			rm -rf "${PRECHECK}"
+			refuse "AGENTSUITE_DEMO_SUITE=${SUITE_DIR}, AGENTSUITE_DEMO_AGENT=${AGENT} on linux/${ARCH} with ${BINDING_FILE} does not render the ${tier} tier: ${reason}"
+		fi
+	done
+	rm -rf "${PRECHECK}"
 fi
 
 # The micro-VM class needs /dev/kvm in the containers Docker runs (the kind node is one). Probe it the

@@ -62,10 +62,13 @@ The recipe is for a disposable kind cluster you trust: nothing in it authenticat
 
 The suite is validated with kaimahi's `agentsuite` package, imported as a Go module at kaimahi
 `9c5c993`, not copied. `render` also loads kaimahi's own `testdata/minimal` suite (see the tests),
-the files `suites/kaimahi-minimal` copies from that commit. `demo.sh` uses its own fixture by default
-because kaimahi's fixtures declare only `linux/amd64`, and a kind node on an arm64 Mac needs an arm64
-image. On amd64, `AGENTSUITE_DEMO_SUITE=suites/kaimahi-minimal AGENTSUITE_DEMO_AGENT=writer` selects
-kaimahi's.
+the files `suites/kaimahi-minimal` copies from that commit. `demo.sh` uses its own fixture by
+default because kaimahi's fixtures declare only `linux/amd64`, and a kind node on an arm64 Mac
+needs an arm64 image. On amd64, the setting
+`AGENTSUITE_DEMO_SUITE=suites/kaimahi-minimal AGENTSUITE_DEMO_AGENT=writer` selects kaimahi's.
+Before it touches the cluster, `up.sh` renders both tiers of the agent for the Docker host's
+platform, so kaimahi's suite on arm64, or an agent the suite lacks, is refused with nothing changed
+(`--substrate-only` does not use the suite and skips this check).
 
 ### The mapping that `emit render` applies
 

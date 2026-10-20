@@ -407,7 +407,7 @@ func TestRestoreRequiresHeldSnapshot(t *testing.T) {
 			if tc.notReady && (!errors.Is(err, substrate.ErrSnapshotNotReady) || errors.Is(err, api.ErrMemoryStateLost)) {
 				t.Fatalf("not-ready classification: %v", err)
 			}
-			if tc.memory && tc.status == substrate.StatusUnknown && (!errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound)) {
+			if tc.memory && tc.status == substrate.StatusUnknown && (!errors.Is(err, substrate.ErrMemoryStateLost) || !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound)) {
 				t.Fatalf("missing memory actor lost error causes: %v", err)
 			}
 			for _, call := range m.calls {
@@ -612,8 +612,24 @@ func TestRestoreReplacementPrecedesFidelityError(t *testing.T) {
 	m.exists("s", substrate.StatusSuspended)
 	m.holds("s", "replacement-snapshot")
 	_, err := newMemoryBackend(m).RestoreInstance(t.Context(), api.SnapshotRef{Local: "s", Memory: true}, func() (string, error) { return "old-uid", nil })
-	if !errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, api.ErrInvalidCheckpoint) || slices.Contains(m.calls, "resume:s") {
+	if !errors.Is(err, substrate.ErrMemoryStateLost) || !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrSnapshotNotRestorable) || errors.Is(err, api.ErrInvalidCheckpoint) || slices.Contains(m.calls, "resume:s") {
 		t.Fatalf("replacement error=%v calls=%v", err, m.calls)
+	}
+}
+
+func TestRestoreMissingObservedUIDKeepsPreflightRefusal(t *testing.T) {
+	m := &mockControl{info: running("w"), getNoUID: true}
+	m.exists("s", substrate.StatusRunning)
+	m.holds("s", "held")
+	inc, err := newMemoryBackend(m).RestoreInstance(t.Context(), api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, func() (string, error) {
+		m.calls = append(m.calls, "read-record")
+		return "recorded-uid", nil
+	})
+	if !errors.Is(err, substrate.ErrSnapshotNotRestorable) || errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, substrate.ErrMemoryStateLost) {
+		t.Fatalf("missing observed UID: err=%v, want original restore refusal, not proven memory loss", err)
+	}
+	if !reflect.DeepEqual(inc, api.Incarnation{}) || !reflect.DeepEqual(m.calls, []string{"get:s", "read-record"}) || m.actors["s"] != substrate.StatusRunning || m.snapshots["s"] != "held" {
+		t.Fatalf("refused restore changed compute: inc=%+v calls=%v actors=%v snapshots=%v", inc, m.calls, m.actors, m.snapshots)
 	}
 }
 

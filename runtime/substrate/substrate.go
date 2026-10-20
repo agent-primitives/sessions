@@ -664,7 +664,7 @@ func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRe
 	if err != nil {
 		if errors.Is(err, ErrActorNotFound) && b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
 			return fmt.Errorf("%w: %w: actor %s/%s no longer exists, so its in-RAM state cannot be restored: %w",
-				ErrSnapshotNotRestorable, api.ErrMemoryStateLost, b.atespace, ref.Local, err)
+				ErrSnapshotNotRestorable, ErrMemoryStateLost, b.atespace, ref.Local, err)
 		}
 		return fmt.Errorf("%w: get restore actor: %w", ErrSnapshotNotRestorable, err)
 	}
@@ -698,9 +698,9 @@ func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRe
 		if readErr != nil {
 			return fmt.Errorf("%w: read recorded compute instance: %w", err, readErr)
 		}
-		if instance != "" && info.UID != instance {
+		if instance != "" && info.UID != "" && info.UID != instance {
 			return fmt.Errorf("%w: %w: actor %s/%s has UID %q, not the recorded instance %q (replaced), so its in-RAM state cannot be restored",
-				ErrSnapshotNotRestorable, api.ErrMemoryStateLost, b.atespace, ref.Local, info.UID, instance)
+				ErrSnapshotNotRestorable, ErrMemoryStateLost, b.atespace, ref.Local, info.UID, instance)
 		}
 	}
 	return err

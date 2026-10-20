@@ -40,9 +40,49 @@ func TestTemplateNameIsContentAddressed(t *testing.T) {
 	if TemplateName("support-desk", "triage", digestA, "sha256:b", Options{Model: "gpt-x"}) == base || TemplateName("support-desk", "triage", digestA, "sha256:b", Options{Memory: true}) == base {
 		t.Fatal("a model override must give another template")
 	}
+	// The documented formula: each option is a keyed line, the model quoted.
+	for _, tc := range []struct {
+		o     Options
+		lines string
+	}{
+		{Options{Model: "gpt-x"}, "\nmodel=\"gpt-x\""},
+		{Options{Memory: true}, "\ntier=memory"},
+		{Options{Model: "gpt-x", Memory: true}, "\nmodel=\"gpt-x\"\ntier=memory"},
+	} {
+		sum := sha256.Sum256([]byte(digestA + "\n" + "sha256:b" + tc.lines))
+		want := "support-desk-triage-" + hex.EncodeToString(sum[:])[:8]
+		if got := TemplateName("support-desk", "triage", digestA, "sha256:b", tc.o); got != want {
+			t.Errorf("%+v: name = %q, want %q", tc.o, got, want)
+		}
+	}
 	long := TemplateName(strings.Repeat("Suite_", 20), strings.Repeat("agent.", 20), digestA, "sha256:b", Options{})
 	if len(long) > 63 || !dnsLabel.MatchString(long) || long[len(long)-8:] != base[len(base)-8:] {
 		t.Fatalf("long name = %q (%d chars): want a DNS label of at most 63 that keeps hash8", long, len(long))
+	}
+}
+
+// Different option sets never share a template name, since up.sh reuses a template by name: a model
+// named like the tier, or holding a newline and the tier's line, is still another template.
+func TestTemplateNameKeepsOptionsApart(t *testing.T) {
+	opts := []Options{
+		{},
+		{Memory: true},
+		{Model: "memory"},
+		{Model: "tier=memory"},
+		{Model: "x"},
+		{Model: "x", Memory: true},
+		{Model: "x\nmemory"},
+		{Model: "x\ntier=memory"},
+		{Model: "x\"\ntier=memory"},
+		{Model: "memory", Memory: true},
+	}
+	seen := map[string]Options{}
+	for _, o := range opts {
+		name := TemplateName("support-desk", "triage", digestA, "sha256:b", o)
+		if prev, ok := seen[name]; ok {
+			t.Errorf("%+v and %+v share template name %q", prev, o, name)
+		}
+		seen[name] = o
 	}
 }
 

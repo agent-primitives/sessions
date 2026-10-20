@@ -71,7 +71,7 @@ kaimahi's.
 
 | ActorTemplate field | Value |
 |---|---|
-| `metadata.name` | `<suite>-<agent>-<hash8>`, where `hash8` is the first 8 hex of `sha256(image digest + "\n" + binding digest)`, with `"\n" + model` appended when `emit render -model` overrides the agent's model and `"\nmemory"` for `-tier memory`. The binding digest is the SHA-256 of its JCS form. The name is a DNS label of at most 63 characters, and only suite and agent are truncated. |
+| `metadata.name` | `<suite>-<agent>-<hash8>`, where `hash8` is the first 8 hex of `sha256(image digest + "\n" + binding digest)`, with `"\nmodel=" + strconv.Quote(model)` appended when `emit render -model` overrides the agent's model and `"\ntier=memory"` for `-tier memory`, so no model name hashes like another model or the tier. The binding digest is the SHA-256 of its JCS form. The name is a DNS label of at most 63 characters, and only suite and agent are truncated. |
 | `metadata.atespace` | `binding.atespace` |
 | `containers[0].image` | The harness image, which must be digest-pinned. |
 | `containers[0].env` | `HARNESS_ADDR=:80`, `HARNESS_READYZ=:8081`, `AGENT_DIR=/agent`, `AGENTSUITE_MODEL` when `-model` is given, and `AGENTSUITE_MEMORY=ram` for `-tier memory`. No model credentials: they stay with the host. |

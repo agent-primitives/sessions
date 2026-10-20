@@ -6,18 +6,18 @@ Substrate paths are at the commit the adapter's go.mod pins (96dffb2, `SUBSTRATE
 Build half (build.mmd, end of chapter 2):
 
 - AgentSuite files -> kaimahi's agentsuite package: `render.Load` calls `agentsuite.ValidateDirectory`
-  (examples/agentsuite-substrate/render/render.go:56); `emit validate` calls it directly
+  (examples/agentsuite-substrate/render/render.go:57); `emit validate` calls it directly
   (examples/agentsuite-substrate/cmd/emit/main.go:109).
 - -> emit bundle -> harness image: `bundle` loads the composition (cmd/emit/main.go:77) and writes
   agent.json and instructions.md (cmd/emit/main.go:84,87); up.sh stages them as the image's /agent
   layer and takes the pushed image's digest (examples/agentsuite-substrate/up.sh:303,305,307;
   Dockerfile.harness).
 - -> emit render, and image digest -> emit render: `renderCmd` loads the composition
-  (cmd/emit/main.go:166); `Render` requires a digest-pinned image (render/render.go:280).
-- binding-microvm.json -> emit render: `LoadBinding` (render/render.go:179), used by `Render`
-  (render/render.go:275).
+  (cmd/emit/main.go:166); `Render` requires a digest-pinned image (render/render.go:283).
+- binding-microvm.json -> emit render: `LoadBinding` (render/render.go:180), used by `Render`
+  (render/render.go:278).
 - emit render -> actortemplate.json and agentsessionsd.args: cmd/emit/main.go:191,201, the flag from
-  `Output.DaemonFlag` (render/render.go:356).
+  `Output.DaemonFlag` (render/render.go:359).
 - actortemplate.json -> ActorTemplate in substrate, created by hand: driver.sh chapter 3.
 - agentsessionsd.args -> agentsessionsd flag, set by hand: up.sh substitutes it into the Deployment
   (up.sh:380,382). The daemon is the substrate build, integrations/substrate/cmd/agentsessionsd,
@@ -49,7 +49,7 @@ Run half (run.mmd, start of chapter 4), each also a row of the traced turn:
   cmd/atecontroller/internal/controllers/workerpool_apply.go:117) and reverse-proxies each request to
   the actor's port, 80 unless the X-Ate-Target-Port header names another
   (internal/atunnel/ingress.go:175-188). The harness listens on HARNESS_ADDR :80
-  (render/render.go:302, cmd/harness/main.go:44).
+  (render/render.go:305, cmd/harness/main.go:44).
 - harness -> agentsessionsd, sink.Model on the same stream: harnesswire/harnesswire.go:225,250.
 - agentsessionsd -> gpt-5.4-mini, chat completions: internal/modelconfig/modelconfig.go:47 builds
   the OpenAI-compatible client from -model and -model-base-url.

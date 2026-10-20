@@ -4,11 +4,11 @@
 //
 // The field mapping follows the AgentSuite to ActorTemplate design (v0): the template name is
 // content-addressed, <suite>-<agent>-<hash8> with hash8 the first 8 hex of
-// sha256(image digest + "\n" + binding digest), with "\n" + model appended when the harness's model
-// is overridden, so the same image under another binding or model is another template; the harness
-// speaks harnesswire on port 80 with a /readyz wakeup probe on 8081; the sandbox, snapshot,
-// resources and worker selector come from the binding. Model credentials are host configuration and
-// never rendered.
+// sha256(image digest + "\n" + binding digest), with a keyed line appended for a model override
+// and one for the memory tier, so the same image under another binding, model or tier is another
+// template; the harness speaks harnesswire on port 80 with a /readyz wakeup probe on 8081; the
+// sandbox, snapshot, resources and worker selector come from the binding. Model credentials are
+// host configuration and never rendered.
 package render
 
 import (
@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
@@ -226,17 +227,19 @@ type Options struct {
 }
 
 // TemplateName is <suite>-<agent>-<hash8>: hash8 is the first 8 hex of
-// sha256(imageDigest + "\n" + bindingDigest), with "\n" + model appended when o.Model is not empty
-// (the template then carries a model override in its env) and "\nmemory" when o.Memory is set (the
-// template then selects the memory tier in its env). The result is a DNS label of at most 63
-// characters; suite and agent are lowercased, sanitized and truncated to fit, never hash8.
+// sha256(imageDigest + "\n" + bindingDigest), with "\nmodel=" + strconv.Quote(o.Model) appended
+// when o.Model is not empty (the template then carries a model override in its env) and
+// "\ntier=memory" when o.Memory is set (the template then selects the memory tier in its env).
+// Each option is a keyed line and the quoted model holds no newline, so no model hashes like
+// another model or the tier. The result is a DNS label of at most 63 characters; suite and agent
+// are lowercased, sanitized and truncated to fit, never hash8.
 func TemplateName(suite, agent, imageDigest, bindingDigest string, o Options) string {
 	content := imageDigest + "\n" + bindingDigest
 	if o.Model != "" {
-		content += "\n" + o.Model
+		content += "\nmodel=" + strconv.Quote(o.Model)
 	}
 	if o.Memory {
-		content += "\nmemory"
+		content += "\ntier=memory"
 	}
 	sum := sha256.Sum256([]byte(content))
 	hash8 := hex.EncodeToString(sum[:])[:8]

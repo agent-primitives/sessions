@@ -380,16 +380,18 @@ commands find the tools on `PATH` and
 the cluster through the demo's own kubeconfig (`KUBECONFIG`), whose current context the driver checks
 is the demo's kind cluster before the first chapter.
 
-`demo/record.sh` runs setup, records `show` with vhs (`demo.tape`, 1920x1080, font size 22, a 130 x
-39 terminal), renders `build.mmd` and `run.mmd` with mermaid-cli (through `npx`) and splices them
-over the blocks chapters 2 and 4 draw for them (`splice.py`), then writes the video, the logs, its
-sha256, a frame from each chapter, the demo files with their sha256 at record time, and a README with
-each chapter's start and the checks to `DEMO_OUT`, and tears the cluster down (`DEMO_KEEP=1` keeps
-it; `record.sh setup|show|reset|record|collect|teardown` runs one part, `show` being a dry run that
-`reset` undoes). The chapter starts come from the video: each chapter draws a progress bar across the
-top row, k/11 full for chapter k, and `chapters.py` finds the first frame of each. By default it runs the driver on the
-machine vhs runs on (`DEMO_REMOTE=local`); `DEMO_REMOTE=hq DEMO_HOST=<host>` drives a remote host
-through `hq remote-test`, a private tool, in the image `Dockerfile.tools` builds there. `DEMO_READ`
-(default 3) is how many seconds a result stays on screen; a caption stays 2.5 s before its first
-command (and on screen through the rest), each page of a file 6.5 s, the title card 5 s and each
-diagram 9 s.
+`demo/record.sh` runs setup, records `show` with vhs (`demo.tape`, 1920x1080, font size 22, a
+130 x 39 terminal), renders `build.mmd` and `run.mmd` with mermaid-cli (through `npx`) and splices
+them over the blocks chapters 2 and 4 draw for them (`splice.py`), then writes the video, the logs,
+its sha256, a frame from each chapter, the demo files with their sha256 at record time, and a README
+with each chapter's start and the checks to `DEMO_OUT`, and tears the cluster down (`DEMO_KEEP=1`
+keeps it; `record.sh setup|show|reset|record|collect|teardown` runs one part, `show` being a dry run
+that `reset` undoes). The README names where the driver ran (`DEMO_REMOTE` at record time, saved in
+`remote.txt`) and states a teardown only once one has succeeded: `teardown` rewrites its line after
+`TEARDOWN OK`. The chapter starts come from the video: each chapter draws a progress bar across the
+top row, k/11 full for chapter k, and `chapters.py` finds the first frame of each. By default it
+runs the driver on the machine vhs runs on (`DEMO_REMOTE=local`); `DEMO_REMOTE=hq DEMO_HOST=<host>`
+drives a remote host through `hq remote-test`, a private tool, in the image `Dockerfile.tools`
+builds there. `DEMO_READ` (default 3) is how many seconds a result stays on screen; a caption stays
+2.5 s before its first command (and on screen through the rest), each page of a file 6.5 s, the
+title card 5 s and each diagram 9 s.

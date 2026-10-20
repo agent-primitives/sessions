@@ -156,6 +156,10 @@ record() {
 	# recording: the README says so only when logs/reset.log is there.
 	mkdir -p "${OUT}/logs"
 	rm -f "${OUT}/logs/reset.log"
+	# Where driver.sh runs (DEMO_REMOTE), taken now: collect may run later with another setting.
+	# A teardown log in ${OUT} is from an earlier recording; teardown copies this one's.
+	echo "${REMOTE}" >"${OUT}/remote.txt"
+	rm -f "${OUT}/logs/teardown.log"
 	if grep -q '^RESET OK' "${LOGS}/reset.log" 2>/dev/null; then cp "${LOGS}/reset.log" "${OUT}/logs/"; fi
 	local tmp="${OUT}/.recording"
 	rm -rf "${tmp}" "${OUT}/demo.mp4"
@@ -218,6 +222,22 @@ collect() {
 	local video source
 	video="$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width,height,r_frame_rate -of csv=p=0 "${mp4}")"
 	source="$(cat "${OUT}/source.txt" 2>/dev/null || echo "an unrecorded source (no source.txt)")"
+	# Where setup and show ran, as record noted it in remote.txt.
+	local cluster_host show_host
+	case "$(cat "${OUT}/remote.txt" 2>/dev/null)" in
+	hq)
+		cluster_host="on a Linux VM with KVM, through \`hq remote-test\`"
+		show_host="on the VM through \`hq remote-test\`"
+		;;
+	local)
+		cluster_host="on the machine that ran record.sh"
+		show_host="on the machine that ran record.sh"
+		;;
+	*)
+		cluster_host="on a host record.sh did not note (no remote.txt)"
+		show_host="on a host record.sh did not note (no remote.txt)"
+		;;
+	esac
 	local scan mp4_hits mp4_prefix
 	scan="$(token_scan "${OUT}/logs" "${OUT}/scripts" "${OUT}/source.txt")"
 	# A JWT in the MP4's bytes is its prefix and at least 8 more base64url characters; the bare 3-byte
@@ -286,10 +306,10 @@ collect() {
 		echo
 		echo "## How it was made"
 		echo
-		echo "- Off camera, before recording (\`record.sh setup\`, logs/setup.log): a kind cluster on a Linux VM"
-		echo "  with KVM, substrate's install with Kata + Cloud Hypervisor micro-VMs, the micro-VM smoke test,"
+		echo "- Off camera, before recording (\`record.sh setup\`, logs/setup.log): a kind cluster ${cluster_host},"
+		echo "  substrate's install with Kata + Cloud Hypervisor micro-VMs, the micro-VM smoke test,"
 		echo "  the suite against kaimahi 9c5c993, the harness image, the memory tier's ActorTemplate (the"
-		echo "  stateless one is only rendered: chapter 3 creates it), a model token from the VM's managed"
+		echo "  stateless one is only rendered: chapter 3 creates it), a model token from the host's managed"
 		echo "  identity (only its size and expiry are logged), both agentsessionsd Deployments, and the"
 		echo "  harness binary copied out of the harness image."
 		if [[ -f "${OUT}/logs/reset.log" ]]; then
@@ -298,19 +318,19 @@ collect() {
 			echo "  No successful \`driver.sh reset\` ran between setup and the recording."
 		fi
 		echo "  \`$(grep -m1 '^SMOKE OK' "${LOGS}/setup.log")\`; \`$(grep -m1 '^SETUP OK' "${LOGS}/setup.log")\`."
-		echo "- On camera (\`record.sh record\`): \`driver.sh show\` on the VM through \`hq remote-test\`, rendered by"
-		echo "  vhs here. Each command on screen is the command line that runs; the driver stops on any claim"
-		echo "  that does not hold, and writes the full output of each command to logs/ch-N.log. Files are"
-		echo "  printed by bat with scripts/bat.conf (colors, line numbers, wrapping at the terminal's width);"
-		echo "  split screens are scripts/split-view.py. \$IMAGE, \$TEMPLATE, \$MEMTEMPLATE, \$API, \$API_MEM and"
-		echo "  \$ROUTER are set from setup's state before the title card (show.log has their values); \$CHILD is"
-		echo "  read from the line \`agentctl fork\` prints on screen (ch-9.log has it); the other variables are"
-		echo "  set by a command on screen."
+		echo "- On camera (\`record.sh record\`): \`driver.sh show\` ${show_host}, rendered by vhs on the"
+		echo "  machine that ran record.sh. Each command on screen is the command line that runs; the driver"
+		echo "  stops on any claim that does not hold, and writes the full output of each command to"
+		echo "  logs/ch-N.log. Files are printed by bat with scripts/bat.conf (colors, line numbers, wrapping at"
+		echo "  the terminal's width); split screens are scripts/split-view.py. \$IMAGE, \$TEMPLATE, \$MEMTEMPLATE,"
+		echo "  \$API, \$API_MEM and \$ROUTER are set from setup's state before the title card (show.log has their"
+		echo "  values); \$CHILD is read from the line \`agentctl fork\` prints on screen (ch-9.log has it); the"
+		echo "  other variables are set by a command on screen."
 		echo "- The diagrams (build.mmd, run.mmd) are rendered with ${MERMAID_CLI} and spliced over the blocks"
 		echo "  chapters 2 and 4 draw for them (splice.py): $(awk -F'\t' '{ printf "%sthe %s diagram %s-%s s", (NR > 1 ? ", " : ""), ($1 == "magenta" ? "build" : $1 == "green" ? "run" : $1), $2, $3 }' "${OUT}/splice.tsv")."
 		echo "- Waits longer than a moment are hidden between a status line \`⠿ <what> …\` and its \`✓ <what> in N s\`;"
 		echo "  that line is the driver's, not a command's output, so it does not count toward a screen's output rows."
-		echo "- After recording (\`record.sh teardown\`, logs/teardown.log): the cluster is deleted."
+		teardown_line
 		echo
 		cat "${DEMO}/diagrams.md"
 		echo
@@ -329,10 +349,31 @@ collect() {
 	echo "wrote ${OUT}/README.md"
 }
 
+# teardown_line: the README's teardown line, from what ${OUT}/logs holds now. collect writes it, and
+# teardown rewrites it once the cluster is gone, so it never states a teardown that has not run.
+teardown_line() {
+	if grep -q '^TEARDOWN OK' "${OUT}/logs/teardown.log" 2>/dev/null; then
+		echo "- Teardown (\`record.sh teardown\`, logs/teardown.log): the cluster was deleted (TEARDOWN OK)."
+	elif [[ -n "${DEMO_KEEP:-}" ]]; then
+		echo "- Teardown: none ran, since DEMO_KEEP is set; the cluster was kept."
+	else
+		echo "- Teardown: none had run when this README was written; \`record.sh teardown\` rewrites this line."
+	fi
+}
+
 teardown() {
 	load_env
 	driver teardown 900
-	[[ ! -d "${OUT}" ]] || cp "${LOGS}/teardown.log" "${OUT}/logs/" 2>/dev/null || true
+	[[ -d "${OUT}" ]] || return 0
+	mkdir -p "${OUT}/logs"
+	rm -f "${OUT}/logs/teardown.log"
+	if grep -q '^TEARDOWN OK' "${LOGS}/teardown.log" 2>/dev/null; then cp "${LOGS}/teardown.log" "${OUT}/logs/"; fi
+	if [[ -f "${OUT}/README.md" ]]; then
+		# teardown_line is one line, and the only one in the README that starts "- Teardown".
+		awk -v line="$(teardown_line)" '/^- Teardown/ { print line; next } { print }' \
+			"${OUT}/README.md" >"${OUT}/README.md.tmp"
+		mv "${OUT}/README.md.tmp" "${OUT}/README.md"
+	fi
 }
 
 check_remote

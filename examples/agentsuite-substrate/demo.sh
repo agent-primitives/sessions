@@ -57,6 +57,7 @@ s = max(snaps, key=lambda s: s["generation"]) if snaps else None
 print("generation %s %s %s" % (s["generation"], s["fidelity"], s["durableSnapshot"]["object"]["snapshotUri"]) if s else "")'
 }
 actor_state() { "${ATE[@]}" get actor "$1" -a "${ATESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"]["state"])'; }
+actor_uid() { "${ATE[@]}" get actor "$1" -a "${ATESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"].get("uid", ""))'; }
 agentctl() { "${WORK}/bin/agentctl" "$1" --server "${SERVER}" "${@:2}"; }
 inputs() { # session -> the user inputs its journal holds, in order, joined by '|'
 	agentctl replay --session "$1" | sed -n 's/^seq=[0-9]* *EVENT_INPUT  user: //p' | paste -sd '|' -
@@ -114,6 +115,8 @@ else
 fi
 
 step "3. Suspend: the actor is snapshotted and its worker freed"
+ACTOR_UID="$(actor_uid "${SID}")"
+[[ -n "${ACTOR_UID}" ]] || fail "actor has no UID"
 agentctl suspend --session "${SID}"
 "${ATE[@]}" get actor "${SID}" -a "${ATESPACE}"
 [[ "$(actor_state "${SID}")" == ACTOR_STATE_SUSPENDED ]] || fail "actor is not suspended"
@@ -128,6 +131,7 @@ say "${SID}" "also, my password expired"
 [[ -n "${REAL}" || "${REPLY}" == *"1) my laptop will not boot; 2) the VPN drops every hour; 3) I was billed twice this month; 4) also, my password expired"* ]] ||
 	fail "resumed turn lost state: ${REPLY}"
 [[ "$(actor_state "${SID}")" == ACTOR_STATE_RUNNING ]] || fail "actor is not running after resume"
+[[ "$(actor_uid "${SID}")" == "${ACTOR_UID}" ]] || fail "resume brought back another actor: its UID changed"
 [[ "$(inputs "${SID}")" == "${TURNS3}|also, my password expired" ]] || fail "journal inputs after resume: $(inputs "${SID}")"
 [[ "$(records "${SID}" EVENT_LIFECYCLE)" == 2 ]] || fail "journal does not record the suspend and the resume"
 [[ "$(records "${SID}" EVENT_MODEL_CALL)" == 4 ]] || fail "journal does not record a model call for the 4th turn"

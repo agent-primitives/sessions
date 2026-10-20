@@ -1440,9 +1440,10 @@ func TestUpRendersTheDaemon(t *testing.T) {
 
 // demoStubs prepares s for demo.sh in real-provider mode: an agentctl that keeps each session's
 // journal in $STUB_DIR/j-<session> and prints records the way agentctl does, a kubectl-ate that
-// reports the actor states agentctl left, a replay that counts the completed turns in the journal,
-// and the template name up.sh would have rendered. STUB_FAULT makes agentctl or replay misbehave in
-// one way, so a test can show demo.sh's journal checks catch it.
+// reports the actor states agentctl left and the actor's UID, a replay that counts the completed
+// turns in the journal, and the template name up.sh would have rendered. STUB_FAULT makes agentctl
+// or replay misbehave in one way (new-actor-on-resume: the resumed actor has another UID), so a
+// test can show demo.sh's checks catch it.
 func demoStubs(t *testing.T, s *stubs) {
 	t.Helper()
 	bin := filepath.Join(s.work, "bin")
@@ -1489,6 +1490,7 @@ suspend)
 resume)
 	rec "EVENT_LIFECYCLE"
 	echo ACTOR_STATE_RUNNING >"$STUB_DIR/state-$sess"
+	[ "$STUB_FAULT" != new-actor-on-resume ] || echo "uid-$sess-2" >"$STUB_DIR/uid-$sess"
 	;;
 replay) cat "$j" ;;
 fork)
@@ -1521,7 +1523,8 @@ snaps='[]'
 if [ -f "$STUB_DIR/snap-$name" ]; then
 	snaps='[{"generation": 1, "fidelity": "FULL", "durableSnapshot": {"status": "SNAPSHOT_STORAGE_STATUS_COMPLETED", "object": {"snapshotUri": "gs://snap/1"}}}]'
 fi
-echo "{\"status\": {\"state\": \"$st\", \"snapshots\": $snaps}}"
+uid=$(cat "$STUB_DIR/uid-$name" 2>/dev/null || echo "uid-$name")
+echo "{\"metadata\": {\"uid\": \"$uid\"}, \"status\": {\"state\": \"$st\", \"snapshots\": $snaps}}"
 `)
 	stub(t, bin, "replay", log+`
 prev= sess=
@@ -1543,10 +1546,11 @@ echo "re-executed $n completed turns"
 	}
 }
 
-// With a real provider demo.sh cannot check reply text, so its claims rest on the journal: the
+// With a real provider demo.sh cannot check reply text, so its claims rest on the journal (the
 // inputs in order, one model call per turn, the suspend and resume records, the fork child's prefix,
-// an untouched parent, and the turns the replay re-ran. Each check must fail the demo when the
-// journal does not hold what it claims, and the fake model must be neither port-forwarded nor asked.
+// an untouched parent, and the turns the replay re-ran) and on substrate's record of the resumed
+// actor's UID. Each check must fail the demo when what it reads does not hold what it claims, and
+// the fake model must be neither port-forwarded nor asked.
 func TestDemoRealProviderJournalChecks(t *testing.T) {
 	for _, tc := range []struct {
 		fault   string
@@ -1557,6 +1561,7 @@ func TestDemoRealProviderJournalChecks(t *testing.T) {
 		{fault: "no-model-call", wantOut: "DEMO FAILED: journal does not record 3 model calls"},
 		{fault: "no-lifecycle", wantOut: "DEMO FAILED: journal does not record the suspend and the resume"},
 		{fault: "no-model-call-4", wantOut: "DEMO FAILED: journal does not record a model call for the 4th turn"},
+		{fault: "new-actor-on-resume", wantOut: "DEMO FAILED: resume brought back another actor: its UID changed"},
 		{fault: "no-child-model-call", wantOut: "DEMO FAILED: child journal does not record turn 1's model call plus its own"},
 		{fault: "replay-skips-a-turn", wantOut: "DEMO FAILED: replay did not re-execute the 4 turns"},
 		{fault: "whole-parent-fork", wantOut: "DEMO FAILED: child journal inputs are not turn 1 plus its own"},

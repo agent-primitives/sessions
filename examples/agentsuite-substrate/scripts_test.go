@@ -2,6 +2,7 @@ package scripts_test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -1777,6 +1778,164 @@ func TestDemoTraceHop(t *testing.T) {
 			}
 			if stdout.String() != tc.want {
 				t.Fatalf("got %q, want %q", stdout.String(), tc.want)
+			}
+		})
+	}
+}
+
+// record.sh teardown runs and records the teardown only where the recording in DEMO_OUT ran its
+// cluster (remote.txt: DEMO_REMOTE, and for hq the sha256 of DEMO_HOST). Elsewhere driver.sh
+// teardown can print TEARDOWN OK for a cluster that is not there, so the README would say the
+// recording's cluster was deleted while it still runs; record.sh refuses before driver.sh runs.
+func TestRecordTeardownChecksTheRecordedTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the demo scripts need a POSIX shell")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not found")
+	}
+	src, err := os.ReadFile("demo/record.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// remote.txt as record writes it for DEMO_REMOTE=hq DEMO_HOST=host-a.
+	hqA := fmt.Sprintf("hq\n%x\n", sha256.Sum256([]byte("host-a")))
+	const (
+		before = "- Teardown: none had run when this README was written; `record.sh teardown` rewrites this line."
+		after  = "- Teardown (`record.sh teardown`, logs/teardown.log): the cluster was deleted (TEARDOWN OK)."
+	)
+	for _, tc := range []struct {
+		name     string
+		remote   string // remote.txt in DEMO_OUT; "" for none
+		env      []string
+		wantCode int
+		wantOut  string
+		wantCall string // the teardown that ran: "driver.sh", "hq" or "" for none
+		wantLine string // the README's teardown line afterwards
+	}{
+		{
+			// The documented split flow: DEMO_REMOTE=hq DEMO_KEEP=1 record.sh, then record.sh
+			// teardown with the default DEMO_REMOTE.
+			name: "a remote recording is not torn down here", remote: hqA, wantCode: 1,
+			wantOut: "ran driver.sh with DEMO_REMOTE=hq, not local", wantLine: before,
+		},
+		{
+			name:   "a remote recording is not torn down on another host",
+			remote: hqA, env: []string{"DEMO_REMOTE=hq", "DEMO_HOST=host-b"},
+			wantCode: 1, wantOut: "on another DEMO_HOST", wantLine: before,
+		},
+		{
+			name:   "a remote recording that does not record its host is not torn down",
+			remote: "hq\n", env: []string{"DEMO_REMOTE=hq", "DEMO_HOST=host-a"},
+			wantCode: 1, wantOut: "on another DEMO_HOST", wantLine: before,
+		},
+		{
+			name:   "a recording made here is not torn down remotely",
+			remote: "local\n", env: []string{"DEMO_REMOTE=hq", "DEMO_HOST=host-a"},
+			wantCode: 1, wantOut: "ran driver.sh with DEMO_REMOTE=local, not hq", wantLine: before,
+		},
+		{
+			name:   "a remote recording is torn down on its host",
+			remote: hqA, env: []string{"DEMO_REMOTE=hq", "DEMO_HOST=host-a"},
+			wantCall: "hq", wantLine: after,
+		},
+		{
+			name:   "a recording made here is torn down here",
+			remote: "local\n", wantCall: "driver.sh", wantLine: after,
+		},
+		{
+			// Nothing ties the teardown to what DEMO_OUT holds, so it runs and the README is kept.
+			name:     "a directory with no remote.txt is left as it is",
+			wantCall: "driver.sh", wantLine: before,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// record.sh finds the checkout three levels up and driver.sh next to itself, so it runs
+			// from a copy whose driver.sh, hq and timeout are stubs: nothing is written to this
+			// checkout and no cluster is touched.
+			root, dir := t.TempDir(), t.TempDir()
+			demo := filepath.Join(root, "examples", "agentsuite-substrate", "demo")
+			bin, out := filepath.Join(dir, "bin"), filepath.Join(dir, "out")
+			for _, d := range []string{demo, bin, out} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(demo, "record.sh"), src, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(bash, filepath.Join(bin, "bash")); err != nil {
+				t.Fatal(err)
+			}
+			// Both teardowns succeed wherever they run, as driver.sh teardown does with no cluster.
+			stub(t, demo, "driver.sh", `echo "driver.sh $*" >>"$STUB_DIR/calls"
+echo "TEARDOWN OK" >"$DEMO_LOGS/teardown.log"
+`)
+			stub(t, bin, "hq", `echo "hq $*" >>"$STUB_DIR/calls"
+echo "TEARDOWN OK" >"$PWD/_local/demo-work/demo-logs/teardown.log"
+`)
+			stub(t, bin, "timeout", `shift
+exec "$@"
+`)
+			envFile := filepath.Join(dir, "model.env")
+			model := "AGENTSUITE_MODEL_BASE_URL=http://model.invalid\nAGENTSUITE_MODEL=m\n" +
+				"AGENTSUITE_MODEL_PATH=/v1\nAZURE_MI_CLIENT_ID=id\n"
+			if err := os.WriteFile(envFile, []byte(model), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.remote != "" {
+				remote := filepath.Join(out, "remote.txt")
+				if err := os.WriteFile(remote, []byte(tc.remote), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			readme := filepath.Join(out, "README.md")
+			if err := os.WriteFile(readme, []byte("# demo\n"+before+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(filepath.Join(demo, "record.sh"), "teardown")
+			cmd.Env = append([]string{
+				"PATH=" + bin + ":/usr/bin:/bin",
+				"HOME=" + dir,
+				"STUB_DIR=" + dir,
+				"DEMO_OUT=" + out,
+				"AZURE_OPENAI_ENV=" + envFile,
+			}, tc.env...)
+			b, err := cmd.CombinedOutput()
+			code := 0
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				code = exit.ExitCode()
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if code != tc.wantCode || !strings.Contains(string(b), tc.wantOut) {
+				t.Fatalf("record.sh teardown exit %d, want %d with %q\noutput:\n%s",
+					code, tc.wantCode, tc.wantOut, b)
+			}
+			calls, err := os.ReadFile(filepath.Join(dir, "calls"))
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			switch got := strings.TrimSpace(string(calls)); {
+			case tc.wantCall == "" && got != "":
+				t.Errorf("calls = %q, want no teardown", got)
+			case tc.wantCall != "" && (strings.Contains(got, "\n") ||
+				!strings.HasPrefix(got, tc.wantCall+" ") || !strings.HasSuffix(got, " teardown")):
+				t.Errorf("calls = %q, want one %s teardown", got, tc.wantCall)
+			}
+			got, err := os.ReadFile(readme)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "# demo\n" + tc.wantLine + "\n"; string(got) != want {
+				t.Errorf("README.md = %q, want %q", got, want)
+			}
+			_, err = os.Stat(filepath.Join(out, "logs", "teardown.log"))
+			if copied := err == nil; copied != (tc.wantLine == after) {
+				t.Errorf("logs/teardown.log in DEMO_OUT: %v, want it copied only with the README's "+
+					"TEARDOWN OK line", err)
 			}
 		})
 	}

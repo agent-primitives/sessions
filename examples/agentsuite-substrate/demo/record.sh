@@ -13,7 +13,8 @@
 #                        (needs a finished setup and a reset cluster)
 #   record.sh collect    the logs, the scripts, the diagrams, demo.mp4.sha256, the checks and
 #                        README.md with chapter times
-#   record.sh teardown   driver.sh teardown
+#   record.sh teardown   driver.sh teardown; refused when DEMO_OUT holds a recording whose cluster
+#                        ran elsewhere (another DEMO_REMOTE, or another DEMO_HOST for hq)
 #   record.sh run        what demo.tape types: driver.sh show through present.awk, then the end marker
 #
 # The driver needs Docker with /dev/kvm, kind and the cluster on one Linux host. DEMO_REMOTE picks
@@ -134,6 +135,13 @@ sha256() {
 	if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi
 }
 
+# target: where driver.sh runs, as record saves it in remote.txt: DEMO_REMOTE, then for hq the
+# sha256 of DEMO_HOST, so teardown can match the host without the artifacts naming it.
+target() {
+	echo "${REMOTE}"
+	if [[ "${REMOTE}" == hq ]]; then printf '%s' "${DEMO_HOST}" | sha256 | cut -d' ' -f1; fi
+}
+
 record() {
 	if ! command -v vhs >/dev/null || ! command -v ffprobe >/dev/null || ! command -v npx >/dev/null; then
 		echo "needs vhs, ffmpeg and npx" >&2
@@ -156,9 +164,10 @@ record() {
 	# recording: the README says so only when logs/reset.log is there.
 	mkdir -p "${OUT}/logs"
 	rm -f "${OUT}/logs/reset.log"
-	# Where driver.sh runs (DEMO_REMOTE), taken now: collect may run later with another setting.
-	# A teardown log in ${OUT} is from an earlier recording; teardown copies this one's.
-	echo "${REMOTE}" >"${OUT}/remote.txt"
+	# Where driver.sh runs (DEMO_REMOTE, and DEMO_HOST for hq), taken now: collect and teardown may
+	# run later with other settings. A teardown log in ${OUT} is from an earlier recording; teardown
+	# copies this one's.
+	target >"${OUT}/remote.txt"
 	rm -f "${OUT}/logs/teardown.log"
 	if grep -q '^RESET OK' "${LOGS}/reset.log" 2>/dev/null; then cp "${LOGS}/reset.log" "${OUT}/logs/"; fi
 	local tmp="${OUT}/.recording"
@@ -222,9 +231,9 @@ collect() {
 	local video source
 	video="$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width,height,r_frame_rate -of csv=p=0 "${mp4}")"
 	source="$(cat "${OUT}/source.txt" 2>/dev/null || echo "an unrecorded source (no source.txt)")"
-	# Where setup and show ran, as record noted it in remote.txt.
+	# Where setup and show ran, as record noted it in remote.txt's first line.
 	local cluster_host show_host
-	case "$(cat "${OUT}/remote.txt" 2>/dev/null)" in
+	case "$(head -1 "${OUT}/remote.txt" 2>/dev/null)" in
 	hq)
 		cluster_host="on a Linux VM with KVM, through \`hq remote-test\`"
 		show_host="on the VM through \`hq remote-test\`"
@@ -363,8 +372,24 @@ teardown_line() {
 
 teardown() {
 	load_env
+	# The recording in ${OUT} names where its cluster runs (remote.txt). A teardown anywhere else can
+	# print TEARDOWN OK without touching that cluster (down.sh finds nothing to delete there), so it
+	# is refused before it runs rather than recorded as this recording's teardown.
+	if [[ -f "${OUT}/remote.txt" ]]; then
+		local recorded
+		recorded="$(head -1 "${OUT}/remote.txt")"
+		if [[ "${recorded}" != "${REMOTE}" ]]; then
+			echo "the recording in ${OUT} ran driver.sh with DEMO_REMOTE=${recorded}, not ${REMOTE}; run teardown with its DEMO_REMOTE (and DEMO_HOST), or another DEMO_OUT" >&2
+			exit 1
+		fi
+		if [[ "$(cat "${OUT}/remote.txt")" != "$(target)" ]]; then
+			echo "the recording in ${OUT} ran driver.sh on another DEMO_HOST (or remote.txt does not record its host); run teardown with that DEMO_HOST, or another DEMO_OUT" >&2
+			exit 1
+		fi
+	fi
 	driver teardown 900
-	[[ -d "${OUT}" ]] || return 0
+	# Without remote.txt, nothing ties this teardown to what ${OUT} holds, so it is left as it is.
+	[[ -f "${OUT}/remote.txt" ]] || return 0
 	mkdir -p "${OUT}/logs"
 	rm -f "${OUT}/logs/teardown.log"
 	if grep -q '^TEARDOWN OK' "${LOGS}/teardown.log" 2>/dev/null; then cp "${LOGS}/teardown.log" "${OUT}/logs/"; fi

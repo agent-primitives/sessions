@@ -1,6 +1,7 @@
 package openai_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -118,8 +119,7 @@ func TestResponsesHTTPDiagnosticReadFailure(t *testing.T) {
 	}
 }
 
-func TestResponsesHTTPDiagnosticIdentifiers(t *testing.T) {
-	const status = "openai responses: HTTP status 400"
+func TestHTTPDiagnosticIdentifiers(t *testing.T) {
 	const safe = `{"error":{"code":"invalid_value","param":"input[1].content[0].type","message":"DO NOT ECHO","type":"invalid_request_error","innererror":{"message":"DO NOT ECHO"}}}`
 	cases := []struct{ name, body, suffix string }{
 		{"safe", safe, " (code=invalid_value, param=input[1].content[0].type)"},
@@ -142,22 +142,35 @@ func TestResponsesHTTPDiagnosticIdentifiers(t *testing.T) {
 		{"oversize envelope", safe + strings.Repeat(" ", (16<<10)+1-len(safe)), ""},
 	}
 	for _, tc := range cases {
-		for _, streaming := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, streaming), func(t *testing.T) {
-				c := newResponses(t, func(w http.ResponseWriter, _ *http.Request) {
-					w.WriteHeader(http.StatusBadRequest)
-					_, _ = io.WriteString(w, tc.body)
+		for _, adapter := range []string{"responses", "chat"} {
+			for _, streaming := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/stream=%t", tc.name, adapter, streaming), func(t *testing.T) {
+					h := func(w http.ResponseWriter, _ *http.Request) {
+						w.WriteHeader(http.StatusBadRequest)
+						_, _ = io.WriteString(w, tc.body)
+					}
+					var model func(context.Context, api.ModelRequest) (api.ModelResponse, error)
+					var stream func(context.Context, api.ModelRequest, func(string)) (api.ModelResponse, error)
+					status := "openai responses: HTTP status 400"
+					if adapter == "chat" {
+						c := newClient(t, h)
+						model, stream = c.Model, c.StreamModel
+						status = "openai: test-model: http 400"
+					} else {
+						c := newResponses(t, h)
+						model, stream = c.Model, c.StreamModel
+					}
+					var err error
+					if streaming {
+						_, err = stream(t.Context(), api.ModelRequest{}, nil)
+					} else {
+						_, err = model(t.Context(), api.ModelRequest{})
+					}
+					if err == nil || err.Error() != status+tc.suffix {
+						t.Fatalf("err=%v, want %s", err, status+tc.suffix)
+					}
 				})
-				var err error
-				if streaming {
-					_, err = c.StreamModel(t.Context(), api.ModelRequest{}, nil)
-				} else {
-					_, err = c.Model(t.Context(), api.ModelRequest{})
-				}
-				if err == nil || err.Error() != status+tc.suffix {
-					t.Fatalf("err=%v, want %s", err, status+tc.suffix)
-				}
-			})
+			}
 		}
 	}
 }

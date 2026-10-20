@@ -287,8 +287,7 @@ func TestModelRejectsUnmappedToolSemantics(t *testing.T) {
 	}
 }
 
-// A provider error message is far more actionable than its status code, since a bad key and a bad
-// model id are both 4xx.
+// Keep the status for diagnosis without echoing provider text into durable errors.
 func TestModelSurfacesProviderError(t *testing.T) {
 	c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -298,8 +297,8 @@ func TestModelSurfacesProviderError(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error")
 	}
-	if !strings.Contains(err.Error(), "Incorrect API key provided") || !strings.Contains(err.Error(), "401") {
-		t.Fatalf("error %q should carry the provider message and status", err)
+	if err.Error() != "openai: test-model: http 401" {
+		t.Fatalf("error %q should carry only the model and status", err)
 	}
 }
 
@@ -311,7 +310,7 @@ func TestModelSurfacesNonJSONError(t *testing.T) {
 		_, _ = io.WriteString(w, "upstream unavailable")
 	})
 	_, err := c.Model(t.Context(), api.ModelRequest{Messages: []api.Message{*api.TextMessage("user", "q")}})
-	if err == nil || !strings.Contains(err.Error(), "502") {
+	if err == nil || err.Error() != "openai: test-model: http 502" {
 		t.Fatalf("err = %v, want one naming http 502", err)
 	}
 }
@@ -643,7 +642,7 @@ func TestStreamModelCapturesTrailingUsage(t *testing.T) {
 	}
 }
 
-// A streaming error must surface as the provider's message rather than as an empty completion.
+// A streaming HTTP error must fail without echoing provider text.
 func TestStreamModelSurfacesProviderError(t *testing.T) {
 	c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -652,8 +651,8 @@ func TestStreamModelSurfacesProviderError(t *testing.T) {
 	_, err := c.StreamModel(t.Context(), api.ModelRequest{
 		Messages: []api.Message{*api.TextMessage("user", "hi")},
 	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "Rate limit reached") {
-		t.Fatalf("err = %v, want the provider message", err)
+	if err == nil || err.Error() != "openai: test-model: http 429" {
+		t.Fatalf("err = %v, want only the model and status", err)
 	}
 }
 

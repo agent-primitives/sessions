@@ -79,7 +79,13 @@ func (h openaiToolHarness) Run(ctx context.Context, start *api.Start, sink api.E
 // Exercise Harness.Connect too: adapter errors are copied into durable ERROR descriptions.
 func assertOpenAICompletionRefused(t *testing.T, streaming bool, body, private, wantError string) {
 	t.Helper()
+	assertOpenAIResponseRefused(t, streaming, http.StatusOK, body, private, wantError)
+}
+
+func assertOpenAIResponseRefused(t *testing.T, streaming bool, status int, body, private, wantError string) {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
 		_, _ = fmt.Fprint(w, body)
 	}))
 	defer server.Close()
@@ -108,8 +114,8 @@ func assertOpenAICompletionRefused(t *testing.T, streaming bool, body, private, 
 	if err == nil || !strings.Contains(err.Error(), wantError) {
 		t.Errorf("err=%v, want refused completion containing %q", err, wantError)
 	}
-	if private != "" && err != nil && strings.Contains(err.Error(), private) {
-		t.Errorf("payload leaked into returned error: %v", err)
+	if err != nil && (strings.Contains(err.Error(), server.URL) || private != "" && strings.Contains(err.Error(), private)) {
+		t.Errorf("payload or endpoint leaked into returned error: %v", err)
 	}
 	if report := <-h.reports; len(report.responses) != 0 {
 		t.Errorf("harness received rejected completion: %+v", report.responses)
@@ -134,8 +140,8 @@ func assertOpenAICompletionRefused(t *testing.T, streaming bool, body, private, 
 				if !strings.Contains(record.Event.Err.Description, wantError) {
 					t.Errorf("journal ERROR=%q, want %q", record.Event.Err.Description, wantError)
 				}
-				if private != "" && strings.Contains(record.Event.Err.Description, private) {
-					t.Errorf("payload leaked into journal ERROR: %s", record.Event.Err.Description)
+				if strings.Contains(record.Event.Err.Description, server.URL) || private != "" && strings.Contains(record.Event.Err.Description, private) {
+					t.Errorf("payload or endpoint leaked into journal ERROR: %s", record.Event.Err.Description)
 				}
 			}
 		}
@@ -145,6 +151,21 @@ func assertOpenAICompletionRefused(t *testing.T, streaming bool, body, private, 
 	}
 	if err := journal.Verify(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Provider messages and raw gateway bodies must not cross the durable journal boundary.
+func TestOpenAIHTTPErrorPrivacy(t *testing.T) {
+	const private = "sk-fixture-do-not-journal"
+	for _, tc := range []struct{ name, body, want string }{
+		{"JSON", `{"error":{"param":"messages[0].content","message":"` + private + `","code":"invalid_value"}}`, "openai: test-model: http 400 (code=invalid_value, param=messages[0].content)"},
+		{"raw", "gateway failure: " + private, "openai: test-model: http 400"},
+	} {
+		for _, streaming := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, streaming), func(t *testing.T) {
+				assertOpenAIResponseRefused(t, streaming, http.StatusBadRequest, tc.body, private, tc.want)
+			})
+		}
 	}
 }
 

@@ -57,7 +57,7 @@ chmod +x "${work}/bin/go"
 run_case() {
 	echo "$1" >>"${root}/targets"
 	echo "$2" >"${root}/$1.rc"
-	printf '%s' "$3" >"${root}/$1.out"
+	printf '%s\n' "$3" >"${root}/$1.out"
 	if [[ "${4:-}" == writes-input ]]; then
 		echo 'go test fuzz v1' >"${root}/$1.input"
 	fi

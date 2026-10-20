@@ -214,6 +214,12 @@ jobs:
         if: needs.changes.outputs.decision != 'skip'
         run: hack/ci-path-filter-test.sh
 
+      # hack/fuzz.sh lets one fuzzing failure through, the coordinator's own fuzztime deadline; this
+      # step pins that every other failure, and that one with an input written, still fails.
+      - name: fuzz script self-test
+        if: needs.changes.outputs.decision != 'skip'
+        run: hack/fuzz-test.sh
+
   integrations:
     # `integrations/substrate` is a SEPARATE Go module, so the root job's ./... never reaches it and a
     # break there would otherwise surface only in the nightly substrate-e2e run. Compiling and testing

@@ -61,11 +61,19 @@ type HarnessRegistry struct {
 	registry *placement.Registry
 	factory  PlacerFactory
 	auth     *authorization
+	logger   *slog.Logger
 
 	// mu serializes RegisterHarness, so building a Placer, storing the row and adding the Placer
 	// happen as one step per name within this process.
 	mu       sync.Mutex
 	releases []func()
+}
+
+// WithRegistryLogger routes registry operational logs, including enforced-mode
+// diagnostics and startup warnings, to logger. A nil logger uses slog.Default().
+// It is independent of WithLogger, which configures only the Sessions service.
+func WithRegistryLogger(logger *slog.Logger) HarnessRegistryOption {
+	return func(h *HarnessRegistry) { h.logger = logger }
 }
 
 // NewHarnessRegistry builds the service, retaining every stored name (including retired ones)
@@ -75,6 +83,7 @@ type HarnessRegistry struct {
 // reserves the registry's static and reserved names in the store, as ReserveStaticHarnessNames does,
 // rather than letting one name mean two harnesses.
 //
+// Operational logs use slog.Default() unless WithRegistryLogger is supplied.
 // Registrations are loaded at startup. A registration another process makes in a shared database
 // is served after this host restarts, or if RegisterHarness loads its identical compatible spec.
 func NewHarnessRegistry(store *sqlitelog.Store, registry *placement.Registry, factory PlacerFactory, opts ...HarnessRegistryOption) (*HarnessRegistry, error) {
@@ -87,6 +96,9 @@ func NewHarnessRegistry(store *sqlitelog.Store, registry *placement.Registry, fa
 	h := &HarnessRegistry{store: store, registry: registry, factory: factory}
 	for _, opt := range opts {
 		opt(h)
+	}
+	if h.logger == nil {
+		h.logger = slog.Default()
 	}
 	if err := forEachRegistration(store, h.load); err != nil {
 		h.Close()
@@ -167,7 +179,7 @@ func (h *HarnessRegistry) unavailable(name string, cause error) error {
 	if err := h.registry.MarkUnavailable(name, cause); err != nil {
 		return err
 	}
-	slog.Warn("stored harness cannot be served on this host", "harness", name, "error", cause)
+	h.logger.Warn("stored harness cannot be served on this host", "harness", name, "error", cause)
 	return nil
 }
 
@@ -325,7 +337,7 @@ func validName(name string) error {
 // RegisterHarness stores a registration and makes it resolvable, or recognizes a repeat of one.
 func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterHarnessRequest) (_ *v1.RegisterHarnessResponse, err error) {
 	ctx = observability.EnsureRequestID(ctx)
-	defer h.auth.internalError(ctx, slog.Default(), v1.HarnessRegistry_RegisterHarness_FullMethodName, &err)
+	defer h.auth.internalError(ctx, h.logger, v1.HarnessRegistry_RegisterHarness_FullMethodName, &err)
 	if err := h.auth.global(ctx, v1.HarnessRegistry_RegisterHarness_FullMethodName, api.ActionRegistryRegister); err != nil {
 		return nil, err
 	}
@@ -419,7 +431,7 @@ func registerOutcome(r sqlitelog.RegisterResult) v1.RegisterOutcome {
 // GetHarness returns one static or registered harness, optionally with what it reports right now.
 func (h *HarnessRegistry) GetHarness(ctx context.Context, req *v1.GetHarnessRequest) (_ *v1.HarnessRegistration, err error) {
 	ctx = observability.EnsureRequestID(ctx)
-	defer h.auth.internalError(ctx, slog.Default(), v1.HarnessRegistry_GetHarness_FullMethodName, &err)
+	defer h.auth.internalError(ctx, h.logger, v1.HarnessRegistry_GetHarness_FullMethodName, &err)
 	if err := h.auth.global(ctx, v1.HarnessRegistry_GetHarness_FullMethodName, api.ActionRegistryRead); err != nil {
 		return nil, err
 	}
@@ -473,7 +485,7 @@ func (h *HarnessRegistry) observe(ctx context.Context, out *v1.HarnessRegistrati
 // RetireHarness refuses new sessions on a registered harness. Existing sessions keep running.
 func (h *HarnessRegistry) RetireHarness(ctx context.Context, req *v1.RetireHarnessRequest) (_ *v1.HarnessRegistration, err error) {
 	ctx = observability.EnsureRequestID(ctx)
-	defer h.auth.internalError(ctx, slog.Default(), v1.HarnessRegistry_RetireHarness_FullMethodName, &err)
+	defer h.auth.internalError(ctx, h.logger, v1.HarnessRegistry_RetireHarness_FullMethodName, &err)
 	if err := h.auth.global(ctx, v1.HarnessRegistry_RetireHarness_FullMethodName, api.ActionRegistryRetire); err != nil {
 		return nil, err
 	}
@@ -501,7 +513,7 @@ func (h *HarnessRegistry) RetireHarness(ctx context.Context, req *v1.RetireHarne
 // the name, so a registration made while a caller pages neither skips nor repeats an entry.
 func (h *HarnessRegistry) ListHarnesses(ctx context.Context, req *v1.ListHarnessesRequest) (_ *v1.ListHarnessesResponse, err error) {
 	ctx = observability.EnsureRequestID(ctx)
-	defer h.auth.internalError(ctx, slog.Default(), v1.HarnessRegistry_ListHarnesses_FullMethodName, &err)
+	defer h.auth.internalError(ctx, h.logger, v1.HarnessRegistry_ListHarnesses_FullMethodName, &err)
 	if err := h.auth.global(ctx, v1.HarnessRegistry_ListHarnesses_FullMethodName, api.ActionRegistryList); err != nil {
 		return nil, err
 	}

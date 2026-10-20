@@ -15,7 +15,8 @@ not provide.
   compute with exec alone, while Resume always requires both. Policy requests carry the originating
   RPC path in Go `AuthorizationRequest.Method`, including compound/recovery/global checks and direct
   handler calls. Existing unbound rows reach custom policies with a zero Owner; `OwnerAuthorizer`
-  still denies them. See the
+  still denies them. `session.WithRegistryLogger` routes registry diagnostics and startup warnings
+  to an embedder-supplied logger. See the
   [action mapping and limits](docs/security.md#optional-go-rpc-authorization).
 - `model/openai` maps Chat Completions function tools and tool choices, assistant tool-call parts
   and text `ToolResult.Content`. Streaming assembles indexed argument deltas into finalized tool
@@ -106,6 +107,9 @@ not provide.
   unavailable. No wire fields, canonical event format, schema version or default behavior change.
   `NewHarnessRegistry` now accepts variadic options: ordinary calls remain source-compatible, but
   function-value assignments using its previous exact signature must wrap or adapt the constructor.
+  `session.WithRegistryLogger` routes registry startup warnings and enforced-mode diagnostics to the
+  embedder's logger, independently of the Sessions service's `WithLogger`; absent or nil, it uses
+  `slog.Default()` captured at construction.
   Go policy requests identify the full originating RPC path in `AuthorizationRequest.Method`;
   built-in owner policies still decide by action. This is a Go SPI contract, not a protobuf message
   or field. Mutation deletion probes acquire and release admission

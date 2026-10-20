@@ -70,7 +70,11 @@ func deleteError(err error, uid string) error {
 	case errors.Is(err, context.DeadlineExceeded):
 		code = codes.DeadlineExceeded
 	}
-	return withStatusCause(code, fmt.Errorf("delete session %q: %w", uid, err))
+	mapped := withStatusCause(code, fmt.Errorf("delete session %q: %w", uid, err))
+	if code == codes.Internal {
+		return &hostFailure{mapped}
+	}
+	return mapped
 }
 func deletedSessionError(info sqlitelog.SessionInfo) error {
 	if info.DeletionState == api.DeletionActive {

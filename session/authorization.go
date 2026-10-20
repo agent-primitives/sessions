@@ -25,7 +25,7 @@ func WithAuthorization(policy api.Authorizer) Option {
 	return func(s *Service) { s.auth = &authorization{policy: policy} }
 }
 
-// HarnessRegistryOption configures authorization on the separate operator service.
+// HarnessRegistryOption configures the separate operator service.
 type HarnessRegistryOption func(*HarnessRegistry)
 
 // WithRegistryAuthorization requires the same verified-caller boundary as
@@ -153,6 +153,7 @@ func (a *authorization) checkActions(ctx context.Context, request api.Authorizat
 type hostFailure struct{ error }
 
 func (e *hostFailure) GRPCStatus() *status.Status { return status.Convert(e.error) }
+func (e *hostFailure) Unwrap() error              { return e.error }
 
 func hostInternalError(format string, args ...any) error {
 	return &hostFailure{status.Errorf(codes.Internal, format, args...)}

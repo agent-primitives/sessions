@@ -29,7 +29,7 @@ backends record external lifecycle calls such as actor creation, resume, suspend
 
 ## Enabling logs
 
-Library components default to a discard logger. The process that assembles them must inject one:
+Most library components default to a discard logger. The process that assembles them must inject one:
 
 <!-- doccheck: body(harness api.Harness, model controller.ModelFunc, store *sqlitelog.Store) -->
 ```go
@@ -41,6 +41,22 @@ if err != nil {
     return err
 }
 service := session.NewService(store, registry, session.WithLogger(logger))
+```
+
+`HarnessRegistry` instead defaults to `slog.Default()` (captured at construction), including for
+startup warnings and enforced-mode diagnostics. Configure it separately with
+`session.WithRegistryLogger`; `session.WithLogger` only configures the Sessions service. A nil
+registry logger uses the default too. An embedder can route both services to the same logger:
+
+<!-- doccheck: body(store *sqlitelog.Store, registry *placement.Registry, factory session.PlacerFactory) -->
+```go
+logger := slog.Default()
+registryService, err := session.NewHarnessRegistry(store, registry, factory,
+    session.WithRegistryLogger(logger))
+if err != nil {
+    return err
+}
+defer registryService.Close()
 ```
 
 Use `observability.UnaryServerInterceptor` and `observability.StreamServerInterceptor` on gRPC

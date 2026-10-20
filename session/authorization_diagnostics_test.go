@@ -30,7 +30,7 @@ import (
 // Losing either the early owner-lookup diagnostic or the deferred INTERNAL
 // diagnostic must not silently turn an operational failure into an opaque one.
 func TestAuthorizationInternalDiagnostics(t *testing.T) {
-	for _, path := range []string{"owner lookup", "post-policy get", "post-policy create", "post-policy list"} {
+	for _, path := range []string{"owner lookup", "post-policy get", "post-policy create", "post-policy list", "post-policy delete"} {
 		for _, id := range []struct{ name, value string }{
 			{"provided ID", "authz-request-190"},
 			{"missing ID", ""},
@@ -46,7 +46,7 @@ func TestAuthorizationInternalDiagnostics(t *testing.T) {
 				policyCalls := 0
 				policy := policyFunc(func(context.Context, api.AuthorizationRequest) error {
 					policyCalls++
-					// GetSession has already read the owner; its subsequent lookup
+					// Session-scoped calls have already read the owner; their next store access
 					// (or the global operation's first store access) now fails.
 					if err := store.Close(); err != nil {
 						t.Fatal(err)
@@ -70,6 +70,8 @@ func TestAuthorizationInternalDiagnostics(t *testing.T) {
 					_, err = svc.CreateSession(ctx, &pb.CreateSessionRequest{})
 				case "post-policy list":
 					_, err = svc.ListSessions(ctx, &pb.ListSessionsRequest{})
+				case "post-policy delete":
+					_, err = svc.DeleteSession(ctx, &pb.DeleteSessionRequest{Uid: "owned"})
 				default:
 					_, err = svc.GetSession(ctx, &pb.GetSessionRequest{Uid: "owned"})
 				}
@@ -107,6 +109,8 @@ func TestAuthorizationInternalDiagnostics(t *testing.T) {
 							wantMethod = pb.Sessions_CreateSession_FullMethodName
 						case "post-policy list":
 							wantMethod = pb.Sessions_ListSessions_FullMethodName
+						case "post-policy delete":
+							wantMethod = pb.Sessions_DeleteSession_FullMethodName
 						}
 						if record["method"] != wantMethod || record["error_kind"] != "internal" || record["error_category"] != "host" {
 							t.Errorf("host diagnostic lacks method/kind/category: %v", record)

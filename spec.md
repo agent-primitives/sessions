@@ -1507,6 +1507,9 @@ The reference implementation protects the integrity of the record, not access to
   `error_category`. Known trusted host/store errors MUST log the full cause with category `host`.
   Model/provider/harness and other unknown-origin errors MUST NOT log message text: category MUST
   be `execution` for Exec/Resume, `runtime` for Suspend/Fork, or `external` for other methods.
+  Registry diagnostics and startup warnings use the logger supplied by `session.WithRegistryLogger`,
+  independently of the Sessions service's `session.WithLogger`. Absent or nil, the registry logger
+  defaults to `slog.Default()` captured at construction.
   Unknown mixed execution/runtime phases MUST fail closed; store faults inside runtime MUST NOT
   qualify as trusted unless known at the service storage boundary. No heuristic redaction is used.
   Request metadata, credentials and session payloads remain excluded; trusted/off behavior is

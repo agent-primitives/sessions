@@ -809,6 +809,149 @@ esac
 	}
 }
 
+// driverFuncs returns the definitions of the named functions in demo/driver.sh, top-level or nested
+// (phase is defined inside setup), so a test can run one setup phase without the rest of setup.
+func driverFuncs(t *testing.T, names ...string) string {
+	t.Helper()
+	b, err := os.ReadFile("demo/driver.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(b), "\n")
+	var out strings.Builder
+	for _, name := range names {
+		found := false
+		for i, l := range lines {
+			indent := l[:len(l)-len(strings.TrimLeft(l, "\t"))]
+			if strings.HasPrefix(l, indent+name+"() { ") && strings.HasSuffix(l, "}") {
+				out.WriteString(l + "\n") // a one-line definition
+				found = true
+				break
+			}
+			if l != indent+name+"() {" {
+				continue
+			}
+			for _, body := range lines[i:] {
+				out.WriteString(body + "\n")
+				if body == indent+"}" {
+					found = true
+					break
+				}
+			}
+			break
+		}
+		if !found {
+			t.Fatalf("demo/driver.sh has no function %s", name)
+		}
+	}
+	return out.String()
+}
+
+// driver.sh setup's check that agentsessionsd is ready while the stateless tier's ActorTemplate
+// does not exist counts only a NotFound answer as the template's absence, as reset does: on a
+// reused cluster an ate API that cannot be reached must not pass for a missing template. It runs
+// through setup's phase, which fails on any failed command in the phase's function, so a
+// Deployment with no ready replica fails it too.
+func TestDriverSetupChecksTheTemplateIsAbsent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the demo scripts need a POSIX shell")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not found")
+	}
+	const name = "agentsessionsd is ready while its template does not exist yet"
+	script := `set -euo pipefail
+STEP_LOG="$STUB_DIR/setup.log"
+: >"${STEP_LOG}"
+ATESPACE=agentsuite-demo NS=agentsuite-demo
+ATE=(kubectl-ate) K=(kubectl)
+redact() { cat; }
+template_name() { echo tmpl-1; }
+` + driverFuncs(t, "log", "fail", "template_state", "template_absent_daemon_ready", "phase") + `
+phase "` + name + `" template_absent_daemon_ready
+echo PHASE OK
+`
+	for _, tc := range []struct {
+		name    string
+		env     []string
+		wantErr string // in the output; "" for a phase that passes
+	}{
+		{
+			name: "NotFound and a ready Deployment", env: []string{"STUB_TEMPLATE=notfound", "STUB_READY=1"},
+		},
+		{
+			name: "the ate API unavailable", env: []string{"STUB_TEMPLATE=unavailable", "STUB_READY=1"},
+			wantErr: "cannot tell whether ActorTemplate tmpl-1 exists",
+		},
+		{
+			name: "the template exists", env: []string{"STUB_TEMPLATE=present", "STUB_READY=1"},
+			wantErr: "ActorTemplate tmpl-1 exists; up.sh was to leave it for show to create",
+		},
+		{
+			name: "no ready replica", env: []string{"STUB_TEMPLATE=notfound", "STUB_READY="},
+			wantErr: "agentsessionsd has no ready replicas, want 1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "bin")
+			if err := os.Mkdir(bin, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// kubectl-ate's errors, as at substrate 96dffb2.
+			stub(t, bin, "kubectl-ate", `e='Error: failed to get actor template "tmpl-1": rpc error: code'
+case "$STUB_TEMPLATE" in
+present) echo tmpl-1 ;;
+unavailable)
+	echo "$e = Unavailable desc = connection refused" >&2
+	exit 1
+	;;
+*)
+	echo "$e = NotFound desc = ActorTemplate agentsuite-demo/tmpl-1 not found" >&2
+	exit 1
+	;;
+esac
+`)
+			stub(t, bin, "kubectl", `case "$*" in
+*"readyReplicas}/"*)
+	echo "$STUB_READY/1 ready"
+	echo '["-substrate-harness=writer=agentsuite-demo/tmpl-1"]'
+	;;
+*readyReplicas*) printf '%s' "$STUB_READY" ;;
+*logs*) echo "agentsessionsd: listening" ;;
+*) exit 1 ;;
+esac
+`)
+			cmd := exec.Command(bash, "-c", script)
+			cmd.Env = append([]string{"PATH=" + bin + ":/usr/bin:/bin", "STUB_DIR=" + dir}, tc.env...)
+			out, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if err != nil && !errors.As(err, &exit) {
+				t.Fatal(err)
+			}
+			if tc.wantErr == "" {
+				if err != nil || !strings.Contains(string(out), "PHASE OK") {
+					t.Fatalf("phase failed: %v, want it to pass\noutput:\n%s", err, out)
+				}
+				return
+			}
+			if err == nil || strings.Contains(string(out), "PHASE OK") {
+				t.Fatalf("phase passed, want it to fail with %q\noutput:\n%s", tc.wantErr, out)
+			}
+			for _, want := range []string{tc.wantErr, "DEMO FAILED: " + name + " (exit 1)"} {
+				if !strings.Contains(string(out), want) {
+					t.Errorf("output does not contain %q:\n%s", want, out)
+				}
+			}
+			unavailable := "code = Unavailable desc = connection refused"
+			if strings.Contains(tc.wantErr, "cannot tell") && !strings.Contains(string(out), unavailable) {
+				t.Errorf("output does not show the error reading the template:\n%s", out)
+			}
+		})
+	}
+}
+
 // up.sh refuses inputs it cannot deploy before it runs anything that touches the cluster (or even
 // lists it), so a misconfigured rerun leaves the cluster, the deployment and the
 // agentsessionsd-model Secret as they were.

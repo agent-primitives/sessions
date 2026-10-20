@@ -164,13 +164,22 @@ setup() {
 	for v in AGENTSUITE_MODEL_BASE_URL AGENTSUITE_MODEL AGENTSUITE_MODEL_PATH AZURE_MI_CLIENT_ID; do
 		[[ -n "${!v:-}" ]] || fail "${v} is not set"
 	done
-	# phase NAME CMD...: one setup phase, its output in setup.log, a one-line status on stdout.
+	# phase NAME CMD...: one setup phase, its output in setup.log, a one-line status on stdout. CMD
+	# runs in a subshell with errexit set: bash ignores -e in a function called on the left of ||
+	# (`f | redact || rc=$?`), so a failed command in a phase function such as build_tools' cmp would
+	# not fail the phase.
 	phase() {
-		local name="$1" t0=${SECONDS} rc=0
+		local name="$1" t0=${SECONDS} rc
 		shift
 		printf '==> %s\n' "${name}"
 		log "" "==> ${name}  ($(date -u +%FT%TZ))"
-		"$@" 2>&1 | redact >>"${STEP_LOG}" || rc=$?
+		set +e
+		(
+			set -e
+			"$@"
+		) 2>&1 | redact >>"${STEP_LOG}"
+		rc=$?
+		set -e
 		((rc == 0)) || {
 			tail -30 "${STEP_LOG}"
 			fail "${name} (exit ${rc})"
@@ -255,16 +264,26 @@ fetch_token() {
 	sed -n 2p "${TOKEN_FILE}" >"${EXPIRY_FILE}"
 	echo "token: $(head -1 "${TOKEN_FILE}" | wc -c | tr -d ' ') bytes, expires $(date -u -d "@$(cat "${EXPIRY_FILE}")" +%FT%TZ)"
 }
+# template_absent_daemon_ready: the stateless tier's ActorTemplate is absent (the ate API answered
+# NotFound; any other error fails, as in reset) and agentsessionsd has its one replica ready.
 template_absent_daemon_ready() {
-	local t
+	local t found ready
 	t="$(template_name)"
-	if "${ATE[@]}" get actor-template "${t}" -a "${ATESPACE}"; then
+	found="$(template_state "${t}")" || {
+		echo "cannot tell whether ActorTemplate ${t} exists"
+		return 1
+	}
+	if [[ "${found}" != absent ]]; then
 		echo "ActorTemplate ${t} exists; up.sh was to leave it for show to create"
 		return 1
 	fi
-	echo "ActorTemplate ${ATESPACE}/${t} does not exist (the lookup above failed)"
+	echo "ActorTemplate ${ATESPACE}/${t} does not exist (the ate API answered NotFound)"
 	"${K[@]}" -n "${NS}" get deploy agentsessionsd -o jsonpath='{.status.readyReplicas}/{.spec.replicas} ready{"\n"}{.spec.template.spec.containers[0].args}{"\n"}'
-	[[ "$("${K[@]}" -n "${NS}" get deploy agentsessionsd -o jsonpath='{.status.readyReplicas}')" == 1 ]]
+	ready="$("${K[@]}" -n "${NS}" get deploy agentsessionsd -o jsonpath='{.status.readyReplicas}')"
+	[[ "${ready}" == 1 ]] || {
+		echo "agentsessionsd has ${ready:-no} ready replicas, want 1"
+		return 1
+	}
 	"${K[@]}" -n "${NS}" logs deploy/agentsessionsd
 	echo "agentsessionsd is ready with -substrate-harness=writer=${ATESPACE}/${t} while that template does not exist"
 }

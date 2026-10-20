@@ -99,7 +99,8 @@ not provide.
   current protobuf descriptor: pre-v6 descriptors drop `ExecutionStart.model` and report
   policy-enabled turns as tampered. Policy-enabled registration requires a successful bounded
   Describe, including at startup; a failed stored route needs a restart after its endpoint is
-  restored. Unconfigured registration remains probe-free. See [model defaults](spec.md#model-defaults).
+  restored. Unconfigured registration remains probe-free. See
+  [model defaults](spec.md#model-defaults).
 - `model/openai` now refuses nonempty `ModelRequest.Params`, previously silently ignored. A turn
   interrupted under an older build whose harness sets Params fails if recovery must re-drive the
   model call; completed recorded model effects remain replayable without invoking the adapter.

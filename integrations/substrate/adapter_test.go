@@ -521,17 +521,20 @@ func TestSnapshotFidelityDoesNotFallBackToAnotherEntry(t *testing.T) {
 		wantURI  string
 		want     substrate.SnapshotFidelity
 		notReady bool
+		pending  bool
 	}{
 		{name: "no snapshot", want: substrate.SnapshotFidelityUnknown},
-		{name: "no completed snapshot", snaps: []*atepb.Snapshot{durableSnapshot(2, "pending", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)}, want: substrate.SnapshotFidelityUnknown, notReady: true},
+		{name: "no completed snapshot", snaps: []*atepb.Snapshot{durableSnapshot(2, "pending", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)}, want: substrate.SnapshotFidelityUnknown, notReady: true, pending: true},
+		{name: "unspecified durable status is not pending", snaps: []*atepb.Snapshot{durableSnapshot(2, "unknown", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_UNSPECIFIED)}, want: substrate.SnapshotFidelityUnknown, notReady: true},
+		{name: "newer local-only blocks older pending", snaps: []*atepb.Snapshot{durableSnapshot(1, "pending", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING), {Generation: 2, Fidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY}}, want: substrate.SnapshotFidelityUnknown, notReady: true},
 		{name: "no durable snapshot", snaps: []*atepb.Snapshot{{Generation: 3, Fidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY}}, want: substrate.SnapshotFidelityUnknown, notReady: true},
 		{name: "tie uses later entry", snaps: []*atepb.Snapshot{durableSnapshot(2, "first", completed), {Generation: 2, Fidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, DurableSnapshot: &atepb.SnapshotStorage{Status: completed, Object: &atepb.ObjectSnapshot{SnapshotUri: "second"}}}}, wantURI: "second", want: substrate.SnapshotFidelityVolumes},
 		{name: "missing URI keeps selected fidelity", snaps: []*atepb.Snapshot{durableSnapshot(1, "older", completed), {Generation: 2, Fidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, DurableSnapshot: &atepb.SnapshotStorage{Status: completed}}}, want: substrate.SnapshotFidelityVolumes},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := actorInfo(&atepb.Actor{Status: &atepb.ActorStatus{Snapshots: tc.snaps}})
-			if got.Snapshot != tc.wantURI || got.SnapshotFidelity != tc.want || got.SnapshotNotReady != tc.notReady {
-				t.Fatalf("info=%+v want URI=%q fidelity=%v notReady=%v", got, tc.wantURI, tc.want, tc.notReady)
+			if got.Snapshot != tc.wantURI || got.SnapshotFidelity != tc.want || got.SnapshotNotReady != tc.notReady || got.SnapshotPending != tc.pending {
+				t.Fatalf("info=%+v want URI=%q fidelity=%v notReady=%v pending=%v", got, tc.wantURI, tc.want, tc.notReady, tc.pending)
 			}
 		})
 	}

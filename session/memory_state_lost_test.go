@@ -971,16 +971,17 @@ func TestResumeWhoseActorIsReplacedAfterTheFailedResumeIsRefused(t *testing.T) {
 
 // The session's own actor can hold a newer snapshot than the journal's last SUSPEND names: the
 // SUSPEND append failed after the snapshot was taken, or another host woke and suspended it again.
-// Restore refuses that stale checkpoint before resuming (INTERNAL), without declaring the recorded
-// actor's memory lost. Another UID remains FAILED_PRECONDITION. Neither refusal journals anything;
-// recovery of the recorded actor requires an explicit new checkpoint, not retrying the stale ref.
+// Restore refuses that stale checkpoint before resuming (FAILED_PRECONDITION), without declaring
+// the recorded actor's memory lost. Another UID remains FAILED_PRECONDITION, as lost memory. Neither
+// refusal journals anything; recovery of the recorded actor requires an explicit new checkpoint,
+// not retrying the stale ref.
 func TestResumeOfTheRecordedActorHoldingANewerSnapshot(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		replace bool
 		want    codes.Code
 	}{
-		{name: "the recorded actor suspended again refuses the stale checkpoint", want: codes.Internal},
+		{name: "the recorded actor suspended again refuses the stale checkpoint", want: codes.FailedPrecondition},
 		{name: "a replacement holding a snapshot is lost", replace: true, want: codes.FailedPrecondition},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1040,7 +1041,7 @@ func TestResumeOfTheRecordedActorHoldingANewerSnapshot(t *testing.T) {
 			if failed.Load() {
 				t.Fatal("stale checkpoint reached ResumeActor")
 			}
-			if tc.want == codes.FailedPrecondition {
+			if tc.replace {
 				if msg := status.Convert(err).Message(); !strings.Contains(msg, "cannot be restored") {
 					t.Errorf("error %q does not say the state cannot be restored", msg)
 				}

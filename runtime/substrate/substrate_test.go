@@ -143,7 +143,7 @@ func (m *mockControl) GetActor(ctx context.Context, a substrate.ActorRef) (subst
 		if m.info.NoSnapshotHistory && m.snapshots[a.Name] == "" {
 			fidelity = substrate.SnapshotFidelityUnknown
 		}
-		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: fidelity, SnapshotNotReady: m.info.SnapshotNotReady, NoSnapshotHistory: m.info.NoSnapshotHistory, UID: uid}, nil
+		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: fidelity, SnapshotNotReady: m.info.SnapshotNotReady, SnapshotPending: m.info.SnapshotPending, NoSnapshotHistory: m.info.NoSnapshotHistory, UID: uid}, nil
 	}
 	if m.status != substrate.StatusUnknown { // canned state for the suspend/restore cases
 		return substrate.ActorInfo{Status: m.status, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: m.info.SnapshotFidelity, UID: m.uid(a.Name)}, nil
@@ -348,27 +348,36 @@ func TestRestoreRequiresHeldSnapshot(t *testing.T) {
 		memory   bool
 		wantOK   bool
 		notReady bool
+		pending  bool
+		precond  bool // FAILED_PRECONDITION through api.ErrInvalidCheckpoint
+		busy     bool
 	}{
-		{name: "running no-held stateless local-only", ref: api.SnapshotRef{Local: "s"}, status: substrate.StatusRunning, notReady: true},
-		{name: "running no-held memory local-only", ref: api.SnapshotRef{Local: "s"}, status: substrate.StatusRunning, memory: true, notReady: true},
-		{name: "wrong URI", ref: api.SnapshotRef{Local: "s", ExternalURI: "wrong"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityVolumes},
-		{name: "missing URI", ref: api.SnapshotRef{Local: "s"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, volumes: true},
+		// ResumeActor is a no-op for RUNNING: repeated Resume, dial retry and interrupted turns.
+		{name: "running no-held stateless local-only", ref: api.SnapshotRef{Local: "s"}, status: substrate.StatusRunning, notReady: true, wantOK: true},
+		{name: "running no-held memory local-only", ref: api.SnapshotRef{Local: "s"}, status: substrate.StatusRunning, memory: true, notReady: true, wantOK: true},
+		{name: "running held pending", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusRunning, notReady: true, pending: true, wantOK: true},
+		{name: "running newer held snapshot", ref: api.SnapshotRef{Local: "s", ExternalURI: "wrong"}, status: substrate.StatusRunning, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, volumes: true, wantOK: true},
+		{name: "suspended pending", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, notReady: true, pending: true},
+		{name: "suspended local-only", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, notReady: true, precond: true},
+		{name: "wrong URI", ref: api.SnapshotRef{Local: "s", ExternalURI: "wrong"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, precond: true},
+		{name: "missing URI", ref: api.SnapshotRef{Local: "s"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, volumes: true, precond: true},
 		{name: "legacy memory flag without checkpoint", ref: api.SnapshotRef{Local: "s", Memory: true}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityMemory, wantOK: true},
-		{name: "missing actor name", ref: api.SnapshotRef{ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityVolumes},
+		{name: "missing actor name", ref: api.SnapshotRef{ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, precond: true},
 		{name: "missing actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, uri: "held", fidelity: substrate.SnapshotFidelityVolumes},
 		{name: "missing memory actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, uri: "held", fidelity: substrate.SnapshotFidelityMemory, memory: true},
-		{name: "missing held snapshot", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, fidelity: substrate.SnapshotFidelityVolumes},
+		{name: "missing held snapshot", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, fidelity: substrate.SnapshotFidelityVolumes, precond: true},
 		{name: "legacy memory flag false", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityMemory, wantOK: true},
 		{name: "legacy memory flag true", ref: api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, wantOK: true},
 		{name: "unknown fidelity", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", wantOK: true},
 		{name: "unrecognized fidelity", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelity(99), wantOK: true},
-		{name: "rootfs is not volumes", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityRootFS, volumes: true},
-		{name: "volumes mode refuses memory", ref: api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityMemory, volumes: true},
-		{name: "memory descriptor refuses files", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, memory: true},
-		{name: "running volumes actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusRunning, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, volumes: true},
-		{name: "running memory actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, status: substrate.StatusRunning, uri: "held", fidelity: substrate.SnapshotFidelityMemory},
-		{name: "transitioning actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusTransitioning, uri: "held", fidelity: substrate.SnapshotFidelityVolumes},
-		{name: "terminated actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusTerminated, uri: "held", fidelity: substrate.SnapshotFidelityVolumes},
+		{name: "rootfs is not volumes", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityRootFS, volumes: true, precond: true},
+		{name: "volumes mode refuses memory", ref: api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityMemory, volumes: true, precond: true},
+		{name: "memory descriptor refuses files", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, memory: true, precond: true},
+		{name: "running volumes actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusRunning, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, volumes: true, wantOK: true},
+		{name: "running memory actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, status: substrate.StatusRunning, uri: "held", fidelity: substrate.SnapshotFidelityMemory, memory: true, wantOK: true},
+		{name: "transitioning actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusTransitioning, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, busy: true},
+		{name: "transitioning pending memory actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, status: substrate.StatusTransitioning, memory: true, notReady: true, pending: true, busy: true},
+		{name: "terminated actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusTerminated, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, precond: true},
 		{name: "volumes", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, volumes: true, wantOK: true},
 		{name: "memory", ref: api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityMemory, memory: true, wantOK: true},
 		{name: "default nonmemory", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityRootFS, wantOK: true},
@@ -379,6 +388,7 @@ func TestRestoreRequiresHeldSnapshot(t *testing.T) {
 			m := &mockControl{info: running("worker-a")}
 			m.info.SnapshotFidelity = tc.fidelity
 			m.info.SnapshotNotReady = tc.notReady
+			m.info.SnapshotPending = tc.pending
 			if tc.status != substrate.StatusUnknown {
 				m.exists("s", tc.status)
 			}
@@ -401,11 +411,25 @@ func TestRestoreRequiresHeldSnapshot(t *testing.T) {
 				}
 				return
 			}
+			if tc.busy {
+				// Mid-transition settles on its own: retryable ABORTED, never a restore refusal.
+				if !errors.Is(err, substrate.ErrActorBusy) || !errors.Is(err, api.ErrComputeBusy) || errors.Is(err, substrate.ErrSnapshotNotRestorable) ||
+					errors.Is(err, api.ErrCheckpointPending) || !reflect.DeepEqual(m.calls, []string{"get:s"}) || !reflect.DeepEqual(inc, api.Incarnation{}) {
+					t.Fatalf("transitioning restore=%+v err=%v calls=%v, want only ErrActorBusy", inc, err, m.calls)
+				}
+				return
+			}
 			if !errors.Is(err, substrate.ErrSnapshotNotRestorable) || !reflect.DeepEqual(inc, api.Incarnation{}) {
 				t.Fatalf("restore=%+v err=%v, want ErrSnapshotNotRestorable", inc, err)
 			}
 			if tc.notReady && (!errors.Is(err, substrate.ErrSnapshotNotReady) || errors.Is(err, api.ErrMemoryStateLost)) {
 				t.Fatalf("not-ready classification: %v", err)
+			}
+			if errors.Is(err, api.ErrCheckpointPending) != tc.pending || errors.Is(err, api.ErrInvalidCheckpoint) != tc.precond {
+				t.Fatalf("pending=%t precondition=%t classification: %v", tc.pending, tc.precond, err)
+			}
+			if tc.status == substrate.StatusTerminated && !strings.Contains(err.Error(), "in state terminated") {
+				t.Fatalf("unreadable actor state: %v", err)
 			}
 			if tc.memory && tc.status == substrate.StatusUnknown && (!errors.Is(err, substrate.ErrMemoryStateLost) || !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound)) {
 				t.Fatalf("missing memory actor lost error causes: %v", err)
@@ -617,19 +641,86 @@ func TestRestoreReplacementPrecedesFidelityError(t *testing.T) {
 	}
 }
 
-func TestRestoreMissingObservedUIDKeepsPreflightRefusal(t *testing.T) {
-	m := &mockControl{info: running("w"), getNoUID: true}
-	m.exists("s", substrate.StatusRunning)
-	m.holds("s", "held")
-	inc, err := newMemoryBackend(m).RestoreInstance(t.Context(), api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, func() (string, error) {
-		m.calls = append(m.calls, "read-record")
-		return "recorded-uid", nil
-	})
-	if !errors.Is(err, substrate.ErrSnapshotNotRestorable) || errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, substrate.ErrMemoryStateLost) {
-		t.Fatalf("missing observed UID: err=%v, want original restore refusal, not proven memory loss", err)
+// A RUNNING memory actor keeps main's no-op Resume, whatever snapshot it now holds, unless a
+// nonempty observed UID differs from the recorded one. Missing evidence is not proof of loss. A
+// proven replacement is loss before readiness; a stale SUSPENDED ref without proof is not.
+func TestRestoreOfMemoryActorIsGatedOnRecordedUID(t *testing.T) {
+	for _, tc := range []struct {
+		name, recorded string
+		suspended      bool
+		pending        bool
+		noUID          bool
+		unreadable     bool
+		wantCalls      []string
+		lost, stale    bool
+	}{
+		{name: "suspended replaced", recorded: "old-uid", suspended: true, wantCalls: []string{"get:s", "read-record"}, lost: true},
+		{name: "suspended record unreadable", suspended: true, unreadable: true, wantCalls: []string{"get:s", "read-record"}},
+		{name: "running record unreadable", unreadable: true, wantCalls: []string{"get:s", "read-record"}},
+		{name: "running matching", recorded: "uid-s", wantCalls: []string{"get:s", "read-record", "resume:s"}},
+		{name: "running mismatched", recorded: "old-uid", wantCalls: []string{"get:s", "read-record"}, lost: true},
+		{name: "running missing observed", recorded: "uid-s", noUID: true, wantCalls: []string{"get:s", "resume:s"}},
+		{name: "running missing recorded", wantCalls: []string{"get:s", "read-record", "resume:s"}},
+		{name: "suspended pending replaced", recorded: "old-uid", suspended: true, pending: true, wantCalls: []string{"get:s", "read-record"}, lost: true},
+		{name: "suspended stale matching", recorded: "uid-s", suspended: true, wantCalls: []string{"get:s", "read-record"}, stale: true},
+		{name: "suspended stale missing observed", recorded: "old-uid", suspended: true, noUID: true, wantCalls: []string{"get:s"}, stale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockControl{info: running("w"), getNoUID: tc.noUID, uids: map[string]string{"s": "uid-s"}}
+			m.info.SnapshotNotReady, m.info.SnapshotPending = tc.pending, tc.pending
+			status := substrate.StatusRunning
+			if tc.suspended {
+				status = substrate.StatusSuspended
+			}
+			m.exists("s", status)
+			m.holds("s", "newer") // the URI check applies only to a SUSPENDED actor
+			inc, err := newMemoryBackend(m).RestoreInstance(t.Context(), api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, func() (string, error) {
+				m.calls = append(m.calls, "read-record")
+				if tc.unreadable {
+					return "", errJournalUnreadable
+				}
+				return tc.recorded, nil
+			})
+			if !reflect.DeepEqual(m.calls, tc.wantCalls) {
+				t.Fatalf("calls=%v want %v (err=%v)", m.calls, tc.wantCalls, err)
+			}
+			if tc.lost {
+				if !errors.Is(err, substrate.ErrMemoryStateLost) || !errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, api.ErrCheckpointPending) || !reflect.DeepEqual(inc, api.Incarnation{}) {
+					t.Fatalf("replaced actor: inc=%+v err=%v, want ErrMemoryStateLost only", inc, err)
+				}
+				return
+			}
+			if tc.unreadable {
+				// Without the record, admission cannot rule out replacement: refuse (INTERNAL), not loss.
+				if !errors.Is(err, errJournalUnreadable) || !errors.Is(err, substrate.ErrSnapshotNotRestorable) || errors.Is(err, api.ErrMemoryStateLost) ||
+					errors.Is(err, api.ErrInvalidCheckpoint) || errors.Is(err, api.ErrComputeBusy) || !reflect.DeepEqual(inc, api.Incarnation{}) {
+					t.Fatalf("unreadable record: inc=%+v err=%v, want a non-loss refusal wrapping the read error", inc, err)
+				}
+				return
+			}
+			if tc.stale {
+				if !errors.Is(err, api.ErrInvalidCheckpoint) || !errors.Is(err, substrate.ErrSnapshotNotRestorable) || errors.Is(err, api.ErrMemoryStateLost) || !reflect.DeepEqual(inc, api.Incarnation{}) {
+					t.Fatalf("stale ref: inc=%+v err=%v, want ErrInvalidCheckpoint, not loss", inc, err)
+				}
+				return
+			}
+			if err != nil || inc.ComputeInstance != "uid-s" {
+				t.Fatalf("RUNNING no-op: inc=%+v err=%v", inc, err)
+			}
+		})
 	}
-	if !reflect.DeepEqual(inc, api.Incarnation{}) || !reflect.DeepEqual(m.calls, []string{"get:s", "read-record"}) || m.actors["s"] != substrate.StatusRunning || m.snapshots["s"] != "held" {
-		t.Fatalf("refused restore changed compute: inc=%+v calls=%v actors=%v snapshots=%v", inc, m.calls, m.actors, m.snapshots)
+}
+
+var errJournalUnreadable = errors.New("journal unreadable")
+
+func TestActorStatusString(t *testing.T) {
+	for st, want := range map[substrate.ActorStatus]string{
+		substrate.StatusUnknown: "unknown", substrate.StatusRunning: "running", substrate.StatusSuspended: "suspended",
+		substrate.StatusTerminated: "terminated", substrate.StatusTransitioning: "transitioning", substrate.ActorStatus(42): "ActorStatus(42)",
+	} {
+		if got := st.String(); got != want {
+			t.Errorf("%d.String()=%q want %q", int(st), got, want)
+		}
 	}
 }
 
@@ -1171,7 +1262,7 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 		getErr    error
 		holds     string // the snapshot the existing actor holds
 		snapshot  string // the ExternalURI restored: "" is gs://snap/sess-x, "-" is none
-		recorded  string // the UID RestoreInstance reads: "" calls Restore, "-" reads none, "!" fails the read
+		recorded  string // the UID RestoreInstance reads: "" calls Restore, "-" reads none, "!" fails the read after the resume
 		resumeErr error  // nil: resumeErr below, which GetActor has to classify
 		wantCalls []string
 		wantLost  bool
@@ -1273,9 +1364,11 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 				uri = tc.snapshot
 			}
 			ref := api.SnapshotRef{Local: "sess-x", ExternalURI: uri, Memory: uri != ""}
-			// Start with valid held state (or live no-checkpoint state), then race the
-			// lifecycle after preflight to preserve failed-resume classification coverage.
-			actors, snapshots, getErr := m.actors, m.snapshots, m.getErr
+			// Start with valid held state (or live no-checkpoint state) on the recorded actor, then
+			// race the lifecycle after preflight, which admits it, so these rows cover failed-resume
+			// classification. Preflight loss and read refusal are covered by
+			// TestRestoreOfMemoryActorIsGatedOnRecordedUID.
+			actors, snapshots, getErr, uids := m.actors, m.snapshots, m.getErr, m.uids
 			state := substrate.StatusRunning
 			if uri != "" {
 				state = substrate.StatusSuspended
@@ -1283,11 +1376,27 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 			m.actors = map[string]substrate.ActorStatus{"sess-x": state}
 			m.snapshots = map[string]string{"sess-x": uri}
 			m.getErr = nil
+			preflightUID := "uid-sess-x-1"
+			if tc.recorded != "" && tc.recorded != "-" && tc.recorded != "!" {
+				preflightUID = tc.recorded
+			}
+			m.uids = map[string]string{"sess-x": preflightUID}
 			m.afterGet = func(string) {
-				m.actors, m.snapshots, m.getErr = actors, snapshots, getErr
+				m.actors, m.snapshots, m.getErr, m.uids = actors, snapshots, getErr, uids
 				m.afterGet = nil
 			}
-			wantCalls := append([]string{"get:sess-x"}, tc.wantCalls...)
+			wantCalls := []string{"get:sess-x"}
+			desc, derr := tc.backend(&mockControl{}).Describe(context.Background())
+			if derr != nil {
+				t.Fatal(derr)
+			}
+			preflightRead := tc.recorded != "" && desc.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+			if preflightRead {
+				// The admission read sees the recorded actor; only a later read can see loss.
+				wantCalls = append(wantCalls, "read-record")
+			}
+			wantCalls = append(wantCalls, tc.wantCalls...)
+			reads := 0
 			var err error
 			switch tc.recorded {
 			case "":
@@ -1296,8 +1405,12 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 				// The record is read after GetActor answers, when the backend decides; calls shows when.
 				_, err = tc.backend(m).RestoreInstance(context.Background(), ref, func() (string, error) {
 					m.calls = append(m.calls, "read-record")
+					reads++
 					switch tc.recorded {
 					case "!":
+						if preflightRead && reads == 1 {
+							return preflightUID, nil
+						}
 						return "", errors.New("journal unreadable")
 					case "-":
 						return "", nil

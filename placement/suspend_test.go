@@ -397,13 +397,7 @@ func TestPlacerSessionOperationsRejectOverlap(t *testing.T) {
 					if err != nil || state != want {
 						t.Fatalf("outer %s left compute=%s, err=%v; want %s", outer, state, err, want)
 					}
-					// A held checkpoint can only restore a suspended actor. Re-park after the
-					// successful outer Resume before testing that its session guard was released.
-					if outer == "Resume" && overlap == "Resume" {
-						if _, err := p.Suspend(ctx, log, "session"); err != nil {
-							t.Fatal(err)
-						}
-					}
+					// The same operation can retry after the outer call releases the session guard.
 					if err := invoke(overlap, log, "session"); err != nil {
 						t.Fatalf("retry %s after %s: %v", overlap, outer, err)
 					}

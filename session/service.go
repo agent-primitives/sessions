@@ -1023,6 +1023,8 @@ func forkError(parent string, err error) error {
 	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing),
 		errors.Is(err, api.ErrSnapshotSuperseded), errors.Is(err, api.ErrComputeBusy):
 		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, api.ErrCheckpointPending):
+		return status.Errorf(codes.Unavailable, "fork: session %q: %v", parent, err)
 	default:
 		return status.Errorf(codes.Internal, "fork: %v", err)
 	}
@@ -1156,6 +1158,8 @@ func suspendError(uid string, err error) error {
 		return status.Errorf(codes.FailedPrecondition, "suspend: %v", err)
 	case errors.Is(err, placement.ErrUnknownHarness):
 		return harnessError(err)
+	case errors.Is(err, api.ErrCheckpointPending):
+		return status.Errorf(codes.Unavailable, "suspend: session %q: %v", uid, err)
 	default:
 		return status.Errorf(codes.Internal, "suspend: %v", err)
 	}
@@ -1197,6 +1201,8 @@ func resumeError(uid string, err error) error {
 		// A stateful Fork of this session superseded this Resume's turn, or the session's compute
 		// is in the middle of another operation; retry once it completes.
 		return status.Errorf(codes.Aborted, "resume: %v", err)
+	case errors.Is(err, api.ErrCheckpointPending):
+		return status.Errorf(codes.Unavailable, "resume: session %q: %v", uid, err)
 	default:
 		return status.Errorf(codes.Internal, "resume: %v", err)
 	}
@@ -1241,6 +1247,8 @@ func execError(uid string, err error) error {
 	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing),
 		errors.Is(err, api.ErrComputeBusy):
 		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, api.ErrCheckpointPending):
+		return status.Errorf(codes.Unavailable, "exec: session %q: %v", uid, err)
 	default:
 		return status.Error(codes.Internal, err.Error())
 	}

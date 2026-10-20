@@ -201,12 +201,16 @@ func (ad *Adapter) DeleteTag(ctx context.Context, tag substrate.SnapshotID) erro
 func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 	st := a.GetStatus()
 	snap := heldSnapshot(st)
-	notReady := snap != nil && snap.GetDurableSnapshot().GetStatus() != atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+	durable := snap.GetDurableSnapshot().GetStatus()
+	notReady := snap != nil && durable != atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
 	if notReady {
 		snap = nil // never expose an older completed generation as the held checkpoint
 	}
 	return substrate.ActorInfo{
 		SnapshotNotReady: notReady,
+		// Only an explicit PENDING upload can complete by waiting; a local-only or unrecognized
+		// durable status needs inspection and a new durable checkpoint.
+		SnapshotPending: notReady && durable == atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING,
 		// Unknown legacy fields (notably pre-list external_snapshot) are not proof of no history.
 		NoSnapshotHistory: st != nil && a.GetMetadata().GetUid() != "" &&
 			st.GetState() == atepb.ActorState_ACTOR_STATE_SUSPENDED &&

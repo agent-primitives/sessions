@@ -74,7 +74,7 @@ func main() {
 
 // printError writes the line agentctl prints for a failed command.
 func printError(w io.Writer, err error) {
-	fmt.Fprintln(w, "agentctl:", err)
+	_, _ = fmt.Fprintln(w, "agentctl:", err)
 }
 
 func usage() {

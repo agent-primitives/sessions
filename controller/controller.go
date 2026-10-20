@@ -392,7 +392,11 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		}
 	}
 	if err := runErr; err != nil {
-		runFinished(err, "error_kind", "harness_run_failed")
+		kind := "harness_run_failed"
+		if errors.Is(err, api.ErrModelNotAllowed) || errors.Is(err, api.ErrInvalidModelPolicy) {
+			kind = controllerErrorKind(err)
+		}
+		runFinished(err, "error_kind", kind)
 		// Best-effort: record the failure. If this append itself fails we still surface the
 		// original harness error to the caller.
 		_, _ = c.appendSeq(executionID, api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
@@ -658,6 +662,8 @@ func controllerErrorKind(err error) string {
 	switch {
 	case err == nil:
 		return ""
+	case errors.Is(err, api.ErrModelNotAllowed), errors.Is(err, api.ErrInvalidModelPolicy):
+		return "model_policy_refused"
 	case errors.Is(err, eventlog.ErrConflict):
 		return "conflict"
 	case errors.Is(err, eventlog.ErrFenced):

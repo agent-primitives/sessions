@@ -535,21 +535,10 @@ func (c *Client) post(ctx context.Context, body []byte) (*http.Response, error) 
 	return c.http.Do(httpReq)
 }
 
-// statusError turns a non-200 into an error carrying the provider's own message, which is usually
-// far more actionable than the status code alone (a wrong model id and a missing key are both 4xx).
+// statusError retains bounded diagnostic identifiers, never provider messages or raw bodies:
+// model errors can become durable journal descriptions.
 func statusError(model string, code int, raw []byte) error {
-	var e errorResponse
-	if err := json.Unmarshal(raw, &e); err == nil && e.Error.Message != "" {
-		return fmt.Errorf("openai: %s: %s (http %d)", model, e.Error.Message, code)
-	}
-	detail := strings.TrimSpace(string(raw))
-	if len(detail) > 200 {
-		detail = detail[:200] + "..."
-	}
-	if detail == "" {
-		return fmt.Errorf("openai: %s: http %d", model, code)
-	}
-	return fmt.Errorf("openai: %s: http %d: %s", model, code, detail)
+	return fmt.Errorf("openai: %s: http %d%s", model, code, providerErrorDetails(raw))
 }
 
 // toModelResponse is shared by streaming and nonstreaming so the journal receives the same
@@ -641,11 +630,4 @@ type chatUsage struct {
 
 func (u chatUsage) toAPI(model string) api.Usage {
 	return api.Usage{Model: model, InputTokens: u.PromptTokens, OutputTokens: u.CompletionTokens, ReasoningTokens: u.CompletionTokensDetails.ReasoningTokens}
-}
-
-type errorResponse struct {
-	Error struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
-	} `json:"error"`
 }

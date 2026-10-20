@@ -532,6 +532,9 @@ func TestVolumesOnlyAdmissionAndConflictingDescriptor(t *testing.T) {
 		if !errors.Is(err, api.ErrInvalidCheckpoint) || ref != (api.SnapshotRef{}) {
 			t.Fatalf("conflicting requirements: ref=%+v err=%v", ref, err)
 		}
+		if !strings.Contains(err.Error(), "actor space/sess-x:") {
+			t.Errorf("conflicting requirements refusal %q does not name the actor", err)
+		}
 		if len(m.calls) != 0 {
 			t.Fatalf("conflicting requirements called control plane: %v", m.calls)
 		}
@@ -1647,6 +1650,59 @@ func TestCreateWhoseActorChangesDuringTheResume(t *testing.T) {
 					t.Errorf("Create error = %v, want it not to wrap %v", err, not)
 				}
 			}
+		})
+	}
+}
+
+// A fidelity refusal is diagnosable from its message alone: Snapshot (Suspend), Restore (Resume)
+// and Create's attach each name the actor and the required and observed fidelity, keep the error
+// identities the session service maps to FAILED_PRECONDITION, and never quote the snapshot URI.
+func TestCheckpointRefusalNamesActorAndFidelity(t *testing.T) {
+	for _, tc := range []struct {
+		mode            string
+		observed        substrate.SnapshotFidelity
+		required, saw   string
+		memoryStateLost bool
+		makeBackend     func(*mockControl) *substrate.Backend
+	}{
+		{
+			mode: "memory tier on a VOLUMES template", observed: substrate.SnapshotFidelityVolumes,
+			required: "required MEMORY", saw: "observed VOLUMES", memoryStateLost: true,
+			makeBackend: func(m *mockControl) *substrate.Backend { return newMemoryBackend(m) },
+		},
+		{
+			mode: "VOLUMES-only backend observing MEMORY", observed: substrate.SnapshotFidelityMemory,
+			required: "required VOLUMES", saw: "observed MEMORY",
+			makeBackend: func(m *mockControl) *substrate.Backend {
+				return newBackend(m, substrate.WithVolumesOnly())
+			},
+		},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			m := &mockControl{info: running("w")}
+			m.info.SnapshotFidelity = tc.observed
+			check := func(operation string, err error) {
+				t.Helper()
+				lost := errors.Is(err, api.ErrMemoryStateLost)
+				if !errors.Is(err, api.ErrInvalidCheckpoint) || lost != tc.memoryStateLost {
+					t.Fatalf("%s: err=%v, want ErrInvalidCheckpoint, ErrMemoryStateLost=%t",
+						operation, err, tc.memoryStateLost)
+				}
+				for _, want := range []string{"actor space/s:", tc.required, tc.saw} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("%s: %q does not contain %q", operation, err, want)
+					}
+				}
+				if strings.Contains(err.Error(), "gs://snap/") {
+					t.Errorf("%s: refusal exposes the snapshot URI: %v", operation, err)
+				}
+			}
+			_, err := tc.makeBackend(m).Snapshot(t.Context(), api.Incarnation{ID: "s"}, api.SnapshotExternal)
+			check("snapshot", err)
+			_, err = tc.makeBackend(m).Restore(t.Context(), api.SnapshotRef{Local: "s"})
+			check("restore", err)
+			_, err = tc.makeBackend(m).Create(t.Context(), &api.SessionSpec{SessionUID: "s"})
+			check("create", err)
 		})
 	}
 }

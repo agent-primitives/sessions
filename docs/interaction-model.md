@@ -243,8 +243,10 @@ gate without `RESUME`, or finish and record `RESUME`. An approved call without a
 executing the tool; an approved executor failure records `EXECUTOR_ERROR` for harness/model
 continuation rather than turning that handled receipt into an RPC transport failure.
 
-This gate is stateless only. Identity is provenance, not authorization; there is no policy hook,
-automatic decision, approval timeout or expiry. Snapshots and unresolved requests are retained
+This gate is stateless only. Identity is provenance, not authorization. Custom Go hosts can install
+[optional RPC authorization](security.md#optional-go-rpc-authorization), including independent
+approve permission; the default daemon remains unenforced. There is no tool/resource authorization
+hook, automatic decision, approval timeout or expiry. Snapshots and unresolved requests are retained
 indefinitely. Cancel remains `UNIMPLEMENTED`; a decision is not cancellation or teardown.
 DeleteSession commits permanent intent without reclaiming resources and refuses all decisions,
 including exact historical retries.
@@ -307,9 +309,11 @@ Daemon/CLI protocol selection remains Chat Completions; `--model-path` changes t
 Being explicit here is part of the contract.
 
 - **No hosted service.** There is no SaaS and no account. You run the host.
-- **No authentication, authorization, or transport security.** Every gRPC path is plaintext,
-  `IdentityRef` is recorded but never enforced, and `project` is a filter rather than a tenancy
-  boundary. See [`security.md`](security.md) before exposing a host to anything.
+- **No enforced daemon authentication, authorization, or transport security.** Its gRPC paths are
+  plaintext; custom Go hosts can compose [optional RPC
+  authorization](security.md#optional-go-rpc-authorization) and caller authentication.
+  `IdentityRef` is provenance, not verified identity; `project` is a filter, not a tenancy boundary.
+  See [`security.md`](security.md) before exposing a host to anything.
 - **No bundled model provider.** `model/openai` speaks a wire protocol; it ships no vendor SDK and
   no credentials.
 - **No vendor-specific anything.** Compute, identity, storage, and model access are all seams, and

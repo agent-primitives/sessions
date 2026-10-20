@@ -9,19 +9,21 @@ not provide.
 
 ### Added
 
-- Go embedders can configure `placement.WithModelPolicy(api.ModelPolicy{Default, Allowed})` per
-  harness route. New sessions validate `Session.model` at creation (`INVALID_ARGUMENT`) and pass its
-  effective default through `Start.Model` and `ExecutionStart.model`. Every new service-created
-  session applies current selected-route policy, including restricted overrides from initially
-  unconfigured routes and later policy activation. Registration checks
-  `Descriptor.Models` is a subset, never infers its default, and fails closed on a bounded Describe
-  failure. Per-call overrides are allowed within policy. An invalid live model request is
-  execution-fatal even if caught: no provider call or `MODEL_CALL`, later effects refused,
-  best-effort `ERROR` and no `END`. Stock Chat Completions and Responses calls send the exact
-  validated model ID, including `echo`, rather than substituting their configured fallback.
-  Policy-Describe failures retain correlated, message-free operator diagnostics; direct registry
-  store failures retain their trusted cause. Daemon bindings and model-to-deployment mappings are
-  not included.
+- Go embedders can configure per-route model defaults and allowed IDs with
+  `placement.WithModelPolicy`. Registration validates the descriptor against policy; new sessions
+  validate their default at creation (`INVALID_ARGUMENT`) and Exec/Resume (`FAILED_PRECONDITION`).
+  Live model-policy refusals are execution-fatal; replay keeps recorded defaults and results.
+  Stock Chat Completions and Responses calls send the exact validated model ID. Daemon bindings
+  and model-to-deployment mappings are not included. See [model defaults](spec.md#model-defaults).
+- Opt-in embedded Sessions and registry RPC authorization with verified callers, independent approve
+  permission, exact-caller allowlists, owned creation and SQL owner-filtered pagination. Inputless
+  Exec approval recovery requires resume as well as exec; ordinary Exec can restore suspended
+  compute with exec alone, while Resume always requires both. Policy requests carry the originating
+  RPC path in Go `AuthorizationRequest.Method`, including compound/recovery/global checks and direct
+  handler calls. Existing unbound rows reach custom policies with a zero Owner; `OwnerAuthorizer`
+  still denies them. `session.WithRegistryLogger` routes registry diagnostics and startup warnings
+  to an embedder-supplied logger. See the
+  [action mapping and limits](docs/security.md#optional-go-rpc-authorization).
 - `model/openai` maps Chat Completions function tools and tool choices, assistant tool-call parts
   and text `ToolResult.Content`. Streaming assembles indexed argument deltas into finalized tool
   parts without emitting tool JSON through the text callback. Replay and completed-effect recovery
@@ -59,6 +61,10 @@ not provide.
 
 ### Security
 
+- Chat Completions status errors, including streaming calls and their journaled errors, now retain
+  only the model, HTTP status and bounded `error.code`/`error.param` identifiers, never provider
+  messages or raw response bodies. Identifier limits and ordering match the Responses adapter.
+  This change does not alter transport, body-read or decode errors.
 - `Exec`, `Resume` and replay reconstruction (`controller.Controller.Replay`, also `Outputs`) verify
   the journal's hash chain before using it and refuse one that fails with the new
   `controller.ErrJournalTampered`; the Sessions API reports `DATA_LOSS`. Before, a record changed in
@@ -68,30 +74,32 @@ not provide.
   pending approval (its park and its approval-request repair) and `Fork` (the copied prefix) check
   the chain too. The chain is unkeyed: this catches corruption and edits that skip rehashing, not a
   writer that recomputes every hash after its edit, and not records removed from the end.
+- The AgentSuite demo (`examples/agentsuite-substrate`) checks its model endpoint with
+  `internal/modelconfig.New`, the check `agentsessionsd` runs at startup: `up.sh` refuses a model
+  API key with a plain-`http` base URL to a host that is not loopback, `localhost` or a `.svc` name
+  before it deploys anything, rather than leaving the daemon to refuse it in the cluster.
 
 ### Changed
 
 - `agentsessionsd` now logs at Warn for tool-executor routes that cannot dispatch because
   `durable_dedup` is false or unknown.
+- Substrate checkpoint fidelity refusals now name the actor (`atespace/name`), and the Suspend,
+  Resume, Exec and Fork `FAILED_PRECONDITION` messages name the session UID, so the CLI output
+  alone identifies the session, actor, and, for a refused observed checkpoint, the required and
+  observed fidelity. Codes and wrapped errors are unchanged.
 
 ### Compatibility
 
-- SQLite schema v6 adds host-owned model-admission flags: creation-time policy opt-in and an
-  independent birth marker for all new sessions, even on unconfigured routes. Genuine pre-policy
-  sessions, including zero-event sessions, remain legacy; fork inherits both flags atomically. Existing journal bytes,
-  hashes and `ModelCall` format are unchanged. Replay/resume restore the recorded effective default;
-  recorded results ignore today's allowlist, while new live effects and unanswered model-intent
-  re-drives check current policy when configured. A recorded nonempty model default retains exact
-  adapter selection even after policy removal; direct adapter calls and pre-policy invocations
-  keep the existing empty/`echo` fallback. Cancelled registrations no longer wait behind another
-  route's policy Describe or persist after cancellation observed before commit. Before
-  upgrading, stop every older host and embedded CLI writer and back up for rollback, following the
+- SQLite schema v6 adds model-admission flags for new sessions; genuine pre-policy sessions,
+  including empty sessions, remain legacy. Fork inherits admission metadata atomically. Existing
+  journal bytes, hashes and `ModelCall` format are unchanged. Before upgrading, stop every older
+  host and embedded CLI writer and back up for rollback, following the
   [rollout order](#sqlite-v4-rollout). Older builds refuse v6 at open, but already-open older writers
-  do not enforce model policy. There is no downgrade migration. Policy-enabled remote registration
-  now requires a bounded successful Describe at startup; a failed stored route needs a restart
-  after its endpoint is restored. Unconfigured registration remains probe-free. Earlier unreleased
-  v6 boolean prototypes cannot read new flag values and must also be stopped, not mixed with this
-  host. Their ambiguous zero rows stay legacy; unknown flag bits refuse Get/List reads.
+  do not enforce model policy. There is no downgrade migration. Auditors must use the current
+  protobuf descriptor: pre-v6 descriptors drop `ExecutionStart.model` and report policy-enabled
+  turns as tampered. Policy-enabled registration requires a successful bounded Describe, including
+  at startup; a failed stored route needs a restart after its endpoint is restored. Unconfigured
+  registration remains probe-free. See [model defaults](spec.md#model-defaults).
 - `model/openai` now refuses nonempty `ModelRequest.Params`, previously silently ignored. A turn
   interrupted under an older build whose harness sets Params fails if recovery must re-drive the
   model call; completed recorded model effects remain replayable without invoking the adapter.
@@ -113,13 +121,38 @@ not provide.
   The reference daemon remains unauthenticated and unenforced; authentication alone is not isolation,
   and there is no daemon required-mode switch.
 - SQLite schema v5 follows approval v3 and deletion v4, adding indexed exact caller issuer/subject
-  ownership and an off-mode journal authorization marker. Legacy and RPC-created sessions remain
-  unbound; ordinary metadata writes and copied history cannot assign or replace owners. No events
-  or hashes are rewritten, and no wire fields change. Older hosts refuse v5 at open time; this host
-  also refuses required, unknown or missing authorization markers at v5 because it cannot enforce
-  caller access. Stop all older writers before the first v5 open, following the
-  [rollout order](#sqlite-v4-rollout). Back up first. Sessions RPCs remain unauthenticated and
-  unenforced.
+  ownership and an off-mode journal authorization marker. Legacy and unenforced RPC-created sessions
+  remain unbound; ordinary metadata writes and copied history cannot assign or replace owners.
+  No events or hashes are rewritten, and no wire fields change. Older hosts refuse v5 at open time;
+  this host also refuses required, unknown or missing authorization markers at v5 because it cannot
+  enforce caller access. Stop all older writers before the first v5 open, following the
+  [rollout order](#sqlite-v4-rollout). Back up first. The default Sessions service remains
+  unauthenticated and unenforced.
+- The new authorization options do not activate required-mode deployment. Journals still require an
+  off marker and unenforced writers can bypass embedded checks. Enforced Fork refuses before IO;
+  enforced Approve clears request actor without claiming verified audit. Owned fork publication,
+  versioned approval audit, journal policy/startup validation, daemon activation and TLS remain
+  unavailable. No wire fields, canonical event format, schema version or default behavior change.
+  `NewHarnessRegistry` now accepts variadic options: ordinary calls remain source-compatible, but
+  function-value assignments using its previous exact signature must wrap or adapt the constructor.
+  `session.WithRegistryLogger` routes registry startup warnings and enforced-mode diagnostics to the
+  embedder's logger, independently of the Sessions service's `WithLogger`; absent or nil, it uses
+  `slog.Default()` captured at construction.
+  Go policy requests identify the full originating RPC path in `AuthorizationRequest.Method`;
+  built-in owner policies still decide by action. This is a Go SPI contract, not a protobuf message
+  or field. Mutation deletion probes acquire and release admission
+  before owner SQL; no admission is held during the query or policy call. A probe can race a later
+  Delete; subsequent guards remain authoritative. Verified callers who know a UID can receive
+  `ABORTED` if exclusive deletion is present at the probe, even without ownership; this grants no
+  access. Policies own failure logs/metrics; services never log raw policy causes. Enforced-mode
+  `INTERNAL` diagnostics include `request_id`, `method`, `error_kind` and stable `error_category`.
+  Known trusted host/store errors log the full cause with category `host`. Model/provider/harness
+  and other unknown-origin errors never log message text: category is `execution` for Exec/Resume,
+  `runtime` for Suspend/Fork, or `external` otherwise. Unknown mixed phases fail closed; store
+  faults inside runtime are not trusted unless known at the service storage boundary. No heuristic
+  redaction is used. Request metadata, credentials and session payloads remain excluded;
+  trusted/off behavior is unchanged. See the
+  [diagnostic-only log exception](docs/observability.md#data-policy).
 - Embedders using `controller.WithToolExecutor` or `placement.WithToolExecutor` must now declare
   durable dedup to keep `Resume` re-driving an interrupted tool call, including a call whose
   executor returned an error the harness did not handle. `Resume` re-runs a turn's trailing

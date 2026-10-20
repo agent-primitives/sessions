@@ -1,9 +1,12 @@
 package controller_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/agent-primitives/sessions/api"
@@ -86,7 +89,9 @@ func TestInvalidModelIsFatalEvenWhenCaught(t *testing.T) {
 				calls++
 				return api.ModelResponse{}, nil
 			}
-			opts := []controller.Option{controller.WithModelPolicy(api.ModelPolicy{Default: "allowed", Allowed: []string{"allowed"}})}
+			var operational bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&operational, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			opts := []controller.Option{controller.WithModelPolicy(api.ModelPolicy{Default: "allowed", Allowed: []string{"allowed"}}), controller.WithLogger(logger)}
 			if streaming {
 				opts = append(opts, controller.WithStreamingModel(func(ctx context.Context, r api.ModelRequest, _ func(string)) (api.ModelResponse, error) {
 					return fn(ctx, r)
@@ -100,6 +105,9 @@ func TestInvalidModelIsFatalEvenWhenCaught(t *testing.T) {
 			err = c.Exec(t.Context(), modelPolicyHarness{requests: []string{"forbidden", "allowed"}, caught: &caught}, nil, 0)
 			if !errors.Is(err, api.ErrModelNotAllowed) {
 				t.Fatalf("Exec = %v", err)
+			}
+			if !strings.Contains(operational.String(), `"error_kind":"model_policy_refused"`) || strings.Contains(operational.String(), `"error_kind":"harness_run_failed"`) {
+				t.Fatalf("policy refusal log = %s", &operational)
 			}
 			if calls != 0 || len(caught) != 6 {
 				t.Fatalf("provider calls/caught = %d/%v", calls, caught)
@@ -141,7 +149,9 @@ func TestModelPolicyResumeChecksOnlyLiveEffects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			log := eventlog.AsStore(eventlog.NewFrom(recs[:tc.cut]))
 			before, _ := log.Head()
-			resume, err := controller.New(log, fn, controller.WithModelPolicy(api.ModelPolicy{Default: "new", Allowed: []string{"new"}}))
+			var operational bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&operational, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			resume, err := controller.New(log, fn, controller.WithModelPolicy(api.ModelPolicy{Default: "new", Allowed: []string{"new"}}), controller.WithLogger(logger))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -160,6 +170,9 @@ func TestModelPolicyResumeChecksOnlyLiveEffects(t *testing.T) {
 				t.Fatalf("provider calls/starts = %d/%v", calls, starts)
 			}
 			if tc.wantErr {
+				if !strings.Contains(operational.String(), `"error_kind":"model_policy_refused"`) {
+					t.Fatalf("recovery refusal log = %s", &operational)
+				}
 				if len(caught) != 3 {
 					t.Fatalf("caught model/output/usage errors = %v", caught)
 				}

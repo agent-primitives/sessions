@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "1.0.0-draft",
+  "mediaType": "application/vnd.agentsuite.manifest.v1+json",
+  "name": "minimal",
+  "agents": [
+    {
+      "id": "writer",
+      "path": "agents/writer.json",
+      "digest": "sha256:9597316f43967e8f7eddf5082c899b5590e9708416c4a47ef5a946a560cdad62"
+    }
+  ],
+  "toolProviderCatalog": {
+    "id": "catalog",
+    "path": "tool-providers/catalog.json",
+    "digest": "sha256:933283a1fa90fd488db3f872fb89dc1572a5f638bf0a81514a542333e310ef95"
+  },
+  "compositions": [
+    {
+      "agent": "writer",
+      "platform": {
+        "os": "linux",
+        "architecture": "amd64"
+      },
+      "path": "compositions/writer-linux-amd64.json",
+      "digest": "sha256:c19a6173a3bad6723b5f4c36f49c8ee21afbd65317d9c9c4275ebd130b2223d5"
+    }
+  ],
+  "buildProfiles": [
+    {
+      "id": "default",
+      "path": "build-profiles/default.json",
+      "digest": "sha256:a7e6136d7e7daf2fcd7e61a149000382032dcbf140f2dda1076d2ee85d0a62cd"
+    }
+  ],
+  "capabilities": [],
+  "extensions": []
+}

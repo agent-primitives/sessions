@@ -20,9 +20,9 @@ func TestApprovalCheckpointRefusalIsAborted(t *testing.T) {
 
 func TestOrdinaryLifecycleJournalContentionIsAborted(t *testing.T) {
 	for _, cause := range []error{eventlog.ErrConflict, eventlog.ErrFenced} {
-		for name, mapError := range map[string]func(error) error{"Suspend": suspendError, "Resume": resumeError} {
+		for name, mapError := range map[string]func(string, error) error{"Suspend": suspendError, "Resume": resumeError} {
 			t.Run(name+"/"+cause.Error(), func(t *testing.T) {
-				if err := mapError(fmt.Errorf("journal: %w", cause)); status.Code(err) != codes.Aborted {
+				if err := mapError("sess-x", fmt.Errorf("journal: %w", cause)); status.Code(err) != codes.Aborted {
 					t.Fatalf("%s=%v, want ABORTED", name, err)
 				}
 			})

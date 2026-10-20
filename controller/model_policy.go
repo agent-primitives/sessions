@@ -13,9 +13,7 @@ import (
 func WithModelPolicy(policy api.ModelPolicy) Option {
 	policy.Allowed = slices.Clone(policy.Allowed)
 	return func(c *Controller) {
-		copy := policy
-		copy.Allowed = slices.Clone(policy.Allowed)
-		c.modelPolicy = &copy
+		c.modelPolicy = &policy
 	}
 }
 

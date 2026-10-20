@@ -115,7 +115,8 @@ The reference daemon does not yet expose binding policy configuration.
 Use a nonempty `Start.Model` as your default; empty retains your existing choice. An empty
 `ModelRequest.Model` also resolves to the recorded default for policy-aware turns. Explicit per-call
 models may differ within the host's allowed set. An invalid live request is execution-fatal even
-if caught: no provider call or `MODEL_CALL`, later effects refused, best-effort `ERROR`, no `END`.
+if caught: no provider call or new `MODEL_CALL`, later effects refused, best-effort `ERROR`, no `END`.
+An existing trailing model intent remains recorded when its re-drive is refused.
 Replay and recorded recovery effects use their original default/hash independently of today's
 policy; only new live effects and unanswered model-intent re-drives check the current allowlist.
 The stock Chat Completions and Responses adapters send the exact validated model ID for these
@@ -449,11 +450,13 @@ add a general sink-concurrency or tool-validation contract.
 
 Clients discover the pending tuple from Session metadata, commit a decision using RPC/SDK
 Approve, then Resume explicitly. Both CLI `approve` and `deny` do those steps. Identity is
-provenance only, not policy/authentication, and there is no authorization hook, approval timeout
-or expiry. Snapshots and unresolved requests are retained indefinitely; Cancel remains
-unavailable. DeleteSession commits permanent intent without resource cleanup and refuses further
-decisions, including exact retries. See [client
-examples](interaction-model.md#approval-decisions-and-recovery) and [security.md](security.md).
+provenance only, not policy/authentication. Custom Go hosts can install
+[optional RPC authorization](security.md#optional-go-rpc-authorization), including independent
+approve permission; the default daemon remains unenforced. There is no tool/resource authorization
+hook, approval timeout or expiry. Snapshots and unresolved requests are retained indefinitely;
+Cancel remains unavailable. DeleteSession commits permanent intent without resource cleanup and
+refuses further decisions, including exact retries. See
+[client examples](interaction-model.md#approval-decisions-and-recovery).
 
 ### Rule 5: pass reasoning parts back verbatim
 

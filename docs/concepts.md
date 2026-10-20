@@ -109,7 +109,8 @@ For every new session, `Session.model` is a validated default whenever its selec
 policy: empty selects the binding's explicit default, nonempty must be allowed (`INVALID_ARGUMENT`
 at creation before persistence). Metadata keeps the requested value. Each new execution resolves
 it against the selected route, including a restricted harness override from an initially
-unconfigured route, before compute is provisioned. Later policy activation on the original route
+unconfigured route, refusing a disallowed stored default with `FAILED_PRECONDITION` before compute
+is provisioned. Later policy activation on the original route
 also applies to these modern sessions. The effective default is delivered in `Start.Model` and
 recorded in `ExecutionStart.model`. An empty per-call model uses that effective default; an explicit
 per-call ID may override it within the allowed set. Existing `ModelCall.model` and `input_hash`
@@ -121,7 +122,8 @@ the selected ID. Direct adapter calls and pre-policy invocations retain the exis
 fallback.
 
 An invalid live model request is **execution-fatal even if the harness catches the error**. It calls
-no provider, appends no `MODEL_CALL`, refuses later effects, and ends with best-effort `ERROR`, not
+no provider, appends no new `MODEL_CALL` (an existing trailing intent remains recorded), refuses
+later effects, and ends with best-effort `ERROR`, not
 `END`. This prevents a handled but unrecorded refusal from making a successful turn unreplayable.
 Both plain and streaming providers use the same admission. Recorded replay/recovery prefixes use
 their original default and per-call hashes, not today's policy. Only new live effects or an
@@ -135,8 +137,7 @@ sessions; zero remains legacy and old value 1 remains eligible. Fork inherits bo
 `model`; modern child metadata commits with its first fence, even for unconfigured parents, so a
 later clone failure cannot expose a legacy child. Unknown flag bits fail Get/List reads. No old
 event or hash changes. Stop all older hosts and embedded CLI readers/writers before upgrading and
-back up for rollback. Earlier unreleased v6 boolean prototypes cannot read the new flags; their
-ambiguous zero rows remain legacy. Older released binaries refuse v6 at open, but already-open old
+back up for rollback. Older binaries refuse v6 at open, but already-open old
 writers do not enforce admission. There is no downgrade migration. The reference daemon has no binding
 policy configuration yet; see [embedder composition](harness-authoring.md#host-owned-model-policy).
 

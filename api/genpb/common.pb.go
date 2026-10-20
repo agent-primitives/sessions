@@ -1114,9 +1114,9 @@ type ModelCall struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// On new policy-enabled turns, an empty request model resolves to Start.model; explicit per-call
 	// overrides are allowed within the host's allowed set. Membership is checked before invoking
-	// the provider. Rejection is execution-fatal even if caught: the provider is not invoked, no
-	// MODEL_CALL is recorded, and subsequent effects are refused. Without policy, existing semantics
-	// apply.
+	// the provider. Rejection is execution-fatal even if caught: the provider is not invoked, no new
+	// MODEL_CALL is appended, and subsequent effects are refused. An existing trailing intent remains
+	// recorded. Without policy, existing semantics apply.
 	// Replay uses recorded invocation state, not today's default. The recorded ModelCall format
 	// is unchanged; admitted policy-enabled calls record the resolved model in this field.
 	Model     string            `protobuf:"bytes,1,opt,name=model,proto3" json:"model,omitempty"`

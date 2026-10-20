@@ -40,6 +40,30 @@ const (
 // SessionsClient is the client API for Sessions service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// Default hosts do not authorize callers. Go hosts may opt into per-RPC authorization, requiring
+// verified callers before validation and hiding unknown sessions and policy refusals uniformly as
+// PERMISSION_DENIED (see docs/security.md#optional-go-rpc-authorization). Existing unbound rows
+// reach custom policies with a zero Owner; OwnerAuthorizer denies them, but custom policies may
+// allow them. Go SPI AuthorizationRequest.Method carries the full originating RPC path as a string,
+// including direct handler calls and compound/recovery/global checks. No protobuf
+// AuthorizationRequest message or Method wire field exists. Inputless Exec approval recovery
+// retains the Exec method for resume checks. Ordinary Exec restores suspended compute with exec
+// alone; Resume requires resume+exec.
+// Mutation deletion probes acquire and release admission before owner SQL or policy evaluation.
+// They never lease SQL and can race a later Delete; later mutation guards remain authoritative. An
+// exclusive Delete present at the probe returns ABORTED even for a verified non-owner who knows the
+// UID; this discloses deletion in progress but grants no access.
+// Enforcing hosts require independent read+approve permissions, owned creation and owner-filtered
+// listing; owned Fork refuses until owner-before-log publication is available. Policies own failure
+// logs/metrics; services never log raw policy causes. Enforced-mode INTERNAL diagnostics include
+// request_id, method, error_kind and stable error_category. Known trusted host/store errors log the
+// full cause with error_category=host. Model/provider/harness and other unknown-origin errors never
+// log message text: category is execution for Exec/Resume, runtime for Suspend/Fork, external for
+// other methods. Mixed phases fail closed; store faults inside runtime are not trusted unless known
+// at the service storage boundary. No heuristic redaction is used. Request metadata, credentials
+// and session payloads remain excluded. Trusted/off behavior is unchanged. These checks do not
+// provide required-mode deployment, verified approval audit or transport assembly.
 type SessionsClient interface {
 	CreateSession(ctx context.Context, in *CreateSessionRequest, opts ...grpc.CallOption) (*Session, error)
 	// GetSession remains available for audit after deletion, including metadata and deletion intent
@@ -93,7 +117,8 @@ type SessionsClient interface {
 	// tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created
 	// for a non-stateless execution; Approve does not Describe or resolve a harness.
 	// ABORTED: local contention, append-CAS conflict or superseded fence; retry
-	// after reading the session. Identity is provenance only; this method provides no authorization,
+	// after reading the session. Identity is unverified provenance, ignored by an enforcing Go host.
+	// Independent read+approve permission checks are opt-in; this method implies no tool/resource
 	// policy hook, expiry, implicit Resume, or Cancel behavior.
 	Approve(ctx context.Context, in *ApproveRequest, opts ...grpc.CallOption) (*ApproveResponse, error)
 	// In-flight control: cancel the running execution. Not implemented: the server returns
@@ -260,6 +285,30 @@ func (c *sessionsClient) Fork(ctx context.Context, in *ForkRequest, opts ...grpc
 // SessionsServer is the server API for Sessions service.
 // All implementations must embed UnimplementedSessionsServer
 // for forward compatibility.
+//
+// Default hosts do not authorize callers. Go hosts may opt into per-RPC authorization, requiring
+// verified callers before validation and hiding unknown sessions and policy refusals uniformly as
+// PERMISSION_DENIED (see docs/security.md#optional-go-rpc-authorization). Existing unbound rows
+// reach custom policies with a zero Owner; OwnerAuthorizer denies them, but custom policies may
+// allow them. Go SPI AuthorizationRequest.Method carries the full originating RPC path as a string,
+// including direct handler calls and compound/recovery/global checks. No protobuf
+// AuthorizationRequest message or Method wire field exists. Inputless Exec approval recovery
+// retains the Exec method for resume checks. Ordinary Exec restores suspended compute with exec
+// alone; Resume requires resume+exec.
+// Mutation deletion probes acquire and release admission before owner SQL or policy evaluation.
+// They never lease SQL and can race a later Delete; later mutation guards remain authoritative. An
+// exclusive Delete present at the probe returns ABORTED even for a verified non-owner who knows the
+// UID; this discloses deletion in progress but grants no access.
+// Enforcing hosts require independent read+approve permissions, owned creation and owner-filtered
+// listing; owned Fork refuses until owner-before-log publication is available. Policies own failure
+// logs/metrics; services never log raw policy causes. Enforced-mode INTERNAL diagnostics include
+// request_id, method, error_kind and stable error_category. Known trusted host/store errors log the
+// full cause with error_category=host. Model/provider/harness and other unknown-origin errors never
+// log message text: category is execution for Exec/Resume, runtime for Suspend/Fork, external for
+// other methods. Mixed phases fail closed; store faults inside runtime are not trusted unless known
+// at the service storage boundary. No heuristic redaction is used. Request metadata, credentials
+// and session payloads remain excluded. Trusted/off behavior is unchanged. These checks do not
+// provide required-mode deployment, verified approval audit or transport assembly.
 type SessionsServer interface {
 	CreateSession(context.Context, *CreateSessionRequest) (*Session, error)
 	// GetSession remains available for audit after deletion, including metadata and deletion intent
@@ -313,7 +362,8 @@ type SessionsServer interface {
 	// tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created
 	// for a non-stateless execution; Approve does not Describe or resolve a harness.
 	// ABORTED: local contention, append-CAS conflict or superseded fence; retry
-	// after reading the session. Identity is provenance only; this method provides no authorization,
+	// after reading the session. Identity is unverified provenance, ignored by an enforcing Go host.
+	// Independent read+approve permission checks are opt-in; this method implies no tool/resource
 	// policy hook, expiry, implicit Resume, or Cancel behavior.
 	Approve(context.Context, *ApproveRequest) (*ApproveResponse, error)
 	// In-flight control: cancel the running execution. Not implemented: the server returns

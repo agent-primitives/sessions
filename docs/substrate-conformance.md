@@ -71,6 +71,9 @@ checks it against the image's own `Describe`. Declaring a `REQUIRES_MEMORY_SNAPS
 stateless lets fork and a lost actor rebuild it by replay, which loses its RAM state, so declare what
 the harness's own `Describe` reports.
 
+`examples/agentsuite-substrate` runs this end to end on kind: an AgentSuite agent rendered into an
+ActorTemplate and served with `-substrate-harness`, then suspended, resumed, replayed and forked.
+
 ### Substrate placement binding
 
 A session's journal records its harness name, not where that harness's actors live. The atespace,
@@ -290,7 +293,10 @@ host cannot revive that refused state. Restore decides whether MEMORY is require
 contract, not from a legacy `SnapshotRef.Memory` bit: journals written before this change
 recorded `Memory: true` for every Substrate suspend, including stateless actors. A
 memory-required actor with non-MEMORY evidence also wraps `api.ErrMemoryStateLost`. Custom clients
-must populate fidelity in GetActor too.
+must populate fidelity in GetActor too. A refusal of an observed checkpoint names the actor
+(`atespace/name`) and the required and observed fidelity, never the snapshot URI. The VOLUMES-only
+refusal of a memory-required `Snapshot` names the actor only: it suspends nothing, so there is no
+observed fidelity. Suspend, Resume, Exec and Fork add the session UID (Fork names the parent).
 
 First placement can find an actor between CreateActor and its first ResumeActor. The additive
 `ActorInfo.NoSnapshotHistory` flag permits that snapshot-less attachment only with positive evidence:

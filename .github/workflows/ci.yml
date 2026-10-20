@@ -6,7 +6,8 @@ on:
   # No paths filter: ci, integrations and integrity are required checks, and a workflow a paths
   # filter skips never reports them, so the pull request could not merge. The changes job decides
   # instead (hack/ci-path-filter.sh): when a pull request changes only markdown (other than the
-  # generated API reference) or the license, each required job skips its steps and reports success.
+  # generated API reference) or the license, each required job skips its steps and reports
+  # success; the examples and fuzz jobs, which are not required, are skipped as a whole.
   pull_request:
 
 permissions:
@@ -289,6 +290,43 @@ jobs:
     uses: ./.github/workflows/fuzz.yml
     with:
       fuzztime: 30s
+
+  examples:
+    # `examples/agentsuite-substrate` is its own Go module (it imports kaimahi's agentsuite package and
+    # substrate's ateapi types, which neither other module may). Its demo needs a cluster; its unit
+    # tests do not, so they run per PR to keep the example from rotting.
+    needs: changes
+    # Not a required check, so the whole job skips when the changes job decides `skip`. It runs
+    # when that job fails (its decision is then empty): any doubt runs it.
+    if: ${{ !cancelled() && needs.changes.outputs.decision != 'skip' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/agentsuite-substrate
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: examples/agentsuite-substrate/go.mod
+
+      - name: go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          working-directory: examples/agentsuite-substrate
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   integrity:
     # Full cross-language provenance audit: record a real journal, have an INDEPENDENT Python

@@ -26,7 +26,7 @@ func TestAdversarialUnconfiguredToRestrictedOverride(t *testing.T) {
 	}{
 		{name: "new_default", want: "allowed"},
 		{name: "new_explicit", model: "chosen", want: "chosen"},
-		{name: "new_forbidden", model: "forbidden", code: codes.InvalidArgument},
+		{name: "new_forbidden", model: "forbidden", code: codes.FailedPrecondition},
 		{name: "new_reopened", want: "allowed", reopen: true},
 		{name: "new_after_open_turn", want: "allowed", priorOpen: true},
 		{name: "new_fork", want: "allowed", fork: true},

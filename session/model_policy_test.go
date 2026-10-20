@@ -280,7 +280,7 @@ func TestExecSessionModelSelectedRoute(t *testing.T) {
 				err = drainExec(stream)
 			}
 			if tc.refuse {
-				if status.Code(err) != codes.InvalidArgument {
+				if status.Code(err) != codes.FailedPrecondition {
 					t.Fatalf("invalid selected model=%v", err)
 				}
 				head, headErr := store.Session(uid).Head()

@@ -1,0 +1,29 @@
+# The deterministic fake model: an OpenAI-compatible endpoint that counts its calls (GET /stats).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fakemodel
+  namespace: agentsuite-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: fakemodel}
+  template:
+    metadata:
+      labels: {app: fakemodel}
+    spec:
+      containers:
+        - name: fakemodel
+          image: FAKEMODEL_IMAGE
+          ports: [{containerPort: 8080}]
+          readinessProbe:
+            httpGet: {path: /stats, port: 8080}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fakemodel
+  namespace: agentsuite-demo
+spec:
+  selector: {app: fakemodel}
+  ports: [{port: 8080, targetPort: 8080}]

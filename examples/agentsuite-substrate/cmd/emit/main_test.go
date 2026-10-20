@@ -123,6 +123,17 @@ func TestCheckModelPathAndAuthHeader(t *testing.T) {
 	}
 }
 
+// A path with both an invalid api-version and another parameter gets the same refusal on every run,
+// the one for the other parameter: a map holds the query, and its iteration order varies.
+func TestCheckPathRefusalIsDeterministic(t *testing.T) {
+	const path = "/chat/completions?api-version=secret&api-key=secret&sig=secret"
+	for i := 0; i < 50; i++ {
+		if err := checkPath(path); err == nil || !strings.Contains(err.Error(), "other than api-version") {
+			t.Fatalf("run %d: err=%v, want the other-parameter refusal", i, err)
+		}
+	}
+}
+
 // With -api-key-set, check-model refuses a plain-http URL to a host that is not loopback, localhost
 // or a *.svc name (a trusted-network exception), as agentsessionsd does with the key, and names the
 // host; without it, or over https, the same URLs pass.

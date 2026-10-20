@@ -339,13 +339,15 @@ func checkPath(raw string) error {
 	if err != nil {
 		return errors.New("check-model: the model path's query does not parse" + hidden)
 	}
-	for k, vs := range q {
+	// Check every key before the api-version value, so a path with both faults gets the same
+	// refusal on every run rather than one chosen by map iteration order.
+	for k := range q {
 		if k != "api-version" {
 			return errors.New("check-model: the model path carries a query parameter other than api-version; pass the provider's key in MODEL_API_KEY" + hidden)
 		}
-		if len(vs) != 1 || !apiVersion.MatchString(vs[0]) {
-			return errors.New("check-model: the model path's api-version is not one date (YYYY-MM-DD, optionally -preview)" + hidden)
-		}
+	}
+	if vs, ok := q["api-version"]; ok && (len(vs) != 1 || !apiVersion.MatchString(vs[0])) {
+		return errors.New("check-model: the model path's api-version is not one date (YYYY-MM-DD, optionally -preview)" + hidden)
 	}
 	return nil
 }

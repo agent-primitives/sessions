@@ -277,25 +277,58 @@ func TestRenderMemoryTier(t *testing.T) {
 }
 
 // The memory tier needs a MEMORY snapshot, so a binding with another fidelity is refused for it and
-// still renders the stateless tier.
+// still renders the stateless tier: VOLUMES on either sandbox class, ROOTFS on microvm.
 func TestRenderMemoryTierNeedsMemoryFidelity(t *testing.T) {
 	comp, err := Load("../suite", "triage", "linux/amd64")
 	if err != nil {
 		t.Fatal(err)
 	}
 	image := "localhost:5001/agentsuite-harness@" + digestA
-	for _, fidelity := range []string{"ROOTFS", "VOLUMES"} {
-		b, err := LoadBinding("../binding.json")
+	for _, tc := range []struct{ binding, fidelity string }{
+		{"../binding.json", "VOLUMES"},
+		{"../binding-microvm.json", "VOLUMES"},
+		{"../binding-microvm.json", "ROOTFS"},
+	} {
+		b, err := LoadBinding(tc.binding)
 		if err != nil {
 			t.Fatal(err)
 		}
-		b.Snapshot.Fidelity = fidelity
+		b.Snapshot.Fidelity = tc.fidelity
 		if _, err := Render(comp, image, b, Options{Memory: true}); err == nil || !strings.Contains(err.Error(), "needs MEMORY") {
-			t.Errorf("%s, memory tier: err = %v, want the fidelity refused", fidelity, err)
+			t.Errorf("%s %s, memory tier: err = %v, want the fidelity refused", tc.binding, tc.fidelity, err)
 		}
-		if _, err := Render(comp, image, b, Options{}); err != nil {
-			t.Errorf("%s, stateless tier: %v", fidelity, err)
+		out, err := Render(comp, image, b, Options{})
+		if err != nil {
+			t.Errorf("%s %s, stateless tier: %v", tc.binding, tc.fidelity, err)
+			continue
 		}
+		if got := out.Template.GetSnapshotConfig().GetPreferredFidelity().String(); got != "SNAPSHOT_FIDELITY_"+tc.fidelity {
+			t.Errorf("%s %s, stateless tier: preferred fidelity %s", tc.binding, tc.fidelity, got)
+		}
+	}
+}
+
+// Substrate's template admission refuses ROOTFS on any sandbox class but microvm, so Render refuses
+// a gVisor binding that asks for it, for both tiers, before emitting anything.
+func TestRenderRefusesRootfsOnGvisor(t *testing.T) {
+	comp, err := Load("../suite", "triage", "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := LoadBinding("../binding.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Sandbox.Class != "gvisor" {
+		t.Fatalf("binding.json sandbox.class = %q, want gvisor", b.Sandbox.Class)
+	}
+	b.Snapshot.Fidelity = "ROOTFS"
+	image := "localhost:5001/agentsuite-harness@" + digestA
+	if out, err := Render(comp, image, b, Options{}); err == nil || !strings.Contains(err.Error(), "only on microvm") {
+		t.Errorf("stateless tier: out = %v, err = %v, want ROOTFS on gvisor refused", out, err)
+	}
+	if _, err := Render(comp, image, b, Options{Memory: true}); err == nil {
+		t.Error("memory tier: ROOTFS on gvisor rendered")
 	}
 }
 

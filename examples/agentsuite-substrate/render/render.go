@@ -297,6 +297,13 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 	if o.Memory && fidelity != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
 		return nil, fmt.Errorf("snapshot.fidelity %q: the memory tier keeps the conversation in RAM, so it needs MEMORY", b.Snapshot.Fidelity)
 	}
+	// Substrate refuses a ROOTFS template on any class but micro-VM, the one that can capture the
+	// root filesystem without memory (at 96dffb2, cmd/ateapi/internal/apivalidation/
+	// actor_template.go, ValidateCustom_CreateActorTemplateRequest_ActorTemplate). Refuse it here, so
+	// no template is emitted that template creation would reject.
+	if fidelity == atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS && class != atepb.SandboxClass_SANDBOX_CLASS_MICROVM {
+		return nil, fmt.Errorf("snapshot.fidelity %q with sandbox.class %q: substrate takes a ROOTFS snapshot only on microvm", b.Snapshot.Fidelity, b.Sandbox.Class)
+	}
 	name := TemplateName(c.Suite, c.Agent.ID, m[1], b.Digest(), o)
 	container := &atepb.Container{
 		Name:  "harness",

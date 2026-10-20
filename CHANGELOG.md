@@ -97,9 +97,9 @@ not provide.
   [rollout order](#sqlite-v4-rollout). Older builds refuse v6 at open, but already-open older
   writers do not enforce model policy. There is no downgrade migration. Auditors must use the
   current protobuf descriptor: pre-v6 descriptors drop `ExecutionStart.model` and report
-  policy-enabled turns as tampered. Policy-enabled registration requires a successful bounded Describe, including
-  at startup; a failed stored route needs a restart after its endpoint is restored. Unconfigured
-  registration remains probe-free. See [model defaults](spec.md#model-defaults).
+  policy-enabled turns as tampered. Policy-enabled registration requires a successful bounded
+  Describe, including at startup; a failed stored route needs a restart after its endpoint is
+  restored. Unconfigured registration remains probe-free. See [model defaults](spec.md#model-defaults).
 - `model/openai` now refuses nonempty `ModelRequest.Params`, previously silently ignored. A turn
   interrupted under an older build whose harness sets Params fails if recovery must re-drive the
   model call; completed recorded model effects remain replayable without invoking the adapter.

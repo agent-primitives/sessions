@@ -5,7 +5,6 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -100,35 +99,46 @@ func TestAuthorizationDeniedCallerDoesNotStarveDelete(t *testing.T) {
 				return serveSessions(t, svc, grpc.ChainUnaryInterceptor(u), grpc.ChainStreamInterceptor(s))
 			}
 			owner := clientFor(authOwner)
-			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			var denied atomic.Int64
 			if looping {
 				foreign := clientFor(api.CallerIdentity{Issuer: "issuer", Subject: "foreign"})
+				// Establish denial synchronously before measuring concurrent Delete.
+				call, stop := context.WithTimeout(ctx, 2*time.Second)
+				_, err := foreign.Suspend(call, &pb.SuspendRequest{Session: "owned"})
+				stop()
+				if status.Code(err) != codes.PermissionDenied {
+					t.Fatalf("initial foreign Suspend: %v", err)
+				}
+				denied.Add(1)
 				done := make(chan struct{})
 				go func() {
 					defer close(done)
 					for ctx.Err() == nil {
-						_, err := foreign.Suspend(ctx, &pb.SuspendRequest{Session: "owned"})
+						call, stop := context.WithTimeout(ctx, 2*time.Second)
+						_, err := foreign.Suspend(call, &pb.SuspendRequest{Session: "owned"})
+						stop()
 						if status.Code(err) == codes.PermissionDenied {
 							denied.Add(1)
 						}
 					}
 				}()
 				defer func() { cancel(); <-done }()
-				for denied.Load() == 0 && ctx.Err() == nil {
-					runtime.Gosched()
-				}
 			}
 			aborted := 0
-			for range 500 {
-				_, err := owner.DeleteSession(ctx, &pb.DeleteSessionRequest{Uid: "owned"})
+			for attempt := range 500 {
+				// Bound each operation, not the combined duration of 500 calls:
+				// race-instrumented scheduling must not consume an unrelated RPC's budget.
+				call, stop := context.WithTimeout(ctx, 2*time.Second)
+				_, err := owner.DeleteSession(call, &pb.DeleteSessionRequest{Uid: "owned"})
+				stop()
 				switch status.Code(err) {
 				case codes.Aborted:
 					aborted++
 				case codes.OK:
 				default:
-					t.Fatalf("Delete: %v", err)
+					t.Fatalf("Delete attempt %d: %v", attempt+1, err)
 				}
 			}
 			t.Logf("Delete ABORTED: %d/500; denied Suspend replies: %d", aborted, denied.Load())
@@ -137,8 +147,8 @@ func TestAuthorizationDeniedCallerDoesNotStarveDelete(t *testing.T) {
 			if aborted > 50 || (!looping && aborted != 0) {
 				t.Errorf("denied caller starved owner deletion: %d/500 ABORTED", aborted)
 			}
-			if looping && denied.Load() == 0 {
-				t.Error("foreign client never exercised denial")
+			if looping && denied.Load() <= 1 {
+				t.Error("foreign loop never exercised concurrent denial")
 			}
 			if b.ioCounts() != ([4]int32{}) {
 				t.Fatal("denied Suspend or Delete touched runtime")

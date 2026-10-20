@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"log/slog"
+	"net"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -15,9 +19,165 @@ import (
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
+
+func TestStartupLogsModelWithoutEndpointDetails(t *testing.T) {
+	cfg, err := parseConfig([]string{"-model=test-model", "-harness-image=example/harness@sha256:" + strings.Repeat("a", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := serveControlAPI(t, &testControlServer{cfg: cfg})
+	cfg.ateapiAddr, cfg.ateapiCAFile = transport.ateapiAddr, transport.ateapiCAFile
+	cfg.ateapiServerName, cfg.ateapiTokenFile = transport.ateapiServerName, transport.ateapiTokenFile
+	cfg.addr = "127.0.0.1:0"
+	cfg.journal = filepath.Join(t.TempDir(), "journal.db")
+	cfg.modelBaseURL = "https://secret-user:secret-password@private.example/v1"
+	cfg.modelPath = "/chat/completions?api-key=private-query"
+	var logs bytes.Buffer
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	logger := slog.New(startupLogHandler{Handler: slog.NewTextHandler(&logs, nil), cancel: cancel})
+	if err := run(ctx, cfg, logger); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "model=test-model") {
+		t.Fatalf("missing startup model ID: %s", &logs)
+	}
+	for _, private := range []string{"secret-user", "secret-password", "private.example", "private-query"} {
+		if strings.Contains(logs.String(), private) {
+			t.Fatalf("startup logs contain private endpoint detail %q", private)
+		}
+	}
+}
+
+type startupLogHandler struct {
+	slog.Handler
+	cancel context.CancelFunc
+}
+
+func (h startupLogHandler) Handle(ctx context.Context, record slog.Record) error {
+	err := h.Handler.Handle(ctx, record)
+	if record.Message == "Sessions server listening" {
+		h.cancel()
+	}
+	return err
+}
+
+func TestATEAPIBoundsEachCall(t *testing.T) {
+	old := ateapiCallTimeout
+	ateapiCallTimeout = time.Second
+	t.Cleanup(func() { ateapiCallTimeout = old })
+	deadlines := make(chan time.Duration, 2)
+	cfg := serveControlAPI(t, &testControlServer{deadlines: deadlines})
+	conn, err := dialATEAPI(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	for _, tc := range []struct {
+		name  string
+		limit time.Duration
+	}{
+		{"no caller deadline", 0},
+		{"earlier caller deadline", 50 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			limit := ateapiCallTimeout
+			if tc.limit != 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.limit)
+				defer cancel()
+				limit = tc.limit
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, err := atepb.NewControlClient(conn).CreateAtespace(ctx, &atepb.CreateAtespaceRequest{})
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if status.Code(err) != codes.DeadlineExceeded {
+					t.Fatalf("call = %v, want DeadlineExceeded", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("ate-api call did not honor its deadline")
+			}
+			select {
+			case duration := <-deadlines:
+				if duration <= 0 || duration > limit {
+					t.Fatalf("server deadline in %v, want at most %v", duration, limit)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("call did not reach the ate-api server")
+			}
+		})
+	}
+}
+
+func serveControlAPI(t *testing.T, control atepb.ControlServer) config {
+	t.Helper()
+	certificateServer := httptest.NewTLSServer(nil)
+	defer certificateServer.Close()
+	dir := t.TempDir()
+	caFile, tokenFile := filepath.Join(dir, "ca.pem"), filepath.Join(dir, "token")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{
+		Type: "CERTIFICATE", Bytes: certificateServer.Certificate().Raw,
+	}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenFile, []byte("test-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+		MinVersion: tls.VersionTLS12, Certificates: certificateServer.TLS.Certificates,
+	})))
+	atepb.RegisterControlServer(srv, control)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	return config{
+		ateapiAddr: lis.Addr().String(), ateapiCAFile: caFile, ateapiTokenFile: tokenFile,
+		ateapiServerName: certificateServer.Certificate().DNSNames[0],
+	}
+}
+
+type testControlServer struct {
+	atepb.UnimplementedControlServer
+	cfg       config
+	deadlines chan time.Duration
+}
+
+func (s *testControlServer) CreateAtespace(ctx context.Context, req *atepb.CreateAtespaceRequest) (*atepb.Atespace, error) {
+	if s.deadlines != nil {
+		duration := time.Duration(-1)
+		if deadline, ok := ctx.Deadline(); ok {
+			duration = time.Until(deadline)
+		}
+		s.deadlines <- duration
+		<-ctx.Done()
+		return nil, status.FromContextError(ctx.Err()).Err()
+	}
+	return req.GetAtespace(), nil
+}
+
+func (s *testControlServer) CreateActorTemplate(_ context.Context, req *atepb.CreateActorTemplateRequest) (*atepb.ActorTemplate, error) {
+	return req.GetActorTemplate(), nil
+}
+
+func (s *testControlServer) GetActorTemplate(context.Context, *atepb.GetActorTemplateRequest) (*atepb.ActorTemplate, error) {
+	template := chatTemplate(s.cfg)
+	template.Status = &atepb.ActorTemplateStatus{GoldenSnapshotStatus: &atepb.GoldenSnapshotStatus{
+		GoldenTag: &atepb.ObjectRef{Atespace: s.cfg.templateAtespace, Name: "golden"},
+	}}
+	return template, nil
+}
 
 func TestSandboxAndSnapshotConfig(t *testing.T) {
 	for _, tc := range []struct {

@@ -35,6 +35,9 @@ must match the requested image, model, and sandbox configuration; otherwise star
 Harness connections use the atenet-router Service with `ate-target-actor` routing metadata, never
 direct worker pod IPs.
 
+Each ate-api RPC is limited to two minutes, or the caller's earlier deadline. Template provisioning
+also has a ten-minute overall startup budget.
+
 This example's `controlplane` binary provisions its own chat ActorTemplate and serves only chat.
 For an existing ActorTemplate, the general-purpose
 [`integrations/substrate/cmd/agentsessionsd`](substrate-conformance.md#running-sessions-on-substrate-with-agentsessionsd)

@@ -215,7 +215,7 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 	return sessionserver.ListenAndServe(ctx, cfg.addr, sessionserver.Config{
 		Journal:          cfg.journal,
 		Project:          cfg.project,
-		ModelDescription: cfg.model + " @ " + cfg.modelBaseURL + cfg.modelPath,
+		ModelDescription: cfg.model,
 	}, registry, logger)
 }
 
@@ -327,6 +327,9 @@ var ateapiConnectParams = grpc.ConnectParams{
 	MinConnectTimeout: 5 * time.Second,
 }
 
+// Bound individual calls as well as reconnects: Sessions requests may carry no deadline.
+var ateapiCallTimeout = 2 * time.Minute
+
 func dialATEAPI(cfg config) (*grpc.ClientConn, error) {
 	tlsConfig, err := ateapiTLSConfig(cfg)
 	if err != nil {
@@ -336,6 +339,11 @@ func dialATEAPI(cfg config) (*grpc.ClientConn, error) {
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
 		grpc.WithPerRPCCredentials(&fileTokenCredentials{path: cfg.ateapiTokenFile}),
 		grpc.WithConnectParams(ateapiConnectParams),
+		grpc.WithUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			ctx, cancel := context.WithTimeout(ctx, ateapiCallTimeout)
+			defer cancel()
+			return invoker(ctx, method, req, reply, cc, opts...)
+		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dial ate-api %s: %w", cfg.ateapiAddr, err)

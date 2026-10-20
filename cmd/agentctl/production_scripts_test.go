@@ -135,14 +135,15 @@ func TestProductionTeardownPreservesSharedRegistry(t *testing.T) {
 
 func TestProductionSetupSelectionAndCheckoutSafety(t *testing.T) {
 	for _, tc := range []struct {
-		name, class, kvm, revision, dirty, want string
-		fail                                    bool
+		name, class, kvm, revision, dirty, want, credentials string
+		fail                                                 bool
 	}{
 		{name: "automatic microvm", kvm: "yes", want: "microvm"},
 		{name: "automatic fallback", kvm: "no", want: "gvisor"},
 		{name: "explicit microvm", class: "microvm", kvm: "yes", want: "microvm"},
 		{name: "explicit gvisor", class: "gvisor", kvm: "yes", want: "gvisor"},
 		{name: "explicit gvisor without KVM", class: "gvisor", kvm: "no", want: "gvisor"},
+		{name: "credential provider override", kvm: "yes", want: "microvm", credentials: `{"name":"custom-provider","config":{"audience":"test"}}`},
 		{name: "explicit microvm without KVM", class: "microvm", kvm: "no", fail: true},
 		{name: "invalid class", class: "typo", kvm: "yes", fail: true},
 		{name: "wrong custom revision", kvm: "yes", revision: strings.Repeat("b", 40), fail: true},
@@ -169,7 +170,7 @@ func TestProductionSetupSelectionAndCheckoutSafety(t *testing.T) {
 			}
 			for _, name := range []string{"create-kind-cluster.sh", "install-ate-kind.sh", "install-microvm-deps.sh"} {
 				if err := os.WriteFile(filepath.Join(substrate, "hack", name),
-					[]byte("#!/bin/bash\necho \"$0 $*\" >> \"$TEST_FIXTURE/installs\"\n"), 0o700); err != nil {
+					[]byte("#!/bin/bash\nprintf '%s\\n' \"$ATE_CREDENTIAL_PROVIDER\" > \"$TEST_FIXTURE/credentials\"\necho \"$0 $*\" >> \"$TEST_FIXTURE/installs\"\n"), 0o700); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -188,6 +189,7 @@ func TestProductionSetupSelectionAndCheckoutSafety(t *testing.T) {
 			t.Setenv("TEST_REVISION", tc.revision)
 			t.Setenv("TEST_DIRTY", tc.dirty)
 			t.Setenv("TEST_KVM", tc.kvm)
+			t.Setenv("ATE_CREDENTIAL_PROVIDER", tc.credentials)
 			t.Setenv("SUBSTRATE_DIR", substrate)
 			t.Setenv("SUBSTRATE_REF", "")
 			t.Setenv("SANDBOX_CLASS", tc.class)
@@ -208,6 +210,14 @@ func TestProductionSetupSelectionAndCheckoutSafety(t *testing.T) {
 					t.Fatal("invalid setup changed a cluster")
 				}
 				return
+			}
+			credentials, err := os.ReadFile(filepath.Join(dir, "credentials"))
+			wantCredentials := tc.credentials
+			if wantCredentials == "" {
+				wantCredentials = `{"name":"k8s.io"}`
+			}
+			if err != nil || strings.TrimSpace(string(credentials)) != wantCredentials {
+				t.Fatalf("credential provider = %q, %v; want %q", credentials, err, wantCredentials)
 			}
 			manifests, err := os.ReadFile(filepath.Join(dir, "manifests"))
 			if err != nil {

@@ -63,6 +63,8 @@ func Serve(ctx context.Context, lis net.Listener, cfg Config, registry *placemen
 		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(logger)),
 		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(logger)),
 	)
+	// Serve can fail while handlers are still running; drain them before closing the journal.
+	defer srv.GracefulStop()
 	v1.RegisterSessionsServer(srv, session.NewService(store, registry,
 		session.WithLogger(logger), session.WithDefaultProject(cfg.Project)))
 
@@ -82,7 +84,6 @@ func Serve(ctx context.Context, lis net.Listener, cfg Config, registry *placemen
 	select {
 	case <-ctx.Done():
 		logger.Info("shutting down")
-		srv.GracefulStop()
 		return nil
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {

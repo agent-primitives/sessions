@@ -379,7 +379,7 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation
 	case info.Status == StatusRunning:
 	case info.Status == StatusSuspended:
 		memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
-		if err := b.requireResumeCheckpoint(info, memory, true); err != nil {
+		if err := b.requireResumeCheckpoint(ref.Name, info, memory, true); err != nil {
 			return api.Incarnation{}, true, err
 		}
 		seen := info
@@ -451,7 +451,9 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 	}
 	memoryRequired := in.ComputeInstance != "" || b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
 	if b.volumesOnly && memoryRequired {
-		return api.SnapshotRef{}, fmt.Errorf("%w: VOLUMES-only backend cannot capture a memory-required checkpoint; no actor was suspended", api.ErrInvalidCheckpoint)
+		return api.SnapshotRef{}, fmt.Errorf("%w: actor %s/%s: VOLUMES-only backend cannot capture "+
+			"a memory-required checkpoint; no actor was suspended",
+			api.ErrInvalidCheckpoint, b.atespace, in.ID)
 	}
 	suspendFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "suspend_actor",
 		"actor", in.ID,
@@ -482,7 +484,7 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 	}
 	// Check the completed snapshot, not the template's preferred fidelity. Substrate can return a
 	// different fidelity (for example a golden MEMORY snapshot), so configuration alone is not proof.
-	if err := b.requireCheckpoint(info, memoryRequired); err != nil {
+	if err := b.requireCheckpoint(in.ID, info, memoryRequired); err != nil {
 		suspendFinished(err, "error_kind", "snapshot_fidelity_mismatch")
 		return api.SnapshotRef{}, err
 	}
@@ -497,17 +499,18 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 
 // requireResumeCheckpoint permits a proven snapshot-less initial placement, not a refused capture.
 // A held ref never gets this exemption, even when another actor was created under the same name.
-func (b *Backend) requireResumeCheckpoint(info ActorInfo, memory, allowFresh bool) error {
+func (b *Backend) requireResumeCheckpoint(name string, info ActorInfo, memory, allowFresh bool) error {
 	if allowFresh && info.NoSnapshotHistory && info.Snapshot == "" &&
 		info.SnapshotFidelity == SnapshotFidelityUnknown && (!b.volumesOnly || !memory) {
 		return nil
 	}
-	return b.requireCheckpoint(info, memory)
+	return b.requireCheckpoint(name, info, memory)
 }
 
 // requireCheckpoint enforces configured fidelity on the suspended actor itself, so a refused
 // capture cannot be bypassed by another host's Create or Restore. Unknown evidence fails closed.
-func (b *Backend) requireCheckpoint(info ActorInfo, memory bool) error {
+// The refusal names the actor (atespace/name) and both fidelities, never the snapshot URI.
+func (b *Backend) requireCheckpoint(name string, info ActorInfo, memory bool) error {
 	if !b.volumesOnly && !memory {
 		return nil
 	}
@@ -518,8 +521,9 @@ func (b *Backend) requireCheckpoint(info ActorInfo, memory bool) error {
 	if (!b.volumesOnly || !memory) && info.Snapshot != "" && info.SnapshotFidelity == required {
 		return nil
 	}
-	err := fmt.Errorf("%w: required %s with a durable URI, observed %s (URI present: %t); actor remains suspended",
-		api.ErrInvalidCheckpoint, required, info.SnapshotFidelity, info.Snapshot != "")
+	err := fmt.Errorf("%w: actor %s/%s: required %s with a durable URI, observed %s "+
+		"(URI present: %t); actor remains suspended",
+		api.ErrInvalidCheckpoint, b.atespace, name, required, info.SnapshotFidelity, info.Snapshot != "")
 	if memory && info.SnapshotFidelity != SnapshotFidelityMemory {
 		return fmt.Errorf("%w: %w: the checkpoint cannot restore the session's in-RAM state", err, api.ErrMemoryStateLost)
 	}
@@ -617,7 +621,7 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 			return api.Incarnation{}, fmt.Errorf("substrate: get actor before restore: %w", getErr)
 		}
 		if info.Status == StatusSuspended {
-			if err := b.requireResumeCheckpoint(info, memory, ref.ExternalURI == "" && !memory); err != nil {
+			if err := b.requireResumeCheckpoint(name, info, memory, ref.ExternalURI == "" && !memory); err != nil {
 				if recorded != nil {
 					// Classify loss/replacement first, without labeling that failure as bad fidelity.
 					cause := errors.New("substrate: actor could not restore the checkpoint")

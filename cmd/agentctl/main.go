@@ -22,6 +22,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -66,9 +67,14 @@ func main() {
 		os.Exit(2)
 	}
 	if err := run(os.Args[2:]); err != nil {
-		fmt.Fprintln(os.Stderr, "agentctl:", err)
+		printError(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// printError writes the line agentctl prints for a failed command.
+func printError(w io.Writer, err error) {
+	_, _ = fmt.Fprintln(w, "agentctl:", err)
 }
 
 func usage() {

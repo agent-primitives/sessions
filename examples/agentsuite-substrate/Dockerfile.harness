@@ -1,0 +1,6 @@
+# The agent's harness image: the harness binary plus the agent layer (manifest and instructions)
+# staged by `emit bundle`. No shell and no base image: the harness is a static Go binary.
+FROM scratch
+COPY harness /harness
+COPY agent/ /agent/
+ENTRYPOINT ["/harness"]

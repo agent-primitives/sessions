@@ -1,0 +1,5 @@
+{
+  "schemaVersion": "1.0.0-draft",
+  "mediaType": "application/vnd.agentsuite.tool.provider.catalog.v1+json",
+  "toolProviders": []
+}

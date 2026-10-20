@@ -71,6 +71,9 @@ checks it against the image's own `Describe`. Declaring a `REQUIRES_MEMORY_SNAPS
 stateless lets fork and a lost actor rebuild it by replay, which loses its RAM state, so declare what
 the harness's own `Describe` reports.
 
+`examples/agentsuite-substrate` runs this end to end on kind: an AgentSuite agent rendered into an
+ActorTemplate and served with `-substrate-harness`, then suspended, resumed, replayed and forked.
+
 ### Substrate placement binding
 
 A session's journal records its harness name, not where that harness's actors live. The atespace,

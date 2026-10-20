@@ -68,6 +68,10 @@ not provide.
   pending approval (its park and its approval-request repair) and `Fork` (the copied prefix) check
   the chain too. The chain is unkeyed: this catches corruption and edits that skip rehashing, not a
   writer that recomputes every hash after its edit, and not records removed from the end.
+- The AgentSuite demo (`examples/agentsuite-substrate`) checks its model endpoint with
+  `internal/modelconfig.New`, the check `agentsessionsd` runs at startup: `up.sh` refuses a model
+  API key with a plain-`http` base URL to a host that is not loopback, `localhost` or a `.svc` name
+  before it deploys anything, rather than leaving the daemon to refuse it in the cluster.
 
 ### Changed
 

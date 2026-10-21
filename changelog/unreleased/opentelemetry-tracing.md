@@ -10,4 +10,5 @@ category: Added
   policy: gRPC status messages, error messages, panic values, and URL queries are redacted, including
   from `otelgrpc` and `otelhttp` spans.
 - `observability.Begin` and `observability.BeginDebug`, which return the span's context. `Start`
-  and `StartDebug` are deprecated but unchanged.
+  and `StartDebug` are deprecated: they now also emit a span, but do not return its context, so
+  work done under the caller's ctx is not nested beneath it.

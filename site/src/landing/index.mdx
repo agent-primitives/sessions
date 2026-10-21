@@ -29,6 +29,7 @@ import ReplayDemo from '../../components/ReplayDemo.astro';
 import SessionFlow from '../../components/SessionFlow.astro';
 import ArchFlow from '../../components/ArchFlow.astro';
 import Cast from '../../components/Cast.astro';
+import Recording from '../../components/Recording.astro';
 import Reveal from '../../components/Reveal.astro';
 
 <ReplayDemo />
@@ -80,6 +81,25 @@ the session up mid-conversation.
   src="/casts/kubernetes-tour.cast"
   title="kind cluster — the full lifecycle, then pod death"
   caption="Recorded by <code>hack/demos/kubernetes-tour.sh</code> against <code>deploy/kubernetes/agentsessionsd.yaml</code>. Nothing is staged: the replay after the pod dies is served from the journal, so the model is called zero times."
+/>
+</Reveal>
+
+<Reveal>
+## On agent-substrate micro-VMs
+
+The same lifecycle with each session's actor in a micro-VM. Resume brings back the same actor with
+its memory, replay calls the model zero times, and a snapshot that cannot restore that memory is
+refused.
+
+<Recording
+  src="/videos/session-lifecycle-ui.mp4"
+  poster="/videos/session-lifecycle-ui.webp"
+  width={1440}
+  height={900}
+  title="micro-VM actors — the lifecycle page"
+  label="Screen recording: the session lifecycle on agent-substrate micro-VMs"
+  description="A two-minute recording of the lifecycle page from examples/session-lifecycle-ui, driven against a kind cluster whose actors run in micro-VMs, with a caption for each of six steps. One: a memory-tier session is created and runs a turn, which places its actor on a micro-VM worker with one model call. Two: suspend checkpoints the actor, which shows SUSPENDED with a MEMORY snapshot. Three: resume restores it, RUNNING with the same actor UID, and a second turn's reply still lists the first turn's issue. Four: a fork at the head starts a child session whose own turn carries the parent's two issues plus a third. Five: a stateless-tier session runs a turn and is replayed; the controller counts zero model calls and the fake model's counter does not move. Six: on a template that takes VOLUMES snapshots, suspend is refused with FailedPrecondition, required MEMORY, observed VOLUMES. The end card repeats the claim: the same actor after resume, and zero model calls on replay. The model is a fake model."
+  caption="Recorded from the page in <code>examples/session-lifecycle-ui</code>, whose README brings it up with the example's <code>up.sh</code> and <code>ui.sh</code>; the micro-VMs need <code>/dev/kvm</code> in the Docker host. The model is a fake model that counts its calls, and the count did not move during the replay."
 />
 </Reveal>
 

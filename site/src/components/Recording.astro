@@ -1,0 +1,94 @@
+---
+// Embeds a screen recording of a real run as a plain <video>, in the same panel chrome as Cast.
+//
+// The file is served from public/videos, so nothing is fetched from a third party, and nothing is
+// fetched at all until someone presses play: preload="none" with a poster. It never autoplays,
+// under any motion preference, and it has no sound. The chrome bar carries the same play/pause
+// toggle as the other recorded figure, pressed while the video is held, mirroring the native
+// controls in both directions.
+//
+// A video has no text of its own, so `description` says what it shows. It is the video's
+// accessible description, and the caption names how to reproduce it.
+import MotionToggle from "./MotionToggle.astro";
+
+interface Props {
+  src: string;
+  poster: string;
+  title: string;
+  /** Accessible name of the video. */
+  label: string;
+  /** What the recording shows, step by step, for anyone who cannot watch it. */
+  description: string;
+  caption?: string;
+  width: number;
+  height: number;
+}
+const { src, poster, title, label, description, caption, width, height } = Astro.props;
+const id = `recording-${src.replace(/\W+/g, "-")}`;
+---
+
+<figure class="recording panel" data-recording>
+  <div class="panel__bar">
+    <MotionToggle label="Pause the recording" />
+    <span class="panel__label">{title}</span>
+    <span class="panel__note recording__badge">recorded</span>
+  </div>
+  <video
+    class="recording__video"
+    controls
+    muted
+    playsinline
+    preload="none"
+    poster={poster}
+    width={width}
+    height={height}
+    aria-label={label}
+    aria-describedby={`${id}-desc`}
+  >
+    <source src={src} type="video/mp4" />
+    <p>Your browser cannot play this video. <a href={src}>Download the MP4</a>.</p>
+  </video>
+  <p class="sr-only" id={`${id}-desc`}>{description}</p>
+  {caption && <figcaption class="panel__caption" set:html={caption} />}
+</figure>
+
+<script>
+  for (const fig of document.querySelectorAll<HTMLElement>("[data-recording]")) {
+    const video = fig.querySelector("video");
+    const button = fig.querySelector<HTMLButtonElement>("[data-motion-toggle]");
+    if (!video || !button) continue;
+    const reflect = () => button.setAttribute("aria-pressed", String(video.paused));
+    button.hidden = false;
+    reflect();
+    button.addEventListener("click", () => {
+      if (video.paused) void video.play();
+      else video.pause();
+    });
+    for (const type of ["play", "pause", "ended"]) video.addEventListener(type, reflect);
+  }
+</script>
+
+<style is:global>
+  .recording__badge {
+    color: var(--p-good);
+    border: 1px solid rgb(63 185 80 / 0.35);
+    border-radius: 999px;
+    padding: 0.05rem 0.45rem;
+  }
+
+  /* The width and height attributes reserve the frame before the poster loads; CSS makes it fluid.
+     The margin reset undoes Starlight's prose rhythm, which spaces any element that follows
+     another. */
+  .recording__video {
+    display: block;
+    width: 100%;
+    height: auto;
+    margin: 0;
+    background: var(--p-bg);
+  }
+
+  .recording__video:focus-visible {
+    outline: 2px solid var(--p-accent);
+    outline-offset: -2px;
+  }
+</style>

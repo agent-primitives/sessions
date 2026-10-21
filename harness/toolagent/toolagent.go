@@ -166,10 +166,10 @@ func toolMessage(id string, result api.ToolResult) api.Message {
 }
 
 // journalOutput is output as a journal reads it back: the wire form, a protobuf Struct, converted
-// to a map again. A nil list or map comes back empty and a Go integer as a float64; output that
-// neither a Struct nor JSON can hold (a func value) comes back nil, as no output. Output that
-// arrived over the wire (a remote harness) is already in this form, and converting it again
-// changes nothing.
+// to a map again. A nil []any or map[string]any comes back empty and a Go integer as a float64;
+// output that neither a Struct nor JSON can hold (a func value) comes back nil, as no output.
+// Output that arrived over the wire (a remote harness) is already in this form, and converting it
+// again changes nothing.
 func journalOutput(output map[string]any) map[string]any {
 	if output == nil {
 		return nil

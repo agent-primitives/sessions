@@ -350,8 +350,9 @@ func TestHistoryDropsReusedCallIDOfFailedTurn(t *testing.T) {
 }
 
 // An in-process executor's Output reaches the model in its journal form: the SQLite journal stores
-// it as a protobuf Struct, which reads a nil list or map back as empty and output it cannot hold
-// as none. Rendering the live value instead would send the model a request replay cannot reproduce.
+// it as a protobuf Struct, which reads a nil []any or map[string]any back as empty and output it
+// cannot hold as none. Rendering the live value instead would send the model a request replay
+// cannot reproduce.
 func TestToolOutputRendersInJournalForm(t *testing.T) {
 	for name, tc := range map[string]struct {
 		output   map[string]any

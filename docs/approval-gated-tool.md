@@ -181,7 +181,7 @@ of two calls' identities, and edits a pending call's arguments in the journal.
 ## Limits
 
 - The chain is unkeyed. Someone who can rewrite the journal and recompute every hash can change a
-  call and its decision together, and neither check below detects it; that needs signing. See
+  call and its decision together, and none of the checks above detects it; that needs signing. See
   [security](security.md).
 - `APPROVAL_RESULT` carries no separate arguments digest, by design for now. The decision binds the
   arguments through the chain (`request_seq` follows the `TOOL_CALL` record whose `content_hash`

@@ -3,9 +3,13 @@ package main
 import (
 	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -13,6 +17,7 @@ import (
 
 	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/model/openai"
 	"github.com/agent-primitives/sessions/sqlitelog"
 	"github.com/agent-primitives/sessions/wire"
 )
@@ -190,5 +195,87 @@ func TestFormatRecordToolCallArgsEscapeFormatRunes(t *testing.T) {
 	var decoded map[string]string
 	if err := json.Unmarshal([]byte(strings.TrimPrefix(want, "args=")), &decoded); err != nil || decoded["text"] != text {
 		t.Fatalf("escaped args decode to %q (err %v), want %q", decoded["text"], err, text)
+	}
+}
+
+// The tool name and call ID are untrusted provider text. A plain token prints bare; anything that
+// could add a line, hide text with a terminal escape, reorder it, or fake another field prints quoted
+// and escaped.
+func TestFormatRecordToolCallIdentityEscaped(t *testing.T) {
+	for _, tt := range []struct {
+		name, tool, id, want string
+	}{
+		{name: "plain", tool: "publish", id: "call_1", want: `tool=publish id=call_1 `},
+		{name: "newline and ESC in ID", tool: "publish", id: "call_1\n\x1b[8m", want: `tool=publish id="call_1\n\x1b[8m" `},
+		{name: "space fakes a field", tool: "publish", id: "call_1 mediation=AUTO", want: `tool=publish id="call_1 mediation=AUTO" `},
+		{name: "format rune in ID", tool: "publish", id: "call_\u202e1", want: `tool=publish id="call_\u202e1" `},
+		{name: "non-ASCII space in ID", tool: "publish", id: "call\u00a01", want: `tool=publish id="call\u00a01" `},
+		{name: "quote and backslash", tool: "publish", id: `a"b\c`, want: `tool=publish id="a\"b\\c" `},
+		{name: "invalid UTF-8", tool: "publish", id: "call_\xff", want: `tool=publish id="call_\xff" `},
+		{name: "empty", tool: "", id: "", want: `tool="" id="" `},
+		{name: "control in tool", tool: "pub\rlish", id: "call_1", want: `tool="pub\rlish" id=call_1 `},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			call := &v1.ToolCall{Id: tt.id, Tool: tt.tool, Mediation: v1.Mediation_MEDIATION_REQUIRES_APPROVAL}
+			record := &v1.LogRecord{Seq: 5, Event: &v1.Event{Kind: v1.EventKind_EVENT_TOOL_CALL, Body: &v1.Event_Tool{Tool: call}}}
+			got := formatRecord(record)
+			if !strings.Contains(got, "  "+tt.want+"mediation=REQUIRES_APPROVAL args=null") {
+				t.Fatalf("formatRecord = %q, want it to contain %q", got, tt.want)
+			}
+			assertOneSafeLine(t, got)
+		})
+	}
+}
+
+// A configured OpenAI-compatible endpoint chooses the call ID, and the adapter accepts any non-empty
+// unique ID. The record agentctl renders for that accepted call stays one line with no terminal
+// controls, so a forged ID cannot hide the real arguments from an approver.
+func TestFormatRecordProviderChosenToolCallID(t *testing.T) {
+	const forged = "call_1 mediation=AUTO args={\"text\":\"safe\"}\n\x1b[8m"
+	body, err := json.Marshal(map[string]any{"choices": []any{map[string]any{
+		"finish_reason": "tool_calls",
+		"message": map[string]any{"tool_calls": []any{map[string]any{
+			"id": forged, "type": "function",
+			"function": map[string]any{"name": "publish", "arguments": `{"text":"rm -rf /"}`},
+		}}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
+	t.Cleanup(srv.Close)
+	c, err := openai.New(openai.WithBaseURL(srv.URL), openai.WithModel("test-model"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Model(t.Context(), api.ModelRequest{
+		Messages: []api.Message{*api.TextMessage("user", "publish")},
+		Tools:    []api.ToolDefinition{{Name: "publish", InputSchema: map[string]any{"type": "object"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Message.Parts) != 1 || resp.Message.Parts[0].ToolCall == nil || resp.Message.Parts[0].ToolCall.ID != forged {
+		t.Fatalf("adapter did not accept the provider's ID verbatim: %#v", resp.Message.Parts)
+	}
+	tc := *resp.Message.Parts[0].ToolCall
+	tc.Mediation = api.MediationRequiresApproval
+	record := &v1.LogRecord{Seq: 5, Event: &v1.Event{Kind: v1.EventKind_EVENT_TOOL_CALL, Body: &v1.Event_Tool{Tool: wire.ToolCallToProto(&tc)}}}
+	for _, got := range []string{formatRecord(record), formatRecordVerbose(record)} {
+		want := `tool=publish id="call_1 mediation=AUTO args={\"text\":\"safe\"}\n\x1b[8m" mediation=REQUIRES_APPROVAL args={"text":"rm -rf /"}`
+		if !strings.HasSuffix(got, want) {
+			t.Fatalf("record = %q, want suffix %q", got, want)
+		}
+		assertOneSafeLine(t, got)
+	}
+}
+
+func assertOneSafeLine(t *testing.T, line string) {
+	t.Helper()
+	if i := strings.IndexFunc(line, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }); i >= 0 {
+		t.Fatalf("line %q has control or format rune at byte %d", line, i)
+	}
+	if !utf8.ValidString(line) {
+		t.Fatalf("line %q is not valid UTF-8", line)
 	}
 }

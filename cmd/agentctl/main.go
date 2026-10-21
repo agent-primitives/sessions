@@ -28,9 +28,11 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 
@@ -448,10 +450,12 @@ func short(h string) string {
 	return h
 }
 
-// toolCallText shows a tool call without its idempotency key. Arguments print as JSON with sorted
-// keys, so the same call prints the same way every time, and without HTML escaping, so an approver
-// reads <, > and & as the tool will receive them. Format characters (Unicode Cf, such as the bidi
-// override U+202E) print as \uXXXX escapes, so model-chosen text cannot visually reorder the line.
+// toolCallText shows a tool call without its idempotency key. The tool name and call ID print as
+// displayToken, so a provider-chosen ID cannot add a line, hide text with terminal escapes, or fake
+// another field. Arguments print as JSON with sorted keys, so the same call prints the same way every
+// time, and without HTML escaping, so an approver reads <, > and & as the tool will receive them.
+// Format characters (Unicode Cf, such as the bidi override U+202E) print as \uXXXX escapes, so
+// model-chosen text cannot visually reorder the line.
 func toolCallText(tc *v1.ToolCall) string {
 	args := "null"
 	if tc.GetArgs() != nil {
@@ -464,8 +468,21 @@ func toolCallText(tc *v1.ToolCall) string {
 			args = "(not JSON)"
 		}
 	}
-	return fmt.Sprintf("tool=%s id=%s mediation=%s args=%s", tc.GetTool(), tc.GetId(),
+	return fmt.Sprintf("tool=%s id=%s mediation=%s args=%s", displayToken(tc.GetTool()), displayToken(tc.GetId()),
 		strings.TrimPrefix(tc.GetMediation().String(), "MEDIATION_"), args)
+}
+
+// displayToken prints an untrusted identifier bare when it is valid UTF-8 made only of printable,
+// non-space runes other than '"' and '\\'; otherwise, or when empty, it prints as a Go quoted
+// string, which escapes control characters (newline, ESC), format characters (Cf) and invalid
+// bytes. A bare token therefore never contains a space, so it cannot be read as two fields.
+func displayToken(s string) string {
+	if s != "" && utf8.ValidString(s) && !strings.ContainsFunc(s, func(r rune) bool {
+		return !unicode.IsPrint(r) || r == ' ' || r == '"' || r == '\\'
+	}) {
+		return s
+	}
+	return strconv.Quote(s)
 }
 
 // escapeFormatRunes replaces each Unicode format character (category Cf) in encoded JSON with its

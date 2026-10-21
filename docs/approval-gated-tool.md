@@ -104,9 +104,12 @@ seq=6   EVENT_APPROVAL_REQUEST
 seq=7   EVENT_LIFECYCLE
 ```
 
-The model's call ID and text vary by model. Stop the daemon and the harness (Ctrl-C) and start
-them again with the same commands. Nothing has run, and the request is still pending; `replay`
-shows the exact call you are deciding on:
+The model's call ID and text vary by model. `agentctl` prints a tool name or call ID that
+contains a space, quote, control or format character as a quoted, escaped string, and escapes
+format characters in the arguments, so provider-chosen text cannot add a line or hide part of
+the call. Stop the daemon and the harness (Ctrl-C) and start them again with the same commands.
+Nothing has run, and the request is still pending; `replay` shows the exact call you are deciding
+on:
 
 ```console
 $ bin/agentctl replay -server 127.0.0.1:8080 -session sess-795307d5d3e863610eddda6b

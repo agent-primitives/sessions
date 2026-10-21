@@ -19,9 +19,10 @@ export KIND_CLUSTER_NAME="${CLUSTER}"
 # up.sh records the control-plane container ID of a cluster it creates as soon as the container
 # exists; down.sh deletes a cluster only when its container still has that ID, so it never deletes a
 # cluster up.sh only reused. SETUP records how far up.sh got with that cluster ("<id> creating" while
-# substrate's create-kind-cluster.sh runs, "<id> created" once it finished, "<id> installed" once
-# ate-system is installed), so a rerun after a failed first setup finishes it instead of reusing a
-# half-built cluster. up.sh refuses an owned cluster with no record for its node.
+# substrate's create-kind-cluster.sh runs, "<id> created" once it finished, "<id> installed <commit>"
+# once ate-system is installed from substrate <commit>), so a rerun after a failed first setup
+# finishes it instead of reusing a half-built cluster. up.sh refuses an owned cluster with no record
+# for its node, and one installed from another substrate commit (refuse_stale_install).
 OWNED="${WORK}/created-cluster-${CLUSTER}"
 SETUP="${WORK}/setup-cluster-${CLUSTER}"
 # What up.sh generates for one cluster (its kubeconfig, the rendered composition and manifests)
@@ -33,8 +34,23 @@ owned_id() { if [[ -f "${OWNED}" ]]; then cat "${OWNED}"; fi; }
 # setup_stage prints the stage SETUP records for the container ID $1, or nothing.
 setup_stage() {
 	local id stage
-	if [[ -f "${SETUP}" ]] && read -r id stage <"${SETUP}" && [[ "${id}" == "$1" ]]; then
+	if [[ -f "${SETUP}" ]] && read -r id stage _ <"${SETUP}" && [[ "${id}" == "$1" ]]; then
 		echo "${stage}"
+	fi
+}
+# refuse_stale_install exits when SETUP records that up.sh installed ate-system on the container ID
+# $1 from a substrate commit other than SUBSTRATE_REF, or from one it did not record (an install
+# from before up.sh kept the commit). Substrate supports no in-place upgrade between releases before
+# 1.0 (its docs/upgrade.md), and v0.5.0 reads an ActorTemplate an older install stored with no
+# sandbox class, so that template's actors cannot resume: the cluster is reinstalled, not reused. A
+# cluster up.sh did not install is not checked.
+refuse_stale_install() {
+	local id stage ref
+	if [[ -f "${SETUP}" ]] && read -r id stage ref <"${SETUP}" && [[ "${id}" == "$1" && "${stage}" == installed ]] &&
+		[[ "${ref}" != "${SUBSTRATE_REF}" ]]; then
+		echo "refusing to use kind cluster ${CLUSTER}: up.sh installed agent-substrate ${ref:-from a commit it did not record} in it, and this checkout pins ${SUBSTRATE_REF}." >&2
+		echo "Substrate cannot be upgraded in place before 1.0. Run down.sh to delete the cluster and its sessions, then rerun up.sh (both in ${HERE})." >&2
+		exit 1
 	fi
 }
 # cluster_listed reports whether kind lists the demo's cluster. A failed listing exits the script: it

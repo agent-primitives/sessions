@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -333,6 +334,25 @@ func (s *stubs) runArgs(t *testing.T, script string, args []string, env ...strin
 // installCall is how the go stub logs up.sh's ate-system install.
 const installCall = "go run ./cmd/ate-setup --kind"
 
+// installed is the setup record up.sh writes once it installed ate-system on node: the node and the
+// substrate commit it installed, which common.sh reads from the substrate e2e workflow.
+func installed(t *testing.T, node string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "substrate-e2e.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^  SUBSTRATE_REF: (\S+)$`).FindSubmatch(b)
+	if m == nil {
+		t.Fatal("substrate-e2e.yml sets no SUBSTRATE_REF")
+	}
+	return node + " installed " + string(m[1])
+}
+
+// staleRef is a substrate commit other than the one the example pins: the pin before v0.5.0, as
+// its Go pseudo-version names it.
+const staleRef = "96dffb287919"
+
 // pastClusterPhase is the status the go stub exits with, so up.sh reached the step after the cluster.
 const pastClusterPhase = 97
 
@@ -354,12 +374,12 @@ func TestUpClusterPhase(t *testing.T) {
 			// The listing failing is not proof of absence: create-kind-cluster.sh would delete a
 			// cluster of this name.
 			name: "a failed kind listing changes nothing", env: []string{"STUB_KIND_LIST_FAIL=1", "STUB_CLUSTERS=" + cluster},
-			node: "node-0", owned: "node-0", setup: "node-0 installed",
+			node: "node-0", owned: "node-0", setup: installed(t, "node-0"),
 			wantCode: 1, wantOut: "kind get clusters failed",
 			// up.sh builds cmd/emit to check its inputs; the build of kubectl-ate is the first go
 			// command past the kind listing.
 			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl", "./cmd/kubectl-ate"},
-			wantOwned: "node-0", wantSetup: "node-0 installed",
+			wantOwned: "node-0", wantSetup: installed(t, "node-0"),
 		},
 		{
 			name: "an unlisted cluster whose container exists is refused", node: "node-0",
@@ -372,7 +392,7 @@ func TestUpClusterPhase(t *testing.T) {
 			wantCode:  pastClusterPhase,
 			wantCalls: []string{"create-kind-cluster.sh", "kind export kubeconfig", installCall + " --no-dev-env --kind-cluster-name=demo --context=kind-demo"},
 			noCalls:   []string{"install-ate-kind.sh"},
-			wantOwned: "node-1", wantSetup: "node-1 installed",
+			wantOwned: "node-1", wantSetup: installed(t, "node-1"),
 		},
 		{
 			// ate-setup on Kind builds for its own GOARCH unless told otherwise, so up.sh passes the
@@ -380,13 +400,13 @@ func TestUpClusterPhase(t *testing.T) {
 			name: "the install builds for the platform Docker reports", env: []string{"STUB_DOCKER_ARCH=x86_64"},
 			wantCode:  pastClusterPhase,
 			wantCalls: []string{installCall, "--ko-default-platforms=linux/amd64", "deploy ate-system --setup-csi=none"},
-			wantOwned: "node-1", wantSetup: "node-1 installed",
+			wantOwned: "node-1", wantSetup: installed(t, "node-1"),
 		},
 		{
 			name:      "an arm64 Docker gets arm64 control-plane images",
 			wantCode:  pastClusterPhase,
 			wantCalls: []string{installCall, "--ko-default-platforms=linux/arm64", "deploy ate-system"},
-			wantOwned: "node-1", wantSetup: "node-1 installed",
+			wantOwned: "node-1", wantSetup: installed(t, "node-1"),
 		},
 		{
 			// The record stays at created, so the rerun installs again instead of reusing it.
@@ -432,7 +452,7 @@ func TestUpClusterPhase(t *testing.T) {
 			node: "node-1", owned: "node-1", setup: "node-1 creating",
 			wantCode: pastClusterPhase, wantOut: "its setup did not finish; recreating it",
 			wantCalls: []string{"create-kind-cluster.sh", installCall},
-			wantOwned: "node-2", wantSetup: "node-2 installed",
+			wantOwned: "node-2", wantSetup: installed(t, "node-2"),
 		},
 		{
 			// An installed cluster whose setup record was lost looks the same as one whose create
@@ -446,10 +466,10 @@ func TestUpClusterPhase(t *testing.T) {
 		},
 		{
 			name: "an owned cluster whose setup record names another node is refused", env: []string{"STUB_CLUSTERS=" + cluster},
-			node: "node-1", owned: "node-1", setup: "node-0 installed",
+			node: "node-1", owned: "node-1", setup: installed(t, "node-0"),
 			wantCode: 1, wantOut: "Run ./down.sh to delete it",
 			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl"},
-			wantOwned: "node-1", wantSetup: "node-0 installed",
+			wantOwned: "node-1", wantSetup: installed(t, "node-0"),
 		},
 		{
 			name: "an owned cluster whose setup record holds an unknown stage is refused", env: []string{"STUB_CLUSTERS=" + cluster},
@@ -464,14 +484,31 @@ func TestUpClusterPhase(t *testing.T) {
 			wantCode:  pastClusterPhase,
 			wantCalls: []string{"kind export kubeconfig", installCall},
 			noCalls:   []string{"create-kind-cluster.sh"},
-			wantOwned: "node-1", wantSetup: "node-1 installed",
+			wantOwned: "node-1", wantSetup: installed(t, "node-1"),
 		},
 		{
 			name: "an installed owned cluster is reused", env: []string{"STUB_CLUSTERS=" + cluster},
-			node: "node-1", owned: "node-1", setup: "node-1 installed",
+			node: "node-1", owned: "node-1", setup: installed(t, "node-1"),
 			wantCode:  pastClusterPhase,
 			wantCalls: []string{"kind export kubeconfig", "kubectl --context kind-demo"},
 			noCalls:   []string{"create-kind-cluster.sh", installCall},
+			wantOwned: "node-1", wantSetup: installed(t, "node-1"),
+		},
+		{
+			// Substrate has no in-place upgrade before 1.0: a cluster installed from another commit is
+			// reinstalled by down.sh and up.sh, never reused, and its records are kept for down.sh.
+			name: "an owned cluster installed from another substrate commit is refused", env: []string{"STUB_CLUSTERS=" + cluster},
+			node: "node-1", owned: "node-1", setup: "node-1 installed " + staleRef,
+			wantCode: 1, wantOut: "up.sh installed agent-substrate " + staleRef + " in it",
+			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl"},
+			wantOwned: "node-1", wantSetup: "node-1 installed " + staleRef,
+		},
+		{
+			// A record from before up.sh kept the commit is an install from an earlier pin.
+			name: "an owned cluster installed before up.sh recorded the commit is refused", env: []string{"STUB_CLUSTERS=" + cluster},
+			node: "node-1", owned: "node-1", setup: "node-1 installed",
+			wantCode: 1, wantOut: "from a commit it did not record",
+			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl"},
 			wantOwned: "node-1", wantSetup: "node-1 installed",
 		},
 		{
@@ -524,13 +561,45 @@ func TestUpClusterPhase(t *testing.T) {
 	}
 }
 
+// ui.sh drives the cluster up.sh brought up, so it refuses one up.sh installed from another
+// substrate commit before it builds or changes anything, and goes on with one from this commit.
+func TestUISubstrateCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name, setup string
+		wantCode    int
+		wantOut     string
+	}{
+		{name: "another commit", setup: "node-1 installed " + staleRef, wantCode: 1, wantOut: "up.sh installed agent-substrate " + staleRef + " in it"},
+		{name: "no commit recorded", setup: "node-1 installed", wantCode: 1, wantOut: "from a commit it did not record"},
+		// The go stub stops the run at the build, past the check.
+		{name: "this commit", setup: installed(t, "node-1"), wantCode: pastClusterPhase},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStubs(t)
+			s.node(t, "node-1")
+			s.record(t, "created-cluster", "node-1")
+			s.record(t, "setup-cluster", tc.setup)
+			code, out, calls := s.runArgs(t, "../session-lifecycle-ui/ui.sh", []string{"check"}, "STUB_CLUSTERS="+cluster)
+			if code != tc.wantCode || !strings.Contains(out, tc.wantOut) {
+				t.Fatalf("ui.sh check exit %d, want %d with %q\noutput:\n%s\ncalls:\n%s", code, tc.wantCode, tc.wantOut, out, calls)
+			}
+			if built := strings.Contains(calls, "go build -o"); built != (tc.wantCode == pastClusterPhase) {
+				t.Errorf("lifecycle-ui built = %t\ncalls:\n%s", built, calls)
+			}
+			if got := s.read(t, "setup-cluster"); got != tc.setup {
+				t.Errorf("setup-cluster record = %q, want %q", got, tc.setup)
+			}
+		})
+	}
+}
+
 // --substrate-only does not use the suite, so it does not check the composition: kaimahi's minimal
 // suite, which has no linux/arm64 composition, still brings substrate up on an arm64 Docker host.
 func TestUpSubstrateOnlySkipsTheCompositionCheck(t *testing.T) {
 	s := newStubs(t)
 	s.node(t, "node-1")
 	s.record(t, "created-cluster", "node-1")
-	s.record(t, "setup-cluster", "node-1 installed")
+	s.record(t, "setup-cluster", installed(t, "node-1"))
 	code, out, calls := s.runArgs(t, "up.sh", []string{"--substrate-only"}, "STUB_CLUSTERS="+cluster,
 		"AGENTSUITE_DEMO_SUITE=suites/kaimahi-minimal", "AGENTSUITE_DEMO_AGENT=writer")
 	if code != pastClusterPhase || strings.Contains(out, "does not render") {
@@ -545,7 +614,7 @@ func TestUpSkipsATemplate(t *testing.T) {
 	s := newStubs(t)
 	s.node(t, "node-1")
 	s.record(t, "created-cluster", "node-1")
-	s.record(t, "setup-cluster", "node-1 installed")
+	s.record(t, "setup-cluster", installed(t, "node-1"))
 	code, out, calls := s.run(t, "up.sh", "STUB_CLUSTERS="+cluster, "STUB_FULL=1", "AGENTSUITE_DEMO_SKIP_TEMPLATE=stateless")
 	if code != 0 {
 		t.Fatalf("up.sh exit %d, want 0\noutput:\n%s\ncalls:\n%s", code, out, calls)
@@ -597,7 +666,7 @@ func TestDown(t *testing.T) {
 			s := newStubs(t)
 			s.node(t, tc.node)
 			s.record(t, "created-cluster", "node-1")
-			s.record(t, "setup-cluster", "node-1 installed")
+			s.record(t, "setup-cluster", installed(t, "node-1"))
 			code, out, calls := s.run(t, "down.sh", tc.env...)
 			if code != tc.wantCode {
 				t.Fatalf("down.sh exit %d, want %d\noutput:\n%s\ncalls:\n%s", code, tc.wantCode, out, calls)
@@ -609,7 +678,7 @@ func TestDown(t *testing.T) {
 				t.Errorf("kind delete called = %v, want %v:\n%s", deleted, tc.wantDelete, calls)
 			}
 			owned, setup := s.read(t, "created-cluster"), s.read(t, "setup-cluster")
-			if tc.wantKept && (owned != "node-1" || setup != "node-1 installed") {
+			if tc.wantKept && (owned != "node-1" || setup != installed(t, "node-1")) {
 				t.Errorf("records = %q, %q, want them kept", owned, setup)
 			}
 			if !tc.wantKept && (owned != "<absent>" || setup != "<absent>") {
@@ -642,7 +711,7 @@ func TestDriverSetupDeletesOnlyTheClusterItCreated(t *testing.T) {
 	installed := func(s *stubs, t *testing.T) {
 		s.node(t, "node-1")
 		s.record(t, "created-cluster", "node-1")
-		s.record(t, "setup-cluster", "node-1 installed")
+		s.record(t, "setup-cluster", installed(t, "node-1"))
 	}
 	for _, tc := range []struct {
 		name       string
@@ -1268,7 +1337,7 @@ func TestUpRefusesInputsBeforeTheCluster(t *testing.T) {
 			s := newStubs(t)
 			s.node(t, "node-1")
 			s.record(t, "created-cluster", "node-1")
-			s.record(t, "setup-cluster", "node-1 installed")
+			s.record(t, "setup-cluster", installed(t, "node-1"))
 			code, out, calls := s.run(t, "up.sh", append(tc.env(t), "STUB_CLUSTERS="+cluster, "STUB_FULL=1")...)
 			if code != 1 || !strings.Contains(out, tc.wantOut) {
 				t.Fatalf("up.sh exit %d, want 1 with %q\noutput:\n%s", code, tc.wantOut, out)
@@ -1361,7 +1430,7 @@ func TestUpRendersTheDaemon(t *testing.T) {
 			s := newStubs(t)
 			s.node(t, "node-1")
 			s.record(t, "created-cluster", "node-1")
-			s.record(t, "setup-cluster", "node-1 installed")
+			s.record(t, "setup-cluster", installed(t, "node-1"))
 			code, out, calls := s.run(t, "up.sh", append(tc.env, "STUB_CLUSTERS="+cluster, "STUB_FULL=1")...)
 			if code != 0 {
 				t.Fatalf("up.sh exit %d, want 0\noutput:\n%s\ncalls:\n%s", code, out, calls)

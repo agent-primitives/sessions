@@ -132,6 +132,11 @@ is named `triage-memory`, is `REQUIRES_MEMORY_SNAPSHOT`, and is applied as
   not create. A cluster it created whose setup record is missing or unreadable is refused rather
   than recreated, since recreating an installed cluster would delete the daemon's session journal:
   run `./down.sh`, then `up.sh` again.
+- `up.sh` records the substrate commit it installed (`SUBSTRATE_REF`) and refuses to reuse a cluster
+  it installed from another commit, or before it recorded one; `ui.sh` refuses it too. Substrate
+  has no in-place upgrade between releases before 1.0, and v0.5.0 reads an ActorTemplate an older
+  install stored with no sandbox class, so its actors cannot resume. Run `./down.sh`, which deletes
+  the cluster and its sessions, then `up.sh` again.
 - `up.sh` also reuses an ActorTemplate that already has the rendered name. The name covers the
   image, the binding, the model and the tier, not what `emit render` writes from them, so after
   updating this example on a cluster that already has its templates (for example to the render

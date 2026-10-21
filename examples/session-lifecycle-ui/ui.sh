@@ -37,6 +37,10 @@ if [[ -z "${1:-}" ]]; then
 	done
 fi
 
+# A cluster up.sh installed from another substrate commit cannot serve this checkout's daemons and
+# templates; up.sh refuses it too.
+refuse_stale_install "$(node_id)"
+
 (cd "${EXAMPLE}" && go build -o "${BIN}" ./cmd/lifecycle-ui)
 
 # The daemons call the fake model unless up.sh was given a real provider; read which from what is

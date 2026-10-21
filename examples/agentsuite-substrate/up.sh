@@ -10,9 +10,9 @@
 # --templates-only once the ActorTemplates hold their golden snapshots, before the model Secret and
 # the Deployments change.
 #
-# Idempotent: an existing cluster, template or deployment is reused. A template is reused by its
-# name, which does not cover the render itself: after a render change, run down.sh first. See
-# README.md.
+# Idempotent: an existing cluster, template or deployment is reused, except a cluster up.sh
+# installed from another substrate commit, which is refused. A template is reused by its name,
+# which does not cover the render itself: after a render change, run down.sh first. See README.md.
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
@@ -219,7 +219,8 @@ if cluster_listed; then
 		stage="$(setup_stage "${id}")"
 		case "${stage}" in
 		creating) stage=incomplete ;;
-		created | installed) ;;
+		created) ;;
+		installed) refuse_stale_install "${id}" ;;
 		*)
 			echo "refusing to reuse or recreate kind cluster ${CLUSTER}: up.sh created it, but ${SETUP} does not record how far its setup got." >&2
 			echo "Recreating it would delete agentsessionsd's session journal if it is installed. Run ./down.sh to delete it, then rerun up.sh." >&2
@@ -288,7 +289,7 @@ if [[ "${stage}" == created ]]; then
 		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${ARCH}" \
 		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m \
 		deploy ate-system --setup-csi=none)
-	echo "${id} installed" >"${SETUP}"
+	echo "${id} installed ${SUBSTRATE_REF}" >"${SETUP}"
 else
 	step "reusing kind cluster ${CLUSTER}"
 	if [[ "${stage}" == foreign ]]; then

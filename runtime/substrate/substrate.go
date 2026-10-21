@@ -173,7 +173,9 @@ type ControlClient interface {
 	CreateActor(ctx context.Context, actor ActorRef, template ObjectRef) error
 	// ResumeActor schedules the actor onto a worker from its own snapshot, or cold-boots the
 	// template spec if it has none. It does not look up the template's golden tag at resume time.
-	// There is no per-call boot flag.
+	// There is no per-call boot flag. It returns the actor as the resume left it, with every field
+	// GetActor reports: a memory-tier Restore and Create's attach compare its Snapshot (or
+	// NoCapture) with the checkpoint the session's journal recorded before handing the actor out.
 	ResumeActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 	// SuspendActor snapshots the actor to durable storage and frees the worker, returning the actor
 	// as the suspend left it: ActorInfo.Snapshot is the external snapshot it now holds, paired with
@@ -344,7 +346,8 @@ func (b *Backend) ref(name string) ActorRef { return ActorRef{Atespace: b.atespa
 // checkpoint SessionSpec.RecordedCheckpoint reads, read after GetActor answers: the snapshot the
 // session's latest SUSPEND names or, with none recorded, no capture of its own. Otherwise it holds
 // a capture the journal never accepted (one a Snapshot refused stays on the actor) and Create
-// refuses with api.ErrMemoryStateLost before resuming or handing it out.
+// refuses with api.ErrMemoryStateLost before resuming or handing it out. A SUSPENDED actor is
+// checked again on what its resume reports (see attach).
 //
 // The distinction matters most for a REQUIRES_MEMORY_SNAPSHOT harness: recreating an actor that
 // already holds live state would silently discard exactly the state fork and suspend exist to carry,
@@ -436,16 +439,23 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 // resume (see resumeFailed). An actor mid-transition is ErrActorBusy, as is a resume substrate
 // refuses because another operation holds the actor (the ControlClient wraps it), so a host that
 // lost a race for a session's first turn gets a retryable error, not a permanent one.
+//
+// A resume is checked again on the actor ResumeActor reports, against the checkpoint recorded
+// reads anew: another operation can leave a capture the journal never accepted (one a Snapshot
+// refused) between the look and the resume, and ResumeActor restores whatever the actor holds by
+// then. A mismatch is api.ErrMemoryStateLost, and the actor is left running and not handed out
+// (see resumedNotHandedOut). A SUSPEND another host recorded in that window is read and accepted.
 func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api.SnapshotRef, error)) (inc api.Incarnation, found bool, err error) {
 	info, err := b.ctl.GetActor(ctx, ref)
 	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+	resumed := false
 	switch {
 	case errors.Is(err, ErrActorNotFound):
 		return api.Incarnation{}, false, nil
 	case err != nil:
 		return api.Incarnation{}, false, fmt.Errorf("substrate: get actor: %w", err)
 	case info.Status == StatusRunning:
-		if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, recorded); err != nil {
+		if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, recorded, attachNotDone); err != nil {
 			return api.Incarnation{}, true, err
 		}
 	case info.Status == StatusSuspended:
@@ -455,7 +465,7 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api
 		// ready". A pending upload is still refused as not ready first.
 		recordedFirst := memory && stuckNotReady(info)
 		if recordedFirst {
-			if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, recorded); err != nil {
+			if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, recorded, attachNotDone); err != nil {
 				return api.Incarnation{}, true, err
 			}
 		}
@@ -463,7 +473,7 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api
 			return api.Incarnation{}, true, err
 		}
 		if !recordedFirst {
-			if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, recorded); err != nil {
+			if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, recorded, attachNotDone); err != nil {
 				return api.Incarnation{}, true, err
 			}
 		}
@@ -471,6 +481,7 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api
 		if info, err = b.ctl.ResumeActor(ctx, ref); err != nil {
 			return b.resumeFailed(ctx, ref, seen, err)
 		}
+		resumed = true
 	case info.Status == StatusTransitioning:
 		// Usually another host's Create is resuming the actor it just made. Retrying finds it
 		// RUNNING (or SUSPENDED); placing onto it now would race that operation.
@@ -479,13 +490,34 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api
 		return api.Incarnation{}, true, fmt.Errorf("substrate: actor %q is in state %v, not placeable", ref.Name, info.Status)
 	}
 	inc, err = b.incarnation(ctx, ref.Name, info)
-	return inc, true, err
+	if err != nil {
+		return api.Incarnation{}, true, err
+	}
+	if resumed {
+		if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, recorded, resumedNotHandedOut); err != nil {
+			return api.Incarnation{}, true, err
+		}
+	}
+	return inc, true, nil
 }
 
-// requireAttachCheckpoint reads the session's recorded checkpoint, after GetActor answered, and
-// checks the actor against it (requireRecordedCheckpoint); it does nothing for a stateless harness.
-// A nil recorded is no recorded checkpoint. A failed read refuses without touching the actor.
-func (b *Backend) requireAttachCheckpoint(ctx context.Context, name string, info ActorInfo, memory bool, recorded func() (api.SnapshotRef, error)) error {
+// attachNotDone is what a refusal before attach resumes or hands out the actor left undone.
+const attachNotDone = "the actor was not attached to or resumed"
+
+// resumedNotHandedOut is what a refusal after a successful ResumeActor (Restore, Create's attach)
+// leaves: the actor already runs the refused capture's RAM, so it is left running, not handed out,
+// suspended or deleted, and nothing is recorded for the session. Every later attach, Restore and
+// Snapshot refuses it again before resuming or suspending it, since it still holds that capture.
+// Recovery is the one for every memory-tier actor refused as lost: delete the actor.
+const resumedNotHandedOut = "the resume had already run, so the actor was left running and " +
+	"was not handed out; as for any memory-tier actor refused this way, delete it to release " +
+	"its worker"
+
+// requireAttachCheckpoint reads the session's recorded checkpoint, after GetActor or ResumeActor
+// answered, and checks the actor against it (requireRecordedCheckpoint); it does nothing for a
+// stateless harness. A nil recorded is no recorded checkpoint. A failed read refuses as a plain
+// error. done says what the refusal left undone.
+func (b *Backend) requireAttachCheckpoint(ctx context.Context, name string, info ActorInfo, memory bool, recorded func() (api.SnapshotRef, error), done string) error {
 	if !memory {
 		return nil
 	}
@@ -496,7 +528,7 @@ func (b *Backend) requireAttachCheckpoint(ctx context.Context, name string, info
 			return fmt.Errorf("substrate: read the session's recorded checkpoint: %w", err)
 		}
 	}
-	return b.requireRecordedCheckpoint(ctx, name, info, checkpoint, "the actor was not attached to or resumed")
+	return b.requireRecordedCheckpoint(ctx, name, info, checkpoint, done)
 }
 
 // resumeFailed classifies a failed resume of the SUSPENDED actor attach found (seen). A resume that
@@ -722,17 +754,17 @@ func (b *Backend) requireCheckedCapture(ctx context.Context, name string, checke
 
 // requireRecordedCheckpoint refuses a memory-tier actor that holds a snapshot other than the
 // checkpoint the session's journal last recorded (recorded), before the backend attaches to,
-// resumes or captures it. Every capture Sessions accepts is recorded as a SUSPEND, and a capture
-// Snapshot refuses (requireCheckedCapture) stays on the suspended actor with nothing on the actor
-// to mark it, so the journal is the record of which capture is the session's. An actor whose
-// newest snapshot is not recorded.ExternalURI, or, with none recorded, that holds any capture
-// (ActorInfo.NoCapture false), holds state the journal never accepted, whether the actor is
-// suspended on it or something (the router, another caller) already resumed it. The error wraps
-// api.ErrMemoryStateLost, names no snapshot URI, and is logged at Warn so an operator can delete
-// the actor (see docs/substrate-conformance.md). It fails closed: a capture the journal missed
-// for another reason, such as a SUSPEND append that failed after its suspend, another host's
-// SUSPEND not appended yet, or an operator's suspend or pause, is refused as well. done says what
-// the refusal left undone.
+// resumes or captures it, and again on the actor a resume reports before it is handed out. Every
+// capture Sessions accepts is recorded as a SUSPEND, and a capture Snapshot refuses
+// (requireCheckedCapture) stays on the suspended actor with nothing on the actor to mark it, so the
+// journal is the record of which capture is the session's. An actor whose newest snapshot is not
+// recorded.ExternalURI, or, with none recorded, that holds any capture (ActorInfo.NoCapture false),
+// holds state the journal never accepted, whether the actor is suspended on it or something (the
+// router, another caller) already resumed it. The error wraps api.ErrMemoryStateLost, names no
+// snapshot URI, and is logged at Warn so an operator can delete the actor (see
+// docs/substrate-conformance.md). It fails closed: a capture the journal missed for another reason,
+// such as a SUSPEND append that failed after its suspend, another host's SUSPEND not appended yet,
+// or an operator's suspend or pause, is refused as well. done says what the refusal left undone.
 func (b *Backend) requireRecordedCheckpoint(ctx context.Context, name string, info ActorInfo, recorded api.SnapshotRef, done string) error {
 	held := "a snapshot other than the checkpoint the session's journal last recorded"
 	if recorded.ExternalURI == "" {
@@ -745,7 +777,7 @@ func (b *Backend) requireRecordedCheckpoint(ctx context.Context, name string, in
 	}
 	observability.Logger(ctx, b.logger).WarnContext(ctx, "refused a memory-tier actor that holds a snapshot the session's journal did not record",
 		"component", "runtime.substrate", "atespace", b.atespace, "actor", name, "actor_uid", info.UID,
-		"actor_status", info.Status, "error_kind", "memory_state_lost")
+		"actor_status", info.Status.String(), "error_kind", "memory_state_lost")
 	return fmt.Errorf("%w: actor %s/%s (UID %q, %s) holds %s (a capture a suspend refused, or one Sessions "+
 		"did not take), so its in-RAM state cannot be shown to be the session's; %s",
 		api.ErrMemoryStateLost, b.atespace, name, info.UID, info.Status, held, done)
@@ -892,6 +924,16 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (api.Incarna
 // RestoreInstance is Restore with a reader for the UID of the actor the session's journal last
 // recorded (api.InstanceRestorer); nil reads none. After a failed resume, that UID is what tells the
 // session's actor, still there, from a replacement (see memoryActorGone).
+//
+// For a REQUIRES_MEMORY_SNAPSHOT harness the actor ResumeActor reports must still hold ref, the
+// checkpoint the journal last recorded (requireRecordedCheckpoint), as it had to before the resume:
+// another operation can leave a capture the journal never accepted (one a Snapshot refused) between
+// the look and the resume, and ResumeActor restores whatever the actor holds by then, on the
+// runtime that capture is stamped with, so MemoryNotRestored does not catch it. A mismatch is
+// api.ErrMemoryStateLost wrapped in ErrSnapshotNotRestorable, and the actor is left running and not
+// handed out (see resumedNotHandedOut). This sees only what the response reports. It is not a
+// precondition on the resume itself, which v0.5.0's ResumeActorRequest (the actor reference only)
+// cannot carry.
 func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, recorded func() (string, error)) (inc api.Incarnation, err error) {
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "restore_compute",
 		"actor", ref.Local,
@@ -922,7 +964,15 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 	}
 	resumeFinished(nil, "actor_status", info.Status)
 	inc, err = b.incarnation(ctx, name, info)
-	return inc, err
+	if err != nil {
+		return api.Incarnation{}, err
+	}
+	if b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
+		if err := b.requireRecordedCheckpoint(ctx, name, info, ref, resumedNotHandedOut); err != nil {
+			return api.Incarnation{}, fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
+		}
+	}
+	return inc, nil
 }
 
 // requireRestoreSnapshot checks the held checkpoint before ResumeActor, which otherwise selects

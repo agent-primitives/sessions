@@ -43,6 +43,9 @@ type lifecycleControl struct {
 	// beforeSuspend, when set, runs once as SuspendActor starts, with l.mu held, so a test can act on
 	// the actor in the window between the backend's check and its suspend.
 	beforeSuspend func(a *atepb.Actor)
+	// beforeResume, when set, runs once as ResumeActor starts, with l.mu held, so a test can act on
+	// the actor in the window between the backend's check and its resume.
+	beforeResume func(a *atepb.Actor)
 	// runtime is the sandbox runtime ResumeActor binds a worker of; a capture is stamped with it.
 	runtime *atepb.SandboxRuntime
 }
@@ -87,6 +90,13 @@ func (l *lifecycleControl) ResumeActor(_ context.Context, in *atepb.ResumeActorR
 	defer l.mu.Unlock()
 	name := in.GetActor().GetName()
 	l.record("resume:" + name)
+	if l.beforeResume != nil {
+		hook := l.beforeResume
+		l.beforeResume = nil
+		if a, ok := l.actors[name]; ok {
+			hook(a)
+		}
+	}
 	a, ok := l.actors[name]
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "Actor %s not found", name)
@@ -554,6 +564,84 @@ func TestOutsideSuspendsOverTheAdapter(t *testing.T) {
 							t.Fatalf("round %d woken=%v %s: calls=%v, want no resume or suspend", round, woken, path.name, ctl.calls)
 						}
 					}
+				}
+			}
+		})
+	}
+}
+
+// The post-resume check over the real adapter. Between the backend's check and its ResumeActor,
+// another operation leaves the session's SUSPENDED actor holding a capture the journal never
+// accepted: another host's Snapshot captured RAM on a worker of another sandbox runtime and refused
+// it. ResumeActor restores that capture on a worker of the runtime it is stamped with, so the
+// response reports the same UID and no MemoryNotRestored. Restore (Resume) and Create's attach (the
+// next turn) compare the actor the response reports with the recorded checkpoint and refuse it with
+// api.ErrMemoryStateLost: the actor is left RUNNING, nothing is suspended or deleted, and every
+// later attach, Restore and Snapshot refuses it before resuming or suspending it.
+func TestResumeOfAnUnrecordedCaptureIsRefusedOverTheAdapter(t *testing.T) {
+	rtA := sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h1")
+	rtB := sandboxRuntime("gvisor", "architecture", "amd64")
+	for _, op := range []string{"resume", "next turn"} {
+		t.Run(op, func(t *testing.T) {
+			ctx := t.Context()
+			ctl := newLifecycleControl()
+			ctl.runtime = rtA
+			b := memoryBackend(ctl)
+			parent, err := b.Create(ctx, &api.SessionSpec{SessionUID: "parent"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorded, err := b.Snapshot(ctx, parent, api.SnapshotExternal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctl.beforeResume = func(a *atepb.Actor) {
+				gen := a.Status.LastAssignedGeneration + 1
+				snap := durableSnapshot(gen, fmt.Sprintf("gs://b/atespaces/space/actors/parent/snapshots/s%d", gen), atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+				snap.SandboxRuntime = rtB
+				a.Status.Snapshots = append(a.Status.Snapshots, snap)
+				a.Status.LastAssignedGeneration = gen
+				ctl.runtime = rtB // substrate restores it on a worker of the runtime it is stamped with
+			}
+			spec := &api.SessionSpec{SessionUID: "parent", StartedTurns: func() (int, error) { return 1, nil },
+				RecordedCheckpoint: func() (api.SnapshotRef, error) { return recorded, nil }}
+			ctl.calls = nil
+			var inc api.Incarnation
+			if op == "resume" {
+				inc, err = b.Restore(ctx, recorded)
+			} else {
+				inc, err = b.Create(ctx, spec)
+			}
+			if !errors.Is(err, api.ErrMemoryStateLost) || inc.ID != "" || inc.ComputeInstance != "" {
+				t.Fatalf("%s: inc=%+v err=%v, want api.ErrMemoryStateLost and no incarnation", op, inc, err)
+			}
+			if strings.Contains(err.Error(), "gs://") || !strings.Contains(err.Error(), "left running") {
+				t.Fatalf("%s: refusal %q must say the actor was left running and name no snapshot URI", op, err)
+			}
+			if want := []string{"resume:parent"}; !reflect.DeepEqual(ctl.calls, want) {
+				t.Fatalf("calls=%v want %v: no suspend or delete after the refused resume", ctl.calls, want)
+			}
+			now, err := FromClient(ctl).GetActor(ctx, substrate.ActorRef{Atespace: "space", Name: "parent"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if now.Status != substrate.StatusRunning || now.UID != parent.ComputeInstance || now.MemoryNotRestored {
+				t.Fatalf("actor after the refusal: %+v, want the session's actor RUNNING with no MemoryNotRestored", now)
+			}
+			for name, path := range map[string]func() error{
+				"next turn": func() error { _, err := b.Create(ctx, spec); return err },
+				"resume":    func() error { _, err := b.Restore(ctx, recorded); return err },
+				"suspend or fork capture": func() error {
+					_, err := b.Snapshot(ctx, api.Incarnation{ID: "parent", ComputeInstance: parent.ComputeInstance, RecordedCheckpoint: recorded}, api.SnapshotExternal)
+					return err
+				},
+			} {
+				ctl.calls = nil
+				if err := path(); !errors.Is(err, api.ErrMemoryStateLost) {
+					t.Fatalf("later %s: %v, want api.ErrMemoryStateLost", name, err)
+				}
+				if len(ctl.calls) != 0 {
+					t.Fatalf("later %s: calls=%v, want no resume or suspend", name, ctl.calls)
 				}
 			}
 		})

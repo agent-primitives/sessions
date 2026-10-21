@@ -188,9 +188,11 @@ not provide.
   reported as pending (`UNAVAILABLE`, which v0.5.0's synchronous suspend does not leave) is refused
   the same way, and Suspend again no longer records it. Suspend of a `SUSPENDING` or `RESUMING`
   actor, such as one another host's Suspend is still capturing, is `ABORTED`. Between that capture
-  and its append, Suspend is refused this way; retry once it is recorded. Nothing in sessions
-  recovers such a session: delete or abandon it, and delete the actor named in the warning with
-  `options.uid` (and `any_state: true` if the router woke it) to release it. Journal, wire and the
+  and its append, Suspend is refused this way; retry once it is recorded. Exec and Resume check the
+  actor a successful `ResumeActor` reports the same way, so a capture left on the actor between the
+  check and the resume is refused too; the actor is then left `RUNNING` and not used. Nothing in
+  sessions recovers such a session: delete or abandon it, and delete the actor named in the warning
+  with `options.uid` (and `any_state: true` if it is running) to release it. Journal, wire and the
   Sessions API are unchanged: the check reads the `SUSPEND` refs the journal already holds. A crash
   and resume onto a worker of the same runtime between the check and the suspend is still not
   caught; a precondition on substrate's `SuspendActor` would close it, and v0.5.0 has none on

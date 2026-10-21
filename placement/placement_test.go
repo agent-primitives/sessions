@@ -426,7 +426,8 @@ func (c *cloningControl) lineage() string { return "held:" + c.snapshot }
 
 func (c *cloningControl) ResumeActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	c.calls = append(c.calls, "resume:"+a.Name)
-	return substrate.ActorInfo{Status: substrate.StatusRunning, UID: "uid-" + a.Name}, nil
+	// The actor as the resume left it, holding the snapshot GetActor reports.
+	return substrate.ActorInfo{Status: substrate.StatusRunning, Snapshot: c.snapshot, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: "uid-" + a.Name, CaptureLineage: c.lineage(), NoCapture: true}, nil
 }
 
 // GetActor reports every actor SUSPENDED holding the snapshot the last suspend produced, which is

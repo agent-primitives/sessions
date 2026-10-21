@@ -1312,7 +1312,9 @@ The reference host takes it as `placement.Backend` in
   backend whose compute can hold a snapshot the journal never recorded MAY refuse, with
   `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) and before it resumes, attaches to or
   suspends anything, compute that holds another one; `runtime/substrate` does for a
-  `REQUIRES_MEMORY_SNAPSHOT` harness (§13.4). This reads only fields the journal already has; a
+  `REQUIRES_MEMORY_SNAPSHOT` harness (§13.4). A backend MAY also refuse that way, from `Create` or
+  `Restore`, compute its resume reports holding another one; that compute is left running and not
+  handed out, and the host records nothing. This reads only fields the journal already has; a
   backend that does not need it ignores it.
 - `RT-4f`: `Describe` returns the harness descriptor the host admits on. It MUST NOT provision
   compute: the host calls it before `Create`, `Restore`, and the fork source step (`RT-1`), in the
@@ -1459,17 +1461,21 @@ The reference host takes it as `placement.Backend` in
   (Suspend, and a stateful fork's capture of the parent) refuse with `api.ErrMemoryStateLost`,
   before `ResumeActor` or `SuspendActor`, an actor, SUSPENDED or RUNNING, whose newest snapshot is
   not the one the latest recorded `SUSPEND` names or, with none recorded, that holds a capture of
-  its own (`ActorInfo.NoCapture` false). It fails closed: a capture whose `SUSPEND` append failed,
-  another host's capture before its append, or a suspend or pause outside sessions is refused too,
-  and nothing in sessions recovers the session after it. One window
-  remains: a crash, revert and resume onto a worker of the same runtime between the check and the
-  suspend keeps the lineage and the newest snapshot, so the capture lacks the turns since the last
-  checkpoint. Only a precondition on `SuspendActor` that substrate enforces (the worker assignment,
-  generation or UID checked) closes it; v0.5.0 has none on `SuspendActor` or `ResumeActor`. A
-  router resume alone keeps the recorded checkpoint, but a suspend by any other caller, such as a
-  gateway's idle suspend, leaves a capture no `SUSPEND` names, so the host must be the only caller
-  that suspends a `REQUIRES_MEMORY_SNAPSHOT` harness's actor. One outside suspend inside the window
-  with no resume after it is the capture `Snapshot` would have taken, and is recorded.
+  its own (`ActorInfo.NoCapture` false). Restore and Create's attach check the actor a successful
+  `ResumeActor` reports the same way (attach reads the recorded checkpoint again), since a capture
+  can land between the check and the resume; a refused actor is left running and not handed out.
+  This sees only what the response reports; it is no precondition on the resume. It fails closed: a
+  capture whose `SUSPEND` append failed, another host's capture before its append, or a suspend or
+  pause outside sessions is refused too, and nothing in sessions recovers the session after it. One
+  window remains: a crash, revert and resume onto a worker of the same runtime between the check and
+  the suspend keeps the lineage and the newest snapshot, so the capture lacks the turns since the
+  last checkpoint. Only a precondition on `SuspendActor` that substrate enforces (the worker
+  assignment, generation or UID checked) closes it; v0.5.0 has none on `SuspendActor` or
+  `ResumeActor`. A router resume alone keeps the recorded checkpoint, but a suspend by any other
+  caller, such as a gateway's idle suspend, leaves a capture no `SUSPEND` names, so the host must be
+  the only caller that suspends a `REQUIRES_MEMORY_SNAPSHOT` harness's actor. One outside suspend
+  inside the window with no resume after it is the capture `Snapshot` would have taken, and is
+  recorded.
   `Snapshot` and `Restore` do not create missing actors. When no actor exists (for example a fresh
   session before any `Create` reached `CreateActor`, and not a fork child, or an actor deleted
   outside the host) both fail with the control API's `NOT_FOUND` (substrate module pinned in

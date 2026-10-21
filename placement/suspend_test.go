@@ -36,7 +36,10 @@ type suspendControl struct {
 	// beforeSuspend, when set, runs once as SuspendActor starts: after the backend's check and
 	// before this suspend acts, the window another caller's suspend and resume can land in.
 	beforeSuspend func()
-	created       int // actors created so far, for server-assigned UIDs
+	// beforeResume, when set, runs once as ResumeActor starts: after the backend's check and
+	// before this resume acts.
+	beforeResume func()
+	created      int // actors created so far, for server-assigned UIDs
 }
 
 type suspendActor struct {
@@ -95,6 +98,11 @@ func (c *suspendControl) CreateActor(_ context.Context, ref substrate.ActorRef, 
 
 func (c *suspendControl) ResumeActor(_ context.Context, ref substrate.ActorRef) (substrate.ActorInfo, error) {
 	c.calls = append(c.calls, "resume:"+ref.Name)
+	if c.beforeResume != nil {
+		hook := c.beforeResume
+		c.beforeResume = nil
+		hook()
+	}
 	a, exists := c.actors[ref]
 	if !exists {
 		return substrate.ActorInfo{}, fmt.Errorf("%w: %w", substrate.ErrActorNotFound, status.Error(codes.NotFound, "actor does not exist"))
@@ -1110,6 +1118,88 @@ func TestOutsideSuspendsEndAMemorySession(t *testing.T) {
 								t.Fatalf("round %d woken=%v %s created a fork child", round, woken, path.name)
 							}
 						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// Between the backend's check and its ResumeActor, another operation leaves the suspended session's
+// actor holding a capture the journal never accepted (another host's refused Snapshot, of RAM that
+// lost the session's turns), and the resume restores it. Resume and Exec refuse the actor the
+// resume reports with api.ErrMemoryStateLost: the actor is left running on its worker, nothing is
+// suspended, deleted or journaled. Every later Exec, Resume, Suspend
+// and Fork refuses it with no control call. A stateless session carries on.
+func TestRefusedResumeLeavesTheActorRunningAndJournalsNothing(t *testing.T) {
+	ref := substrate.ActorRef{Atespace: "space", Name: "session"}
+	for _, op := range []string{"resume", "exec"} {
+		for _, memory := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/memory=%v", op, memory), func(t *testing.T) {
+				ctx := t.Context()
+				ctl := newSuspendControl()
+				p, _ := newSuspendPlacer(t, ctl, memory)
+				store := newSuspendStore(t)
+				log := store.Session("session")
+				execSuspendTurn(t, p, log, "session", "first")
+				if _, err := p.Suspend(ctx, log, "session"); err != nil {
+					t.Fatalf("suspend: %v", err)
+				}
+				ctl.beforeResume = func() {
+					ctl.outsideResume(ref)
+					ctl.actors[ref].turns = 0 // the foreign RAM the refused capture holds
+					ctl.outsideSuspend(ref)
+				}
+				head, err := log.Head()
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctl.calls = nil
+				run := map[string]func() error{
+					"resume": func() error { return p.Resume(ctx, log, "session") },
+					"exec": func() error {
+						_, err := p.Exec(ctx, log, "session", []api.Message{*api.TextMessage("user", "next")}, head)
+						return err
+					},
+				}
+				err = run[op]()
+				if !memory {
+					if err != nil {
+						t.Fatalf("stateless %s: %v", op, err)
+					}
+					return
+				}
+				if !errors.Is(err, api.ErrMemoryStateLost) {
+					t.Fatalf("%s: %v, want api.ErrMemoryStateLost", op, err)
+				}
+				if want := []string{"resume:session"}; !reflect.DeepEqual(ctl.calls, want) {
+					t.Fatalf("calls=%v want %v: no suspend or delete after the refused resume", ctl.calls, want)
+				}
+				if a := ctl.actors[ref]; a == nil || a.status != substrate.StatusRunning || !a.worker {
+					t.Fatalf("actor %+v, want it left running on its worker", a)
+				}
+				if got, err := log.Head(); err != nil || got != head {
+					t.Fatalf("head %d (err %v), want %d: nothing may be journaled", got, err, head)
+				}
+				child := store.Session("child")
+				for _, name := range []string{"exec", "resume", "suspend", "fork"} {
+					later := map[string]func() error{
+						"exec":    run["exec"],
+						"resume":  run["resume"],
+						"suspend": func() error { _, err := p.Suspend(ctx, log, "session"); return err },
+						"fork": func() error {
+							return p.Fork(ctx, log, "session", []placement.ForkChild{{UID: "child", Log: child}}, head)
+						},
+					}[name]
+					ctl.calls = nil
+					if err := later(); !errors.Is(err, api.ErrMemoryStateLost) {
+						t.Fatalf("later %s: %v, want api.ErrMemoryStateLost", name, err)
+					}
+					if len(ctl.calls) != 0 {
+						t.Fatalf("later %s: calls=%v, want no control call", name, ctl.calls)
+					}
+					if got, err := log.Head(); err != nil || got != head {
+						t.Fatalf("later %s: head %d (err %v), want %d", name, got, err, head)
 					}
 				}
 			})

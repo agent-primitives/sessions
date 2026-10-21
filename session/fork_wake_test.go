@@ -95,7 +95,13 @@ func (c *actorControl) ResumeActor(_ context.Context, a substrate.ActorRef) (sub
 		return substrate.ActorInfo{}, substrate.ErrActorNotFound
 	}
 	c.status[a.Name] = substrate.StatusRunning
-	return substrate.ActorInfo{Status: substrate.StatusRunning, Worker: "w", UID: c.uids[a.Name]}, nil
+	// The actor as the resume left it, as GetActor reports it: the snapshot it restored from stays
+	// its newest until its next capture.
+	fidelity := substrate.SnapshotFidelityMemory
+	if c.snapshots[a.Name] == "" {
+		fidelity = substrate.SnapshotFidelityUnknown
+	}
+	return substrate.ActorInfo{Status: substrate.StatusRunning, Worker: "w", Snapshot: c.snapshots[a.Name], SnapshotFidelity: fidelity, UID: c.uids[a.Name], CaptureLineage: c.lineage(a.Name), NoCapture: c.captures[a.Name] == 0}, nil
 }
 
 func (c *actorControl) SuspendActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {

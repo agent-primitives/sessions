@@ -27,7 +27,8 @@ var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was supers
 // required (a stateful fork). A backend whose compute can hold a snapshot the journal never
 // recorded returns it from Create, Restore and Snapshot when the compute holds one other than the
 // checkpoint the journal last recorded (SessionSpec.RecordedCheckpoint,
-// Incarnation.RecordedCheckpoint, Restore's ref). The journal cannot rebuild the state (I4), so
+// Incarnation.RecordedCheckpoint, Restore's ref), before it resumes the compute or, from Create
+// and Restore, after, on what the resume reports. The journal cannot rebuild the state (I4), so
 // fresh compute would continue the journal with a harness that has forgotten it. Retrying does not
 // fix it, except when the missing record is still being written: another host's Snapshot between
 // its capture and its SUSPEND append is refused until that append lands. The session service

@@ -135,6 +135,13 @@ func (m *mockControl) ResumeActor(ctx context.Context, a substrate.ActorRef) (su
 	if info.UID == "" {
 		info.UID = m.uid(a.Name)
 	}
+	// The actor as the resume left it, as GetActor would report it: the snapshot it restored from
+	// stays its newest until its next capture.
+	if info.Snapshot == "" {
+		info.Snapshot = m.snapshots[a.Name]
+	}
+	info.CaptureLineage = m.lineage(a.Name, substrate.StatusRunning)
+	info.NoCapture = m.noCapture(a.Name)
 	return info, nil
 }
 func (m *mockControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -2828,5 +2835,121 @@ func TestSnapshotRefusesAnActorReplacedBetweenTheCheckAndTheSuspend(t *testing.T
 	}
 	if !strings.Contains(output.String(), `"error_kind":"memory_state_lost"`) || !strings.Contains(output.String(), replacement) {
 		t.Fatalf("refusal was not logged for operators: %s", output.String())
+	}
+}
+
+// Between the check before a resume and the resume, another operation can leave the actor holding
+// a capture the journal never accepted: here another host's Snapshot, which captured foreign RAM,
+// refused it and left the actor SUSPENDED on it. ResumeActor restores whatever the actor holds by
+// then, on the runtime that capture is stamped with, so the actor comes back with the same UID and
+// MemoryNotRestored false. Restore and Create's attach check the actor the resume reports against
+// the recorded checkpoint (attach reads it again) and refuse it with api.ErrMemoryStateLost: no
+// incarnation, the actor left running and neither suspended nor deleted, the refusal logged for
+// operators. Every later attach, Restore and Snapshot then refuses it before any resume or suspend.
+// A SUSPEND another host recorded in that window is read by attach and accepted. A stateless
+// session is not checked.
+func TestResumeThatRestoresAnUnrecordedCaptureIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		op   string // "restore" or "attach"
+		// recordedMeanwhile: the capture in the window is another host's, and its SUSPEND is in
+		// the journal by the time attach reads it again.
+		recordedMeanwhile bool
+	}{
+		{name: "restore", op: "restore"},
+		{name: "attach", op: "attach"},
+		{name: "attach after another host recorded the capture", op: "attach", recordedMeanwhile: true},
+	} {
+		for _, memory := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/memory=%v", tc.name, memory), func(t *testing.T) {
+				ctx := t.Context()
+				var output bytes.Buffer
+				logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelWarn}))
+				m := &mockControl{info: running("worker-a")}
+				m.info.SnapshotFidelity = substrate.SnapshotFidelityMemory
+				// The session was suspended once; the journal records that capture.
+				m.exists("sess-x", substrate.StatusSuspended)
+				m.capture("sess-x")
+				m.holds("sess-x", m.captureURI("sess-x"))
+				recorded := api.SnapshotRef{Local: "sess-x", ExternalURI: m.captureURI("sess-x"), Memory: true}
+				var other api.SnapshotRef
+				m.afterGet = func(name string) {
+					m.afterGet = nil
+					// The other operation: woken, captured and left SUSPENDED on the capture.
+					m.capture(name)
+					m.holds(name, m.captureURI(name))
+					other = api.SnapshotRef{Local: name, ExternalURI: m.captureURI(name), Memory: true}
+				}
+				resumability := api.ResumabilityStatelessReplay
+				if memory {
+					resumability = api.ResumabilityRequiresMemorySnapshot
+				}
+				b := substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
+					api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: resumability}},
+					substrate.WithLogger(logger))
+				reads := 0
+				spec := &api.SessionSpec{SessionUID: "sess-x", StartedTurns: func() (int, error) { return 1, nil },
+					RecordedCheckpoint: func() (api.SnapshotRef, error) {
+						// The other host's SUSPEND lands after attach's first read.
+						if reads++; tc.recordedMeanwhile && reads > 1 {
+							return other, nil
+						}
+						return recorded, nil
+					}}
+				var inc api.Incarnation
+				var err error
+				if tc.op == "restore" {
+					inc, err = b.Restore(ctx, recorded)
+				} else {
+					inc, err = b.Create(ctx, spec)
+				}
+				if want := []string{"get:sess-x", "resume:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+					t.Fatalf("calls=%v want %v", m.calls, want)
+				}
+				if !memory || tc.recordedMeanwhile {
+					if err != nil || inc.ID != "sess-x" {
+						t.Fatalf("%s: inc=%+v err=%v, want the actor handed out", tc.op, inc, err)
+					}
+					return
+				}
+				if !errors.Is(err, api.ErrMemoryStateLost) || !reflect.DeepEqual(inc, api.Incarnation{}) {
+					t.Fatalf("%s: inc=%+v err=%v, want api.ErrMemoryStateLost and no incarnation", tc.op, inc, err)
+				}
+				if tc.op == "restore" && !errors.Is(err, substrate.ErrSnapshotNotRestorable) {
+					t.Fatalf("restore: %v, want it to wrap ErrSnapshotNotRestorable", err)
+				}
+				if st := m.statusOf("sess-x"); st != substrate.StatusRunning {
+					t.Fatalf("actor is %v, want it left running", st)
+				}
+				for _, part := range []string{"space/sess-x", m.uid("sess-x"), "left running", "delete it"} {
+					if !strings.Contains(err.Error(), part) {
+						t.Fatalf("refusal %q does not say %q", err, part)
+					}
+				}
+				if strings.Contains(err.Error(), "gs://") {
+					t.Fatalf("refusal %q names a snapshot URI", err)
+				}
+				if !strings.Contains(output.String(), `"error_kind":"memory_state_lost"`) || !strings.Contains(output.String(), `"actor_status":"running"`) {
+					t.Fatalf("refusal was not logged for operators: %s", output.String())
+				}
+				// It stays refused, before any resume or suspend.
+				for name, path := range map[string]func() error{
+					"attach":  func() error { _, err := b.Create(ctx, spec); return err },
+					"restore": func() error { _, err := b.Restore(ctx, recorded); return err },
+					"snapshot": func() error {
+						_, err := b.Snapshot(ctx, api.Incarnation{ID: "sess-x", RecordedCheckpoint: recorded}, api.SnapshotExternal)
+						return err
+					},
+				} {
+					m.calls = nil
+					if err := path(); !errors.Is(err, api.ErrMemoryStateLost) {
+						t.Fatalf("later %s: %v, want api.ErrMemoryStateLost", name, err)
+					}
+					if want := []string{"get:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+						t.Fatalf("later %s: calls=%v want %v", name, m.calls, want)
+					}
+				}
+			})
+		}
 	}
 }

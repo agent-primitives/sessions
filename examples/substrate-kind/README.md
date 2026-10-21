@@ -28,7 +28,8 @@ cd examples/substrate-kind
 ```
 
 By default, Ollama serves `gemma3:270m` locally without provider credentials. The first image/model
-download is large and inference is CPU-only. The Ollama volume declares 1Gi of storage for this
+download is large and inference is CPU-only. The model download has a ten-minute deadline and
+setup refuses a failed or timed-out pull. The Ollama volume declares 1Gi of storage for this
 model; increase both its PV capacity and PVC request in `deploy/ollama.yaml` for larger models or
 multiple cached models. The hostPath volume uses disk space as files are written and does not
 enforce that capacity as a quota.
@@ -59,7 +60,11 @@ Setup defaults to microVM when Docker can expose `/dev/kvm` to a short-lived Bus
 It visibly falls back to gVisor when Docker reports that device is missing; image download,
 other Docker, installation, or startup failures stop setup. This checks device access, not VM
 creation. `SANDBOX_CLASS=microvm` requires the device check to pass; `SANDBOX_CLASS=gvisor` skips
-the probe. Images and runtime assets target the Docker server's architecture.
+this initial probe. The upstream cluster-creation helper probes KVM independently; before installing
+or reusing a microVM deployment, setup also requires a writable `/dev/kvm` mount on the kind node.
+If the helper omitted that mount, setup refuses rather than installing incompatible workers; use
+`down.sh` before recreating the cluster. Images and runtime assets target the Docker server's
+architecture.
 
 ## Deployment layout
 
@@ -77,13 +82,17 @@ the probe. Images and runtime assets target the Docker server's architecture.
 
 `provision.sh` uses `jq --arg` to parameterize image/model values in the checked-in JSON.
 Templates are created through `kubectl-ate`, because they belong to Substrate's Control API,
-not `kubectl apply`. Existing containers, resource limits, selectors,
-sandbox configuration and snapshot configuration must match exactly. `--check-only` performs this
+not `kubectl apply`. The complete existing specification, including volumes, containers, resource
+limits, selectors, sandbox configuration and snapshot configuration, must match exactly.
+Server-owned metadata and status are excluded. `--check-only` performs this
 comparison before worker/daemon changes. Each CLI invocation is bounded to two minutes, and the
 whole provisioning/golden wait to ten minutes.
 
 `ACTOR_TEMPLATE` defaults to `chat-harness`. Intentionally changing an immutable image/model/sandbox
 requires a new name or a fresh cluster; setup never silently keeps an incompatible template.
+WorkerPools are named `chat-harness-microvm` and `chat-harness-gvisor`, so changing sandbox class
+with a new template does not mutate the previous pool's immutable class or remove its actors.
+Switching to microVM also requires the existing kind node's KVM mount; otherwise use a fresh cluster.
 `SANDBOX_CONFIG` overrides the class's default config (`microvm` or `gvisor-default`), which must
 already exist when custom. `SNAPSHOT_LOCATION` defaults to `gs://ate-snapshots/sessions-example/`;
 the template name is appended. Generated JSON and tools live under

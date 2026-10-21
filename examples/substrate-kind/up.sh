@@ -81,6 +81,18 @@ if [[ "${stage}" == absent ]]; then
 	stage=created
 fi
 
+# The upstream creation helper probes KVM independently. Never install or reuse a
+# microVM deployment if that helper omitted the node's required device mount.
+if [[ "${SANDBOX_CLASS}" == microvm ]]; then
+	progress "Checking the owned kind node's /dev/kvm mount"
+	id="$(node_id)"
+	[[ -n "${id}" ]] || die "Cluster has no control-plane container ID."
+	mounts="$(docker inspect --format '{{json .Mounts}}' "${id}")" ||
+		die "Cannot inspect the kind node's mounts."
+	jq -e 'any(.[]; .Source == "/dev/kvm" and .Destination == "/dev/kvm" and .RW == true)' <<<"${mounts}" >/dev/null ||
+		die "Kind node lacks the required writable /dev/kvm mount; run down.sh before recreating this cluster."
+fi
+
 # Install the Substrate control plane only on a newly created cluster. Keep an
 # installed cluster intact on reruns, and record completion only if its identity still matches.
 kind_command export kubeconfig --name "${CLUSTER}" --kubeconfig "${KUBECONFIG}"

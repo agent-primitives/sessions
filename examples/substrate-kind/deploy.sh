@@ -21,17 +21,20 @@ bash "${HERE}/provision.sh" --check-only
 progress "Deploying the ${SANDBOX_CLASS} worker pool and waiting for readiness"
 render "${HERE}/deploy/workerpool.yaml" WORKER_IMAGE "${WORKER_IMAGE}" SANDBOX_CLASS "${SANDBOX_CLASS}" |
 	"${K[@]}" apply -f -
-"${ROOT}/hack/wait-worker-pool.sh" chat-harness "${NS}"
+"${ROOT}/hack/wait-worker-pool.sh" "chat-harness-${SANDBOX_CLASS}" "${NS}"
 bash "${HERE}/provision.sh"
 
 # Start an in-cluster provider when selected. External providers need configuration only.
 case "${MODEL_SOURCE}" in
 ollama)
+	timeout_command
 	progress "Deploying Ollama and waiting for readiness"
 	"${K[@]}" apply -f "${HERE}/deploy/ollama.yaml"
 	"${K[@]}" rollout status deployment/ollama -n "${NS}" --timeout=600s
 	progress "Downloading the configured Ollama model into its persistent cache"
-	"${K[@]}" exec -n "${NS}" deployment/ollama -- ollama pull "${MODEL_NAME}"
+	if ! "${TIMEOUT}" --kill-after=5s 600s "${K[@]}" exec -n "${NS}" deployment/ollama -- ollama pull "${MODEL_NAME}"; then
+		die "Ollama model download failed or exceeded its ten-minute deadline."
+	fi
 	;;
 stub)
 	progress "Deploying the deterministic model stub and waiting for readiness"

@@ -28,9 +28,12 @@ func cmdVerify(args []string) error {
 	if err != nil {
 		return err
 	}
-	records, err := c.Replay(ctx, *uid, 1, sess.GetLastSeq())
-	if err != nil {
-		return err
+	var records []*v1.LogRecord
+	if sess.GetLastSeq() > 0 {
+		records, err = c.Replay(ctx, *uid, 1, sess.GetLastSeq())
+		if err != nil {
+			return err
+		}
 	}
 	if err := verifyRecords(records, sess.GetLastSeq()); err != nil {
 		return err

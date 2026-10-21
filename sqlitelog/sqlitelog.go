@@ -616,6 +616,20 @@ func touchSession(tx *sql.Tx, session, defaultProject string, ev api.Event) erro
 // Read returns all records with seq >= fromSeq, in order. It returns the stored hashes verbatim
 // and does not re-canonicalize — that is Verify's job (reviewer note: never re-hash on read).
 func (l *Log) Read(fromSeq int64) ([]eventlog.Record, error) {
+	records, err := l.ReadProto(fromSeq)
+	if err != nil {
+		return nil, err
+	}
+	var out []eventlog.Record
+	for _, record := range records {
+		out = append(out, eventlog.RecordFromProto(record))
+	}
+	return out, nil
+}
+
+// ReadProto returns stored records without converting their events to the domain type.
+// Audit callers use it to preserve protobuf field presence; hashes are returned unchanged.
+func (l *Log) ReadProto(fromSeq int64) ([]*v1.LogRecord, error) {
 	rows, err := l.store.db.Query(
 		`SELECT seq, prev_hash, hash, fence, event FROM events
 		 WHERE session = ? AND seq >= ? ORDER BY seq`, l.session, fromSeq,
@@ -624,7 +638,7 @@ func (l *Log) Read(fromSeq int64) ([]eventlog.Record, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []eventlog.Record
+	var out []*v1.LogRecord
 	for rows.Next() {
 		var (
 			seq, fence     int64
@@ -634,11 +648,11 @@ func (l *Log) Read(fromSeq int64) ([]eventlog.Record, error) {
 		if err := rows.Scan(&seq, &prevHash, &hash, &fence, &blob); err != nil {
 			return nil, err
 		}
-		ev, err := decode(blob)
-		if err != nil {
+		ev := &v1.Event{}
+		if err := proto.Unmarshal(blob, ev); err != nil {
 			return nil, fmt.Errorf("sqlitelog: decode seq %d: %w", seq, err)
 		}
-		out = append(out, eventlog.Record{Seq: seq, PrevHash: prevHash, Hash: hash, Fence: fence, Event: ev})
+		out = append(out, &v1.LogRecord{Seq: seq, PrevHash: prevHash, ContentHash: hash, Fence: fence, Event: ev})
 	}
 	return out, rows.Err()
 }

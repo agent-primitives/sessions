@@ -6,7 +6,7 @@ metadata:
 apiVersion: ate.dev/v1alpha1
 kind: WorkerPool
 metadata:
-  name: chat-harness
+  name: chat-harness-SANDBOX_CLASS
   namespace: sessions-example
   labels:
     workload: sessions-example-SANDBOX_CLASS

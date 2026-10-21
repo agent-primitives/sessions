@@ -82,7 +82,12 @@ second="$(ctl exec --session "${uid}" --input second)"
 echo "${second}"
 if [[ "${MODEL_SOURCE:-}" == stub ]]; then grep -q 'context=3 last=second' <<<"${second}"; fi
 progress "Verifying the journal chain after continuation"
-ctl verify --session "${uid}"
+verification="$(ctl verify --session "${uid}")"
+echo "${verification}"
+if [[ "${MODEL_SOURCE:-}" == stub ]]; then
+	grep -qF 'chain verified (10 records)' <<<"${verification}" ||
+		die "Stub smoke expected ten journal records after two turns."
+fi
 
 # Show the resumed session's correlation evidence from the replacement daemon.
 progress "Checking session correlation in the replacement daemon logs"

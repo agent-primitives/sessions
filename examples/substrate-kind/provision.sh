@@ -96,8 +96,7 @@ while :; do
 	current="$(ate "" get actor-template "${ACTOR_TEMPLATE}" -a "${NS}")"
 	jq -e --arg name "${ACTOR_TEMPLATE}" --arg ns "${NS}" --slurpfile wanted "${desired}" '
 		.metadata.name == $name and .metadata.atespace == $ns and
-		({workerSelector, containers, resources, snapshotConfig, sandboxConfig} ==
-		 ($wanted[0] | {workerSelector, containers, resources, snapshotConfig, sandboxConfig}))
+		(del(.metadata, .status) == ($wanted[0] | del(.metadata, .status)))
 	' <<<"${current}" >/dev/null || die "Immutable template mismatch; choose a new ACTOR_TEMPLATE before changing the deployment."
 	error="$(jq -r '.status.goldenSnapshotStatus.errorMessage // empty' <<<"${current}")"
 	[[ -z "${error}" ]] || die "Golden snapshot failed: ${error}"

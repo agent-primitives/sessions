@@ -74,6 +74,8 @@ jq --arg mode "$TEST_MODE" '
   elif $mode == "sandboxConfig" then .sandboxConfig.configName = "changed"
   elif $mode == "snapshotConfig" then .snapshotConfig.storageLocation = "changed"
   elif $mode == "workerSelector" then .workerSelector.matchLabels.unexpected = "changed"
+  elif $mode == "durable-volume" then .volumes = [{name:"extra",durableDir:{}}]
+  elif $mode == "external-volume" then .volumes = [{name:"extra",externalVolumeTemplate:{capacity:"10Gi",storageClassName:"example"}}]
   elif $mode == "identity" then .metadata.name = "wrong"
   elif $mode == "golden-error" then .status.goldenSnapshotStatus.errorMessage = "snapshot refused"
   elif $mode == "golden-pending" then .status = {}
@@ -138,7 +140,7 @@ func TestProvisionCreatesAndReusesDeclarativeTemplate(t *testing.T) {
 
 func TestProvisionFailsClosed(t *testing.T) {
 	for _, mode := range []string{
-		"containers", "resources", "sandboxConfig", "snapshotConfig", "workerSelector",
+		"containers", "resources", "sandboxConfig", "snapshotConfig", "workerSelector", "durable-volume", "external-volume",
 		"identity", "golden-error", "golden-pending", "transport", "ambiguous", "auth", "null", "stall",
 	} {
 		t.Run(mode, func(t *testing.T) {
@@ -150,6 +152,12 @@ func TestProvisionFailsClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("TEST_MODE", mode)
+			if mode == "durable-volume" || mode == "external-volume" {
+				out, err := exec.CommandContext(t.Context(), "bash", "provision.sh", "--check-only").CombinedOutput()
+				if err == nil || !strings.Contains(string(out), "Immutable template mismatch") {
+					t.Fatalf("volume mismatch passed preflight: %v\n%s", err, out)
+				}
+			}
 			if mode == "golden-pending" || mode == "stall" {
 				t.Setenv("PROVISION_TIMEOUT_SECONDS", "1")
 			}
@@ -174,6 +182,171 @@ func TestProvisionPreflightDoesNotCreate(t *testing.T) {
 	calls, err := os.ReadFile(filepath.Join(dir, "calls"))
 	if err != nil || strings.Contains(string(calls), "create ") {
 		t.Fatalf("preflight created a resource: %s %v", calls, err)
+	}
+}
+
+func deploymentFixture(t *testing.T) string {
+	t.Helper()
+	prerequisites(t)
+	dir, state := fixture(t, map[string]string{
+		"sleep": `exit 0`,
+		"timeout": `echo "$*" >> "$TEST_DIR/timeout-calls"
+if [[ "$*" == *" -- ollama pull "* && "$TEST_PULL" == timeout ]]; then exit 124; fi
+shift 2
+exec "$@"`,
+		"kubectl": `echo "$*" >> "$TEST_DIR/kube-calls"
+case "$*" in
+  *"apply -f -"*)
+    manifest="$(cat)"
+    if [[ "$manifest" == *"kind: WorkerPool"* ]]; then
+      pool="$(awk '/^  name: chat-harness/ {print $2}' <<< "$manifest")"
+      class="$(awk '/^    - name:/ {print $3}' <<< "$manifest")"
+      [[ -n "$pool" && -n "$class" ]]
+      file="$TEST_DIR/pool-$pool"
+      if [[ -f "$file" && "$(cat "$file")" != "$class" ]]; then
+        echo 'sandboxClasses names are immutable' >&2; exit 1
+      fi
+      echo "$class" > "$file"
+    fi ;;
+  *"apply -f "* | *" -- ollama pull "*) exit 0 ;;
+  *"get deployment/"*) echo ready ;;
+  *"get pods"*) echo 'worker=10.0.0.1' ;;
+  *"rollout status"*) exit 0 ;;
+  *"create configmap"*) echo '{}' ;;
+  *"get configmap"*) echo 1 ;;
+  *"get secret"* | *"delete secret"*) exit 0 ;;
+  *) exit 1 ;;
+esac`,
+	})
+	ate := strings.ReplaceAll(fakeATE, "$TEST_DIR/current", "$TEST_DIR/current-$ACTOR_TEMPLATE")
+	if err := os.WriteFile(filepath.Join(state, "kubectl-ate"),
+		[]byte("#!/usr/bin/env bash\nset -euo pipefail\n"+ate), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_MODE", "")
+	t.Setenv("HARNESS_IMAGE", "example/harness@sha256:"+strings.Repeat("a", 64))
+	t.Setenv("DAEMON_IMAGE", "example/daemon@sha256:"+strings.Repeat("b", 64))
+	t.Setenv("MODEL_SOURCE", "external")
+	t.Setenv("MODEL_NAME", "fixture-model")
+	t.Setenv("MODEL_BASE_URL", "https://model.example")
+	t.Setenv("MODEL_API_KEY", "")
+	t.Setenv("SANDBOX_CONFIG", "")
+	t.Setenv("SANDBOX_CLASS", "gvisor")
+	t.Setenv("ACTOR_TEMPLATE", "chat-gvisor")
+	t.Setenv("WORKER_IMAGE", "example/worker@sha256:"+strings.Repeat("c", 64))
+	t.Setenv("TEST_PULL", "success")
+	return dir
+}
+
+func TestDeploySandboxChangePreservesExistingWorkerPool(t *testing.T) {
+	dir := deploymentFixture(t)
+	for _, class := range []string{"gvisor", "microvm"} {
+		t.Setenv("SANDBOX_CLASS", class)
+		t.Setenv("ACTOR_TEMPLATE", "chat-"+class)
+		t.Setenv("WORKER_IMAGE", "example/worker-"+class+"@sha256:"+strings.Repeat("c", 64))
+		if out, err := exec.CommandContext(t.Context(), "bash", "deploy.sh").CombinedOutput(); err != nil {
+			t.Fatalf("%s deployment: %v\n%s", class, err, out)
+		}
+	}
+	calls, err := os.ReadFile(filepath.Join(dir, "kube-calls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, class := range []string{"gvisor", "microvm"} {
+		pool := "chat-harness-" + class
+		contents, err := os.ReadFile(filepath.Join(dir, "pool-"+pool))
+		if err != nil || strings.TrimSpace(string(contents)) != class {
+			t.Fatalf("pool %s not preserved: %q %v", pool, contents, err)
+		}
+		if !strings.Contains(string(calls), "rollout status deployment/"+pool+" ") {
+			t.Fatalf("deployment did not wait for %s:\n%s", pool, calls)
+		}
+	}
+}
+
+func TestOllamaPullDeadline(t *testing.T) {
+	for _, mode := range []string{"success", "timeout"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := deploymentFixture(t)
+			t.Setenv("MODEL_SOURCE", "ollama")
+			t.Setenv("MODEL_BASE_URL", "")
+			t.Setenv("TEST_PULL", mode)
+			out, err := exec.CommandContext(t.Context(), "bash", "deploy.sh").CombinedOutput()
+			if mode == "success" {
+				if err != nil || !strings.Contains(string(out), "Sessions application deployment is ready") {
+					t.Fatalf("Ollama deployment: %v\n%s", err, out)
+				}
+			} else {
+				if err == nil || !strings.Contains(string(out), "Ollama model download failed or exceeded") {
+					t.Fatalf("pull timeout did not refuse deployment: %v\n%s", err, out)
+				}
+				calls, err := os.ReadFile(filepath.Join(dir, "kube-calls"))
+				if err != nil || strings.Contains(string(calls), "create configmap") {
+					t.Fatalf("pull timeout changed daemon configuration: %v\n%s", err, calls)
+				}
+			}
+			calls, err := os.ReadFile(filepath.Join(dir, "timeout-calls"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			boundedPull := false
+			for _, call := range strings.Split(string(calls), "\n") {
+				if strings.Contains(call, " -- ollama pull ") &&
+					strings.HasPrefix(call, "--kill-after=5s 600s ") {
+					boundedPull = true
+				}
+			}
+			if !boundedPull {
+				t.Fatalf("missing bounded model pull:\n%s", calls)
+			}
+		})
+	}
+}
+
+func TestStubSmokeRequiresTenRecords(t *testing.T) {
+	for _, count := range []string{"10", "9"} {
+		t.Run(count, func(t *testing.T) {
+			prerequisites(t)
+			fixture(t, map[string]string{
+				"go": `[[ "$1" == -C && "$3" == build && "$4" == -o ]]
+cp "$TEST_DIR/agentctl-fixture" "$5"`,
+				"agentctl-fixture": `case "$1" in
+  list) exit 0 ;;
+  exec)
+    echo 'session smoke-review'
+    if [[ "$*" == *"--input first"* ]]; then echo 'context=1 last=first'; else echo 'context=3 last=second'; fi ;;
+  verify)
+    count=5
+    if [[ -f "$TEST_DIR/verified" ]]; then count="$TEST_RECORDS"; fi
+    touch "$TEST_DIR/verified"
+    echo "session smoke-review chain verified ($count records)" ;;
+  get | replay) echo first ;;
+  *) exit 1 ;;
+esac`,
+				"kubectl": `case "$*" in
+  *"port-forward"*) echo 'Forwarding from 127.0.0.1:18080'; exec sleep 30 ;;
+  *"get pod"*) if [[ -f "$TEST_DIR/restarted" ]]; then echo new-pod; else echo old-pod; fi ;;
+  *"delete pod"*) touch "$TEST_DIR/restarted" ;;
+  *"rollout status"*) exit 0 ;;
+  *"logs"*) echo 'session_uid=smoke-review' ;;
+  *) exit 1 ;;
+esac`,
+			})
+			t.Setenv("TEST_RECORDS", count)
+			t.Setenv("MODEL_SOURCE", "stub")
+			t.Setenv("SMOKE_TIMEOUT_SECONDS", "8")
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			out, err := exec.CommandContext(ctx, "bash", "smoke.sh").CombinedOutput()
+			if count == "10" {
+				if err != nil || !strings.Contains(string(out), "Restart smoke passed: smoke-review") {
+					t.Fatalf("valid stub smoke: %v\n%s", err, out)
+				}
+			} else if err == nil || !strings.Contains(string(out), "expected ten journal records") ||
+				strings.Contains(string(out), "Restart smoke passed:") {
+				t.Fatalf("wrong record count did not refuse: %v\n%s", err, out)
+			}
+		})
 	}
 }
 

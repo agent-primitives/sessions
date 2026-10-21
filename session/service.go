@@ -865,7 +865,7 @@ func (s *Service) Replay(req *v1.ReplayRequest, stream v1.Sessions_ReplayServer)
 	if from <= 0 {
 		from = 1
 	}
-	recs, err := s.store.Session(req.GetSession()).Read(from)
+	recs, err := s.store.Session(req.GetSession()).ReadProto(from)
 	if err != nil {
 		return hostInternalError("read: %v", err)
 	}
@@ -873,7 +873,7 @@ func (s *Service) Replay(req *v1.ReplayRequest, stream v1.Sessions_ReplayServer)
 		if to := req.GetToSeq(); to != 0 && r.Seq > to {
 			break
 		}
-		if err := stream.Send(eventlog.RecordToProto(r)); err != nil {
+		if err := stream.Send(r); err != nil {
 			return err
 		}
 		recordsSent++

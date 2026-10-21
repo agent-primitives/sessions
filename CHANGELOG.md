@@ -54,6 +54,11 @@ not provide.
 
 ### Fixed
 
+- SQLite-backed `Replay` preserves the stored protobuf event's field presence, so audit clients
+  can detect presence-only tampering instead of verifying a normalized event. Stored bytes,
+  hashes, and journal/wire schemas are unchanged; no journal migration is required.
+- `agentctl verify` skips `Replay` for a captured empty prefix, avoiding false failures when a
+  concurrent turn appends after the session head was read.
 - Substrate no longer resumes a suspended actor from a checkpoint other than the one the session
   recorded, and no longer treats an older completed snapshot as current while the newest one is
   pending or local-only (see Compatibility).

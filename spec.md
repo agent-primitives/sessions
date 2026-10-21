@@ -1375,6 +1375,16 @@ The reference host takes it as `placement.Backend` in
 
 ### 13.4 Reference backends (informative)
 
+The SQLite placement path durably records allocation intent before Create/Restore and confirms
+only the immutable returned resource ID. Failed or lost responses retain unresolved attempts;
+addresses and call credentials are not inventory. Optional `api.CleanupRuntime` keys identify exact
+non-destructive release configurations, not harness aliases or a generic Stop fallback. Fork keeps
+its legacy allocation/rollback path at this stage. The cleanup schema reserves internal publication
+and cleanup state, but enables no reclamation. Every newly created inventory remains incomplete,
+as does every migrated row; tracking a later restore does not certify a previous untracked fork.
+Only explicit operator reconciliation via `Store.CertifyInventory` can establish coverage. Stop all
+old writers before migration and never downgrade the migrated journal to v0.3.0 or older.
+
 - `runtime/local`: serves the harness in the host process over a unix socket shared by all
   sessions. `Describe` asks that in-process harness. All capabilities false.
   `Snapshot(EXTERNAL)` returns `{local: id, memory: false}`; `Create`, `Restore`, and `Fork`

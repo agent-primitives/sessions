@@ -30,6 +30,7 @@ package remote
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -259,6 +260,20 @@ func (b *Backend) Stop(ctx context.Context, in api.Incarnation) error {
 	finish(nil)
 	return nil
 }
+
+// CleanupKey identifies the configured endpoint across host restarts, independently of harness
+// aliases. Hashing keeps endpoint details out of the durable ledger; this is not authentication.
+func (b *Backend) CleanupKey() string {
+	return fmt.Sprintf("remote:%x", sha256.Sum256([]byte(b.addr)))
+}
+
+// ReleaseSession only detaches. It must not close the shared Describe connection or stop a server
+// owned by somebody else, even if the allocation response was never confirmed.
+func (b *Backend) ReleaseSession(ctx context.Context, sessionUID string) error {
+	return b.Stop(ctx, api.Incarnation{ID: sessionUID})
+}
+
+var _ api.CleanupRuntime = (*Backend)(nil)
 
 // Status reports the compute-lifecycle state. The log and the placement layer are the lifecycle
 // authority, so a known incarnation is LIVE.

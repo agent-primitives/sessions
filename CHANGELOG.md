@@ -7,7 +7,19 @@ not provide.
 
 ## Unreleased
 
+### Added
+
+- Durable allocation intent and immutable resource acknowledgements for SQLite-backed Create and
+  Restore, plus optional non-destructive release contracts for local and remote runtimes. No reaper
+  runs yet; Fork retains its existing allocation and rollback behavior.
+
 ### Compatibility
+
+- The SQLite journal gains an allocation inventory and reserved internal publication/cleanup state.
+  Stop all old writers and back up the database and WAL before migration. There is no downgrade to
+  v0.3.0 or older; an already-open old writer is not fenced by the schema stamp. Every inventory,
+  including fresh rows, stays incomplete until explicit operator reconciliation. See
+  [allocation ownership](docs/allocation-ownership.md).
 
 - A stateful substrate `Fork` now refuses a clone whose `ResumeActor` leaves `NoCapture` false but
   shows no capture of its own with `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`), where v0.3.0

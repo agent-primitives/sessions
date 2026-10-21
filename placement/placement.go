@@ -421,7 +421,9 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}}
 	createFinished := observability.StartDebug(ctx, p.logger, "placement", "create_compute",
 		"session_uid", sessionUID)
-	inc, err = p.backend.Create(ctx, spec)
+	inc, err = p.allocate(ctx, log, "create", func() (api.Incarnation, error) {
+		return p.backend.Create(ctx, spec)
+	})
 	if err != nil {
 		createFinished(err, "error_kind", "runtime_create_failed")
 		return inc, err
@@ -1191,18 +1193,19 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	// clone a fork child's FORK marker recorded, before its first turn). It can refuse a replacement
 	// before resume and classify permanent loss after a failure. Each callback reads the journal
 	// when the backend decides, so a turn another host journals between those checks is seen.
-	if r, ok := p.backend.(api.InstanceRestorer); ok {
-		inc, err = r.RestoreInstance(ctx, ref, func() (string, error) {
-			recs, err := log.Read(1)
-			if err != nil {
-				return "", fmt.Errorf("placement: read session journal: %w", err)
-			}
-			instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
-			return instance, nil
-		})
-	} else {
-		inc, err = p.backend.Restore(ctx, ref)
-	}
+	inc, err = p.allocate(ctx, log, "restore", func() (api.Incarnation, error) {
+		if r, ok := p.backend.(api.InstanceRestorer); ok {
+			return r.RestoreInstance(ctx, ref, func() (string, error) {
+				recs, err := log.Read(1)
+				if err != nil {
+					return "", fmt.Errorf("placement: read session journal: %w", err)
+				}
+				instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
+				return instance, nil
+			})
+		}
+		return p.backend.Restore(ctx, ref)
+	})
 	if err != nil {
 		return err
 	}

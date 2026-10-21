@@ -163,3 +163,14 @@ func TestFormatRecordShowsToolCall(t *testing.T) {
 		t.Fatalf("formatRecord without arguments = %s", got)
 	}
 }
+
+// Arguments print as the tool receives them: <, > and & are not HTML-escaped, so an approver reads
+// the literal text.
+func TestFormatRecordToolCallArgsNotHTMLEscaped(t *testing.T) {
+	call := wire.ToolCallToProto(&api.ToolCall{ID: "call_1", Tool: "publish", Args: map[string]any{"text": `<a href="x">A & B</a>`}, Mediation: api.MediationRequiresApproval})
+	record := &v1.LogRecord{Seq: 5, Event: &v1.Event{Kind: v1.EventKind_EVENT_TOOL_CALL, Body: &v1.Event_Tool{Tool: call}}}
+	want := `args={"text":"<a href=\"x\">A & B</a>"}`
+	if got := formatRecord(record); !strings.HasSuffix(got, want) {
+		t.Fatalf("formatRecord = %s, want suffix %s", got, want)
+	}
+}

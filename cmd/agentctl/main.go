@@ -19,6 +19,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -446,12 +447,16 @@ func short(h string) string {
 }
 
 // toolCallText shows a tool call without its idempotency key. Arguments print as JSON with sorted
-// keys, so the same call prints the same way every time.
+// keys, so the same call prints the same way every time, and without HTML escaping, so an approver
+// reads <, > and & as the tool will receive them.
 func toolCallText(tc *v1.ToolCall) string {
 	args := "null"
 	if tc.GetArgs() != nil {
-		if data, err := json.Marshal(tc.GetArgs().AsMap()); err == nil {
-			args = string(data)
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(tc.GetArgs().AsMap()); err == nil {
+			args = strings.TrimSuffix(buf.String(), "\n")
 		} else {
 			args = "(not JSON)"
 		}

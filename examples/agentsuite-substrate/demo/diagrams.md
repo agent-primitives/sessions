@@ -10,7 +10,7 @@ Build half (build.mmd, end of chapter 2):
   (examples/agentsuite-substrate/cmd/emit/main.go:109).
 - -> emit bundle -> harness image: `bundle` loads the composition (cmd/emit/main.go:77) and writes
   agent.json and instructions.md (cmd/emit/main.go:84,87); up.sh stages them as the image's /agent
-  layer and takes the pushed image's digest (examples/agentsuite-substrate/up.sh:324,326,328;
+  layer and takes the pushed image's digest (examples/agentsuite-substrate/up.sh:325,327,329;
   Dockerfile.harness).
 - -> emit render, and image digest -> emit render: `renderCmd` loads the composition
   (cmd/emit/main.go:166); `Render` requires a digest-pinned image (render/render.go:283).
@@ -20,7 +20,7 @@ Build half (build.mmd, end of chapter 2):
   `Output.DaemonFlag` (render/render.go:366).
 - actortemplate.json -> ActorTemplate in substrate, created by hand: driver.sh chapter 3.
 - agentsessionsd.args -> agentsessionsd flag, set by hand: up.sh substitutes it into the Deployment
-  (up.sh:401,403). The daemon is the substrate build, integrations/substrate/cmd/agentsessionsd,
+  (up.sh:402,404). The daemon is the substrate build, integrations/substrate/cmd/agentsessionsd,
   which registers `-substrate-harness` (integrations/substrate/cmd/agentsessionsd/substrate.go:132).
 
 Run half (run.mmd, start of chapter 4), each also a row of the traced turn:

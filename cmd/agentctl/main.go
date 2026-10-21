@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -390,13 +391,20 @@ func lifecycle(args []string, which string) error {
 	return nil
 }
 
-func printRecord(r *v1.LogRecord) {
+func printRecord(r *v1.LogRecord) { fmt.Println(formatRecord(r)) }
+
+// formatRecord is one record's line: its seq and kind, a message's text, and a tool call's tool,
+// ID, mediation and arguments, so an operator can read the call an approval would authorize.
+func formatRecord(r *v1.LogRecord) string {
 	ev := r.GetEvent()
 	line := fmt.Sprintf("seq=%-3d %s", r.GetSeq(), ev.GetKind())
 	if msg := ev.GetMessage(); msg != nil {
 		line += "  " + partsText(msg)
 	}
-	fmt.Println(line)
+	if tc := ev.GetTool(); tc != nil {
+		line += "  " + toolCallText(tc)
+	}
+	return line
 }
 
 // formatRecordVerbose is printRecord's line plus the record's chain links (content_hash and
@@ -418,6 +426,9 @@ func formatRecordVerbose(r *v1.LogRecord) string {
 	if msg := ev.GetMessage(); msg != nil {
 		line += "  " + partsText(msg)
 	}
+	if tc := ev.GetTool(); tc != nil {
+		line += "  " + toolCallText(tc)
+	}
 	return line
 }
 
@@ -432,6 +443,21 @@ func short(h string) string {
 		return h[:16]
 	}
 	return h
+}
+
+// toolCallText shows a tool call without its idempotency key. Arguments print as JSON with sorted
+// keys, so the same call prints the same way every time.
+func toolCallText(tc *v1.ToolCall) string {
+	args := "null"
+	if tc.GetArgs() != nil {
+		if data, err := json.Marshal(tc.GetArgs().AsMap()); err == nil {
+			args = string(data)
+		} else {
+			args = "(not JSON)"
+		}
+	}
+	return fmt.Sprintf("tool=%s id=%s mediation=%s args=%s", tc.GetTool(), tc.GetId(),
+		strings.TrimPrefix(tc.GetMediation().String(), "MEDIATION_"), args)
 }
 
 func partsText(m *v1.Message) string {

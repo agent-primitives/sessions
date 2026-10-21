@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/sqlitelog"
 	"github.com/agent-primitives/sessions/wire"
@@ -143,5 +144,22 @@ func TestFormatRecordVerbose(t *testing.T) {
 		if got := formatRecordVerbose(tt.r); got != tt.want {
 			t.Errorf("got  %q\nwant %q", got, tt.want)
 		}
+	}
+}
+
+// A tool call's record shows the call an approval would authorize, without its idempotency key.
+func TestFormatRecordShowsToolCall(t *testing.T) {
+	call := wire.ToolCallToProto(&api.ToolCall{ID: "call_1", Tool: "publish", Args: map[string]any{"text": "hello", "a": []any{1.0}}, Mediation: api.MediationRequiresApproval, IdempotencyKey: "secret-key"})
+	record := &v1.LogRecord{Seq: 5, ContentHash: "0123456789abcdef0123", Event: &v1.Event{Kind: v1.EventKind_EVENT_TOOL_CALL, Body: &v1.Event_Tool{Tool: call}}}
+	want := `seq=5   EVENT_TOOL_CALL  tool=publish id=call_1 mediation=REQUIRES_APPROVAL args={"a":[1],"text":"hello"}`
+	if got := formatRecord(record); got != want {
+		t.Fatalf("formatRecord =\n%s\nwant\n%s", got, want)
+	}
+	if got := formatRecordVerbose(record); !strings.HasSuffix(got, `  tool=publish id=call_1 mediation=REQUIRES_APPROVAL args={"a":[1],"text":"hello"}`) || strings.Contains(got, "secret-key") {
+		t.Fatalf("formatRecordVerbose = %s", got)
+	}
+	call.Args = nil
+	if got := formatRecord(record); !strings.HasSuffix(got, "args=null") {
+		t.Fatalf("formatRecord without arguments = %s", got)
 	}
 }

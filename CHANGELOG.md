@@ -9,6 +9,8 @@ not provide.
 
 ### Added
 
+- `agentctl exec` and `replay` print a tool call's tool, ID, mediation and arguments (not its
+  idempotency key), so an approver can read the call before deciding.
 - Go embedders can configure per-route model defaults and allowed IDs with
   `placement.WithModelPolicy`. Registration validates the descriptor against policy; new sessions
   validate their default at creation (`INVALID_ARGUMENT`) and Exec/Resume (`FAILED_PRECONDITION`).

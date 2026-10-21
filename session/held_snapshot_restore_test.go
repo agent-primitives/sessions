@@ -24,7 +24,8 @@ const (
 	modePending           // newest durable copy still uploading
 	modeLocalOnly         // newest checkpoint has no durable copy (a PAUSED actor's local checkpoint)
 	modeTransitioning
-	modeOmitUID // GetActor omits the actor UID; ResumeActor still reports it
+	modeTerminatedPending // a crashed actor retains an upload that will never complete
+	modeOmitUID           // GetActor omits the actor UID; ResumeActor still reports it
 )
 
 // Inject only the control-plane read/readiness evidence, preserving actor lifecycle side effects.
@@ -42,11 +43,13 @@ func (c *restoreControl) GetActor(ctx context.Context, ref substrate.ActorRef) (
 	switch mode {
 	case modeTransitioning:
 		info.Status = substrate.StatusTransitioning
+	case modeTerminatedPending:
+		info.Status = substrate.StatusTerminated
 	case modeOmitUID:
 		info.UID = ""
 	}
-	info.SnapshotNotReady = mode == modePending || mode == modeLocalOnly
-	info.SnapshotPending = mode == modePending
+	info.SnapshotNotReady = mode == modePending || mode == modeLocalOnly || mode == modeTerminatedPending
+	info.SnapshotPending = mode == modePending || mode == modeTerminatedPending
 	return info, err
 }
 
@@ -223,6 +226,7 @@ func TestHeldRestoreRefusalsDoNotJournal(t *testing.T) {
 		exec, suspend, fork bool
 	}{
 		{reason: "transitioning", mode: modeTransitioning, want: codes.Aborted, exec: true},
+		{reason: "terminated pending", mode: modeTerminatedPending, want: codes.FailedPrecondition},
 		{reason: "wrong URI", want: codes.FailedPrecondition},
 		{reason: "read failure", mode: modeReadFailure, want: codes.Internal, exec: true},
 		{reason: "pending", mode: modePending, want: codes.Unavailable, exec: true, suspend: true, fork: true},

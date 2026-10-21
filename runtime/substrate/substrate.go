@@ -720,9 +720,6 @@ func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRe
 	if info.Status == StatusRunning {
 		return nil // ResumeActor is a no-op: interrupted turns and dial retries keep the live actor.
 	}
-	if info.SnapshotNotReady {
-		return b.checkpointNotReady(ref.Local, info)
-	}
 	// Admission follows the descriptor, not the legacy SnapshotRef.Memory capture bit.
 	if info.Status == StatusSuspended {
 		// Preserve fidelity admission even for no-held interrupted-turn recovery.

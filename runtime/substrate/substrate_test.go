@@ -378,6 +378,7 @@ func TestRestoreRequiresHeldSnapshot(t *testing.T) {
 		{name: "transitioning actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusTransitioning, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, busy: true},
 		{name: "transitioning pending memory actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, status: substrate.StatusTransitioning, memory: true, notReady: true, pending: true, busy: true},
 		{name: "terminated actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusTerminated, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, precond: true},
+		{name: "terminated pending actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusTerminated, notReady: true, pending: true, precond: true},
 		{name: "volumes", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, volumes: true, wantOK: true},
 		{name: "memory", ref: api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityMemory, memory: true, wantOK: true},
 		{name: "default nonmemory", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityRootFS, wantOK: true},
@@ -422,10 +423,11 @@ func TestRestoreRequiresHeldSnapshot(t *testing.T) {
 			if !errors.Is(err, substrate.ErrSnapshotNotRestorable) || !reflect.DeepEqual(inc, api.Incarnation{}) {
 				t.Fatalf("restore=%+v err=%v, want ErrSnapshotNotRestorable", inc, err)
 			}
-			if tc.notReady && (!errors.Is(err, substrate.ErrSnapshotNotReady) || errors.Is(err, api.ErrMemoryStateLost)) {
+			if tc.notReady && tc.status == substrate.StatusSuspended && (!errors.Is(err, substrate.ErrSnapshotNotReady) || errors.Is(err, api.ErrMemoryStateLost)) {
 				t.Fatalf("not-ready classification: %v", err)
 			}
-			if errors.Is(err, api.ErrCheckpointPending) != tc.pending || errors.Is(err, api.ErrInvalidCheckpoint) != tc.precond {
+			wantPending := tc.pending && tc.status == substrate.StatusSuspended
+			if errors.Is(err, api.ErrCheckpointPending) != wantPending || errors.Is(err, api.ErrInvalidCheckpoint) != tc.precond {
 				t.Fatalf("pending=%t precondition=%t classification: %v", tc.pending, tc.precond, err)
 			}
 			if tc.status == substrate.StatusTerminated && !strings.Contains(err.Error(), "in state terminated") {

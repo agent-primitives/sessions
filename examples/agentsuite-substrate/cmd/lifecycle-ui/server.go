@@ -291,6 +291,11 @@ type activity struct {
 	Records    []recordView  `json:"records,omitempty"`
 	Replay     *replayResult `json:"replay,omitempty"`
 	After      *sessionView  `json:"after,omitempty"`
+
+	// FailedAt is "bridge" when a failed call stopped in the bridge with no Sessions call failing
+	// (a replay after its journal read, or one the bridge declined); empty means the daemon
+	// returned the error.
+	FailedAt string `json:"failedAt,omitempty"`
 }
 
 func (s *server) begin(op string, l *lane, uid string) *activity {

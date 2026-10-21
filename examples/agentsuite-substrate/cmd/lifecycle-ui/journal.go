@@ -105,16 +105,21 @@ func journalView(uid string, protos []*v1.LogRecord) journal {
 }
 
 // replayResult is what a replay showed: the turns it re-ran, the outputs, and the model calls.
+// It exists once the journal was read and verified; a replay that fails later keeps what it
+// established so far, and the activity's ok, not this, says whether the replay held.
 type replayResult struct {
-	Records         int      `json:"records"`
-	Turns           int      `json:"turns"`
-	Outputs         []string `json:"outputs"`
-	ControllerCalls int      `json:"controllerCalls"`
+	Records int      `json:"records"`
+	Turns   int      `json:"turns"`
+	Outputs []string `json:"outputs"`
+	// ControllerCalls is the controller's model count; -1 until its replay ran.
+	ControllerCalls int `json:"controllerCalls"`
 	// FakeBefore and FakeAfter are the fake model's counter around the replay; -1 when there is
-	// no fake (a real provider), and the controller's count is the proof.
-	FakeBefore int64  `json:"fakeBefore"`
-	FakeAfter  int64  `json:"fakeAfter"`
-	Head       string `json:"head"`
+	// no fake (a real provider; the controller's count is the proof) or the counter was not read.
+	FakeBefore int64 `json:"fakeBefore"`
+	FakeAfter  int64 `json:"fakeAfter"`
+	// ModelCalled is set when a counter shows the replay called the model.
+	ModelCalled bool   `json:"modelCalled,omitempty"`
+	Head        string `json:"head"`
 }
 
 func (s *server) handleReplay(w http.ResponseWriter, r *http.Request) {
@@ -137,33 +142,41 @@ func (s *server) handleReplay(w http.ResponseWriter, r *http.Request) {
 	}
 	a := s.begin("replay", l, body.Session)
 	if l.Tier != "STATELESS_REPLAY" {
+		a.FailedAt = "bridge"
 		writeJSON(w, http.StatusOK, s.finish(a, fmt.Errorf("replay re-runs turns on the session's live actor, which only the stateless tier supports (a memory-tier harness keeps its conversation in RAM)")))
 		return
 	}
-	res, err := s.replay(ctx, l, body.Session)
-	a.Replay = res
+	// The daemon's part is the Replay RPC; everything after it is the bridge's.
+	protos, err := l.c.Replay(ctx, body.Session, 1, 0)
+	if err == nil {
+		a.Replay, err = s.replay(ctx, body.Session, protos)
+		if err != nil {
+			a.FailedAt = "bridge"
+		}
+	}
 	a.After = s.current(ctx, l, body.Session)
 	writeJSON(w, http.StatusOK, s.finish(a, err))
 }
 
-// replay is cmd/replay's run, in process: read the journal over the Sessions API, verify the chain,
+// replay is cmd/replay's run, in process, on the journal the Replay RPC returned: verify the chain,
 // and run the controller's replay against the session's own actor through the atenet-router, with
 // every model call served from the journal. It fails if the controller or the fake model counted a
-// call.
-func (s *server) replay(ctx context.Context, l *lane, uid string) (*replayResult, error) {
-	protos, err := l.c.Replay(ctx, uid, 1, 0)
-	if err != nil {
-		return nil, err
-	}
+// call. Once the journal verifies it returns a result with any error, holding what was
+// established before the failure.
+func (s *server) replay(ctx context.Context, uid string, protos []*v1.LogRecord) (
+	*replayResult, error,
+) {
 	log, harness, turns, err := loadJournal(uid, protos)
 	if err != nil {
 		return nil, err
 	}
-	res := &replayResult{Records: len(protos), Turns: turns, FakeBefore: -1, FakeAfter: -1,
-		Head: shortHash(protos[len(protos)-1].GetContentHash())}
-	if res.FakeBefore, err = s.modelCalls(ctx); err != nil {
+	res := &replayResult{Records: len(protos), Turns: turns, ControllerCalls: -1,
+		FakeBefore: -1, FakeAfter: -1, Head: shortHash(protos[len(protos)-1].GetContentHash())}
+	before, err := s.modelCalls(ctx)
+	if err != nil {
 		return res, err
 	}
+	res.FakeBefore = before
 	model, err := openai.New(openai.WithModel("replay-must-not-call"), openai.WithBaseURL(s.cfg.ModelURL))
 	if err != nil {
 		return res, err
@@ -187,14 +200,18 @@ func (s *server) replay(ctx context.Context, l *lane, uid string) (*replayResult
 	defer func() { _ = closeHarness() }()
 	outputs, err := ctl.Replay(ctx, h)
 	res.ControllerCalls = ctl.ModelInvocations()
+	res.ModelCalled = res.ControllerCalls > 0
 	if err != nil {
 		return res, fmt.Errorf("replay: %w", err)
 	}
 	res.Outputs = outputs
-	if res.FakeAfter, err = s.modelCalls(ctx); err != nil {
+	after, err := s.modelCalls(ctx)
+	if err != nil {
 		return res, err
 	}
-	if res.ControllerCalls != 0 || res.FakeAfter != res.FakeBefore {
+	res.FakeAfter = after
+	if res.ModelCalled || res.FakeAfter != res.FakeBefore {
+		res.ModelCalled = true
 		return res, fmt.Errorf("replay called the model")
 	}
 	if err := log.Verify(); err != nil {

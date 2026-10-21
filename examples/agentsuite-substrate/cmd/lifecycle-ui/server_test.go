@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -316,8 +317,111 @@ func TestReplayIsRefusedWhereItCannotRun(t *testing.T) {
 	}
 	s.cfg.Router = "127.0.0.1:1"
 	a := postActivity(t, ts, "/api/replay", map[string]string{"session": sid})
-	if a.OK || !strings.Contains(a.Message, "only the stateless tier") {
+	if a.OK || a.FailedAt != "bridge" || a.Replay != nil || !strings.Contains(a.Message, "only the stateless tier") {
 		t.Fatalf("memory-tier replay: %+v", a)
+	}
+}
+
+// A replay that stops after the journal read, here because the fake model's stats forward is
+// gone, says what it established and nothing more: no re-run, no zero-call claim, no verdict on
+// the model, and the failure is the bridge's, not the daemon's.
+func TestFailedReplayClaimsNoSuccess(t *testing.T) {
+	s, ts := testServer(t, map[string]*fakeSessions{"stateless": newFake()})
+	sid := postActivity(t, ts, "/api/create", map[string]string{"lane": "stateless"}).Session
+	resp := post(t, ts, "/api/exec", map[string]string{"session": sid, "input": "hi"})
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	stats := httptest.NewServer(http.NotFoundHandler())
+	stats.Close()
+	s.cfg.Router = "127.0.0.1:1"
+	s.cfg.ModelStats = stats.URL + "/stats"
+
+	a := postActivity(t, ts, "/api/replay", map[string]string{"session": sid})
+	if a.OK || a.FailedAt != "bridge" || !strings.Contains(a.Message, "read fake model stats") {
+		t.Fatalf("replay: ok=%v failedAt=%q message=%q", a.OK, a.FailedAt, a.Message)
+	}
+	want := replayResult{Records: 5, Turns: 1, ControllerCalls: -1, FakeBefore: -1, FakeAfter: -1}
+	if r := a.Replay; r == nil || r.Records != want.Records || r.Turns != want.Turns ||
+		r.ControllerCalls != -1 || r.FakeBefore != -1 || r.FakeAfter != -1 || r.ModelCalled || r.Outputs != nil {
+		t.Fatalf("replay result %+v, want %+v", a.Replay, want)
+	}
+
+	tr := s.trace(context.Background(), &a)
+	if m := tr.Nodes["model"]; m.State != "unknown" || !strings.Contains(m.Detail, "not established") ||
+		strings.Contains(m.Detail, "counted 0") {
+		t.Errorf("model: %+v", m)
+	}
+	if b := tr.Nodes["bridge"]; b.State != "failed" || !strings.Contains(b.Detail, "read fake model stats") {
+		t.Errorf("bridge: %+v", b)
+	}
+	if d := tr.Nodes["daemon"]; d.State == "refused" {
+		t.Errorf("daemon: %+v, want the Replay RPC it served left as traced", d)
+	}
+}
+
+// A replay whose controller runs but cannot reach the actor (the router forward is gone) reports
+// the counters it read and leaves the zero-call claim unmade.
+func TestReplayThatCannotReachTheActor(t *testing.T) {
+	s, ts := testServer(t, map[string]*fakeSessions{"stateless": newFake()})
+	sid := postActivity(t, ts, "/api/create", map[string]string{"lane": "stateless"}).Session
+	resp := post(t, ts, "/api/exec", map[string]string{"session": sid, "input": "hi"})
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	stats := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"calls":3}`))
+	}))
+	t.Cleanup(stats.Close)
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("replay called the model")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(model.Close)
+	router, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.cfg.Router = router.Addr().String()
+	_ = router.Close()
+	s.cfg.ModelURL = model.URL
+	s.cfg.ModelStats = stats.URL
+
+	a := postActivity(t, ts, "/api/replay", map[string]string{"session": sid})
+	if a.OK || a.FailedAt != "bridge" || !strings.Contains(a.Message, "replay:") {
+		t.Fatalf("replay: ok=%v failedAt=%q message=%q", a.OK, a.FailedAt, a.Message)
+	}
+	if r := a.Replay; r == nil || r.ControllerCalls != 0 || r.FakeBefore != 3 || r.FakeAfter != -1 || r.ModelCalled {
+		t.Fatalf("replay result %+v", a.Replay)
+	}
+	if m := s.trace(context.Background(), &a).Nodes["model"]; m.State != "unknown" ||
+		!strings.Contains(m.Detail, "fake model counter 3 before, not read after") {
+		t.Errorf("model: %+v", m)
+	}
+}
+
+// The model node in a replay's trace: skipped only when the replay held.
+func TestReplayModel(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		a      activity
+		state  string
+		detail string
+	}{
+		{"held", activity{OK: true, Replay: &replayResult{FakeBefore: 3, FakeAfter: 3}}, "skipped",
+			"controller counted 0 model calls; fake model counter 3 -> 3"},
+		{"stopped before the journal", activity{}, "skipped", "before the controller ran"},
+		{"stopped after the fake counter", activity{Replay: &replayResult{ControllerCalls: -1, FakeBefore: 3, FakeAfter: -1}},
+			"unknown", "not established: the controller's replay did not run; fake model counter 3 before, not read after"},
+		{"controller failed", activity{Replay: &replayResult{ControllerCalls: 0, FakeBefore: -1, FakeAfter: -1}},
+			"unknown", "not established: controller counted 0 model calls"},
+		{"called the model", activity{Replay: &replayResult{FakeBefore: 3, FakeAfter: 4, ModelCalled: true}},
+			"observed", "the replay called the model: controller counted 0 model calls; fake model counter 3 -> 4"},
+	} {
+		got := replayModel(&c.a)
+		if got.State != c.state || !strings.Contains(got.Detail, c.detail) {
+			t.Errorf("%s: %+v, want %s with %q", c.name, got, c.state, c.detail)
+		}
 	}
 }
 

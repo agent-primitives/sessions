@@ -135,6 +135,44 @@ test("replay shows the model as asked-and-not-taken", () => {
   assert.equal(Flow.edgeStates("replay", trace).model, "off");
 });
 
+test("only a replay that held claims re-execution and zero model calls", () => {
+  const held = { op: "replay", ok: true, replay: { records: 10, turns: 2, controllerCalls: 0, fakeBefore: 4, fakeAfter: 4, head: "abc123" } };
+  assert.equal(Flow.replayNote(held), "Re-ran 2 completed turns in the actor; controller counted 0 model calls; fake model counter 4 to 4. Chain verified, head abc123.");
+
+  // The stats forward dropped before the controller ran: the counters were never read.
+  const stopped = { op: "replay", ok: false, failedAt: "bridge", replay: { records: 5, turns: 1, controllerCalls: -1, fakeBefore: -1, fakeAfter: -1, head: "abc123" } };
+  const note = Flow.replayNote(stopped);
+  assert.match(note, /^Replay did not complete\./);
+  assert.match(note, /the controller did not re-run any turn/);
+  assert.match(note, /Zero model calls is not established\.$/);
+  for (const claim of [/Re-ran/, /Chain verified/, /counted 0/, /to -1/]) assert.doesNotMatch(note, claim);
+
+  const late = { op: "replay", ok: false, replay: { records: 5, turns: 1, controllerCalls: 0, fakeBefore: 3, fakeAfter: -1, head: "abc123" } };
+  assert.match(Flow.replayNote(late), /counted 0 model calls before it stopped; fake model counter 3 before, not read after\. Zero model calls is not established\.$/);
+
+  const called = { op: "replay", ok: false, replay: { records: 5, turns: 1, controllerCalls: 0, fakeBefore: 3, fakeAfter: 4, modelCalled: true, head: "abc123" } };
+  assert.match(Flow.replayNote(called), /fake model counter 3 to 4\. The replay called the model\.$/);
+
+  assert.equal(Flow.replayNote({ op: "replay", ok: false }), null);
+});
+
+test("a replay that failed in the bridge marks the bridge, not the daemon", () => {
+  assert.equal(Flow.failedNode({ ok: false, failedAt: "bridge" }), "bridge");
+  assert.equal(Flow.failedNode({ ok: false, code: "FailedPrecondition" }), "daemon");
+  const trace = {
+    nodes: {
+      browser: { state: "observed" },
+      bridge: { state: "failed" },
+      daemon: { state: "observed" },
+      router: { state: "missing" },
+      model: { state: "unknown" },
+    },
+  };
+  assert.equal(Flow.edgeStates("replay", trace).http, "done");
+  assert.equal(Flow.nodeStates("replay", trace).bridge, "failed");
+  assert.equal(Flow.nodeStates("replay", trace).model, "unknown");
+});
+
 test("an exec that attaches to a running actor lights GetActor and the routed path, not a restore", () => {
   const trace = {
     nodes: {

@@ -145,7 +145,8 @@
   }
 
   // traceStates merges a trace into a state per node: "off" when not on the call's path; on it, the
-  // trace's state (observed, missing, refused, skipped, unknown), or "pending" with no trace yet.
+  // trace's state (observed, missing, refused, failed, skipped, unknown), or "pending" with no
+  // trace yet.
   function traceStates(op, trace) {
     const on = new Set(nodesOn(op));
     const out = {};
@@ -165,8 +166,9 @@
   }
 
   // edgeStates: an edge on the path is "done" when its witness (its target, unless witness says
-  // otherwise) was observed (or refused: the request reached it), "missing" when the witness has no
-  // evidence, "pending" with no trace, and "off" when not on the path or not taken (skipped).
+  // otherwise) was observed (or refused or failed: the request reached it), "missing" when the
+  // witness has no evidence, "pending" with no trace, and "off" when not on the path or not taken
+  // (skipped).
   function edgeStates(op, trace) {
     const ns = traceStates(op, trace);
     const on = new Set(pathFor(op));
@@ -177,7 +179,7 @@
         continue;
       }
       const s = ns[(witness[op] && witness[op][e.id]) || e.to];
-      if (s === "observed" || s === "refused") out[e.id] = "done";
+      if (s === "observed" || s === "refused" || s === "failed") out[e.id] = "done";
       else if (s === "pending") out[e.id] = "pending";
       else if (s === "skipped") out[e.id] = "off";
       else out[e.id] = "missing";
@@ -220,6 +222,36 @@
     return rows;
   }
 
+  // failedNode is the node a failed call stopped at: the bridge when it says so (a replay after
+  // its journal read), else the daemon, which returned the error.
+  function failedNode(act) {
+    return act && act.failedAt === "bridge" ? "bridge" : "daemon";
+  }
+
+  // replayNote is the timeline's line for a replay that got past the journal read. Only a replay
+  // that held claims re-execution and zero model calls; one that stopped says what it established.
+  function replayNote(act) {
+    const r = act && act.replay;
+    if (!r) return null;
+    const turns = r.turns + " completed turn" + (r.turns === 1 ? "" : "s");
+    let fake = "";
+    if (r.fakeBefore >= 0 && r.fakeAfter >= 0) {
+      fake = "; fake model counter " + r.fakeBefore + " to " + r.fakeAfter;
+    } else if (r.fakeBefore >= 0) {
+      fake = "; fake model counter " + r.fakeBefore + " before, not read after";
+    }
+    if (act.ok) {
+      return "Re-ran " + turns + " in the actor; controller counted " + r.controllerCalls +
+        " model calls" + fake + ". Chain verified, head " + r.head + ".";
+    }
+    const ctl = r.controllerCalls >= 0
+      ? "the controller counted " + r.controllerCalls + " model calls before it stopped"
+      : "the controller did not re-run any turn";
+    const verdict = r.modelCalled ? "The replay called the model." : "Zero model calls is not established.";
+    return "Replay did not complete. The journal (" + r.records + " records, " + turns + ", head " +
+      r.head + ") verified before the run; " + ctl + fake + ". " + verdict;
+  }
+
   return {
     VIEW,
     NODE_W,
@@ -235,5 +267,7 @@
     edgeStates,
     edgeLabel,
     refusalRows,
+    failedNode,
+    replayNote,
   };
 });

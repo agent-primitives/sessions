@@ -132,7 +132,7 @@
     const lane = act ? laneOf(act.lane) : null;
     if (id === "daemon" && lane) return { stateless: "stateless tier", memory: "memory tier", volumes: "VOLUMES template" }[lane.name] || lane.name;
     if (id === "actor" && act && (act.child || act.session)) return "actor " + short(act.child || act.session);
-    if (id === "model" && act && act.op === "replay") return "served from the journal";
+    if (id === "model" && act && act.op === "replay" && act.ok) return "served from the journal";
     return Flow.nodes.find((n) => n.id === id).sub;
   }
 
@@ -158,7 +158,10 @@
       const id = g.dataset.id;
       let s = es[id];
       if (animStep !== undefined && s === "pending") s = path.indexOf(id) <= animStep ? "active" : "pending";
-      if (act && !act.ok && trace && id === "grpc") s = "failed";
+      // The daemon's error marks the call into it; a failure in the bridge leaves it as traced.
+      if (act && !act.ok && trace && id === "grpc" && Flow.failedNode(act) === "daemon") {
+        s = "failed";
+      }
       g.setAttribute("class", "edge " + s);
       g.querySelector("text").textContent = Flow.edgeLabel(op, id, trace, s);
     }
@@ -209,7 +212,8 @@
     }
     if (state.shown !== act) return;
     paintFlow(act.op, trace, act);
-    const focus = !act.ok ? "daemon" : act.op === "replay" ? "model" : Flow.nodesOn(act.op).slice(-1)[0];
+    const focus = !act.ok ? Flow.failedNode(act)
+      : act.op === "replay" ? "model" : Flow.nodesOn(act.op).slice(-1)[0];
     showEvidence(focus);
     renderTimeline();
   }
@@ -342,10 +346,7 @@
       li.append(el("p", { class: "note", text: "Compute " + a.after.computeState.replace("COMPUTE_", "").toLowerCase() + ", last seq " + a.after.lastSeq + "." }));
     }
     if (a.op === "replay" && a.replay) {
-      const r = a.replay;
-      let t = "Re-ran " + r.turns + " completed turn" + (r.turns === 1 ? "" : "s") + " in the actor; controller counted " + r.controllerCalls + " model calls";
-      if (r.fakeBefore >= 0) t += "; fake model counter " + r.fakeBefore + " to " + r.fakeAfter;
-      li.append(el("p", { class: "note", text: t + ". Chain verified, head " + r.head + "." }));
+      li.append(el("p", { class: "note", text: Flow.replayNote(a) }));
     }
     if (!a.ok && !a.running) {
       if (a.refusal) {

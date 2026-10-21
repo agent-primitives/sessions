@@ -180,8 +180,8 @@ input:disabled, select:disabled { opacity: 0.55; }
 .node.skipped { opacity: 0.55; }
 .node.skipped rect { stroke-dasharray: 2 3; }
 .node.forwarded rect { stroke: var(--accent-fill); stroke-width: 2; stroke-dasharray: 2 3; fill: color-mix(in srgb, var(--accent-soft) 60%, var(--panel)); }
-.node.refused rect { stroke: var(--danger); stroke-width: 2; fill: var(--danger-soft); }
-.node.refused .label { fill: var(--danger); }
+.node.refused rect, .node.failed rect { stroke: var(--danger); stroke-width: 2; fill: var(--danger-soft); }
+.node.refused .label, .node.failed .label { fill: var(--danger); }
 .node.selected rect { stroke-width: 3; }
 
 .edge path { fill: none; stroke: var(--line-strong); stroke-width: 1.5; transition: stroke 200ms var(--ease); }

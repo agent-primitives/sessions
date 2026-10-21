@@ -282,17 +282,20 @@ func (s *server) trace(ctx context.Context, a *activity) traceView {
 		}
 		t.Nodes["model"] = nodeEvidence{State: st, Detail: fmt.Sprintf("%d model call(s) journaled by this turn", calls), Source: "the Exec stream"}
 	case "replay":
-		if a.Replay != nil {
-			d := fmt.Sprintf("controller counted %d model calls", a.Replay.ControllerCalls)
-			if a.Replay.FakeBefore >= 0 {
-				d += fmt.Sprintf("; fake model counter %d -> %d", a.Replay.FakeBefore, a.Replay.FakeAfter)
-			}
-			t.Nodes["model"] = nodeEvidence{State: "skipped", Detail: d}
-		}
+		t.Nodes["model"] = replayModel(a)
 	default:
 		t.Nodes["model"] = nodeEvidence{State: "skipped"}
 	}
-	if !a.OK {
+	switch {
+	case a.OK:
+	case a.FailedAt == "bridge":
+		// The call stopped in the bridge: no Sessions call failed (a replay after its journal
+		// read, or one the bridge declined).
+		b := t.Nodes["bridge"]
+		b.State = "failed"
+		b.Detail += "; stopped here: " + a.Message
+		t.Nodes["bridge"] = b
+	default:
 		// The bridge saw the failure from the daemon; a refusal is the daemon's (its substrate
 		// adapter runs in process), anything else is reported there too, with the code.
 		d := t.Nodes["daemon"]
@@ -301,6 +304,39 @@ func (s *server) trace(ctx context.Context, a *activity) traceView {
 		t.Nodes["daemon"] = d
 	}
 	return t
+}
+
+// replayModel is the model's part in a replay. Only a replay that held is shown as not calling
+// it; one that stopped early has not established that, and one a counter caught calling it shows
+// the call.
+func replayModel(a *activity) nodeEvidence {
+	r := a.Replay
+	switch {
+	case r == nil:
+		return nodeEvidence{State: "skipped",
+			Detail: "the replay stopped before the controller ran; nothing was asked of the model"}
+	case a.OK:
+		return nodeEvidence{State: "skipped", Detail: replayCounts(r)}
+	case r.ModelCalled:
+		return nodeEvidence{State: "observed", Detail: "the replay called the model: " + replayCounts(r)}
+	}
+	return nodeEvidence{State: "unknown",
+		Detail: "the replay did not complete, so zero model calls is not established: " + replayCounts(r)}
+}
+
+// replayCounts says what the replay's counters read, and which were never read.
+func replayCounts(r *replayResult) string {
+	d := "the controller's replay did not run"
+	if r.ControllerCalls >= 0 {
+		d = fmt.Sprintf("controller counted %d model calls", r.ControllerCalls)
+	}
+	switch {
+	case r.FakeBefore >= 0 && r.FakeAfter >= 0:
+		d += fmt.Sprintf("; fake model counter %d -> %d", r.FakeBefore, r.FakeAfter)
+	case r.FakeBefore >= 0:
+		d += fmt.Sprintf("; fake model counter %d before, not read after", r.FakeBefore)
+	}
+	return d
 }
 
 func bridgeDetail(a *activity) string {

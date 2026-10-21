@@ -38,7 +38,10 @@ need `/dev/kvm` in the Docker host and an arm64 Mac cannot run them.
 Replay is not a Sessions RPC: the API streams the journal, and re-execution exists only in process
 (the example's [gaps](../agentsuite-substrate/README.md#gaps-this-poc-works-around)). The bridge
 does what `cmd/replay` does, on the stateless tier only, since a memory-tier harness keeps its
-conversation in RAM.
+conversation in RAM. Only a replay that completes claims the re-run and zero model calls. One that
+stops after the journal read (a dropped port-forward, an actor the router cannot reach) is marked as
+failing in the bridge, lists the counters it read, and draws the model as unknown, or as called if
+a counter moved.
 
 ## The refusal
 

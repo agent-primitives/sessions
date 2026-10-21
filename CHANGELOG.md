@@ -114,12 +114,19 @@ not provide.
   control-read failures refuse.
   Resume of a running actor still succeeds, and a resuming or suspending actor is `ABORTED`. See
   [Substrate conformance](docs/substrate-conformance.md#held-checkpoint-restore-and-readiness).
-- Upgrade ate-system to agent-substrate v0.5.0 together with an adapter built from this release:
-  the client decodes actors by field number and the two must match. Against an older server, this
-  adapter reads a `PAUSED` or `PAUSING` actor as an unknown state rather than as suspended or
-  busy: Exec refuses it, Restore of a held checkpoint refuses it with `FAILED_PRECONDITION`, and
-  Restore with no held checkpoint passes it to `ResumeActor`. Rolling back means rolling back
-  both. An AgentSuite template rendered for v0.5.0 names its sandbox class as `microvm` or
+- Moving ate-system from the previous pin (`96dffb28`) to agent-substrate v0.5.0 is not an
+  in-place upgrade. Substrate supports no upgrade between minor releases before 1.0 (its
+  `docs/upgrade.md` says to reinstall), and v0.5.0 turned `SandboxConfig.sandbox_class` from an
+  enum into a string under the same field number: it reads an ActorTemplate stored by the old pin
+  with an empty sandbox class, so no worker matches that template's actors and they cannot resume.
+  Reinstall Substrate with fresh state and create templates and actors on v0.5.0; the old state's
+  actors, and the session checkpoints held on them, do not carry over. Deploy an adapter built
+  from this release with it: the client decodes actors by field number and the two must match.
+  Against an older server, this adapter reads a `PAUSED` or `PAUSING` actor as an unknown state
+  rather than as suspended or busy: Exec refuses it, Restore of a held checkpoint refuses it with
+  `FAILED_PRECONDITION`, and Restore with no held checkpoint passes it to `ResumeActor`. Rolling
+  back is likewise a reinstall of the older Substrate with an older adapter, not a downgrade over
+  v0.5.0 state. An AgentSuite template rendered for v0.5.0 names its sandbox class as `microvm` or
   `gvisor`, not `SANDBOX_CLASS_MICROVM`, so re-render templates for the matching substrate.
 - On a v0.5.0 cluster with more than one sandbox runtime, a memory-tier session whose actor was
   resumed on a worker that cannot restore its snapshot's recorded runtime (substrate restores its
@@ -133,8 +140,9 @@ not provide.
   still `RUNNING`, and v0.5.0 refuses a plain delete of it with `FAILED_PRECONDITION`. Set
   `options.uid` to the warning's `actor_uid` so a later actor created under the same name is
   refused with `ABORTED` instead of deleted. `kubectl ate` sends no UID: checking the UID with
-  `get` first is a separate read and cannot stop a replacement created before the delete.
-  Stateless sessions are unaffected, and clusters whose workers share one runtime do not hit it.
+  `get` first is a separate read and cannot stop a replacement created between the `get` and the
+  delete. Stateless sessions are unaffected, and clusters whose workers share one runtime do not
+  hit it.
   The adapter reports it through the new `ActorInfo.MemoryNotRestored`; another
   `runtime/substrate.ControlClient` implementation that leaves it false keeps the old behavior. See
   [runtime fallback](docs/substrate-conformance.md#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback).

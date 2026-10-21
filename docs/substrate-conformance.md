@@ -366,6 +366,13 @@ newest generation is local-only, so it reports `SnapshotNotReady` without `Snaps
 Restore and Create's attachment refuse it with `FAILED_PRECONDITION` before `ResumeActor`. Suspend
 of a paused actor uploads that generation, after which Restore proceeds from it.
 
+Moving an existing Substrate install from the previous pin (`96dffb28`) to v0.5.0 is not an
+in-place upgrade. v0.5.0 turned `SandboxConfig.sandbox_class` from an enum into a string under the
+same field number and reads an ActorTemplate stored by the old pin with an empty class, so
+`ResumeActor` finds no worker for that template's actors. Reinstall Substrate with fresh state, as
+Substrate's `docs/upgrade.md` requires for a minor release before 1.0, and deploy the adapter from
+the same sessions release with it. Rolling back is a reinstall too.
+
 `SuspendActor` at v0.5.0 is synchronous and has no durability option: the server uploads the
 checkpoint and marks the newest generation `COMPLETED` before it returns. The adapter still treats
 a checkpoint as held only when the newest generation it returns is `COMPLETED`: a `PENDING` upload

@@ -29,6 +29,8 @@ import (
 	"net"
 	"os"
 	"strings"
+	"unicode"
+	"unicode/utf16"
 
 	"google.golang.org/grpc"
 
@@ -448,7 +450,8 @@ func short(h string) string {
 
 // toolCallText shows a tool call without its idempotency key. Arguments print as JSON with sorted
 // keys, so the same call prints the same way every time, and without HTML escaping, so an approver
-// reads <, > and & as the tool will receive them.
+// reads <, > and & as the tool will receive them. Format characters (Unicode Cf, such as the bidi
+// override U+202E) print as \uXXXX escapes, so model-chosen text cannot visually reorder the line.
 func toolCallText(tc *v1.ToolCall) string {
 	args := "null"
 	if tc.GetArgs() != nil {
@@ -456,7 +459,7 @@ func toolCallText(tc *v1.ToolCall) string {
 		enc := json.NewEncoder(&buf)
 		enc.SetEscapeHTML(false)
 		if err := enc.Encode(tc.GetArgs().AsMap()); err == nil {
-			args = strings.TrimSuffix(buf.String(), "\n")
+			args = escapeFormatRunes(strings.TrimSuffix(buf.String(), "\n"))
 		} else {
 			args = "(not JSON)"
 		}
@@ -464,6 +467,30 @@ func toolCallText(tc *v1.ToolCall) string {
 	return fmt.Sprintf("tool=%s id=%s mediation=%s args=%s", tc.GetTool(), tc.GetId(),
 		strings.TrimPrefix(tc.GetMediation().String(), "MEDIATION_"), args)
 }
+
+// escapeFormatRunes replaces each Unicode format character (category Cf) in encoded JSON with its
+// \uXXXX escape, as a UTF-16 surrogate pair above U+FFFF. Such runes occur only inside JSON strings,
+// so the result is still valid JSON that decodes to the same value.
+func escapeFormatRunes(s string) string {
+	if !strings.ContainsFunc(s, isFormatRune) {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case !isFormatRune(r):
+			b.WriteRune(r)
+		case r > 0xFFFF:
+			r1, r2 := utf16.EncodeRune(r)
+			fmt.Fprintf(&b, `\u%04x\u%04x`, r1, r2)
+		default:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		}
+	}
+	return b.String()
+}
+
+func isFormatRune(r rune) bool { return unicode.Is(unicode.Cf, r) }
 
 func partsText(m *v1.Message) string {
 	s := m.GetRole() + ":"

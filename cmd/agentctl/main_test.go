@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net"
 	"path/filepath"
 	"strings"
@@ -172,5 +173,22 @@ func TestFormatRecordToolCallArgsNotHTMLEscaped(t *testing.T) {
 	want := `args={"text":"<a href=\"x\">A & B</a>"}`
 	if got := formatRecord(record); !strings.HasSuffix(got, want) {
 		t.Fatalf("formatRecord = %s, want suffix %s", got, want)
+	}
+}
+
+// Format characters such as the bidi override U+202E print escaped, so model-chosen arguments cannot
+// visually reorder what an approver reads; the escaped text still decodes to the original value.
+func TestFormatRecordToolCallArgsEscapeFormatRunes(t *testing.T) {
+	text := "pay \u202eevil\u202c ok\u200b \U000e0041"
+	call := wire.ToolCallToProto(&api.ToolCall{ID: "call_1", Tool: "publish", Args: map[string]any{"text": text}, Mediation: api.MediationRequiresApproval})
+	record := &v1.LogRecord{Seq: 5, Event: &v1.Event{Kind: v1.EventKind_EVENT_TOOL_CALL, Body: &v1.Event_Tool{Tool: call}}}
+	got := formatRecord(record)
+	want := `args={"text":"pay \u202eevil\u202c ok\u200b \udb40\udc41"}`
+	if !strings.HasSuffix(got, want) {
+		t.Fatalf("formatRecord = %s, want suffix %s", got, want)
+	}
+	var decoded map[string]string
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(want, "args=")), &decoded); err != nil || decoded["text"] != text {
+		t.Fatalf("escaped args decode to %q (err %v), want %q", decoded["text"], err, text)
 	}
 }

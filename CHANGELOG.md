@@ -111,7 +111,8 @@ not provide.
   v0.5.0 runtime-fallback entry below). A suspended actor's newest snapshot still
   uploading is `UNAVAILABLE` (`api.ErrCheckpointPending`) for Exec, Suspend, Resume and Fork: once it
   completes, Suspend again to record it before Resume. A newest local-only checkpoint, including an
-  out-of-band paused actor, is `FAILED_PRECONDITION`. Every Restore reads the actor first, so
+  out-of-band paused actor, is `FAILED_PRECONDITION` (for a memory-tier session
+  `api.ErrMemoryStateLost`, below). Every Restore reads the actor first, so
   control-read failures refuse.
   Resume of a running actor still succeeds, and a resuming or suspending actor is `ABORTED`. See
   [Substrate conformance](docs/substrate-conformance.md#held-checkpoint-restore-and-readiness).

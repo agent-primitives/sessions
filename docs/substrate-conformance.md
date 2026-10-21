@@ -357,7 +357,8 @@ session, compare the actor with the journal's latest `SUSPEND` (`SessionSpec.Rec
 Snapshot on every backend mode, Restore of a suspended actor (even without a held ref), and
 suspended-actor attachment refuse a newest incomplete durable copy with
 `substrate.ErrSnapshotNotReady` (also wrapping ErrSnapshotNotRestorable), not permanent memory loss
-unless the actor is proven replaced. An explicit `PENDING` upload (`ActorInfo.SnapshotPending`)
+unless the actor is proven replaced or, for a memory-tier session's suspended actor before it is
+resumed or suspended, the copy is not a pending upload (below). An explicit `PENDING` upload (`ActorInfo.SnapshotPending`)
 also wraps `api.ErrCheckpointPending` and is `UNAVAILABLE`: once the upload completes, Suspend
 again to record the newest checkpoint before Resume; the older ref is stale. A memory-tier session
 cannot: the completed upload is a capture the journal did not record, and is refused as
@@ -368,7 +369,12 @@ unrecognized durable status also wraps
 `api.ErrInvalidCheckpoint` and is `FAILED_PRECONDITION`: it may never upload, so inspect and
 explicitly establish a durable checkpoint rather than just waiting. Snapshot returns zero ref;
 compute may already be released without a SUSPEND record. This conservatively refuses
-out-of-band paused (local-only) attachment even for default stateless backends.
+out-of-band paused (local-only) attachment even for default stateless backends. A memory-tier
+session never records a checkpoint that is not ready, so for it such a snapshot is a capture the
+journal did not record: Restore, Create's attach and Snapshot refuse it with
+`api.ErrMemoryStateLost`, as for
+[a refused capture](#substrate-v050-a-refused-capture-stays-refused). Before resuming or suspending
+a memory-tier session's actor, only a pending upload is reported as not ready.
 The client-side GetActor → ResumeActor check still races lifecycle operations; atomic expected
 snapshot/state validation must be supplied by Substrate.
 
@@ -398,8 +404,12 @@ The adapter pins agent-substrate v0.5.0 (`SUBSTRATE_REF` in `.github/workflows/s
 node-local newest snapshot generation and no durable copy, and a pause in progress is `SUSPENDING`.
 The adapter maps them as it mapped `PAUSED` and `PAUSING` (suspended and busy). A paused actor's
 newest generation is local-only, so it reports `SnapshotNotReady` without `SnapshotPending`:
-Restore and Create's attachment refuse it with `FAILED_PRECONDITION` before `ResumeActor`. Suspend
-of a paused actor uploads that generation, after which Restore proceeds from it.
+Restore and Create's attachment refuse it with `FAILED_PRECONDITION` before `ResumeActor`. For a
+stateless or VOLUMES-only session, Suspend of a paused actor uploads that generation, after which
+Restore proceeds from it. A memory-tier session's actor paused outside sessions holds a capture the
+journal did not record, so Exec (Create's attach), Resume, Suspend and Fork all refuse it with
+`api.ErrMemoryStateLost`, logged at `WARN`, and Suspend no longer makes it usable
+([a refused capture stays refused](#substrate-v050-a-refused-capture-stays-refused)).
 
 Moving an existing Substrate install from the previous pin (`96dffb28`) to v0.5.0 is not an
 in-place upgrade. v0.5.0 turned `SandboxConfig.sandbox_class` from an enum into a string under the
@@ -572,7 +582,8 @@ a paused actor to suspended but reports only durable checkpoint evidence. At the
 pinned Substrate, resume can restore something other than the durable checkpoint the adapter
 validated. Validation can falsely refuse recoverable local state or accept a checkpoint whose
 fidelity does not meet the backend's requirement. A newest local-only checkpoint is
-conservatively refused as not ready even if recoverable; this does not identify Substrate's
+conservatively refused even if recoverable (as not ready, or for a memory-tier session as
+`api.ErrMemoryStateLost`); this does not identify Substrate's
 effective source. Local checkpoint preference can still differ from the durable evidence selected
 here, so a durable VOLUMES checkpoint can pass validation while resume restores local MEMORY.
 Likewise, when a durable snapshot's recorded `ActorTemplate` UID differs from the

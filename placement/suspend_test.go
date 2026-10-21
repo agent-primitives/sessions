@@ -52,6 +52,9 @@ type suspendActor struct {
 	memoryLost bool
 	// captures counts the actor's captures, for CaptureLineage and NoCapture.
 	captures int
+	// paused models a pause: the newest capture is node-local, so GetActor reports it not ready
+	// and not pending, with no durable URI, as the adapter does on v0.5.0. A suspend uploads it.
+	paused bool
 }
 
 // lineage is the actor's CaptureLineage: the capture its next suspend would take, or the one it
@@ -135,6 +138,7 @@ func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef)
 		return substrate.ActorInfo{}, status.Error(codes.NotFound, "actor does not exist")
 	}
 	if a.status == substrate.StatusSuspended && a.snapshot.Name != "" {
+		a.paused = false // a paused-origin suspend uploads the paused generation
 		return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid, CaptureLineage: a.lineage(), NoCapture: a.captures == 0}, nil
 	}
 	a.captures++
@@ -178,6 +182,9 @@ func (c *suspendControl) GetActor(_ context.Context, ref substrate.ActorRef) (su
 
 func (c *suspendControl) info(ref substrate.ActorRef, a *suspendActor) substrate.ActorInfo {
 	info := substrate.ActorInfo{Status: a.status, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid, CaptureLineage: a.lineage(), NoCapture: a.captures == 0}
+	if a.paused {
+		info.Snapshot, info.SnapshotNotReady = "", true
+	}
 	if a.worker {
 		info.Worker = ref.Name
 		info.MemoryNotRestored = a.memoryLost
@@ -937,6 +944,17 @@ func (c *suspendControl) outsideSuspend(ref substrate.ActorRef) {
 	a.status, a.worker = substrate.StatusSuspended, false
 }
 
+// outsidePause is a pause by a caller other than sessions: a running actor is captured to a
+// node-local snapshot and left suspended on it; a suspended one is left as it is.
+func (c *suspendControl) outsidePause(ref substrate.ActorRef) {
+	a := c.actors[ref]
+	if a.status == substrate.StatusSuspended {
+		return
+	}
+	c.outsideSuspend(ref)
+	a.paused = true
+}
+
 // outsideResume is the router resuming the actor for a request addressed to it, from the snapshot
 // it holds, on a worker of the same sandbox runtime: its memory comes back.
 func (c *suspendControl) outsideResume(ref substrate.ActorRef) {
@@ -947,7 +965,7 @@ func (c *suspendControl) outsideResume(ref substrate.ActorRef) {
 	if snapshot, ok := c.snapshots[a.snapshot]; ok {
 		a.turns = snapshot.turns
 	}
-	a.status, a.worker = substrate.StatusRunning, true
+	a.status, a.worker, a.paused = substrate.StatusRunning, true, false
 }
 
 // Where the router resumes suspended actors on demand and a gateway suspends idle ones, another
@@ -975,6 +993,9 @@ func TestOutsideSuspendsEndAMemorySession(t *testing.T) {
 		window, later           func(ctl *suspendControl)
 		firstSuspend, suspended bool
 		refused                 bool
+		// memoryOnly skips the stateless run: a paused actor is not ready for any tier until a
+		// Suspend uploads it (TestPausedActorIsHeldOnlyAfterSuspendUploadsIt in the adapter).
+		memoryOnly bool
 	}{
 		{name: "router resumes only", suspended: true, later: func(ctl *suspendControl) { ctl.outsideResume(ref) }},
 		{name: "one outside suspend in the window", window: func(ctl *suspendControl) { ctl.outsideSuspend(ref) }},
@@ -982,8 +1003,12 @@ func TestOutsideSuspendsEndAMemorySession(t *testing.T) {
 		{name: "cycles in the window, first suspend", firstSuspend: true, refused: true, window: func(ctl *suspendControl) { cycles(ctl, 3) }},
 		{name: "suspended session woken by the router in the window", suspended: true, refused: true, window: func(ctl *suspendControl) { ctl.outsideResume(ref) }},
 		{name: "idle suspend by someone else later", refused: true, later: func(ctl *suspendControl) { ctl.outsideSuspend(ref) }},
+		{name: "pause by someone else later", refused: true, memoryOnly: true, later: func(ctl *suspendControl) { ctl.outsidePause(ref) }},
 	} {
 		for _, memory := range []bool{true, false} {
+			if tc.memoryOnly && !memory {
+				continue
+			}
 			t.Run(fmt.Sprintf("%s/memory=%v", tc.name, memory), func(t *testing.T) {
 				ctx := t.Context()
 				ctl := newSuspendControl()

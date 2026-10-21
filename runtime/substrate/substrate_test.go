@@ -2672,3 +2672,68 @@ func TestOutsideSuspendsAreRefusedForGood(t *testing.T) {
 		})
 	}
 }
+
+// A memory-tier actor paused outside sessions is suspended on a node-local capture: not ready, not
+// pending, no durable URI. That capture is not the checkpoint the journal recorded, so Create's
+// attach and Restore refuse it with api.ErrMemoryStateLost and log it for the operator, as Suspend
+// and Fork do, not as "not ready", which would suggest a Suspend makes it usable. A pending upload
+// stays "not ready", and a stateless actor in the same state is still only "not ready".
+func TestPausedMemoryActorIsLostOnAttachAndRestore(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		recorded string // the journal's last SUSPEND, "" for none
+		pending  bool
+		memory   bool
+		lost     bool
+	}{
+		{name: "paused after a recorded suspend", recorded: "gs://snap/s", memory: true, lost: true},
+		{name: "paused before any suspend", memory: true, lost: true},
+		{name: "upload pending", recorded: "gs://snap/s", pending: true, memory: true},
+		{name: "stateless paused", recorded: "gs://snap/s"},
+	} {
+		for _, path := range []string{"create", "restore"} {
+			t.Run(tc.name+"/"+path, func(t *testing.T) {
+				var output bytes.Buffer
+				logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelWarn}))
+				m := &mockControl{info: running("w")}
+				m.exists("s", substrate.StatusSuspended)
+				m.capture("s")
+				m.holds("s", "") // a not-ready generation exposes no URI
+				m.info.SnapshotNotReady, m.info.SnapshotPending = true, tc.pending
+				m.info.SnapshotFidelity = substrate.SnapshotFidelityMemory
+				resumability := api.ResumabilityStatelessReplay
+				if tc.memory {
+					resumability = api.ResumabilityRequiresMemorySnapshot
+				}
+				b := substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
+					api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: resumability}},
+					substrate.WithLogger(logger))
+				ref := api.SnapshotRef{Local: "s", ExternalURI: tc.recorded, Memory: true}
+				var err error
+				if path == "create" {
+					_, err = b.Create(t.Context(), &api.SessionSpec{SessionUID: "s", RecordedCheckpoint: func() (api.SnapshotRef, error) { return ref, nil }})
+				} else {
+					_, err = b.Restore(t.Context(), ref)
+				}
+				for _, call := range m.calls {
+					if strings.HasPrefix(call, "resume:") || strings.HasPrefix(call, "suspend:") {
+						t.Fatalf("refused %s made call %q (calls=%v)", path, call, m.calls)
+					}
+				}
+				logged := strings.Contains(output.String(), `"error_kind":"memory_state_lost"`) && strings.Contains(output.String(), m.uid("s"))
+				if tc.lost {
+					if !errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, substrate.ErrSnapshotNotReady) || errors.Is(err, api.ErrInvalidCheckpoint) {
+						t.Fatalf("%s: err=%v, want api.ErrMemoryStateLost, not a not-ready refusal", path, err)
+					}
+					if !logged {
+						t.Fatalf("%s: refusal not logged for operators: %s", path, output.String())
+					}
+					return
+				}
+				if !errors.Is(err, substrate.ErrSnapshotNotReady) || errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, api.ErrCheckpointPending) != tc.pending || logged {
+					t.Fatalf("%s: err=%v logs=%s, want only a not-ready refusal (pending=%v)", path, err, output.String(), tc.pending)
+				}
+			})
+		}
+	}
+}

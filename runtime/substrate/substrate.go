@@ -447,11 +447,23 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api
 			return api.Incarnation{}, true, err
 		}
 	case info.Status == StatusSuspended:
+		// A memory-tier actor whose newest snapshot cannot become ready by waiting (an outside
+		// pause's local-only generation) is checked against the recorded checkpoint first, as
+		// Snapshot does, so a capture the journal did not record is ErrMemoryStateLost, not "not
+		// ready". A pending upload is still refused as not ready first.
+		recordedFirst := memory && stuckNotReady(info)
+		if recordedFirst {
+			if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, recorded); err != nil {
+				return api.Incarnation{}, true, err
+			}
+		}
 		if err := b.requireResumeCheckpoint(ref.Name, info, memory, true); err != nil {
 			return api.Incarnation{}, true, err
 		}
-		if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, recorded); err != nil {
-			return api.Incarnation{}, true, err
+		if !recordedFirst {
+			if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, recorded); err != nil {
+				return api.Incarnation{}, true, err
+			}
 		}
 		seen := info
 		if info, err = b.ctl.ResumeActor(ctx, ref); err != nil {
@@ -707,6 +719,16 @@ func (b *Backend) requireRecordedCheckpoint(ctx context.Context, name string, in
 		api.ErrMemoryStateLost, b.atespace, name, info.UID, info.Status, held, done)
 }
 
+// stuckNotReady reports a newest snapshot with no completed durable copy and no upload in progress
+// (local-only, failed or unknown durable evidence), which waiting will not make ready. Sessions
+// never records such a snapshot (Snapshot refuses it), so on a memory-tier actor it is a capture
+// the journal did not record, typically a pause outside Sessions: attach and Restore compare it
+// with the recorded checkpoint before refusing it as not ready, and so report it as
+// api.ErrMemoryStateLost. A pending upload can complete by waiting and stays "not ready".
+func stuckNotReady(info ActorInfo) bool {
+	return info.SnapshotNotReady && !info.SnapshotPending
+}
+
 // requireResumeCheckpoint permits a proven snapshot-less initial placement, not a refused capture.
 // A held ref never gets this exemption, even when another actor was created under the same name.
 func (b *Backend) requireResumeCheckpoint(name string, info ActorInfo, memory, allowFresh bool) error {
@@ -812,7 +834,11 @@ var ErrSnapshotNotRestorable = errors.New("substrate: snapshot is not restorable
 // ErrSnapshotNotReady is returned by Snapshot, Restore or Create's suspended-actor attachment when
 // the newest snapshot has no completed durable copy. It wraps ErrSnapshotNotRestorable. Snapshot
 // returns no ref and Restore does not resume. Pending uploads may complete; local-only checkpoints
-// require inspection and an explicit durable checkpoint, not merely waiting.
+// require inspection and an explicit durable checkpoint, not merely waiting. For a
+// REQUIRES_MEMORY_SNAPSHOT harness, Restore, Create's attach and Snapshot's check before suspending
+// return it for a suspended actor only while its upload is pending: any other snapshot that is not
+// ready was never recorded, so they return api.ErrMemoryStateLost (see stuckNotReady). A Snapshot
+// whose own suspend leaves the capture not ready still returns it.
 var ErrSnapshotNotReady = fmt.Errorf("%w: newest snapshot has no completed durable copy", ErrSnapshotNotRestorable)
 
 // checkpointNotReady separates an upload that may finish from evidence requiring a new capture.
@@ -908,6 +934,13 @@ func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRe
 	}
 	// Admission follows the descriptor, not the legacy SnapshotRef.Memory capture bit.
 	if info.Status == StatusSuspended {
+		// As in attach, a memory-tier actor whose newest snapshot cannot become ready by waiting is
+		// compared with the recorded checkpoint first, so an outside pause is ErrMemoryStateLost.
+		if memory && stuckNotReady(info) {
+			if err := b.requireRecordedCheckpoint(ctx, ref.Local, info, ref, "nothing was resumed"); err != nil {
+				return fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
+			}
+		}
 		// Preserve fidelity admission even for no-held interrupted-turn recovery.
 		err = b.requireResumeCheckpoint(ref.Local, info, memory, ref.ExternalURI == "" && !memory)
 		if err == nil && memory {

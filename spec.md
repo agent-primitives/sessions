@@ -1420,7 +1420,11 @@ The reference host takes it as `placement.Backend` in
   returns only once its upload completed, so it does not leave one pending. Local-only state wraps
   `api.ErrInvalidCheckpoint` (`FAILED_PRECONDITION`): it may
   never upload, so inspect and explicitly establish a durable checkpoint instead of waiting. This
-  conservatively refuses out-of-band paused/local-only default attachment. Readiness is not
+  conservatively refuses out-of-band paused/local-only default attachment. For a
+  `REQUIRES_MEMORY_SNAPSHOT` harness, whose journal never records a checkpoint that is not ready,
+  Restore, Create's attach and `Snapshot` (before suspending) refuse a suspended actor as not ready
+  only while its upload is pending, and any other as an unrecorded capture with
+  `api.ErrMemoryStateLost` (below). Readiness is not
   effective restore-source evidence.
   These client checks can race lifecycle operations or router ingress; only Substrate can atomically
   bind expected snapshot/state to resume. Known limit: the effective resume source can differ from

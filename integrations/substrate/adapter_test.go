@@ -882,7 +882,9 @@ func TestSuspendHoldsOnlyADurableNewestGeneration(t *testing.T) {
 // checkpoint, so Restore and Create's attach refuse before ResumeActor rather than resume the
 // older durable generation, and a pause in progress (SUSPENDING) is busy. A Suspend uploads the
 // paused generation (a paused-origin suspend), after which Restore proceeds from it. A memory tier
-// refuses that upload instead: the pause is a capture the session's journal did not record.
+// refuses the paused actor on every path with api.ErrMemoryStateLost instead, Restore and attach
+// included: the pause is a capture the session's journal did not record, so a Suspend cannot make
+// it usable.
 func TestPausedActorIsHeldOnlyAfterSuspendUploadsIt(t *testing.T) {
 	const completed = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
 	for _, mode := range []string{"default", "volumes", "memory"} {
@@ -910,17 +912,29 @@ func TestPausedActorIsHeldOnlyAfterSuspendUploadsIt(t *testing.T) {
 				t.Fatalf("paused info=%+v err=%v want suspended, not ready, not pending, no URI", info, err)
 			}
 			b := substrate.New(ad, "space", substrate.ObjectRef{Name: "echo"}, desc, opts...)
+			// refused is "not ready" for every tier but memory, which reports the lost state.
+			refused := func(err error) bool {
+				if mode == "memory" {
+					return errors.Is(err, api.ErrMemoryStateLost) && !errors.Is(err, substrate.ErrSnapshotNotReady) && !errors.Is(err, api.ErrInvalidCheckpoint)
+				}
+				return errors.Is(err, substrate.ErrSnapshotNotReady) && errors.Is(err, api.ErrInvalidCheckpoint) &&
+					!errors.Is(err, api.ErrCheckpointPending) && !errors.Is(err, api.ErrMemoryStateLost)
+			}
 			for _, uri := range []string{"older", ""} {
 				f.calls = nil
 				_, err := b.Restore(t.Context(), api.SnapshotRef{Local: "sess-x", ExternalURI: uri, Memory: mode != "volumes"})
-				if !errors.Is(err, substrate.ErrSnapshotNotReady) || !errors.Is(err, api.ErrInvalidCheckpoint) || errors.Is(err, api.ErrCheckpointPending) ||
-					!reflect.DeepEqual(f.calls, []string{"get:sess-x"}) {
+				if !refused(err) || !reflect.DeepEqual(f.calls, []string{"get:sess-x"}) {
 					t.Fatalf("paused restore uri=%q: err=%v calls=%v", uri, err, f.calls)
 				}
 			}
-			f.calls = nil
-			if _, err := b.Create(t.Context(), &api.SessionSpec{SessionUID: "sess-x"}); !errors.Is(err, substrate.ErrSnapshotNotReady) || !reflect.DeepEqual(f.calls, []string{"get:sess-x"}) {
-				t.Fatalf("paused attach: err=%v calls=%v", err, f.calls)
+			for _, uri := range []string{"older", ""} {
+				f.calls = nil
+				spec := &api.SessionSpec{SessionUID: "sess-x", RecordedCheckpoint: func() (api.SnapshotRef, error) {
+					return api.SnapshotRef{Local: "sess-x", ExternalURI: uri, Memory: true}, nil
+				}}
+				if _, err := b.Create(t.Context(), spec); !refused(err) || !reflect.DeepEqual(f.calls, []string{"get:sess-x"}) {
+					t.Fatalf("paused attach recorded=%q: err=%v calls=%v", uri, err, f.calls)
+				}
 			}
 
 			// A pause in progress: SUSPENDING, newest generation neither local nor durable yet.

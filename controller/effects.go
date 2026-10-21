@@ -35,22 +35,7 @@ var _ api.EventSink = (*liveSink)(nil)
 //
 // Footgun: the completion is ALREADY recorded as the output here. A harness that also calls
 // Output() with the same content double-records it; use Output() only for additional/streamed text.
-func (s *liveSink) Model(ctx context.Context, req api.ModelRequest) (resp api.ModelResponse, err error) {
-	ctx, finish := observability.BeginDebug(ctx, s.c.logger, "controller", "model_call",
-		"session_uid", s.c.sessionUID,
-		"execution_id", s.executionID,
-		"model", req.Model,
-		"message_count", len(req.Messages),
-		"streaming", s.c.stream != nil,
-	)
-	defer func() {
-		finish(err,
-			"error_kind", controllerErrorKind(err),
-			"input_tokens", resp.Usage.InputTokens,
-			"output_tokens", resp.Usage.OutputTokens,
-			"reasoning_tokens", resp.Usage.ReasoningTokens,
-		)
-	}()
+func (s *liveSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
 	if err := s.guard.mu.Lock(ctx); err != nil {
 		return api.ModelResponse{}, err
 	}
@@ -81,14 +66,30 @@ func (s *liveSink) model(ctx context.Context, req api.ModelRequest) (api.ModelRe
 // completeModel invokes the model for a MODEL_CALL that is already recorded and appends the
 // completion as the OUTPUT that answers it: OUTPUT carries no call ID, so its position directly
 // after the MODEL_CALL in the execution's effect stream is the correlation. It is reused verbatim
-// when Resume re-drives a call cut before its completion was recorded.
-func (s *liveSink) completeModel(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+// when Resume re-drives a call cut before its completion was recorded, so both paths get the
+// controller.model_call span; a completion served from the journal gets none.
+func (s *liveSink) completeModel(ctx context.Context, req api.ModelRequest) (resp api.ModelResponse, err error) {
+	ctx, finish := observability.BeginDebug(ctx, s.c.logger, "controller", "model_call",
+		"session_uid", s.c.sessionUID,
+		"execution_id", s.executionID,
+		"model", req.Model,
+		"message_count", len(req.Messages),
+		"streaming", s.c.stream != nil,
+	)
+	defer func() {
+		finish(err,
+			"error_kind", controllerErrorKind(err),
+			"input_tokens", resp.Usage.InputTokens,
+			"output_tokens", resp.Usage.OutputTokens,
+			"reasoning_tokens", resp.Usage.ReasoningTokens,
+		)
+	}()
 	if err := s.validateModel(req); err != nil {
 		return api.ModelResponse{}, err
 	}
 	// The recorded invocation default, not today's policy, owns selection during recovery.
 	ctx = modelcall.WithExactModel(ctx, s.modelDefault != "")
-	resp, err := s.c.invokeModel(ctx, s.executionID, req)
+	resp, err = s.c.invokeModel(ctx, s.executionID, req)
 	if err != nil {
 		return api.ModelResponse{}, err
 	}
@@ -174,14 +175,7 @@ func toolMediationError(mediation api.Mediation) error {
 // intent MUST already be recorded by the caller — execTool performs only phases 2 and 3 of §3
 // (execute, then append the result), so it is reused verbatim on crash-recovery, where the intent
 // is already durable in the journal.
-func (s *liveSink) execTool(ctx context.Context, call api.ToolCall) (result api.ToolResult, err error) {
-	ctx, finish := observability.BeginDebug(ctx, s.c.logger, "controller", "tool_call",
-		"session_uid", s.c.sessionUID,
-		"execution_id", s.executionID,
-		"tool", call.Tool,
-		"mediation", string(call.Mediation),
-	)
-	defer func() { finish(err, "error_kind", controllerErrorKind(err), "tool_is_error", result.IsError) }()
+func (s *liveSink) execTool(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
 	if s.c.tool == nil {
 		// ToolCall is the controller-mediated path; without an executor it is a misconfiguration
 		// (in-harness-reported tools use Report instead).
@@ -198,7 +192,7 @@ func (s *liveSink) execTool(ctx context.Context, call api.ToolCall) (result api.
 		}
 		return *denied, nil
 	}
-	res, err := s.c.tool(ctx, ToolCallContext{SessionUID: s.c.sessionUID}, call)
+	res, err := s.invokeTool(ctx, call)
 	if err != nil {
 		return api.ToolResult{}, err
 	}
@@ -206,12 +200,25 @@ func (s *liveSink) execTool(ctx context.Context, call api.ToolCall) (result api.
 	if err := approvalReportError(res); err != nil {
 		return api.ToolResult{}, err
 	}
-	result = res
+	result := res
 	result.ID = call.ID // the host owns tool-result correlation: the result references its call's ID
 	if _, err := s.append(api.Event{Kind: api.EventToolResult, Result: &result}); err != nil {
 		return api.ToolResult{}, err
 	}
 	return result, nil
+}
+
+// invokeTool runs the executor under a controller.tool_call span. Every executor invocation goes
+// through it: ordinary calls, crash recovery, and approved calls.
+func (s *liveSink) invokeTool(ctx context.Context, call api.ToolCall) (res api.ToolResult, err error) {
+	ctx, finish := observability.BeginDebug(ctx, s.c.logger, "controller", "tool_call",
+		"session_uid", s.c.sessionUID,
+		"execution_id", s.executionID,
+		"tool", call.Tool,
+		"mediation", string(call.Mediation),
+	)
+	defer func() { finish(err, "error_kind", controllerErrorKind(err), "tool_is_error", res.IsError) }()
+	return s.c.tool(ctx, ToolCallContext{SessionUID: s.c.sessionUID}, call)
 }
 
 func (s *liveSink) Report(ctx context.Context, tr api.ToolResult) error {

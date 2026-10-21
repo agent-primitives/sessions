@@ -202,6 +202,20 @@ func TestResumeAfterCrashDuringModelCall(t *testing.T) {
 	assertRecovered(t, log)
 }
 
+// Recovery re-drives the cut call through completeModel, outside liveSink.Model; it must still
+// get exactly one model_call span.
+func TestResumeRedriveOfModelCallIsTraced(t *testing.T) {
+	log := memStore(t)
+	execCutAtModelCall(t, log, true)
+	rec := controller.RecordSpans(t)
+	if err := resumeOnce(t, log, &echoHarness{}, &scriptedModel{}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if n := controller.SpanCount(rec, "controller.model_call"); n != 1 {
+		t.Fatalf("controller.model_call spans = %d, want 1", n)
+	}
+}
+
 // ERROR events left by failed resumes stay in the journal as audit records but are not effects:
 // they neither consume the pending MODEL_CALL nor block a later resume from completing it.
 func TestResumeAfterFailedResumesAtModelCall(t *testing.T) {

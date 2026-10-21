@@ -95,7 +95,8 @@ not provide.
   `PAUSED` and `PAUSING` actor states: a paused actor is `SUSPENDED` with a node-local newest
   snapshot, and a pause in progress is `SUSPENDING`. The adapter treats them as it treated
   `PAUSED` and `PAUSING`: Resume and Exec refuse a paused actor with `FAILED_PRECONDITION` until
-  a Suspend uploads its snapshot, and a pausing one is `ABORTED`. Suspend stays synchronous:
+  a Suspend uploads its snapshot (for a memory-tier session, Suspend is refused too: see the v0.5.0
+  runtime-fallback entry below), and a pausing one is `ABORTED`. Suspend stays synchronous:
   v0.5.0's `SuspendActor` has no durability option and returns once the newest generation is
   `COMPLETED`. The adapter still records a checkpoint only when that generation is `COMPLETED`;
   a pending upload fails Suspend with `UNAVAILABLE`. v0.5.0 can also resume a memory snapshot on

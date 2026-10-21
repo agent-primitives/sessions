@@ -420,7 +420,9 @@ func snapshotFidelity(f atepb.SnapshotFidelity) substrate.SnapshotFidelity {
 // cmd/ateapi/internal/controlapi/snapshot_helpers.go). They map to StatusSuspended and
 // StatusTransitioning, as PAUSED and PAUSING did. What tells a paused actor apart is its snapshots,
 // so actorInfo reports it as SnapshotNotReady without SnapshotPending, and the backend refuses to
-// restore or attach to it until a suspend uploads that generation.
+// restore or attach to it until a suspend uploads that generation. A memory-tier session's suspend
+// is refused too (api.ErrMemoryStateLost, runtime/substrate requireRecordedCheckpoint), so that
+// actor is never usable again.
 func actorStatus(s atepb.ActorState) substrate.ActorStatus {
 	switch s {
 	case atepb.ActorState_ACTOR_STATE_RUNNING:

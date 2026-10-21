@@ -358,21 +358,19 @@ Snapshot on every backend mode, Restore of a suspended actor (even without a hel
 suspended-actor attachment refuse a newest incomplete durable copy with
 `substrate.ErrSnapshotNotReady` (also wrapping ErrSnapshotNotRestorable), not permanent memory loss
 unless the actor is proven replaced or, for a memory-tier session's suspended actor before it is
-resumed or suspended, the copy is not a pending upload (below). An explicit `PENDING` upload (`ActorInfo.SnapshotPending`)
-also wraps `api.ErrCheckpointPending` and is `UNAVAILABLE`: once the upload completes, Suspend
-again to record the newest checkpoint before Resume; the older ref is stale. A memory-tier session
-cannot: the completed upload is a capture the journal did not record, and is refused as
-`api.ErrMemoryStateLost`. At v0.5.0 `SuspendActor` returns only once the upload completed, so a
-memory-tier Suspend reaches this only through a client or substrate that suspends asynchronously.
-A local-only or
-unrecognized durable status also wraps
-`api.ErrInvalidCheckpoint` and is `FAILED_PRECONDITION`: it may never upload, so inspect and
-explicitly establish a durable checkpoint rather than just waiting. Snapshot returns zero ref;
-compute may already be released without a SUSPEND record. This conservatively refuses
-out-of-band paused (local-only) attachment even for default stateless backends. A memory-tier
-session never records a checkpoint that is not ready, so for it such a snapshot is a capture the
-journal did not record: Restore, Create's attach and Snapshot refuse it with
-`api.ErrMemoryStateLost`, as for
+resumed or suspended, the copy is not a pending upload (below). An explicit `PENDING` upload
+(`ActorInfo.SnapshotPending`) also wraps `api.ErrCheckpointPending` and is `UNAVAILABLE`: once the
+upload completes, Suspend again to record the newest checkpoint before Resume; the older ref is
+stale. A memory-tier session cannot: the completed upload is a capture the journal did not record,
+and is refused as `api.ErrMemoryStateLost`. At v0.5.0 `SuspendActor` returns only once the upload
+completed, so a memory-tier Suspend reaches this only through a client or substrate that suspends
+asynchronously. A local-only or unrecognized durable status also wraps `api.ErrInvalidCheckpoint`
+and is `FAILED_PRECONDITION`: it may never upload, so inspect and explicitly establish a durable
+checkpoint rather than just waiting. Snapshot returns zero ref; compute may already be released
+without a SUSPEND record. This conservatively refuses out-of-band paused (local-only) attachment
+even for default stateless backends. A memory-tier session never records a checkpoint that is not
+ready, so for it such a snapshot is a capture the journal did not record: Restore, Create's attach
+and Snapshot refuse it with `api.ErrMemoryStateLost`, as for
 [a refused capture](#substrate-v050-a-refused-capture-stays-refused). Before resuming or suspending
 a memory-tier session's actor, only a pending upload is reported as not ready.
 The client-side GetActor → ResumeActor check still races lifecycle operations; atomic expected

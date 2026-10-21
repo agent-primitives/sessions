@@ -993,8 +993,9 @@ func TestOutsideSuspendsEndAMemorySession(t *testing.T) {
 		window, later           func(ctl *suspendControl)
 		firstSuspend, suspended bool
 		refused                 bool
-		// memoryOnly skips the stateless run: a paused actor is not ready for any tier until a
-		// Suspend uploads it (TestPausedActorIsHeldOnlyAfterSuspendUploadsIt in the adapter).
+		// memoryOnly skips the stateless run: a stateless session refuses a paused actor as not
+		// ready until a Suspend uploads it (TestPausedActorIsHeldOnlyAfterSuspendUploadsIt in the
+		// adapter).
 		memoryOnly bool
 	}{
 		{name: "router resumes only", suspended: true, later: func(ctl *suspendControl) { ctl.outsideResume(ref) }},

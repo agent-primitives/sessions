@@ -296,6 +296,9 @@ type activity struct {
 	// (a replay after its journal read, or one the bridge declined); empty means the daemon
 	// returned the error.
 	FailedAt string `json:"failedAt,omitempty"`
+	// Declined is set when the bridge refused the call before making any Sessions call (a replay
+	// on a tier that cannot run it); FailedAt is "bridge" then too.
+	Declined bool `json:"declined,omitempty"`
 }
 
 func (s *server) begin(op string, l *lane, uid string) *activity {

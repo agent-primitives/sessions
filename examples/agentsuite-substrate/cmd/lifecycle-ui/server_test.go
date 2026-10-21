@@ -317,8 +317,19 @@ func TestReplayIsRefusedWhereItCannotRun(t *testing.T) {
 	}
 	s.cfg.Router = "127.0.0.1:1"
 	a := postActivity(t, ts, "/api/replay", map[string]string{"session": sid})
-	if a.OK || a.FailedAt != "bridge" || a.Replay != nil || !strings.Contains(a.Message, "only the stateless tier") {
+	if a.OK || a.FailedAt != "bridge" || !a.Declined || a.Replay != nil || !strings.Contains(a.Message, "only the stateless tier") {
 		t.Fatalf("memory-tier replay: %+v", a)
+	}
+	// The trace names no call the bridge did not make, and no hop past it as reached.
+	tr := s.trace(context.Background(), &a)
+	if b := tr.Nodes["bridge"]; b.State != "failed" || strings.Contains(b.Detail, "then controller.Replay") ||
+		!strings.Contains(b.Detail, "declined before Sessions.Replay") || !strings.Contains(b.Detail, "only the stateless tier") {
+		t.Errorf("bridge: %+v", b)
+	}
+	for _, n := range []string{"daemon", "ateapi", "worker", "actor", "router", "model"} {
+		if ev := tr.Nodes[n]; ev.State != "skipped" {
+			t.Errorf("%s: %+v, want skipped", n, ev)
+		}
 	}
 }
 
@@ -352,7 +363,8 @@ func TestFailedReplayClaimsNoSuccess(t *testing.T) {
 		strings.Contains(m.Detail, "counted 0") {
 		t.Errorf("model: %+v", m)
 	}
-	if b := tr.Nodes["bridge"]; b.State != "failed" || !strings.Contains(b.Detail, "read fake model stats") {
+	if b := tr.Nodes["bridge"]; b.State != "failed" || !strings.Contains(b.Detail, "read fake model stats") ||
+		strings.Contains(b.Detail, "then controller.Replay") || !strings.Contains(b.Detail, "controller.Replay did not run") {
 		t.Errorf("bridge: %+v", b)
 	}
 	if d := tr.Nodes["daemon"]; d.State == "refused" {
@@ -394,9 +406,39 @@ func TestReplayThatCannotReachTheActor(t *testing.T) {
 	if r := a.Replay; r == nil || r.ControllerCalls != 0 || r.FakeBefore != 3 || r.FakeAfter != -1 || r.ModelCalled {
 		t.Fatalf("replay result %+v", a.Replay)
 	}
-	if m := s.trace(context.Background(), &a).Nodes["model"]; m.State != "unknown" ||
+	tr := s.trace(context.Background(), &a)
+	if m := tr.Nodes["model"]; m.State != "unknown" ||
 		!strings.Contains(m.Detail, "fake model counter 3 before, not read after") {
 		t.Errorf("model: %+v", m)
+	}
+	// The controller ran here, so the bridge names it, and where the call stopped.
+	if b := tr.Nodes["bridge"]; b.State != "failed" || !strings.Contains(b.Detail, "then controller.Replay through atenet-router") ||
+		!strings.Contains(b.Detail, "stopped here: replay:") {
+		t.Errorf("bridge: %+v", b)
+	}
+}
+
+// The bridge's part in a replay names controller.Replay only when the controller ran.
+func TestReplayBridgeDetail(t *testing.T) {
+	const ran = "Sessions.Replay (journal), then controller.Replay through atenet-router"
+	for _, c := range []struct {
+		name string
+		a    activity
+		want string
+	}{
+		{"held", activity{OK: true, Replay: &replayResult{ControllerCalls: 0}}, ran},
+		{"controller failed", activity{FailedAt: "bridge", Replay: &replayResult{ControllerCalls: 0}}, ran},
+		{"declined", activity{FailedAt: "bridge", Declined: true}, "declined before Sessions.Replay"},
+		{"Replay RPC failed", activity{Code: "Unavailable"}, "Sessions.Replay (journal) failed; controller.Replay did not run"},
+		{"journal did not load", activity{FailedAt: "bridge"},
+			"Sessions.Replay (journal); the journal did not load, so controller.Replay did not run"},
+		{"stopped before the controller", activity{FailedAt: "bridge", Replay: &replayResult{ControllerCalls: -1}},
+			"Sessions.Replay (journal), verified; controller.Replay did not run"},
+	} {
+		c.a.Op = "replay"
+		if got := bridgeDetail(&c.a); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 

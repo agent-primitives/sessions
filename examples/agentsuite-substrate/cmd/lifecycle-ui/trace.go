@@ -212,8 +212,10 @@ func parseActor(b []byte) (*actorView, error) {
 // nodeEvidence is what one node of the flow showed for an activity.
 type nodeEvidence struct {
 	// State is observed (a log line or state read shows the hop), missing (none found in the
-	// window), refused (the call failed here), skipped (the hop is not on this call's path, or it
-	// was asked and not taken, such as replay's model) or unknown (the cluster could not be read).
+	// window), refused (the daemon returned the call's error), failed (the call stopped in the
+	// bridge with no Sessions call failing), skipped (the hop is not on this call's path, was not
+	// reached, or was asked and not taken, such as replay's model) or unknown (the cluster could
+	// not be read).
 	State  string `json:"state"`
 	Detail string `json:"detail,omitempty"`
 	// Method names the RPCs the evidence shows for this call, in the order they were logged
@@ -261,11 +263,17 @@ func (s *server) trace(ctx context.Context, a *activity) traceView {
 	if a.Child != "" {
 		ids = append(ids, a.Child)
 	}
-	if s.kube == nil {
+	switch {
+	case a.Declined:
+		// No Sessions call was made, so no later hop was reached.
+		for _, n := range []string{"daemon", "ateapi", "worker", "actor", "router"} {
+			t.Nodes[n] = nodeEvidence{State: "skipped", Detail: "the bridge declined the call; no Sessions call was made"}
+		}
+	case s.kube == nil:
 		for _, n := range []string{"daemon", "ateapi", "worker", "actor", "router"} {
 			t.Nodes[n] = nodeEvidence{State: "unknown", Detail: "cluster reads are off"}
 		}
-	} else {
+	default:
 		s.traceCluster(ctx, a, daemon, ids, since, &t)
 	}
 	switch a.Op {
@@ -352,9 +360,26 @@ func bridgeDetail(a *activity) string {
 	case "fork":
 		return fmt.Sprintf("Sessions.Fork at seq %d", a.AtSeq)
 	case "replay":
-		return "Sessions.Replay (journal), then controller.Replay through atenet-router"
+		return replayBridgeDetail(a)
 	}
 	return a.Op
+}
+
+// replayBridgeDetail names the bridge's calls for a replay as far as the replay got: a hop it did
+// not reach is said not to have run, never named as if it had.
+func replayBridgeDetail(a *activity) string {
+	r := a.Replay
+	switch {
+	case a.Declined:
+		return "declined before Sessions.Replay"
+	case r != nil && r.ControllerCalls >= 0:
+		return "Sessions.Replay (journal), then controller.Replay through atenet-router"
+	case a.FailedAt != "bridge":
+		return "Sessions.Replay (journal) failed; controller.Replay did not run"
+	case r == nil:
+		return "Sessions.Replay (journal); the journal did not load, so controller.Replay did not run"
+	}
+	return "Sessions.Replay (journal), verified; controller.Replay did not run"
 }
 
 func (s *server) traceCluster(ctx context.Context, a *activity, daemon string, ids []string, since time.Time, t *traceView) {

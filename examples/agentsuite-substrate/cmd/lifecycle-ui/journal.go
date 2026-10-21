@@ -142,7 +142,7 @@ func (s *server) handleReplay(w http.ResponseWriter, r *http.Request) {
 	}
 	a := s.begin("replay", l, body.Session)
 	if l.Tier != "STATELESS_REPLAY" {
-		a.FailedAt = "bridge"
+		a.FailedAt, a.Declined = "bridge", true
 		writeJSON(w, http.StatusOK, s.finish(a, fmt.Errorf("replay re-runs turns on the session's live actor, which only the stateless tier supports (a memory-tier harness keeps its conversation in RAM)")))
 		return
 	}

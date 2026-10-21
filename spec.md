@@ -1426,6 +1426,9 @@ The reference host takes it as `placement.Backend` in
   `ActorInfo.MemoryNotRestored`, and for a `REQUIRES_MEMORY_SNAPSHOT` harness the backend refuses
   that actor with `api.ErrMemoryStateLost` wherever it would hand it out (Create, Restore, a
   stateful Fork's clone) and before `Snapshot` suspends it, recorded compute instance or not.
+  `SuspendActor` takes no precondition, so `Snapshot` also refuses, with `api.ErrMemoryStateLost`, a
+  suspend whose `ActorInfo.CaptureLineage` differs from the actor it checked (a capture, pause or
+  move to another runtime in between); the refused capture stays on the suspended actor.
   `Snapshot` and `Restore` do not create missing actors. When no actor exists (for example a fresh
   session before any `Create` reached `CreateActor`, and not a fork child, or an actor deleted
   outside the host) both fail with the control API's `NOT_FOUND` (substrate module pinned in

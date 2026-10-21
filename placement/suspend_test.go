@@ -47,6 +47,18 @@ type suspendActor struct {
 	// memoryLost models a resume that landed on a worker of another sandbox runtime and restored
 	// the snapshot's volumes only; GetActor reports it as MemoryNotRestored while the actor runs.
 	memoryLost bool
+	// captures counts the actor's captures, for CaptureLineage.
+	captures int
+}
+
+// lineage is the actor's CaptureLineage: the capture its next suspend would take, or the one it
+// holds when that suspend is a no-op.
+func (a *suspendActor) lineage() string {
+	n := a.captures
+	if a.status != substrate.StatusSuspended || a.snapshot.Name == "" {
+		n++
+	}
+	return fmt.Sprintf("capture-%d", n)
 }
 
 type suspendSnapshot struct {
@@ -115,8 +127,9 @@ func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef)
 		return substrate.ActorInfo{}, status.Error(codes.NotFound, "actor does not exist")
 	}
 	if a.status == substrate.StatusSuspended && a.snapshot.Name != "" {
-		return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid}, nil
+		return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid, CaptureLineage: a.lineage()}, nil
 	}
+	a.captures++
 	a.snapshot = substrate.SnapshotID{Atespace: ref.Atespace, Name: fmt.Sprintf("snap-%s-%d", ref.Name, len(c.snapshots)+1)}
 	c.snapshots[a.snapshot] = suspendSnapshot{turns: a.turns, template: a.template}
 	a.status, a.worker = substrate.StatusSuspended, false
@@ -125,7 +138,7 @@ func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef)
 		c.afterSuspend = nil
 		hook()
 	}
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid}, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid, CaptureLineage: a.lineage()}, nil
 }
 
 func (c *suspendControl) DeleteActor(_ context.Context, ref substrate.ActorRef) error {
@@ -156,7 +169,7 @@ func (c *suspendControl) GetActor(_ context.Context, ref substrate.ActorRef) (su
 }
 
 func (c *suspendControl) info(ref substrate.ActorRef, a *suspendActor) substrate.ActorInfo {
-	info := substrate.ActorInfo{Status: a.status, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid}
+	info := substrate.ActorInfo{Status: a.status, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid, CaptureLineage: a.lineage()}
 	if a.worker {
 		info.Worker = ref.Name
 		info.MemoryNotRestored = a.memoryLost

@@ -216,8 +216,9 @@ func TestResumeMapsActorState(t *testing.T) {
 		Snapshot:         "gs://b/atespaces/space/actors/u1/snapshots/s1",
 		SnapshotFidelity: substrate.SnapshotFidelityMemory,
 		UID:              "0b5c3c56-6d5e-4f0e-9b1a-2f4d8c1e7a90",
+		CaptureLineage:   info.CaptureLineage, // opaque; TestCaptureLineageFollowsTheSuspendWorkflow covers it
 	}
-	if info != want {
+	if info != want || info.CaptureLineage == "" {
 		t.Fatalf("info=%+v want %+v", info, want)
 	}
 	if want := []string{"resume:space/sess-x"}; !reflect.DeepEqual(f.calls, want) {
@@ -1103,6 +1104,126 @@ func TestRestoreRefusesAMemoryResumeOnAnotherRuntime(t *testing.T) {
 			f.calls = nil
 			if _, err := b.Snapshot(t.Context(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal); !errors.Is(err, api.ErrMemoryStateLost) || !reflect.DeepEqual(f.calls, []string{"get:sess-x"}) {
 				t.Fatalf("suspend after refusal: err=%v calls=%v", err, f.calls)
+			}
+		})
+	}
+}
+
+// capturedActor is the actor substrate v0.5.0's SuspendActor returns after capturing a running
+// actor as generation gen on a worker of runtime rt: SUSPENDED, no assignment, and only that
+// generation kept (pruneSnapshots in cmd/ateapi/internal/controlapi/snapshot_helpers.go).
+func capturedActor(gen int32, rt *atepb.SandboxRuntime) *atepb.Actor {
+	a := runningActor()
+	snap := durableSnapshot(gen, fmt.Sprintf("gs://b/atespaces/space/actors/u1/snapshots/s%d", gen), atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+	snap.SandboxRuntime = rt
+	a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
+	a.Status.WorkerAssignment = nil
+	a.Status.Snapshots = []*atepb.Snapshot{snap}
+	a.Status.LastAssignedGeneration = gen
+	return a
+}
+
+// CaptureLineage follows substrate v0.5.0's suspend workflow: a suspend that captures the state a
+// read saw reports that read's value, whatever state the read caught the actor in, and a capture
+// or a move to another runtime in between changes it.
+func TestCaptureLineageFollowsTheSuspendWorkflow(t *testing.T) {
+	rtA := sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h1")
+	rtB := sandboxRuntime("gvisor", "architecture", "amd64")
+	running := func(rt *atepb.SandboxRuntime) *atepb.Actor { return runtimeRunningActor(rtA, rt) } // generation 1 held
+	suspending := func() *atepb.Actor {
+		a := running(rtA)
+		inFlight := durableSnapshot(2, "gs://b/s2", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)
+		inFlight.SandboxRuntime = rtA
+		a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDING
+		a.Status.Snapshots = append(a.Status.Snapshots, inFlight)
+		a.Status.LastAssignedGeneration = 2
+		return a
+	}
+	paused := func() *atepb.Actor {
+		a := capturedActor(1, rtA)
+		local := pausedSnapshot(2)
+		local.SandboxRuntime = rtA
+		a.Status.Snapshots = append(a.Status.Snapshots, local)
+		a.Status.LastAssignedGeneration = 2
+		return a
+	}
+	for _, tc := range []struct {
+		name          string
+		read, suspend *atepb.Actor
+		same          bool
+	}{
+		{name: "running, captured as checked", read: running(rtA), suspend: capturedActor(2, rtA), same: true},
+		{name: "running without a runtime, captured as checked", read: running(nil), suspend: capturedActor(2, nil), same: true},
+		{name: "suspending, completed", read: suspending(), suspend: capturedActor(2, rtA), same: true},
+		{name: "suspended, no-op", read: capturedActor(1, rtA), suspend: capturedActor(1, rtA), same: true},
+		{name: "paused, uploaded", read: paused(), suspend: capturedActor(2, rtA), same: true},
+		{name: "running, captured and resumed on another runtime first", read: running(rtA), suspend: capturedActor(3, rtB)},
+		{name: "running, captured and resumed on the same runtime first", read: running(rtA), suspend: capturedActor(3, rtA)},
+		{name: "running, moved to another runtime without a capture", read: running(rtA), suspend: capturedActor(2, rtB)},
+		{name: "suspended, resumed on another runtime first", read: capturedActor(1, rtA), suspend: capturedActor(2, rtB)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeControl{actor: tc.read}
+			ad, ref := FromClient(f), substrate.ActorRef{Atespace: "space", Name: "sess-x"}
+			read, err := ad.GetActor(t.Context(), ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.actor = tc.suspend
+			suspended, err := ad.SuspendActor(t.Context(), ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if read.CaptureLineage == "" || suspended.CaptureLineage == "" {
+				t.Fatalf("lineage missing: read %q, suspend %q", read.CaptureLineage, suspended.CaptureLineage)
+			}
+			if same := read.CaptureLineage == suspended.CaptureLineage; same != tc.same {
+				t.Fatalf("read %q, suspend %q: same = %v, want %v", read.CaptureLineage, suspended.CaptureLineage, same, tc.same)
+			}
+		})
+	}
+	if got := actorInfo(&atepb.Actor{Metadata: runningActor().GetMetadata()}).CaptureLineage; got != "" {
+		t.Fatalf("an actor without a status reports lineage %q, want none", got)
+	}
+}
+
+// The memory check and the suspend are separate calls, and v0.5.0's SuspendActor takes no
+// precondition. When another caller suspends the checked actor and resumes it on a worker of
+// another runtime in between, substrate restores its volumes only and this suspend captures RAM
+// that is not the session's; the response carries no assignment left to compare. The backend
+// refuses the capture, through the real adapter, rather than return it as a MEMORY checkpoint.
+func TestSnapshotRefusesACaptureAfterAnIncompatibleResume(t *testing.T) {
+	rtA := sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h1")
+	rtB := sandboxRuntime("gvisor", "architecture", "amd64")
+	for _, tc := range []struct {
+		name    string
+		capture *atepb.Actor
+		lost    bool
+	}{
+		{name: "nothing in between", capture: capturedActor(2, rtA)},
+		{name: "suspended and resumed on another runtime", capture: capturedActor(3, rtB), lost: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeControl{actor: runtimeRunningActor(rtA, rtA)}
+			uid := f.actor.GetMetadata().GetUid()
+			f.onSuspend = func() { f.actor = tc.capture }
+			b := substrate.New(FromClient(f), "space", substrate.ObjectRef{Name: "counter"},
+				api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}})
+			ref, err := b.Snapshot(t.Context(), api.Incarnation{ID: "sess-x", ComputeInstance: uid}, api.SnapshotExternal)
+			if want := []string{"get:sess-x", "suspend:sess-x"}; !reflect.DeepEqual(f.calls, want) {
+				t.Fatalf("calls = %v, want %v", f.calls, want)
+			}
+			if !tc.lost {
+				if err != nil || !ref.Memory || ref.ExternalURI == "" {
+					t.Fatalf("snapshot: ref=%+v err=%v, want a MEMORY checkpoint", ref, err)
+				}
+				return
+			}
+			if !errors.Is(err, api.ErrMemoryStateLost) || ref != (api.SnapshotRef{}) {
+				t.Fatalf("snapshot: ref=%+v err=%v, want api.ErrMemoryStateLost and no ref", ref, err)
+			}
+			if !strings.Contains(err.Error(), uid) || strings.Contains(err.Error(), "gs://") {
+				t.Fatalf("refusal %q must name the actor UID and no snapshot URI", err)
 			}
 		})
 	}

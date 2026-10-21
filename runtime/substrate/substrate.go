@@ -137,6 +137,16 @@ type ActorInfo struct {
 	// actor runs on that worker. False is not proof that memory was restored (see the
 	// effective-source limits in sessions issue #192).
 	MemoryNotRestored bool
+	// CaptureLineage identifies the in-RAM state a suspend of the actor captures. For an actor on a
+	// worker it is the snapshot generation the next capture will be assigned and the sandbox runtime
+	// that capture will be stamped with; for one mid-capture or without a worker it is the newest
+	// snapshot's generation and stamp, which a suspend completes or leaves as it is. So a suspend
+	// that captures the state an earlier read saw reports the value that read did. A capture or
+	// pause by another caller in between assigns a new generation and changes it, as does a move to
+	// a worker of another sandbox runtime; a crash and resume onto a worker of the same runtime does
+	// not. The value is opaque: compare it only for equality. "" means the client cannot tell, and a
+	// memory-tier Snapshot refuses it (see Backend.Snapshot).
+	CaptureLineage string
 	// UID is the actor's server-assigned identity (substrate ResourceMetadata.uid). It is fixed for the
 	// actor's lifetime, suspends and resumes included, and differs for an actor created later under the
 	// same name, which is how the backend tells a replacement apart. A REQUIRES_MEMORY_SNAPSHOT harness
@@ -160,7 +170,8 @@ type ControlClient interface {
 	// as the suspend left it: ActorInfo.Snapshot is the external snapshot it now holds, paired with
 	// its observed SnapshotFidelity, and ActorInfo.UID tells which actor under the name was suspended.
 	// UID must be set: a memory-tier Snapshot refuses a suspend that reports none, since it cannot
-	// tell which actor it captured.
+	// tell which actor it captured. So must CaptureLineage, which a memory-tier Snapshot compares
+	// with the one GetActor reported when it checked the actor.
 	// An actor that does not exist must be reported as (or wrap) ErrActorNotFound.
 	SuspendActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 	DeleteActor(ctx context.Context, actor ActorRef) error
@@ -477,6 +488,19 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 // checkpoint must hold memory, recorded instance or not, an actor that reports MemoryNotRestored
 // is refused with api.ErrMemoryStateLost before suspending, so its RAM-less state is never
 // recorded as the session's checkpoint.
+//
+// That check and the suspend are separate calls, and substrate v0.5.0's SuspendActor takes no
+// precondition (no UID, generation or worker), so another caller can suspend the checked actor
+// and resume it on a worker that cannot restore its memory before this suspend captures it. The
+// capture then holds RAM that is not the session's, and the evidence is gone: a suspended actor
+// holds no worker to compare. So whenever the checkpoint must hold memory, Snapshot also requires
+// the suspend to report the CaptureLineage the check saw, and refuses any other with
+// api.ErrMemoryStateLost and no ref; the actor is left suspended. That fails closed: a capture,
+// pause, or suspend and resume by another caller in the window is refused even when the memory
+// survived. A lineage missing from either read is a plain error, before suspending when the check
+// reports none. Two windows remain. A crash and resume onto a worker of the same runtime keeps
+// the lineage. And the refusal is not durable: nothing marks the actor, so the session's next
+// turn attaches to it and resumes the snapshot this suspend took.
 func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (snapshot api.SnapshotRef, err error) {
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "snapshot_compute",
 		"actor", in.ID,
@@ -501,6 +525,7 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 		"atespace", b.atespace,
 		"reason", "snapshot",
 	)
+	var checked ActorInfo
 	if memoryRequired {
 		// Look before suspending whenever the checkpoint must hold memory, with or without a
 		// recorded instance: a journal without one (written before EXECUTION_START recorded
@@ -524,6 +549,13 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 			suspendFinished(err, "error_kind", "memory_state_lost")
 			return api.SnapshotRef{}, err
 		}
+		if info.CaptureLineage == "" {
+			err := fmt.Errorf("substrate: actor %s/%s reported no capture lineage, so a snapshot could not be "+
+				"tied to the state checked; nothing was snapshotted for the session", b.atespace, in.ID)
+			suspendFinished(err, "error_kind", "capture_lineage_missing")
+			return api.SnapshotRef{}, err
+		}
+		checked = info
 	}
 	info, err := b.ctl.SuspendActor(ctx, b.ref(in.ID))
 	if err != nil {
@@ -534,6 +566,12 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 	if err := b.requireInstance(in, info.UID); err != nil {
 		suspendFinished(err, "error_kind", snapshotErrorKind(err, "actor_uid_missing"))
 		return api.SnapshotRef{}, err
+	}
+	if memoryRequired {
+		if err := b.requireCheckedCapture(ctx, in.ID, checked, info); err != nil {
+			suspendFinished(err, "error_kind", snapshotErrorKind(err, "capture_lineage_missing"))
+			return api.SnapshotRef{}, err
+		}
 	}
 	if info.SnapshotNotReady {
 		err := b.checkpointNotReady(in.ID, info)
@@ -553,6 +591,31 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 	// uses the handle to check that the actor still holds this exact snapshot when it is tagged.
 	snapshot = api.SnapshotRef{Local: in.ID, ExternalURI: uri, Memory: info.SnapshotFidelity == SnapshotFidelityMemory}
 	return snapshot, nil
+}
+
+// requireCheckedCapture refuses a memory-tier suspend whose capture is not of the state Snapshot
+// checked: the CaptureLineage the suspend reports (after) must be the one GetActor reported
+// (checked). A mismatch wraps api.ErrMemoryStateLost and is logged at Warn, since the actor is left
+// suspended holding that capture and the session's next turn would resume it. A suspend that
+// reports no lineage is a plain error: the ControlClient broke its contract, which is not evidence
+// of lost state.
+func (b *Backend) requireCheckedCapture(ctx context.Context, name string, checked, after ActorInfo) error {
+	if after.CaptureLineage == "" {
+		return fmt.Errorf("substrate: suspend of actor %s/%s reported no capture lineage, so the snapshot "+
+			"could not be tied to the state checked; no checkpoint was recorded for the session; "+
+			"actor remains suspended", b.atespace, name)
+	}
+	if after.CaptureLineage == checked.CaptureLineage {
+		return nil
+	}
+	observability.Logger(ctx, b.logger).WarnContext(ctx, "refused a memory-tier snapshot whose capture is not of the state checked before the suspend",
+		"component", "runtime.substrate", "atespace", b.atespace, "actor", name, "actor_uid", after.UID,
+		"error_kind", "memory_state_lost")
+	return fmt.Errorf("%w: actor %s/%s (UID %q) was captured or paused by another operation, or moved to "+
+		"a worker of another sandbox runtime, between the memory check and this suspend, so the snapshot "+
+		"cannot be shown to hold the session's in-RAM state; no checkpoint was recorded for the session; "+
+		"actor remains suspended",
+		api.ErrMemoryStateLost, b.atespace, name, after.UID)
 }
 
 // requireResumeCheckpoint permits a proven snapshot-less initial placement, not a refused capture.

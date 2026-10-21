@@ -12,6 +12,7 @@ package ateadapter
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"slices"
 
@@ -20,6 +21,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // Adapter implements substrate.ControlClient over the ate-api Control gRPC client.
@@ -228,6 +230,7 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 			st.GetLastAssignedGeneration() == 0 && len(st.GetSnapshots()) == 0 &&
 			len(st.ProtoReflect().GetUnknown()) == 0,
 		MemoryNotRestored: memoryNotRestored(a),
+		CaptureLineage:    captureLineage(st),
 		Status:            actorStatus(st.GetState()),
 		Worker:            st.GetWorkerAssignment().GetWorkerPod(),
 		Snapshot:          snap.GetDurableSnapshot().GetObject().GetSnapshotUri(),
@@ -281,6 +284,44 @@ func memoryNotRestored(a *atepb.Actor) bool {
 		return false
 	}
 	return !runtimeRestores(assignment.GetSandboxRuntime(), recorded)
+}
+
+// captureLineage is ActorInfo.CaptureLineage: the generation and the recorded sandbox runtime of
+// the snapshot a SuspendActor of the actor ends up holding, as substrate v0.5.0 assigns them
+// (cmd/ateapi/internal/controlapi/workflow_suspend.go):
+//
+//   - SUSPENDING: the capture in progress, the newest generation. ensureMarkedSuspending assigned
+//     it and stamped it with the worker's runtime (or, for a paused actor, promoted the pause's
+//     local snapshot), and a SuspendActor that re-enters the workflow completes that one.
+//   - Any other state with a worker assignment (RUNNING, or RESUMING once bound): the next capture.
+//     ensureMarkedSuspending gives it last_assigned_generation+1 and stamps it with a copy of
+//     WorkerAssignment.sandbox_runtime, and the assignment cannot change in place.
+//   - No assignment (SUSPENDED, paused included, or CRASHED): the newest generation, which a
+//     SuspendActor leaves as it is or, for a paused actor, uploads under the same generation and
+//     stamp.
+//
+// So the SuspendActor response reports the value an earlier GetActor did only if the suspend
+// captured the state that read saw. Any capture or pause in between assigns a new generation, and
+// a resume onto a worker of another runtime changes the stamp; a crash, revert and resume onto a
+// worker of the same runtime changes neither. "" when the status is missing or the runtime cannot
+// be encoded, which the backend refuses for a memory-tier Snapshot.
+func captureLineage(st *atepb.ActorStatus) string {
+	if st == nil {
+		return ""
+	}
+	gen, rt := heldSnapshot(st).GetGeneration(), heldSnapshot(st).GetSandboxRuntime()
+	if assignment := st.GetWorkerAssignment(); assignment != nil && st.GetState() != atepb.ActorState_ACTOR_STATE_SUSPENDING {
+		gen, rt = st.GetLastAssignedGeneration()+1, assignment.GetSandboxRuntime()
+	}
+	stamp := "none"
+	if rt != nil {
+		b, err := proto.MarshalOptions{Deterministic: true}.Marshal(rt)
+		if err != nil {
+			return ""
+		}
+		stamp = base64.RawStdEncoding.EncodeToString(b)
+	}
+	return fmt.Sprintf("generation %d runtime %s", gen, stamp)
 }
 
 // runtimeRestores reports whether an actor running under assigned can have restored the memory of

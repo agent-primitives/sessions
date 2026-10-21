@@ -429,6 +429,27 @@ that actor (it no longer holds the recorded snapshot), but Create's attach does 
 journal-held URI. Stateless sessions rebuild from the journal and are placed as before. A cluster
 whose workers all share one sandbox runtime, as the e2e kind cluster does, never hits the fallback.
 
+That check and the suspend are separate calls, and v0.5.0's `SuspendActorRequest` carries only the
+actor reference: no UID, generation or worker precondition. Another caller can suspend the checked
+actor and resume it on a worker that cannot restore its memory before `Snapshot`'s suspend captures
+it, and the suspended actor then holds no worker to compare. So a memory-tier `Snapshot` compares
+the capture the suspend reports with the actor it checked, through `ActorInfo.CaptureLineage`: the
+snapshot generation a suspend of that actor ends with, and the sandbox runtime that snapshot is
+stamped with. The adapter derives it from `last_assigned_generation`, the worker assignment's
+runtime and the newest snapshot, following the suspend workflow
+(`cmd/ateapi/internal/controlapi/workflow_suspend.go`). A capture or pause in between assigns a new
+generation, and a resume onto a worker of another runtime changes the stamp. Any change is
+`api.ErrMemoryStateLost` (`FAILED_PRECONDITION`), logged at `WARN`; no `SUSPEND` is recorded and the
+actor is left suspended. The check fails closed: a capture and resume onto a compatible worker in
+that window is refused too, although the memory survived. A `ControlClient` that reports no lineage
+cannot suspend a memory-tier session. Two windows remain. A crash, revert and resume onto a worker
+of the same runtime keeps the lineage. And the refusal is not durable: the actor now holds a
+snapshot stamped with the runtime it ran on, so the session's next turn attaches, resumes it with
+its memory and runs on RAM that is not the session's. Before that turn, delete the actor named in
+the warning: it is `SUSPENDED`, so a plain `DeleteActor` with `options.uid` set to the warning's
+`actor_uid` does it, and the next turn is then refused as a memory-tier session whose actor is gone.
+A worker-assignment precondition on `SuspendActor` would close both windows.
+
 The refused actor keeps its worker until the actor itself is deleted. `DeleteSession` does not
 release it: Delete never contacts the runtime or calls Stop (see the
 [FAQ](faq.md#does-deleting-a-session-stop-its-actor-or-erase-its-history) and #88). The backend

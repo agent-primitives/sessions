@@ -47,6 +47,50 @@ type mockControl struct {
 	getNoUID          bool
 	suspendNoUID      bool
 	suspendNoSnapshot bool
+	// gens counts each actor's captures and stamps records the runtime its newest one was taken
+	// on; runtime is the sandbox runtime of the worker a running actor holds ("" is "rt-a"). They
+	// model CaptureLineage the way the adapter derives it, so a capture by another caller, or a
+	// move to another runtime, changes it. getNoLineage and suspendNoLineage report none.
+	gens             map[string]int
+	stamps           map[string]string
+	runtime          string
+	getNoLineage     bool
+	suspendNoLineage bool
+}
+
+// workerRuntime is the sandbox runtime of the worker a running actor holds.
+func (m *mockControl) workerRuntime() string {
+	if m.runtime == "" {
+		return "rt-a"
+	}
+	return m.runtime
+}
+
+// lineage is the CaptureLineage of an actor at st: the next capture's generation and runtime on a
+// worker, the newest capture's otherwise.
+func (m *mockControl) lineage(name string, st substrate.ActorStatus) string {
+	if st == substrate.StatusRunning {
+		return fmt.Sprintf("gen-%d@%s", m.gens[name]+1, m.workerRuntime())
+	}
+	return fmt.Sprintf("gen-%d@%s", m.gens[name], m.stamps[name])
+}
+
+// capture records a capture of a running actor on its worker's runtime, as a suspend or pause
+// by any caller does.
+func (m *mockControl) capture(name string) {
+	if m.gens == nil {
+		m.gens, m.stamps = map[string]int{}, map[string]string{}
+	}
+	m.gens[name]++
+	m.stamps[name] = m.workerRuntime()
+}
+
+// statusOf is the actor's status as GetActor reports it.
+func (m *mockControl) statusOf(name string) substrate.ActorStatus {
+	if st, ok := m.actors[name]; ok {
+		return st
+	}
+	return m.status
 }
 
 // exists records an actor at a status, so GetActor reports it as already placed.
@@ -98,6 +142,9 @@ func (m *mockControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (s
 	if m.suspendErr != nil {
 		return substrate.ActorInfo{}, m.suspendErr
 	}
+	if m.statusOf(a.Name) == substrate.StatusRunning {
+		m.capture(a.Name)
+	}
 	m.exists(a.Name, substrate.StatusSuspended)
 	snap := "gs://snap/" + a.Name
 	if m.suspendNoSnapshot {
@@ -108,7 +155,11 @@ func (m *mockControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (s
 	if m.suspendNoUID {
 		uid = ""
 	}
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: m.info.Worker, Snapshot: snap, SnapshotFidelity: m.info.SnapshotFidelity, UID: uid}, nil
+	lineage := m.lineage(a.Name, substrate.StatusSuspended)
+	if m.suspendNoLineage {
+		lineage = ""
+	}
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: m.info.Worker, Snapshot: snap, SnapshotFidelity: m.info.SnapshotFidelity, UID: uid, CaptureLineage: lineage}, nil
 }
 
 // holds records the external snapshot an actor currently holds.
@@ -135,6 +186,10 @@ func (m *mockControl) GetActor(ctx context.Context, a substrate.ActorRef) (subst
 	if m.getErr != nil {
 		return substrate.ActorInfo{}, m.getErr
 	}
+	lineage := ""
+	if !m.getNoLineage {
+		lineage = m.lineage(a.Name, m.statusOf(a.Name))
+	}
 	if st, ok := m.actors[a.Name]; ok {
 		uid := m.uid(a.Name)
 		if m.getNoUID {
@@ -144,10 +199,10 @@ func (m *mockControl) GetActor(ctx context.Context, a substrate.ActorRef) (subst
 		if m.info.NoSnapshotHistory && m.snapshots[a.Name] == "" {
 			fidelity = substrate.SnapshotFidelityUnknown
 		}
-		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: fidelity, SnapshotNotReady: m.info.SnapshotNotReady, SnapshotPending: m.info.SnapshotPending, NoSnapshotHistory: m.info.NoSnapshotHistory, MemoryNotRestored: m.info.MemoryNotRestored, UID: uid}, nil
+		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: fidelity, SnapshotNotReady: m.info.SnapshotNotReady, SnapshotPending: m.info.SnapshotPending, NoSnapshotHistory: m.info.NoSnapshotHistory, MemoryNotRestored: m.info.MemoryNotRestored, UID: uid, CaptureLineage: lineage}, nil
 	}
 	if m.status != substrate.StatusUnknown { // canned state for the suspend/restore cases
-		return substrate.ActorInfo{Status: m.status, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: m.info.SnapshotFidelity, MemoryNotRestored: m.info.MemoryNotRestored, UID: m.uid(a.Name)}, nil
+		return substrate.ActorInfo{Status: m.status, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: m.info.SnapshotFidelity, MemoryNotRestored: m.info.MemoryNotRestored, UID: m.uid(a.Name), CaptureLineage: lineage}, nil
 	}
 	return substrate.ActorInfo{}, substrate.ErrActorNotFound
 }
@@ -2163,4 +2218,131 @@ func backendFor(m *mockControl, memory bool) *substrate.Backend {
 	}
 	return substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
 		api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}})
+}
+
+// The memory check and the suspend are separate calls, and SuspendActor takes no precondition, so
+// another caller can suspend the checked actor and resume it on a worker that cannot restore its
+// memory in between; the suspend then captures RAM that is not the session's. Snapshot compares the
+// CaptureLineage the check saw with the one the suspend reports and refuses any change with
+// api.ErrMemoryStateLost and no ref. It fails closed, so a capture in the window is refused even
+// when the resume kept the memory. A stateless harness is not checked.
+func TestSnapshotRefusesACaptureTheMemoryCheckDidNotSee(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		suspended bool // the actor is SUSPENDED when Snapshot checks it
+		between   func(m *mockControl)
+		refused   bool
+	}{
+		{name: "nothing in between"},
+		{name: "checked suspended, nothing in between", suspended: true},
+		{name: "suspended and resumed on another runtime", refused: true, between: func(m *mockControl) {
+			m.capture("sess-x")
+			m.runtime = "rt-b"
+		}},
+		{name: "suspended and resumed on the same runtime", refused: true, between: func(m *mockControl) {
+			m.capture("sess-x")
+		}},
+		{name: "moved to another runtime without a capture", refused: true, between: func(m *mockControl) {
+			m.runtime = "rt-b"
+		}},
+		{name: "checked suspended, resumed on another runtime", suspended: true, refused: true, between: func(m *mockControl) {
+			m.actors["sess-x"] = substrate.StatusRunning
+			m.runtime = "rt-b"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, memory := range []bool{true, false} {
+				var output bytes.Buffer
+				logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelWarn}))
+				m := &mockControl{info: running("worker-a")}
+				m.exists("sess-x", substrate.StatusRunning)
+				if tc.suspended {
+					m.capture("sess-x")
+					m.exists("sess-x", substrate.StatusSuspended)
+				}
+				m.afterGet = func(string) {
+					m.afterGet = nil
+					if tc.between != nil {
+						tc.between(m)
+					}
+				}
+				resumability := api.ResumabilityStatelessReplay
+				if memory {
+					resumability = api.ResumabilityRequiresMemorySnapshot
+				}
+				b := substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
+					api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: resumability}},
+					substrate.WithLogger(logger))
+				in := api.Incarnation{ID: "sess-x"}
+				if memory {
+					in.ComputeInstance = m.uid("sess-x")
+				} else if tc.between != nil {
+					tc.between(m) // a stateless Snapshot does not look first
+				}
+				ref, err := b.Snapshot(t.Context(), in, api.SnapshotExternal)
+				if !memory || !tc.refused {
+					if err != nil || ref.ExternalURI == "" {
+						t.Fatalf("memory=%v: snapshot: ref=%+v err=%v, want a snapshot", memory, ref, err)
+					}
+					if output.Len() != 0 {
+						t.Fatalf("memory=%v: logged %s", memory, output.String())
+					}
+					continue
+				}
+				if !errors.Is(err, api.ErrMemoryStateLost) || ref != (api.SnapshotRef{}) {
+					t.Fatalf("snapshot: ref=%+v err=%v, want api.ErrMemoryStateLost", ref, err)
+				}
+				if want := []string{"get:sess-x", "suspend:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+					t.Fatalf("calls=%v want %v", m.calls, want)
+				}
+				for _, part := range []string{"space/sess-x", m.uid("sess-x"), "no checkpoint was recorded", "actor remains suspended"} {
+					if !strings.Contains(err.Error(), part) {
+						t.Fatalf("refusal %q does not name %q", err, part)
+					}
+				}
+				if strings.Contains(err.Error(), "gs://") {
+					t.Fatalf("refusal %q names the snapshot URI", err)
+				}
+				if !strings.Contains(output.String(), `"error_kind":"memory_state_lost"`) || !strings.Contains(output.String(), m.uid("sess-x")) {
+					t.Fatalf("refusal was not logged for operators: %s", output.String())
+				}
+			}
+		})
+	}
+}
+
+// CaptureLineage is part of the ControlClient contract for a memory-tier Snapshot. A check that
+// reports none is refused before anything is suspended; a suspend that reports none is refused
+// after it. Neither is evidence of lost state, so neither wraps api.ErrMemoryStateLost.
+func TestSnapshotRequiresACaptureLineage(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(m *mockControl)
+		calls []string
+	}{
+		{name: "check", setup: func(m *mockControl) { m.getNoLineage = true }, calls: []string{"get:sess-x"}},
+		{name: "suspend", setup: func(m *mockControl) { m.suspendNoLineage = true }, calls: []string{"get:sess-x", "suspend:sess-x"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockControl{info: running("worker-a")}
+			m.exists("sess-x", substrate.StatusRunning)
+			tc.setup(m)
+			ref, err := newMemoryBackend(m).Snapshot(t.Context(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+			if err == nil || errors.Is(err, api.ErrMemoryStateLost) || ref != (api.SnapshotRef{}) {
+				t.Fatalf("snapshot: ref=%+v err=%v, want a plain refusal", ref, err)
+			}
+			if !strings.Contains(err.Error(), "no capture lineage") {
+				t.Fatalf("refusal %q does not say the lineage is missing", err)
+			}
+			if !reflect.DeepEqual(m.calls, tc.calls) {
+				t.Fatalf("calls=%v want %v", m.calls, tc.calls)
+			}
+		})
+	}
+	// A stateless harness does not need one.
+	m := &mockControl{info: running("worker-a"), getNoLineage: true, suspendNoLineage: true}
+	m.exists("sess-x", substrate.StatusRunning)
+	if _, err := backendFor(m, false).Snapshot(t.Context(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal); err != nil {
+		t.Fatalf("stateless snapshot: %v", err)
+	}
 }

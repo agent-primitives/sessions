@@ -43,6 +43,18 @@ type actorControl struct {
 	// created again under a name reports a new one.
 	uids    map[string]string
 	created int
+	// captures counts each actor's captures, for CaptureLineage.
+	captures map[string]int
+}
+
+// lineage is the actor's CaptureLineage: the capture its next suspend would take, or the one it
+// holds when that suspend is a no-op. c.mu must be held.
+func (c *actorControl) lineage(name string) string {
+	n := c.captures[name]
+	if c.status[name] != substrate.StatusSuspended || c.snapshots[name] == "" {
+		n++
+	}
+	return fmt.Sprintf("capture-%d", n)
 }
 
 // newUID mints the UID substrate assigns an actor at creation. c.mu must be held.
@@ -95,16 +107,20 @@ func (c *actorControl) SuspendActor(_ context.Context, a substrate.ActorRef) (su
 	// Substrate's suspend is a no-op on an actor that is already SUSPENDED holding a snapshot.
 	snap := c.snapshots[a.Name]
 	if c.status[a.Name] != substrate.StatusSuspended || snap == "" {
+		if c.captures == nil {
+			c.captures = map[string]int{}
+		}
+		c.captures[a.Name]++
 		c.suspends++
 		snap = fmt.Sprintf("snap-%s-%d", a.Name, c.suspends)
 		c.status[a.Name], c.snapshots[a.Name] = substrate.StatusSuspended, snap
 	}
-	uid := c.uids[a.Name]
+	uid, lineage := c.uids[a.Name], c.lineage(a.Name)
 	c.mu.Unlock()
 	if c.onSuspend != nil {
 		c.onSuspend(a.Name)
 	}
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: "w", Snapshot: snap, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: uid}, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: "w", Snapshot: snap, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: uid, CaptureLineage: lineage}, nil
 }
 
 func (c *actorControl) DeleteActor(_ context.Context, a substrate.ActorRef) error {
@@ -114,6 +130,7 @@ func (c *actorControl) DeleteActor(_ context.Context, a substrate.ActorRef) erro
 	delete(c.uids, a.Name)
 	// The snapshot went with the actor: one created again under the name holds none.
 	delete(c.snapshots, a.Name)
+	delete(c.captures, a.Name)
 	return nil
 }
 
@@ -132,7 +149,7 @@ func (c *actorControl) GetActor(_ context.Context, a substrate.ActorRef) (substr
 	if noHistory {
 		fidelity = substrate.SnapshotFidelityUnknown
 	}
-	return substrate.ActorInfo{Status: st, Worker: "w", Snapshot: c.snapshots[a.Name], SnapshotFidelity: fidelity, NoSnapshotHistory: noHistory, UID: c.uids[a.Name]}, nil
+	return substrate.ActorInfo{Status: st, Worker: "w", Snapshot: c.snapshots[a.Name], SnapshotFidelity: fidelity, NoSnapshotHistory: noHistory, UID: c.uids[a.Name], CaptureLineage: c.lineage(a.Name)}, nil
 }
 
 func (c *actorControl) TagActor(_ context.Context, a substrate.ActorRef, _ substrate.SnapshotID) error {

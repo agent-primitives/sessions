@@ -153,8 +153,15 @@ not provide.
   `get` first is a separate read and cannot stop a replacement created between the `get` and the
   delete. Stateless sessions are unaffected, and clusters whose workers share one runtime do not
   hit it.
-  The adapter reports it through the new `ActorInfo.MemoryNotRestored`; another
-  `runtime/substrate.ControlClient` implementation that leaves it false keeps the old behavior. See
+  Because v0.5.0's `SuspendActor` takes no precondition, a memory-tier Suspend or Fork also refuses
+  with `api.ErrMemoryStateLost`, logged at `WARN`, when the actor was captured, paused or moved to
+  another runtime between its check and the suspend; the actor is left suspended and no checkpoint
+  is recorded. This fails closed even when the memory survived. The refusal is not durable: delete
+  that actor before the session's next turn, which would otherwise resume the capture.
+  The adapter reports these through the new `ActorInfo.MemoryNotRestored` and
+  `ActorInfo.CaptureLineage`. Another `runtime/substrate.ControlClient` implementation that leaves
+  `MemoryNotRestored` false keeps the old behavior, but one that leaves `CaptureLineage` empty can
+  no longer suspend or fork a memory-tier session. See
   [runtime fallback](docs/substrate-conformance.md#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback).
 - SQLite schema v6 adds model-admission flags for new sessions; genuine pre-policy sessions,
   including empty sessions, remain legacy. Fork inherits admission metadata atomically. Existing

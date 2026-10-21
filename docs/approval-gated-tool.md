@@ -3,7 +3,7 @@
 A model calls a tool that needs a human decision. The session parks, survives a daemon restart,
 and after approval the tool runs exactly once. Everything here is a stock binary from this
 repository: `agentsessionsd`, `harnessnode` and `agentctl`, plus the
-[Python executor example](tool-executor-example.py). No custom host is built.
+[Python executor example](../docs/tool-executor-example.py). No custom host is built.
 
 ```mermaid
 sequenceDiagram
@@ -174,7 +174,8 @@ of two calls' identities, and edits a pending call's arguments in the journal.
 ## Limits
 
 - The chain is unkeyed. Someone who can rewrite the journal and recompute every hash can change a
-  call and its decision together; see [security](security.md).
+  call and its decision together, and neither check below detects it; that needs signing. See
+  [security](security.md).
 - `APPROVAL_RESULT` carries no separate arguments digest, by design for now. The decision binds the
   arguments through the chain (`request_seq` follows the `TOOL_CALL` record whose `content_hash`
   covers the canonical arguments) plus the hash recheck right before dispatch, so an exported
@@ -182,8 +183,7 @@ of two calls' identities, and edits a pending call's arguments in the journal.
   export and verifier work and to executor-held credentials, where a decision is checked away from
   its journal.
 - The daemon, not the executor, refuses changed arguments: the executor checks nothing itself and
-  is never dialed for a mismatched call. Neither check stops a full journal rewrite with recomputed
-  hashes; that needs signing.
+  is never dialed for a mismatched call.
 - The harness chooses mediation. The reference tool harness always requests approval; a harness
   you run yourself could emit `CONTROLLER_MEDIATED` and skip the gate for a configured route.
 - The daemon is unauthenticated: anyone who reaches its port can approve. Run it on loopback or a

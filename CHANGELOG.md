@@ -46,6 +46,16 @@ not provide.
   system/user text uses `input_text`. Model-call diagnostics retain categories, HTTP status and bounded
   provider `error.code`/`error.param` identifiers, not messages or transport URLs/details; see
   [mapping and limits](docs/responses-adapter.md).
+- OpenTelemetry tracing. Session, placement, controller, runtime, and harness-wire operations emit
+  spans, and gRPC clients and servers propagate W3C trace context, including into substrate. Each
+  session operation is linked to the session's previous one, so a session can be followed across
+  suspensions. The reference binaries export over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+  See [docs/observability.md](docs/observability.md#tracing). Spans follow the logging data
+  policy: gRPC status messages, error messages, panic values, and URL queries are redacted, including
+  from `otelgrpc` and `otelhttp` spans.
+- `observability.Begin` and `observability.BeginDebug`, which return the span's context. `Start`
+  and `StartDebug` are deprecated: they now also emit a span, but do not return its context, so
+  work done under the caller's ctx is not nested beneath it.
 
 ### Fixed
 
@@ -106,15 +116,10 @@ not provide.
   Resume, Exec and Fork `FAILED_PRECONDITION` messages name the session UID, so the CLI output
   alone identifies the session, actor, and, for a refused observed checkpoint, the required and
   observed fidelity. Codes and wrapped errors are unchanged.
-- OpenTelemetry tracing. Session, placement, controller, runtime, and harness-wire operations emit
-  spans, and gRPC clients and servers propagate W3C trace context, including into substrate. Each
-  session operation is linked to the session's previous one, so a session can be followed across
-  suspensions. The reference binaries export over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
-  See [docs/observability.md](docs/observability.md#tracing). Spans follow the logging data
-  policy: gRPC status messages, error messages, panic values, and URL queries are redacted, including
-  from `otelgrpc` and `otelhttp` spans.
-- `observability.Begin` and `observability.BeginDebug`, which return the span's context. `Start`
-  and `StartDebug` are deprecated but unchanged.
+- After `EVENT_END` the reference host half-closes the harness Connect stream and waits up to 2
+  seconds for the harness to end the RPC, instead of cancelling it at once, so the harness can
+  flush its spans and return its own status. A harness that never closes costs at most the 2
+  seconds. A park already waited for the harness to close.
 
 ### Compatibility
 

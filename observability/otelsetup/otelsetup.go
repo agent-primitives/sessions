@@ -34,10 +34,9 @@ import (
 // The propagator is installed even when export is off, so a process that only forwards requests
 // still passes a caller's trace context through to the next hop.
 func Init(ctx context.Context, serviceName string) (func(context.Context) error, error) {
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{},
-		propagation.Baggage{},
-	))
+	// Trace context only: nothing here reads baggage, and forwarding it would pass caller-supplied
+	// values on to substrate and the harness.
+	otel.SetTextMapPropagator(propagation.TraceContext{})
 	noop := func(context.Context) error { return nil }
 	if !Enabled() {
 		return noop, nil

@@ -79,8 +79,9 @@ only on the OpenTelemetry API, so spans are no-ops until a process installs an S
 ### Enabling tracing
 
 The reference binaries (`agentsessionsd`, `harnessnode`, and `agentctl`) call
-`observability/otelsetup.Init`. It always installs the W3C TraceContext and Baggage propagators, and
-exports over OTLP/gRPC only when the standard environment asks for it:
+`observability/otelsetup.Init`. It always installs the W3C TraceContext propagator, and exports
+over OTLP/gRPC only when the standard environment asks for it. Baggage is not propagated, so
+caller-supplied baggage does not reach substrate or the harness.
 
 ```bash
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
@@ -88,6 +89,11 @@ export OTEL_EXPORTER_OTLP_INSECURE=true      # plaintext collector
 export OTEL_TRACES_SAMPLER=parentbased_always_on
 export OTEL_RESOURCE_ATTRIBUTES=deployment.environment=dev
 ```
+
+The daemon parents each RPC on the caller's `traceparent` when one arrives. The caller therefore
+picks the trace ID that `session_traces` records and, under the default `parentbased_*` samplers,
+whether the operation is sampled. Callers outside your trust boundary can steer both; use a
+non-parent-based sampler, or strip `traceparent` at the edge, if that matters.
 
 `OTEL_TRACES_EXPORTER=none` turns export off. A process that assembles the libraries itself installs
 its own provider and adds `observability.ServerTracing()` to its gRPC servers and
@@ -164,7 +170,8 @@ to general logs. The startup summary deliberately omits that raw cause; host-bui
 can still quote untrusted stored values.
 
 Use `error_kind`, gRPC status, identifiers, counts, and durations for diagnosis. Spans never
-record exception events or error strings.
+record exception messages, stack traces, or raw error strings; a recorded error carries only its
+type.
 
 Third-party instrumentation does not follow this policy by default. `otelgrpc` puts the gRPC status
 message in the span status, `otelhttp` records `err.Error()` and the full request URL, query

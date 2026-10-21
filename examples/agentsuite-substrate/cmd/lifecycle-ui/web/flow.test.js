@@ -150,8 +150,16 @@ test("only a replay that held claims re-execution and zero model calls", () => {
   const late = { op: "replay", ok: false, replay: { records: 5, turns: 1, controllerCalls: 0, fakeBefore: 3, fakeAfter: -1, head: "abc123" } };
   assert.match(Flow.replayNote(late), /counted 0 model calls before it stopped; fake model counter 3 before, not read after\. Zero model calls is not established\.$/);
 
-  const called = { op: "replay", ok: false, replay: { records: 5, turns: 1, controllerCalls: 0, fakeBefore: 3, fakeAfter: 4, modelCalled: true, head: "abc123" } };
+  const called = { op: "replay", ok: false, replay: { records: 5, turns: 1, controllerCalls: 1, fakeBefore: 3, fakeAfter: 4, modelCalled: true, head: "abc123" } };
   assert.match(Flow.replayNote(called), /fake model counter 3 to 4\. The replay called the model\.$/);
+
+  // The shared fake counter moved while the controller counted no call: another session's turn can
+  // do that, so the note neither blames the replay nor claims zero calls.
+  const moved = { op: "replay", ok: false, failedAt: "bridge", replay: { records: 5, turns: 1, controllerCalls: 0, fakeBefore: 3, fakeAfter: 4, head: "abc123" } };
+  const movedNote = Flow.replayNote(moved);
+  assert.match(movedNote, /^Replay not confirmed\./);
+  assert.match(movedNote, /controller counted 0 model calls; fake model counter 3 to 4\. The daemons share that counter, so the move cannot be attributed to this replay\. Zero model calls is not established\.$/);
+  for (const claim of [/called the model/, /Re-ran/, /Chain verified/]) assert.doesNotMatch(movedNote, claim);
 
   assert.equal(Flow.replayNote({ op: "replay", ok: false }), null);
 });

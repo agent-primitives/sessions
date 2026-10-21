@@ -17,7 +17,10 @@ import (
 	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/client"
+	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/harnesswire"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -523,6 +526,109 @@ func TestReplayThatCannotReachTheActor(t *testing.T) {
 	}
 }
 
+// echoActor gives a session a journal the echo harness wrote on "triage" and serves that harness
+// over gRPC on loopback, standing in for the session's actor behind atenet-router. It returns the
+// address to use as the router.
+func echoActor(t *testing.T, f *fakeSessions, uid string) string {
+	t.Helper()
+	live := eventlog.New()
+	c, err := controller.New(eventlog.AsStore(live), echoagent.Model, controller.WithSessionUID(uid), controller.WithHarness("triage"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "ping")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	var protos []*v1.LogRecord
+	for _, r := range live.Snapshot() {
+		protos = append(protos, eventlog.RecordToProto(r))
+	}
+	f.mu.Lock()
+	f.log[uid] = protos
+	f.mu.Unlock()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := grpc.NewServer()
+	v1.RegisterHarnessServer(g, harnesswire.NewServer(echoagent.Harness{}))
+	go func() { _ = g.Serve(lis) }()
+	t.Cleanup(g.Stop)
+	return lis.Addr().String()
+}
+
+// counterServer is the fake model's stats endpoint, answering each read with the next value.
+func counterServer(t *testing.T, reads ...int64) string {
+	t.Helper()
+	var mu sync.Mutex
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if n >= len(reads) {
+			t.Errorf("fake model stats read %d times, want %d", n+1, len(reads))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, `{"calls":%d}`, reads[n])
+		n++
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// The fake model's counter is shared by every daemon: a turn another tab or `ui.sh check` sends
+// during a replay moves it. A replay whose controller counted no call still fails when it moves,
+// but the move is not attributed to the replay: the model is drawn unknown, not called.
+func TestReplayCounterMoveIsNotAttributedToTheReplay(t *testing.T) {
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("replay called the model")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(model.Close)
+	for _, c := range []struct {
+		name  string
+		reads []int64
+	}{
+		{"counter held", []int64{3, 3}},
+		{"another session's turn moved the counter", []int64{3, 4}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFake()
+			s, ts := testServer(t, map[string]*fakeSessions{"stateless": f})
+			sid := postActivity(t, ts, "/api/create", map[string]string{"lane": "stateless"}).Session
+			if _, err := f.setCompute(sid, v1.ComputeState_COMPUTE_LIVE); err != nil {
+				t.Fatal(err)
+			}
+			s.cfg.Router = echoActor(t, f, sid)
+			s.cfg.ModelURL = model.URL
+			s.cfg.ModelStats = counterServer(t, c.reads...)
+
+			a := postActivity(t, ts, "/api/replay", map[string]string{"session": sid})
+			r := a.Replay
+			if r == nil || r.ControllerCalls != 0 || r.FakeBefore != c.reads[0] || r.FakeAfter != c.reads[1] || r.ModelCalled {
+				t.Fatalf("replay result %+v (ok=%v message=%q)", r, a.OK, a.Message)
+			}
+			tr := s.trace(context.Background(), &a)
+			m := tr.Nodes["model"]
+			if c.reads[0] == c.reads[1] {
+				if !a.OK || len(r.Outputs) != 1 || r.Outputs[0] != "echo:ping" || m.State != "skipped" {
+					t.Fatalf("held replay: ok=%v message=%q outputs=%q model=%+v", a.OK, a.Message, r.Outputs, m)
+				}
+				return
+			}
+			if a.OK || a.FailedAt != "bridge" || strings.Contains(a.Message, "replay called the model") ||
+				!strings.Contains(a.Message, "fake model's counter moved 3 -> 4") || !strings.Contains(a.Message, "not established") {
+				t.Fatalf("replay: ok=%v failedAt=%q message=%q", a.OK, a.FailedAt, a.Message)
+			}
+			if m.State != "unknown" || strings.Contains(m.Detail, "called the model") ||
+				!strings.Contains(m.Detail, "cannot be attributed") || !strings.Contains(m.Detail, "fake model counter 3 -> 4") {
+				t.Errorf("model: %+v", m)
+			}
+		})
+	}
+}
+
 // The bridge's part in a replay names controller.Replay only when the controller ran.
 func TestReplayBridgeDetail(t *testing.T) {
 	const ran = "Sessions.Replay (journal), then controller.Replay through atenet-router"
@@ -562,8 +668,10 @@ func TestReplayModel(t *testing.T) {
 			"unknown", "not established: the controller's replay did not run; fake model counter 3 before, not read after"},
 		{"controller failed", activity{Replay: &replayResult{ControllerCalls: 0, FakeBefore: -1, FakeAfter: -1}},
 			"unknown", "not established: controller counted 0 model calls"},
-		{"called the model", activity{Replay: &replayResult{FakeBefore: 3, FakeAfter: 4, ModelCalled: true}},
-			"observed", "the replay called the model: controller counted 0 model calls; fake model counter 3 -> 4"},
+		{"called the model", activity{Replay: &replayResult{ControllerCalls: 1, FakeBefore: 3, FakeAfter: 4, ModelCalled: true}},
+			"observed", "the replay called the model: controller counted 1 model calls; fake model counter 3 -> 4"},
+		{"shared counter moved", activity{Replay: &replayResult{ControllerCalls: 0, FakeBefore: 3, FakeAfter: 4}},
+			"unknown", "cannot be attributed to the replay and zero model calls is not established: controller counted 0 model calls; fake model counter 3 -> 4"},
 	} {
 		got := replayModel(&c.a)
 		if got.State != c.state || !strings.Contains(got.Detail, c.detail) {

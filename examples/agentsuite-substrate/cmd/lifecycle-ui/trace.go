@@ -349,8 +349,8 @@ func (s *server) trace(ctx context.Context, a *activity) traceView {
 }
 
 // replayModel is the model's part in a replay. Only a replay that held is shown as not calling
-// it; one that stopped early has not established that, and one a counter caught calling it shows
-// the call.
+// it; one that stopped early has not established that, and one whose controller counted a call
+// shows the call. A move of the fake model's counter, which every daemon shares, is unknown.
 func replayModel(a *activity) nodeEvidence {
 	r := a.Replay
 	switch {
@@ -361,6 +361,10 @@ func replayModel(a *activity) nodeEvidence {
 		return nodeEvidence{State: "skipped", Detail: replayCounts(r)}
 	case r.ModelCalled:
 		return nodeEvidence{State: "observed", Detail: "the replay called the model: " + replayCounts(r)}
+	case r.ControllerCalls == 0 && r.counterMoved():
+		return nodeEvidence{State: "unknown",
+			Detail: "the fake model's counter moved, but the daemons share it, so the move cannot be attributed to the " +
+				"replay and zero model calls is not established: " + replayCounts(r)}
 	}
 	return nodeEvidence{State: "unknown",
 		Detail: "the replay did not complete, so zero model calls is not established: " + replayCounts(r)}

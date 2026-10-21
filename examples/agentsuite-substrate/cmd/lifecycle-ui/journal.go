@@ -115,9 +115,11 @@ type replayResult struct {
 	ControllerCalls int `json:"controllerCalls"`
 	// FakeBefore and FakeAfter are the fake model's counter around the replay; -1 when there is
 	// no fake (a real provider; the controller's count is the proof) or the counter was not read.
+	// Every daemon calls the same fake model, so the counter also counts other sessions' turns.
 	FakeBefore int64 `json:"fakeBefore"`
 	FakeAfter  int64 `json:"fakeAfter"`
-	// ModelCalled is set when a counter shows the replay called the model.
+	// ModelCalled is set when the controller counted a model call. A move of the shared fake
+	// counter alone fails the replay but is not attributed to it (counterMoved).
 	ModelCalled bool   `json:"modelCalled,omitempty"`
 	Head        string `json:"head"`
 }
@@ -191,9 +193,9 @@ func replayableCompute(cs v1.ComputeState) error {
 
 // replay is cmd/replay's run, in process, on the journal the Replay RPC returned: verify the chain,
 // and run the controller's replay against the session's own actor through the atenet-router, with
-// every model call served from the journal. It fails if the controller or the fake model counted a
-// call. Once the journal verifies it returns a result with any error, holding what was
-// established before the failure.
+// every model call served from the journal. It fails if the controller counted a model call or the
+// shared fake model's counter moved; only the controller's count sets ModelCalled. Once the journal
+// verifies it returns a result with any error, holding what was established before the failure.
 func (s *server) replay(ctx context.Context, uid string, protos []*v1.LogRecord) (
 	*replayResult, error,
 ) {
@@ -241,14 +243,25 @@ func (s *server) replay(ctx context.Context, uid string, protos []*v1.LogRecord)
 		return res, err
 	}
 	res.FakeAfter = after
-	if res.ModelCalled || res.FakeAfter != res.FakeBefore {
-		res.ModelCalled = true
+	if res.ModelCalled {
 		return res, fmt.Errorf("replay called the model")
+	}
+	// The controller counted no call, but the counter is shared: a turn from another tab or
+	// `ui.sh check` moves it too. Fail closed without blaming the replay.
+	if res.counterMoved() {
+		return res, fmt.Errorf("the fake model's counter moved %d -> %d during the replay while the controller counted "+
+			"no call; the daemons share that counter, so the move cannot be attributed to the replay and zero model "+
+			"calls is not established; rerun with no other turns in flight", res.FakeBefore, res.FakeAfter)
 	}
 	if err := log.Verify(); err != nil {
 		return res, fmt.Errorf("journal does not verify after replay: %w", err)
 	}
 	return res, nil
+}
+
+// counterMoved reports that the fake model's counter was read on both sides of the replay and moved.
+func (r *replayResult) counterMoved() bool {
+	return r.FakeBefore >= 0 && r.FakeAfter >= 0 && r.FakeAfter != r.FakeBefore
 }
 
 // loadJournal is cmd/replay's: a verified log, the harness the last completed turn ran on, and how

@@ -347,3 +347,17 @@ test("a declined call marks the bridge declined and the edge into it done", () =
   assert.equal(Flow.edgeStates("replay", trace).http, "done");
   assert.equal(Flow.edgeStates("replay", trace).grpc, "off");
 });
+
+test("a session's view draws only a flow that concerns it", () => {
+  const acts = [
+    { id: 1, op: "exec", session: "A" },
+    { id: 2, op: "fork", session: "A", child: "C" },
+    { id: 3, op: "exec", session: "B" },
+  ];
+  assert.equal(Flow.flowFor(acts, "A").id, 2, "latest of A");
+  assert.equal(Flow.flowFor(acts, "A", 1).id, 1, "the asked-for call of A");
+  assert.equal(Flow.flowFor(acts, "B", 1).id, 3, "another session's call is not drawn beside B");
+  assert.equal(Flow.flowFor(acts, "C").id, 2, "a fork child shows the fork that made it");
+  assert.equal(Flow.flowFor(acts, "D"), null);
+  assert.equal(Flow.flowFor(acts, ""), null);
+});

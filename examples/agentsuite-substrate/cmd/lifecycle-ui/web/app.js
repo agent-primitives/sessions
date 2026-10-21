@@ -195,6 +195,11 @@
     clearInterval(animTimer);
     state.shown = act;
     state.selectedNode = null;
+    // The URL names the call drawn, so a reload draws it again (start checks it is the session's).
+    const url = new URL(location.href);
+    if (act) url.searchParams.set("activity", act.id);
+    else url.searchParams.delete("activity");
+    history.replaceState(null, "", url);
     $("flow-caption").textContent = caption(act);
     $("evidence").textContent = "";
     if (!act) return paintFlow("create", { nodes: {} }, null);
@@ -282,7 +287,10 @@
 
   // ---- selection ----
 
-  async function select(uid) {
+  // select shows a session: its timeline, journal, actor and a flow that concerns it. The flow
+  // drawn stays when it concerns the session; else it is the asked-for call (wantActivity, from
+  // the URL) when that is the session's, else the session's latest call, else none.
+  async function select(uid, wantActivity) {
     // While a call is in flight its result is drawn beside the session it was made on, so the
     // selection stays put (the session picker is disabled; this covers a fork's "Open the child").
     if (state.busy && uid !== state.selected) return;
@@ -295,7 +303,11 @@
     history.replaceState(null, "", url);
     renderControls();
     renderTimeline();
-    await Promise.all([loadJournal(), loadActor()]);
+    const loads = [loadJournal(), loadActor()];
+    if (wantActivity !== undefined || !Flow.concerns(state.shown, uid)) {
+      loads.push(showFlow(Flow.flowFor(state.activity, uid, wantActivity)));
+    }
+    await Promise.all(loads);
   }
 
   function renderControls() {
@@ -571,11 +583,10 @@
       setStatus("Session list read failed: " + err.message, true);
     }
     renderControls();
+    // The selection may have moved on while this settled (the picker unlocks when the call
+    // returns); the result is then drawn only when that session is selected again.
     if (!Flow.concerns(act, state.selected)) return;
-    const url = new URL(location.href);
-    url.searchParams.set("activity", act.id);
-    history.replaceState(null, "", url);
-    await showFlow(act);
+    if (state.shown !== act) await showFlow(act);
   }
 
   async function execTurn(text) {
@@ -673,10 +684,10 @@
     }
     const params = new URLSearchParams(location.search);
     const uid = params.get("session") || "";
-    await select(sessionByID(uid) ? uid : "");
-    const want = Number(params.get("activity"));
-    const act = state.activity.find((a) => a.id === want) || state.activity.filter((a) => Flow.concerns(a, state.selected)).slice(-1)[0];
-    if (act) await showFlow(act);
+    // A URL's activity is drawn only when it concerns the session; select falls back to the
+    // session's latest call.
+    const want = params.has("activity") ? Number(params.get("activity")) : undefined;
+    await select(sessionByID(uid) ? uid : "", want);
     renderTimeline();
   }
 

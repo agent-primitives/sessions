@@ -285,6 +285,13 @@
     return Boolean(act && uid) && (act.session === uid || act.child === uid);
   }
 
+  // flowFor is the activity whose flow a session's view draws: the one asked for (a URL's activity
+  // ID) when it concerns the session, else the session's latest call, else none.
+  function flowFor(acts, uid, wantID) {
+    const mine = (acts || []).filter((a) => concerns(a, uid));
+    return mine.find((a) => a.id === wantID) || mine[mine.length - 1] || null;
+  }
+
   return {
     VIEW,
     NODE_W,
@@ -304,6 +311,7 @@
     replayNote,
     replayBlock,
     concerns,
+    flowFor,
     outcome,
   };
 });

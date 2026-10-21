@@ -136,8 +136,9 @@ its daemon.
 ## Tested
 
 `go test ./cmd/lifecycle-ui` (bridge, against an in-memory Sessions server and canned cluster
-output) and `node --test` in `cmd/lifecycle-ui/web` (the diagram's rules). A live run against the
-example cluster is recorded in the pull request, not here.
+output) and `node --test` in `cmd/lifecycle-ui/web` (the diagram's rules, and the page's session
+selection in a small fake DOM). A live run against the example cluster is recorded in the pull
+request, not here.
 
 ## Credit
 

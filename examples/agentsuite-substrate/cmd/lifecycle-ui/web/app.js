@@ -615,6 +615,7 @@
     state.pending = { id: -1, op: "exec", session: uid, input: text, output: "", records: [], started: new Date().toISOString(), running: true };
     renderTimeline();
     let act = null;
+    let failed = "";
     try {
       const res = await fetch("/api/exec", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: uid, input: text }) });
       if (!res.ok) {
@@ -646,14 +647,20 @@
         }
       }
     } catch (err) {
-      setStatus("Exec failed: " + err.message, true);
+      failed = err.message;
     }
     state.pending = null;
     state.busy = false;
     if (act) await settle(act);
     else {
+      // The bridge never reported how the call ended: end the animation, draw the flow shown
+      // before the call again, say why, and re-read the journal, which shows any record it wrote.
+      setStatus(failed ? "Exec failed: " + failed
+        : "Exec ended without a result: the stream closed before the bridge reported the call's outcome, which is unknown; the journal shows what was written.", true);
       clearInterval(animTimer);
       renderTimeline();
+      renderControls();
+      await Promise.all([showFlow(state.shown), loadJournal(), loadActor()]);
     }
     renderControls();
   }

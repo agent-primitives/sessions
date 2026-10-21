@@ -146,6 +146,17 @@ function activity(id, op, uid) {
   return { id, op, session: uid, lane: "stateless", ok: true, started: "2026-10-21T00:00:00Z", durationMs: 5, records: [] };
 }
 
+// Stream is a route body that /api/exec streams as NDJSON lines, then ends.
+class Stream {
+  constructor(msgs) {
+    this.msgs = msgs;
+  }
+  reader() {
+    const chunks = this.msgs.map((m) => new TextEncoder().encode(JSON.stringify(m) + "\n"));
+    return { read: async () => (chunks.length ? { value: chunks.shift(), done: false } : { value: undefined, done: true }) };
+  }
+}
+
 // page loads app.js against a fake bridge. routes maps a path (without its query) to a body or a
 // function of the URL returning one; a returned promise is awaited, so a test can hold a call.
 async function page(search, routes, timers) {
@@ -156,6 +167,7 @@ async function page(search, routes, timers) {
     const r = routes[u.pathname];
     if (r === undefined) throw new Error("fake bridge: no route " + u.pathname);
     const body = await (typeof r === "function" ? r(u) : r);
+    if (body instanceof Stream) return { ok: true, status: 200, statusText: "OK", body: { getReader: () => body.reader() } };
     return { ok: true, status: 200, statusText: "OK", json: async () => body };
   };
   const ctx = {
@@ -340,4 +352,40 @@ test("an actor read that a newer read of the same session overtook is dropped", 
   const text = p.$("actor").textContent;
   assert.match(text, /the newest read/);
   assert.doesNotMatch(text, /the stale read/);
+});
+
+test("an Exec with no final result ends its animation, restores the flow and says so", async () => {
+  for (const c of [
+    { name: "the stream ends without the activity", exec: () => new Stream([{ type: "record", data: { seq: 1, kind: "INPUT", text: "hi" } }]),
+      status: /^Exec ended without a result: the stream closed before the bridge reported the call's outcome, which is unknown/ },
+    { name: "the request fails", exec: () => { throw new Error("Failed to fetch"); }, status: /^Exec failed: Failed to fetch$/ },
+  ]) {
+    let animating = false;
+    let journalReads = 0;
+    const p = await page("?session=" + A, routes([activity(1, "exec", A)], {
+      "/api/exec": c.exec,
+      "/api/journal": () => {
+        journalReads++;
+        return { records: [], verified: true };
+      },
+    }), {
+      setInterval: () => { animating = true; return 1; },
+      clearInterval: () => { animating = false; },
+    });
+    const before = p.caption();
+    assert.match(before, /^Exec · session aaaaaaaa/, c.name);
+    const readsBefore = journalReads;
+    p.$("input").value = "hi";
+    await p.$("composer").fire("submit");
+    for (let i = 0; i < 50 && !p.$("status").textContent; i++) await flush();
+    for (let i = 0; i < 5; i++) await flush();
+    assert.equal(animating, false, c.name + ": the in-flight animation stopped");
+    assert.doesNotMatch(p.caption(), /in flight/, c.name);
+    assert.equal(p.caption(), before, c.name + ": the flow drawn before the call is back");
+    assert.match(p.$("status").textContent, c.status, c.name);
+    assert.ok(p.$("status").classList.contains("error"), c.name);
+    assert.equal(p.$("send").disabled, false, c.name + ": the controls are back");
+    assert.equal(p.$("timeline").querySelectorAll(".entry").length, 1, c.name + ": no running entry is left");
+    assert.ok(journalReads > readsBefore, c.name + ": the journal is read again, since the turn may have written records");
+  }
 });

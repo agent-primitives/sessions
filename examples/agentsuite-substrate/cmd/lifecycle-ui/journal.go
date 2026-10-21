@@ -140,10 +140,27 @@ func (s *server) handleReplay(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	a := s.begin("replay", l, body.Session)
 	if l.Tier != "STATELESS_REPLAY" {
+		a := s.begin("replay", l, body.Session)
 		a.FailedAt, a.Declined = "bridge", true
 		writeJSON(w, http.StatusOK, s.finish(a, fmt.Errorf("replay re-runs turns on the session's live actor, which only the stateless tier supports (a memory-tier harness keeps its conversation in RAM)")))
+		return
+	}
+	// The replay's turns reach the actor through atenet-router, which resumes a suspended actor on
+	// any routed request (substrate 96dffb2, cmd/atenet/internal/router/ingress). On a session that
+	// is not LIVE that would wake the actor outside Sessions, which would still report it suspended
+	// with no Resume journaled. This is a read before the call, not a guard: a Suspend from another
+	// client between the read and the routed turns is not caught.
+	sess, err := l.c.GetSession(ctx, body.Session)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	a := s.begin("replay", l, body.Session)
+	if err := replayableCompute(sess.GetComputeState()); err != nil {
+		a.FailedAt, a.Declined = "bridge", true
+		a.After = viewSession(l, sess)
+		writeJSON(w, http.StatusOK, s.finish(a, err))
 		return
 	}
 	// The daemon's part is the Replay RPC; everything after it is the bridge's.
@@ -156,6 +173,20 @@ func (s *server) handleReplay(w http.ResponseWriter, r *http.Request) {
 	}
 	a.After = s.current(ctx, l, body.Session)
 	writeJSON(w, http.StatusOK, s.finish(a, err))
+}
+
+// replayableCompute declines a replay unless Sessions reports the session's compute LIVE: the
+// replay drives the running actor, and only Sessions.Resume or a turn may bring it back.
+func replayableCompute(cs v1.ComputeState) error {
+	switch cs {
+	case v1.ComputeState_COMPUTE_LIVE:
+		return nil
+	case v1.ComputeState_COMPUTE_COLD:
+		return fmt.Errorf("the session is suspended (COMPUTE_COLD): replay re-runs turns on the running actor, " +
+			"and routing them would wake the actor outside Sessions; Resume the session first")
+	}
+	return fmt.Errorf("the session's compute is %s, not COMPUTE_LIVE: replay re-runs turns on the running actor; "+
+		"run a turn or Resume the session first", cs)
 }
 
 // replay is cmd/replay's run, in process, on the journal the Replay RPC returned: verify the chain,

@@ -43,6 +43,14 @@ stops after the journal read (a dropped port-forward, an actor the router cannot
 failing in the bridge, lists the counters it read, and draws the model as unknown, or as called if
 a counter moved.
 
+The bridge also replays only a session that Sessions reports `COMPUTE_LIVE`, and the Replay button
+is off otherwise. The replay's turns go through atenet-router, which resumes a suspended actor on
+any routed request (substrate `cmd/atenet/internal/router/ingress`). Replaying a suspended session
+would wake its actor outside Sessions, which would still report it `COMPUTE_COLD` with no Resume in
+the journal. Resume the session first. The bridge reads the session with `GetSession` just before
+the replay; that read is not atomic with it, so a Suspend from another client in between is not
+caught.
+
 ## The refusal
 
 `up.sh` deploys two daemons. `ui.sh` adds a third, `agentsessionsd-volumes`, which serves the

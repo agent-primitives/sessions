@@ -319,6 +319,21 @@ func (c *checker) run(ctx context.Context) error {
 		return err
 	}
 
+	c.step("replay while suspended: declined, the actor left suspended")
+	if a, err = c.call(ctx, "/api/replay", map[string]string{"session": sid}); err != nil {
+		return err
+	}
+	if err := c.expect(!a.OK && a.Declined && a.Replay == nil && strings.Contains(a.Message, "COMPUTE_COLD"),
+		"Replay of a suspended session declined before Sessions.Replay (%s)", a.Message); err != nil {
+		return err
+	}
+	if av, err = c.actor(ctx, sid); err != nil {
+		return err
+	}
+	if err := c.expect(av.State == "SUSPENDED", "actor still SUSPENDED (%s)", av.State); err != nil {
+		return err
+	}
+
 	c.step("resume, then a third turn")
 	if a, err = c.call(ctx, "/api/resume", map[string]string{"session": sid}); err != nil {
 		return err

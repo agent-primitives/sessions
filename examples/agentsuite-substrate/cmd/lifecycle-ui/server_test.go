@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 )
 
 // The refusal as the sessions service and the substrate runtime write it for a memory-tier session
@@ -50,7 +51,8 @@ func (f *fakeSessions) CreateSession(_ context.Context, r *v1.CreateSessionReque
 	defer f.mu.Unlock()
 	uid := fmt.Sprintf("sess-%d", len(f.sessions)+1)
 	s := &v1.Session{Metadata: &v1.ResourceMetadata{Uid: uid, Name: r.GetSession().GetMetadata().GetName(),
-		Project: r.GetSession().GetMetadata().GetProject()}, Harness: r.GetSession().GetHarness()}
+		Project: r.GetSession().GetMetadata().GetProject()}, Harness: r.GetSession().GetHarness(),
+		ComputeState: v1.ComputeState_COMPUTE_NONE}
 	f.sessions[uid] = s
 	return s, nil
 }
@@ -59,7 +61,7 @@ func (f *fakeSessions) GetSession(_ context.Context, r *v1.GetSessionRequest) (*
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if s, ok := f.sessions[r.GetUid()]; ok {
-		return s, nil
+		return proto.Clone(s).(*v1.Session), nil
 	}
 	return nil, status.Error(codes.NotFound, "no session")
 }
@@ -91,6 +93,7 @@ func (f *fakeSessions) Exec(r *v1.ExecRequest, stream v1.Sessions_ExecServer) er
 	recs := turn(f.log[r.GetSession()], text)
 	f.mu.Lock()
 	f.log[r.GetSession()] = recs
+	s.ComputeState = v1.ComputeState_COMPUTE_LIVE
 	f.mu.Unlock()
 	for _, rec := range recs[len(recs)-5:] {
 		if err := stream.Send(&v1.ExecUpdate{Update: &v1.ExecUpdate_Record{Record: rec}}); err != nil {
@@ -143,7 +146,22 @@ func (f *fakeSessions) Suspend(_ context.Context, r *v1.SuspendRequest) (*v1.Ses
 	if f.suspendErr != nil {
 		return nil, f.suspendErr
 	}
-	return f.GetSession(context.Background(), &v1.GetSessionRequest{Uid: r.GetSession()})
+	return f.setCompute(r.GetSession(), v1.ComputeState_COMPUTE_COLD)
+}
+
+func (f *fakeSessions) Resume(_ context.Context, r *v1.ResumeRequest) (*v1.Session, error) {
+	return f.setCompute(r.GetSession(), v1.ComputeState_COMPUTE_LIVE)
+}
+
+func (f *fakeSessions) setCompute(uid string, cs v1.ComputeState) (*v1.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s, ok := f.sessions[uid]
+	if !ok {
+		return nil, status.Error(codes.NotFound, "no session")
+	}
+	s.ComputeState = cs
+	return proto.Clone(s).(*v1.Session), nil
 }
 
 func (f *fakeSessions) Fork(_ context.Context, r *v1.ForkRequest) (*v1.ForkResponse, error) {
@@ -333,6 +351,93 @@ func TestReplayIsRefusedWhereItCannotRun(t *testing.T) {
 	}
 }
 
+// A suspended (or never placed) stateless session is declined before Sessions.Replay: routing the
+// replay's turns would make atenet-router wake the actor outside Sessions. Nothing reaches the
+// router, the session stays COMPUTE_COLD, and after a visible Resume the replay goes ahead.
+func TestReplayOfASessionThatIsNotLiveIsDeclined(t *testing.T) {
+	f := newFake()
+	s, ts := testServer(t, map[string]*fakeSessions{"stateless": f})
+	router, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = router.Close() })
+	dialed := make(chan struct{}, 1)
+	go func() {
+		for {
+			c, err := router.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+			select {
+			case dialed <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	s.cfg.Router = router.Addr().String()
+	sid := postActivity(t, ts, "/api/create", map[string]string{"lane": "stateless"}).Session
+
+	// Created, no turn yet: no actor to drive.
+	a := postActivity(t, ts, "/api/replay", map[string]string{"session": sid})
+	if a.OK || !a.Declined || a.FailedAt != "bridge" || a.Replay != nil || !strings.Contains(a.Message, "COMPUTE_NONE, not COMPUTE_LIVE") {
+		t.Fatalf("replay before a turn: %+v", a)
+	}
+
+	resp := post(t, ts, "/api/exec", map[string]string{"session": sid, "input": "hi"})
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if sus := postActivity(t, ts, "/api/suspend", map[string]string{"session": sid}); !sus.OK || sus.After.ComputeState != "COMPUTE_COLD" {
+		t.Fatalf("suspend: %+v", sus)
+	}
+	a = postActivity(t, ts, "/api/replay", map[string]string{"session": sid})
+	if a.OK || !a.Declined || a.FailedAt != "bridge" || a.Replay != nil ||
+		!strings.Contains(a.Message, "suspended (COMPUTE_COLD)") || !strings.Contains(a.Message, "Resume the session first") {
+		t.Fatalf("replay while suspended: %+v", a)
+	}
+	if a.After == nil || a.After.ComputeState != "COMPUTE_COLD" {
+		t.Fatalf("after a declined replay: %+v", a.After)
+	}
+	select {
+	case <-dialed:
+		t.Fatal("a declined replay reached the router")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if got, _ := f.GetSession(context.Background(), &v1.GetSessionRequest{Uid: sid}); got.GetComputeState() != v1.ComputeState_COMPUTE_COLD {
+		t.Fatalf("session compute %s after a declined replay", got.GetComputeState())
+	}
+	tr := s.trace(context.Background(), &a)
+	if b := tr.Nodes["bridge"]; b.State != "failed" || !strings.Contains(b.Detail, "declined before Sessions.Replay") ||
+		!strings.Contains(b.Detail, "COMPUTE_COLD") {
+		t.Errorf("bridge: %+v", b)
+	}
+	for _, n := range []string{"daemon", "ateapi", "worker", "actor", "router", "model"} {
+		if ev := tr.Nodes[n]; ev.State != "skipped" {
+			t.Errorf("%s: %+v, want skipped", n, ev)
+		}
+	}
+
+	// Resumed through Sessions, the replay is no longer declined (it then dials the router).
+	if res := postActivity(t, ts, "/api/resume", map[string]string{"session": sid}); !res.OK || res.After.ComputeState != "COMPUTE_LIVE" {
+		t.Fatalf("resume: %+v", res)
+	}
+	a = postActivity(t, ts, "/api/replay", map[string]string{"session": sid})
+	if a.Declined || a.Replay == nil || a.Replay.Turns != 1 {
+		t.Fatalf("replay after resume: %+v", a)
+	}
+}
+
+func TestReplayableCompute(t *testing.T) {
+	for cs := range v1.ComputeState_name {
+		err := replayableCompute(v1.ComputeState(cs))
+		if want := v1.ComputeState(cs) == v1.ComputeState_COMPUTE_LIVE; (err == nil) != want {
+			t.Errorf("%s: err %v", v1.ComputeState(cs), err)
+		}
+	}
+}
+
 // A replay that stops after the journal read, here because the fake model's stats forward is
 // gone, says what it established and nothing more: no re-run, no zero-call claim, no verdict on
 // the model, and the failure is the bridge's, not the daemon's.
@@ -430,8 +535,8 @@ func TestReplayBridgeDetail(t *testing.T) {
 		{"controller failed", activity{FailedAt: "bridge", Replay: &replayResult{ControllerCalls: 0}}, ran},
 		{"declined", activity{FailedAt: "bridge", Declined: true}, "declined before Sessions.Replay"},
 		{"Replay RPC failed", activity{Code: "Unavailable"}, "Sessions.Replay (journal) failed; controller.Replay did not run"},
-		{"journal did not load", activity{FailedAt: "bridge"},
-			"Sessions.Replay (journal); the journal did not load, so controller.Replay did not run"},
+		{"nothing to re-run", activity{FailedAt: "bridge"},
+			"Sessions.Replay (journal); nothing to re-run or the chain did not verify, so controller.Replay did not run"},
 		{"stopped before the controller", activity{FailedAt: "bridge", Replay: &replayResult{ControllerCalls: -1}},
 			"Sessions.Replay (journal), verified; controller.Replay did not run"},
 	} {

@@ -1403,7 +1403,7 @@ The reference host takes it as `placement.Backend` in
   Suspend again to record the new ref before Resume; the older ref is stale. Local-only state wraps
   `api.ErrInvalidCheckpoint` (`FAILED_PRECONDITION`): it may
   never upload, so inspect and explicitly establish a durable checkpoint instead of waiting. This
-  conservatively refuses out-of-band PAUSED/local-only default attachment. Readiness is not
+  conservatively refuses out-of-band paused/local-only default attachment. Readiness is not
   effective restore-source evidence.
   These client checks can race lifecycle operations or router ingress; only Substrate can atomically
   bind expected snapshot/state to resume. Known limit: the effective resume source can differ from

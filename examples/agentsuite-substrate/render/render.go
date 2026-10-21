@@ -298,10 +298,10 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 		return nil, fmt.Errorf("snapshot.fidelity %q: the memory tier keeps the conversation in RAM, so it needs MEMORY", b.Snapshot.Fidelity)
 	}
 	// Substrate refuses a ROOTFS template on any class but micro-VM, the one that can capture the
-	// root filesystem without memory (at 96dffb2, cmd/ateapi/internal/apivalidation/
+	// root filesystem without memory (at v0.5.0, cmd/ateapi/internal/apivalidation/
 	// actor_template.go, ValidateCustom_CreateActorTemplateRequest_ActorTemplate). Refuse it here, so
 	// no template is emitted that template creation would reject.
-	if fidelity == atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS && class != atepb.SandboxClass_SANDBOX_CLASS_MICROVM {
+	if fidelity == atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS && class != "microvm" {
 		return nil, fmt.Errorf("snapshot.fidelity %q with sandbox.class %q: substrate takes a ROOTFS snapshot only on microvm", b.Snapshot.Fidelity, b.Sandbox.Class)
 	}
 	name := TemplateName(c.Suite, c.Agent.ID, m[1], b.Digest(), o)
@@ -313,8 +313,8 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 			{Name: "HARNESS_READYZ", Value: fmt.Sprintf(":%d", ReadyzPort)},
 			{Name: "AGENT_DIR", Value: AgentDir},
 		},
-		WakeupProbe: &atepb.ContainerWakeupProbe{
-			HttpGet:        &atepb.HTTPGetAction{Path: "/readyz", Port: ReadyzPort},
+		WakeupProbe: &atepb.WakeupProbe{
+			HttpGet:        &atepb.HttpGetAction{Path: "/readyz", Port: ReadyzPort},
 			TimeoutSeconds: 120,
 		},
 		// Add no capabilities: the harness needs none, and the template is the only place to say so.
@@ -328,7 +328,7 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.MemoryEnv, Value: agent.MemoryRAM})
 		harness, resumability, tier = c.Agent.ID+"-memory", v1.Resumability_RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT, ",memory"
 	}
-	// The binding's resources go on the template only. At substrate 96dffb2, the template's
+	// The binding's resources go on the template only. At substrate v0.5.0, the template's
 	// resources size the sandbox and book the worker (cmd/ateapi/internal/controlapi/
 	// workflow_resume.go, actorResourceLimits and schedulingConstraints). ateom-gvisor writes them
 	// into the container's OCI spec (internal/sizing.ApplyToOCISpec). ateom-microvm boots a guest
@@ -382,14 +382,14 @@ func resourceLimits(cpu, memory string) *atepb.Resources {
 	return &atepb.Resources{Limits: limits}
 }
 
-func sandboxClass(s string) (atepb.SandboxClass, error) {
+// sandboxClass is the SandboxConfig.sandbox_class for a binding's sandbox.class. Since substrate
+// v0.5.0 the field is the class name itself ("microvm" or "gvisor"), not an enum.
+func sandboxClass(s string) (string, error) {
 	switch s {
-	case "microvm":
-		return atepb.SandboxClass_SANDBOX_CLASS_MICROVM, nil
-	case "gvisor":
-		return atepb.SandboxClass_SANDBOX_CLASS_GVISOR, nil
+	case "microvm", "gvisor":
+		return s, nil
 	}
-	return 0, fmt.Errorf("sandbox.class %q: want microvm or gvisor", s)
+	return "", fmt.Errorf("sandbox.class %q: want microvm or gvisor", s)
 }
 
 func snapshotFidelity(s string) (atepb.SnapshotFidelity, error) {

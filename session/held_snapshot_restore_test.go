@@ -22,7 +22,7 @@ import (
 const (
 	modeReadFailure int32 = iota + 1
 	modePending           // newest durable copy still uploading
-	modeLocalOnly         // newest checkpoint has no durable copy (a PAUSED actor's local checkpoint)
+	modeLocalOnly         // newest checkpoint has no durable copy (a paused actor's local checkpoint)
 	modeTransitioning
 	modeTerminatedPending // a crashed actor retains an upload that will never complete
 	modeOmitUID           // GetActor omits the actor UID; ResumeActor still reports it

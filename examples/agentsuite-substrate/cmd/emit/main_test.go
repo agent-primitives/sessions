@@ -224,7 +224,7 @@ func TestStableJSON(t *testing.T) {
 			Image: "img@sha256:00",
 			Env:   []*atepb.EnvVar{{Name: "K", Value: "v"}},
 		}},
-		SandboxConfig: &atepb.SandboxConfig{SandboxClass: atepb.SandboxClass_SANDBOX_CLASS_MICROVM, ConfigName: "microvm"},
+		SandboxConfig: &atepb.SandboxConfig{SandboxClass: "microvm", ConfigName: "microvm"},
 	}
 	got, err := stableJSON(m)
 	if err != nil {
@@ -248,7 +248,7 @@ func TestStableJSON(t *testing.T) {
     }
   ],
   "sandboxConfig": {
-    "sandboxClass": "SANDBOX_CLASS_MICROVM",
+    "sandboxClass": "microvm",
     "configName": "microvm"
   }
 }

@@ -90,17 +90,38 @@ not provide.
   Resume, Exec and Fork `FAILED_PRECONDITION` messages name the session UID, so the CLI output
   alone identifies the session, actor, and, for a refused observed checkpoint, the required and
   observed fidelity. Codes and wrapped errors are unchanged.
+- The substrate adapter (`integrations/substrate`), the AgentSuite example and the substrate e2e
+  now build and deploy agent-substrate v0.5.0 (`e8d40c33`; was `96dffb28`). v0.5.0 removes the
+  `PAUSED` and `PAUSING` actor states: a paused actor is `SUSPENDED` with a node-local newest
+  snapshot, and a pause in progress is `SUSPENDING`. The adapter treats them as it treated
+  `PAUSED` and `PAUSING`: Resume and Exec refuse a paused actor with `FAILED_PRECONDITION` until
+  a Suspend uploads its snapshot, and a pausing one is `ABORTED`. Suspend stays synchronous:
+  v0.5.0's `SuspendActor` has no durability option and returns once the newest generation is
+  `COMPLETED`. The adapter still records a checkpoint only when that generation is `COMPLETED`;
+  a pending upload fails Suspend with `UNAVAILABLE`. Journal and schema are unchanged. See
+  [Substrate v0.5.0](docs/substrate-conformance.md#substrate-v050-paused-actors-and-suspend-durability).
 
 ### Compatibility
 
 - Substrate Resume of a suspended actor now refuses a held checkpoint the actor no longer holds
   (`FAILED_PRECONDITION`); Suspend again before Resume. A suspended actor's newest snapshot still
   uploading is `UNAVAILABLE` (`api.ErrCheckpointPending`) for Exec, Suspend, Resume and Fork: once it
-  completes, Suspend again to record it before Resume. A newest local-only checkpoint, including
-  out-of-band PAUSED state, is `FAILED_PRECONDITION`. Every Restore reads the actor first, so
+  completes, Suspend again to record it before Resume. A newest local-only checkpoint, including an
+  out-of-band paused actor, is `FAILED_PRECONDITION`. Every Restore reads the actor first, so
   control-read failures refuse.
   Resume of a running actor still succeeds, and a resuming or suspending actor is `ABORTED`. See
   [Substrate conformance](docs/substrate-conformance.md#held-checkpoint-restore-and-readiness).
+- Upgrade ate-system to agent-substrate v0.5.0 together with an adapter built from this release:
+  the client decodes actors by field number and the two must match. Against an older server, this
+  adapter reads a `PAUSED` or `PAUSING` actor as an unknown state rather than as suspended or
+  busy: Exec refuses it, Restore of a held checkpoint refuses it with `FAILED_PRECONDITION`, and
+  Restore with no held checkpoint passes it to `ResumeActor`. Rolling back means rolling back
+  both. An AgentSuite template rendered for v0.5.0 names its sandbox class as `microvm` or
+  `gvisor`, not `SANDBOX_CLASS_MICROVM`, so re-render templates for the matching substrate. Since
+  v0.5.0 a resume whose snapshot's recorded sandbox runtime matches no worker with room restores
+  at VOLUMES scope on another worker, which loses a memory-tier session's RAM without a refusal;
+  clusters whose workers share one runtime do not hit it. See the
+  [known limit](docs/substrate-conformance.md#held-checkpoint-restore-and-readiness).
 - SQLite schema v6 adds model-admission flags for new sessions; genuine pre-policy sessions,
   including empty sessions, remain legacy. Fork inherits admission metadata atomically. Existing
   journal bytes, hashes and `ModelCall` format are unchanged. Before upgrading, stop every older

@@ -770,7 +770,7 @@ func TestDriverResetChecksTheSessionActorsAreGone(t *testing.T) {
 			}
 			// get actors lists two session actors and a golden one until a delete is logged (or
 			// always, with STUB_ACTORS_STAY). get actor-template answers NotFound, as kubectl-ate
-			// does at substrate 96dffb2, unless STUB_TEMPLATE says the template is there (until its
+			// does at substrate v0.5.0, unless STUB_TEMPLATE says the template is there (until its
 			// delete is logged, or always) or cannot be read.
 			stub(t, filepath.Join(s.work, "bin"), "kubectl-ate", `echo "kubectl-ate $*" >>"$STUB_DIR/calls"
 case " $* " in
@@ -916,7 +916,7 @@ echo PHASE OK
 			if err := os.Mkdir(bin, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			// kubectl-ate's errors, as at substrate 96dffb2.
+			// kubectl-ate's errors, as at substrate v0.5.0.
 			stub(t, bin, "kubectl-ate", `e='Error: failed to get actor template "tmpl-1": rpc error: code'
 case "$STUB_TEMPLATE" in
 present) echo tmpl-1 ;;

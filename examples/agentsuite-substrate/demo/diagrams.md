@@ -1,6 +1,6 @@
 ## The two diagrams, checked against the code
 
-Substrate paths are at the commit the adapter's go.mod pins (96dffb2, `SUBSTRATE_REF` in
+Substrate paths are at the commit the adapter's go.mod pins (v0.5.0, `SUBSTRATE_REF` in
 .github/workflows/substrate-e2e.yml); kaimahi's at 9c5c993; the rest in this repository.
 
 Build half (build.mmd, end of chapter 2):
@@ -33,19 +33,19 @@ Run half (run.mmd, start of chapter 4), each also a row of the traced turn:
   the ate-api and wraps the connection in the adapter
   (integrations/substrate/cmd/agentsessionsd/substrate.go:246,250).
 - ate-api -> worker, resume the actor: ate-api calls the node's atelet (AteomHerder),
-  substrate cmd/ateapi/internal/controlapi/workflow_resume.go:676, which sends RestoreWorkload to the
-  worker pod's ateom (cmd/atelet/main.go:1259, the client from cmd/atelet/main.go:1557).
+  substrate cmd/ateapi/internal/controlapi/workflow_resume.go:765, which sends RestoreWorkload to
+  the worker pod's ateom (cmd/atelet/main.go:1319, the client from cmd/atelet/main.go:1616).
 - agentsessionsd -> atenet-router, harnesswire stream: the actor is named in the ate-target-actor
-  header (runtime/substrate/substrate.go:1034,1061).
+  header (runtime/substrate/substrate.go:1130,1157).
 - atenet-router -> worker :443: substrate cmd/atenet/internal/router/ingress/ingress.go:140-142
   ("Route ok", targetAddr workerIP:443).
 - worker -> harness, "starts it": ateom-microvm's RestoreWorkload (substrate
   cmd/ateom-microvm/restore.go:107) relaunches cloud-hypervisor from the snapshot and resumes the
   guest (restore.go:96-97,184); the Kata + Cloud Hypervisor class is the install's, setup.log.
 - worker -> harness, "then forwards into it": the worker pod's ateom starts atunnel with the actor's
-  HTTP upstream (substrate cmd/ateom-microvm/main.go:230), `http://<actor veth>:80`
-  (internal/ateomnet/net.go:35); atunnel listens on :443 (internal/ateomtunnel/ateomtunnel.go:77,127;
-  the WorkerPool passes `--atunnel-listen-address=:443`,
+  HTTP upstream (substrate cmd/ateom-microvm/main.go:226), `http://<actor veth>:80`
+  (internal/ateomnet/net.go:35); atunnel listens on :443
+  (internal/ateomtunnel/ateomtunnel.go:82,142; the WorkerPool passes `--atunnel-listen-address=:443`,
   cmd/atecontroller/internal/controllers/workerpool_apply.go:117) and reverse-proxies each request to
   the actor's port, 80 unless the X-Ate-Target-Port header names another
   (internal/atunnel/ingress.go:175-188). The harness listens on HARNESS_ADDR :80

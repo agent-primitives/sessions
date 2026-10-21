@@ -95,6 +95,16 @@ func (ad *Adapter) ResumeActor(ctx context.Context, actor substrate.ActorRef) (s
 // ActorWorkflow.SuspendActor in cmd/ateapi/internal/controlapi/workflow_suspend.go), reported as
 // substrate.ErrActorNotFound, which the ControlClient contract requires: a memory-tier Snapshot
 // reads it as the session's in-RAM state being gone, not as a transport failure.
+//
+// The suspend is synchronous. SuspendActorRequest at substrate v0.5.0 has no durability option:
+// SuspendActor in cmd/ateapi/internal/controlapi/workflow_suspend.go checkpoints a running actor
+// with UPLOAD_MODE_IMMEDIATE (or uploads a paused actor's local snapshot with PromoteSnapshot), and
+// ensureSuspendedFinalized marks the newest generation COMPLETED before the call returns. The
+// adapter does not rely on that: actorInfo reports a newest generation that is not COMPLETED as
+// SnapshotNotReady, which the backend refuses rather than return or restore a checkpoint.
+// Substrate after v0.5.0 adds SuspendActorRequest.options.mode and defaults it to asynchronous, so
+// TestSuspendActorRequestHasNoDurabilityOption fails on a bump that adds any request field until
+// this call asks for a synchronous suspend explicitly.
 func (ad *Adapter) SuspendActor(ctx context.Context, actor substrate.ActorRef) (substrate.ActorInfo, error) {
 	resp, err := ad.ctl.SuspendActor(ctx, &atepb.SuspendActorRequest{Actor: objectRef(actor)})
 	if status.Code(err) == codes.NotFound {
@@ -193,7 +203,7 @@ func (ad *Adapter) DeleteTag(ctx context.Context, tag substrate.SnapshotID) erro
 // actorInfo maps a substrate Actor onto the narrowed ActorInfo the backend needs. The worker is
 // reported for diagnostics only: the backend reaches the harness through the atenet-router, which
 // resolves the actor's worker on every request, so nothing here is dialed. Substrate clears the
-// worker assignment whenever the actor holds no worker (SUSPENDED, PAUSED, CRASHED).
+// worker assignment whenever the actor holds no worker (SUSPENDED, paused included, and CRASHED).
 //
 // UID is ResourceMetadata.uid, which substrate assigns when the actor is created and keeps across
 // every later update (suspend and resume included), so an actor created again under the same name
@@ -260,20 +270,28 @@ func snapshotFidelity(f atepb.SnapshotFidelity) substrate.SnapshotFidelity {
 	}
 }
 
-// actorStatus narrows substrate's lifecycle onto the states the backend acts on. RESUMING,
-// SUSPENDING and PAUSING map to StatusTransitioning: they settle into RUNNING, SUSPENDED or PAUSED
-// on their own (often another host's resume), so the backend reports them as retryable. DELETING,
-// REVERTING and any state this client does not know map to StatusUnknown, which the backend refuses
-// to place onto rather than guess which side it will land on.
+// actorStatus narrows substrate's lifecycle onto the states the backend acts on. RESUMING and
+// SUSPENDING map to StatusTransitioning: they settle into RUNNING or SUSPENDED on their own (often
+// another host's resume), so the backend reports them as retryable. DELETING, REVERTING and any
+// state this client does not know map to StatusUnknown, which the backend refuses to place onto
+// rather than guess which side it will land on.
+//
+// Substrate v0.5.0 has no PAUSED or PAUSING state (agent-substrate/substrate#2620): a paused actor
+// is SUSPENDED with a node-local newest generation and no durable copy, and a pause in progress is
+// SUSPENDING (latestSnapshotIsLocalOnly and latestSnapshotIsPendingLocal in
+// cmd/ateapi/internal/controlapi/snapshot_helpers.go). They map to StatusSuspended and
+// StatusTransitioning, as PAUSED and PAUSING did. What tells a paused actor apart is its snapshots,
+// so actorInfo reports it as SnapshotNotReady without SnapshotPending, and the backend refuses to
+// restore or attach to it until a suspend uploads that generation.
 func actorStatus(s atepb.ActorState) substrate.ActorStatus {
 	switch s {
 	case atepb.ActorState_ACTOR_STATE_RUNNING:
 		return substrate.StatusRunning
-	case atepb.ActorState_ACTOR_STATE_SUSPENDED, atepb.ActorState_ACTOR_STATE_PAUSED:
+	case atepb.ActorState_ACTOR_STATE_SUSPENDED:
 		return substrate.StatusSuspended
 	case atepb.ActorState_ACTOR_STATE_CRASHED:
 		return substrate.StatusTerminated
-	case atepb.ActorState_ACTOR_STATE_RESUMING, atepb.ActorState_ACTOR_STATE_SUSPENDING, atepb.ActorState_ACTOR_STATE_PAUSING:
+	case atepb.ActorState_ACTOR_STATE_RESUMING, atepb.ActorState_ACTOR_STATE_SUSPENDING:
 		return substrate.StatusTransitioning
 	default:
 		return substrate.StatusUnknown

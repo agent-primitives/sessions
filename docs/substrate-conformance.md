@@ -146,7 +146,7 @@ UID breaks its contract. When `CreateActor` finds the name taken (`substrate.Err
 `Create` attaches to that actor, so two hosts racing a session's first turn share one actor. The
 loser's turn fails at worst, never the session, and a retry attaches: `ABORTED` when its append
 loses, and `ABORTED` (`api.ErrComputeBusy`) when it finds the winner's actor `RESUMING`,
-`SUSPENDING` or `PAUSING`, or substrate refuses its resume because another operation holds the actor
+`SUSPENDING` (or pausing), or substrate refuses its resume because another operation holds the actor
 (substrate's `ABORTED`, reported as `substrate.ErrActorBusy`). An actor that is `CRASHED`,
 `DELETING`, `REVERTING` or in a state the adapter does not know is `INTERNAL`. When `Create` resumes
 a `SUSPENDED` actor and the resume reports it missing (`substrate.ErrActorNotFound`), `Create` reads
@@ -259,7 +259,7 @@ attached to as if it held the cloned RAM. The child now records the clone's UID 
 | `api.Runtime` | substrate Control |
 |---|---|
 | `Create` | `CreateActor` + `ResumeActor` (starts from the template's golden snapshot, or cold-boots); refused for a memory-tier session with started turns and no actor |
-| `Snapshot(EXTERNAL)` | `SuspendActor` (snapshot to storage, worker freed, actor SUSPENDED; fidelity reported from the completed snapshot) |
+| `Snapshot(EXTERNAL)` | `SuspendActor` (synchronous: snapshot to storage, worker freed, actor SUSPENDED; held only when the newest generation is `COMPLETED`; fidelity reported from that snapshot) |
 | `Restore` | `GetActor` (busy if mid-transition; a suspended actor's held URI and readiness are checked), then `ResumeActor` |
 | `Fork` (stateless) | `CreateActor` + `ResumeActor` — a replay-fork; the journal reconstructs the child |
 | `Fork` (memory) | `CreateTag{source_actor}` + `CreateActor{source_tag}` + `ResumeActor` — clones the parent's RAM |
@@ -352,12 +352,31 @@ unrecognized durable status also wraps
 `api.ErrInvalidCheckpoint` and is `FAILED_PRECONDITION`: it may never upload, so inspect and
 explicitly establish a durable checkpoint rather than just waiting. Snapshot returns zero ref;
 compute may already be released without a SUSPEND record. This conservatively refuses
-out-of-band PAUSED/local-only attachment even for default stateless backends.
+out-of-band paused (local-only) attachment even for default stateless backends.
 The client-side GetActor → ResumeActor check still races lifecycle operations; atomic expected
 snapshot/state validation must be supplied by Substrate.
 
+### Substrate v0.5.0: paused actors and suspend durability
+
+The adapter pins agent-substrate v0.5.0 (`SUBSTRATE_REF` in `.github/workflows/substrate-e2e.yml`,
+`e8d40c33`). v0.5.0 has no `PAUSED` or `PAUSING` actor state: a paused actor is `SUSPENDED` with a
+node-local newest snapshot generation and no durable copy, and a pause in progress is `SUSPENDING`.
+The adapter maps them as it mapped `PAUSED` and `PAUSING` (suspended and busy). A paused actor's
+newest generation is local-only, so it reports `SnapshotNotReady` without `SnapshotPending`:
+Restore and Create's attachment refuse it with `FAILED_PRECONDITION` before `ResumeActor`. Suspend
+of a paused actor uploads that generation, after which Restore proceeds from it.
+
+`SuspendActor` at v0.5.0 is synchronous and has no durability option: the server uploads the
+checkpoint and marks the newest generation `COMPLETED` before it returns. The adapter still treats
+a checkpoint as held only when the newest generation it returns is `COMPLETED`: a `PENDING` upload
+fails Suspend with `UNAVAILABLE` (`api.ErrCheckpointPending`) and records no `SUSPEND`, rather than
+returning an older completed generation. Substrate after v0.5.0 adds
+`SuspendActorRequest.options.mode` and defaults it to asynchronous; the adapter must ask for a
+synchronous suspend explicitly before it moves past v0.5.0, and
+`TestSuspendActorRequestHasNoDurabilityOption` fails on a pin that adds the field.
+
 **Known limit — effective resume source can differ from durable evidence:** the adapter maps
-Substrate PAUSED to suspended but reports only durable checkpoint evidence. At the
+a paused actor to suspended but reports only durable checkpoint evidence. At the
 pinned Substrate, resume can restore something other than the durable checkpoint the adapter
 validated. Validation can falsely refuse recoverable local state or accept a checkpoint whose
 fidelity does not meet the backend's requirement. A newest local-only checkpoint is
@@ -367,8 +386,12 @@ here, so a durable VOLUMES checkpoint can pass validation while resume restores 
 Likewise, when a durable snapshot's recorded `ActorTemplate` UID differs from the
 actor's current template UID (for example because the template was deleted and recreated under the
 same name), pinned Substrate restores at VOLUMES scope: a memory-tier session can pass durable
-MEMORY validation yet still cold-boot and lose RAM.
-Sessions does not call `PauseActor`. Both effective-source cases remain open in
+MEMORY validation yet still cold-boot and lose RAM. Since v0.5.0 the same downgrade happens when
+the snapshot's recorded `SandboxRuntime` matches no worker with room: the resume drops the runtime
+constraint and restores at VOLUMES scope on another worker (`canRelaxRuntime` and the restore in
+`cmd/ateapi/internal/controlapi/workflow_resume.go`). A cluster whose workers all share one sandbox
+runtime, as the e2e kind cluster does, does not hit it.
+Sessions does not call `PauseActor`. These effective-source cases remain open in
 [issue #192](https://github.com/agent-primitives/sessions/issues/192); neither the conservative
 local-only refusal nor held-URI validation solves them. These checks provide no boot-scoped
 credential authority.

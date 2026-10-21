@@ -81,10 +81,10 @@ platform, so kaimahi's suite on arm64, or an agent the suite lacks, is refused w
 | `containers[0].wakeupProbe` | `GET /readyz` on 8081 |
 | `containers[0].securityContext` | `capabilities: {}`, adding none |
 | `containers[0].resources` | Unset: the sandbox bounds the container (see `resources`). |
-| `sandboxConfig` | `binding.sandbox`: `SANDBOX_CLASS_MICROVM`, `microvm` (or `SANDBOX_CLASS_GVISOR`, `gvisor-default`) |
-| `snapshotConfig` | `preferredFidelity` from `binding.snapshot.fidelity`, which must be `MEMORY` (or unset) for `-tier memory`: that tier keeps the conversation in RAM. At substrate `96dffb2` a suspend snapshot takes the template's `preferredFidelity`, and `agentsessionsd-memory` refuses to suspend, fork, resume or run a turn on a session whose completed snapshot is not `MEMORY` with a durable URI (`FAILED_PRECONDITION`; no `SUSPEND` or child is journaled). The stateless tier accepts any fidelity substrate admits: `ROOTFS` only with `sandbox.class` `microvm`, the one class substrate `96dffb2` takes a `ROOTFS` template on, so `emit render` refuses `ROOTFS` on `gvisor`. `storageLocation` is `binding.snapshot.storageLocation` + `<name>/`. |
+| `sandboxConfig` | `binding.sandbox`: class `microvm`, config `microvm` (or `gvisor`, `gvisor-default`) |
+| `snapshotConfig` | `preferredFidelity` from `binding.snapshot.fidelity`, which must be `MEMORY` (or unset) for `-tier memory`: that tier keeps the conversation in RAM. At substrate `v0.5.0` a suspend snapshot takes the template's `preferredFidelity`, and `agentsessionsd-memory` refuses to suspend, fork, resume or run a turn on a session whose completed snapshot is not `MEMORY` with a durable URI (`FAILED_PRECONDITION`; no `SUSPEND` or child is journaled). The stateless tier accepts any fidelity substrate admits: `ROOTFS` only with `sandbox.class` `microvm`, the one class substrate `v0.5.0` takes a `ROOTFS` template on, so `emit render` refuses `ROOTFS` on `gvisor`. `storageLocation` is `binding.snapshot.storageLocation` + `<name>/`. |
 | `workerSelector` | `binding.workerSelector` |
-| `resources` | `binding.resources`. Substrate sizes the sandbox and books the worker from these. A micro-VM gets the CPU rounded up to whole vCPUs and the memory less the VMM reserve (128MiB at substrate `96dffb2`), so `512Mi` boots a 384MiB guest; ateom-microvm refuses a container limit above the guest, which is why the container declares none. gVisor applies these limits to the container. |
+| `resources` | `binding.resources`. Substrate sizes the sandbox and books the worker from these. A micro-VM gets the CPU rounded up to whole vCPUs and the memory less the VMM reserve (128MiB at substrate `v0.5.0`), so `512Mi` boots a 384MiB guest; ateom-microvm refuses a container limit above the guest, which is why the container declares none. gVisor applies these limits to the container. |
 
 The harness registration is a `HarnessRegistration` with `spec.substrate {atespace, template}`,
 `STATELESS_REPLAY` and `descriptor_id: triage`. `agentsessionsd` does not serve the registry, so
@@ -239,7 +239,7 @@ header has not been run against a live deployment.
   - router authentication: run the router with `--ingress-auth-mode=static-mtls`, which closes the
     plaintext listeners and requires a client certificate with an allowed SPIFFE ID, and give
     `agentsessionsd` (and `cmd/replay`) a TLS client certificate for the router connection, which
-    neither supports today. At substrate 96dffb28, `ate-setup` has no option for this mode: the
+    neither supports today. At substrate v0.5.0, `ate-setup` has no option for this mode: the
     `ate-setup --ingress-auth-mode` flag and `components/router-static-mtls` that substrate's
     AGENTS.md names are not in the tree, so it means editing the router Deployment's args;
   - host authentication on the harness: a per-session credential the host presents and the harness

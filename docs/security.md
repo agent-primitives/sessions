@@ -105,6 +105,13 @@ reach the router is trusted, or restrict the router to the `agentsessions` host.
 additive, so a narrower policy next to the install's `atenet-router` policy restricts nothing: the
 install's policy itself has to change, and every Substrate install applies it again.
 
+The `ate.dev/api-access=true` label that v0.5.0 requires on the `agentsessionsd` namespace
+([namespace access](substrate-conformance.md#substrate-v050-namespace-access-to-ate-api-server))
+admits every pod in that namespace except worker pods to ate-api-server at the network level.
+ate-api-server still authenticates and authorizes each request (as the policy's comment in substrate
+`manifests/ate-install/ate-system-networkpolicies.yaml` notes), so the label widens reachability,
+not permissions. Keep untrusted workloads out of a labeled namespace.
+
 Not yet implemented: the harness does not authenticate the host. A planned fix delivers a per-session
 credential at actor creation and has `harnessnode` check it on every Connect, so a harness talks only
 to its own session's host whatever the ingress allows. Router-side caller authorization (T-04)

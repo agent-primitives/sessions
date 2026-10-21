@@ -368,17 +368,16 @@ install kustomizations). Its `ate-api-server` policy admits TCP 443 from the con
 components (`ate-controller`, `atelet`, `atenet-egress`, `atenet-router`) and from pods in
 namespaces labeled `ate.dev/api-access: "true"`, excluding pods labeled `ate.dev/worker-pool`.
 
-So the namespace that runs `agentsessionsd`, or any other Sessions host or client that calls
-Control, must carry `ate.dev/api-access: "true"` in its `metadata.labels`. Without it every Control
-call fails with gRPC `Unavailable` and `dial tcp <ate-api-server pod IP>:443: i/o timeout`; the
-conformance Job failed that way on its first v0.5.0 run. `deploy/substrate/namespace.yaml`
-(`ate-agentsessions`, the conformance Job's namespace) and the AgentSuite example's
-`deploy/namespace.yaml` (`agentsuite-demo`) carry the label. Worker pods stay excluded in a labeled
-namespace, so a WorkerPool that shares it gets no API access. The label is not needed to reach
-harnesses: the same manifest's `atenet-router` policy admits any source on the router's data
-ports. The policies only take effect where the network plugin enforces NetworkPolicy; the kind
-cluster CI uses does. The previous pin (`96dffb28`) installs none of them, so the label has no
-effect there.
+So the namespace that runs `agentsessionsd`, and any other namespace whose pods call the ate-api,
+must carry `ate.dev/api-access: "true"` in its `metadata.labels`. Without it every Control call
+fails with gRPC `Unavailable` and `dial tcp <ate-api-server pod IP>:443: i/o timeout`.
+`deploy/substrate/namespace.yaml` (`ate-agentsessions`, the conformance Job's namespace) and the
+AgentSuite example's `deploy/namespace.yaml` (`agentsuite-demo`) carry the label. Worker pods stay
+excluded in a labeled namespace, so a WorkerPool that shares it gets no API access. The label is
+not needed to reach harnesses: the same manifest's `atenet-router` policy admits any source on the
+router's data ports. The policies only take effect where the network plugin enforces
+NetworkPolicy; the kind cluster CI uses does. The previous pin (`96dffb28`) installs none of them,
+so the label has no effect there.
 
 ### Substrate v0.5.0: paused actors, suspend durability and runtime fallback
 

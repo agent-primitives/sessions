@@ -1348,7 +1348,10 @@ sequenceDiagram
 - `WIRE-12`: A normal run MUST end with exactly one `EVENT_END`. The reference harness server sends
   `state = "COMPLETED"`, or `state = "FAILED"` with `error.description`. The host treats any state
   other than `COMPLETED` as a failed execution. An approval park ends with `EVENT_PARKED` instead
-  (§10.3).
+  (§10.3). After `EVENT_END` the reference host half-closes its sending side and waits up to 2
+  seconds for the harness to end the RPC before cancelling it, so the harness can flush telemetry
+  and return its own status; after `EVENT_PARKED` it already waits for the harness to close
+  (`APR-10`).
 - TODO(spike): The reference host client treats a stream that closes cleanly without `EVENT_END`
   as success, and silently ignores harness-sent `EVENT_INPUT`, `EVENT_LIFECYCLE`, `EVENT_ERROR`,
   and unspecified kinds. Should these be protocol errors, as the proto comment implies?

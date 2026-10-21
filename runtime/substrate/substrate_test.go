@@ -2737,3 +2737,96 @@ func TestPausedMemoryActorIsLostOnAttachAndRestore(t *testing.T) {
 		}
 	}
 }
+
+// Another host's Suspend leaves a memory-tier actor SUSPENDING, its newest generation's upload
+// PENDING, until it completes and that host records the capture. Snapshot reports the actor as
+// ErrActorBusy (ABORTED, retryable) before the checkpoint checks, which would read the pending
+// capture as one the journal never recorded and refuse it as api.ErrMemoryStateLost. It does not
+// suspend the actor or log a refusal for operators.
+func TestSnapshotOfATransitioningMemoryActorIsBusy(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		recorded bool // the journal records an earlier SUSPEND
+	}{
+		{name: "after a recorded suspend", recorded: true},
+		{name: "before any recorded suspend"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			m := &mockControl{info: running("worker-a")}
+			m.info.SnapshotFidelity = substrate.SnapshotFidelityMemory
+			m.exists("sess-x", substrate.StatusRunning)
+			in := api.Incarnation{ID: "sess-x", ComputeInstance: m.uid("sess-x")}
+			if tc.recorded {
+				m.capture("sess-x")
+				in.RecordedCheckpoint = api.SnapshotRef{Local: "sess-x", ExternalURI: m.captureURI("sess-x"), Memory: true}
+			}
+			// The other host's suspend: a new generation whose upload is pending exposes no URI.
+			m.capture("sess-x")
+			m.holds("sess-x", "")
+			m.exists("sess-x", substrate.StatusTransitioning)
+			m.info.SnapshotNotReady, m.info.SnapshotPending = true, true
+			b := substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
+				api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}},
+				substrate.WithLogger(logger))
+			ref, err := b.Snapshot(t.Context(), in, api.SnapshotExternal)
+			if !errors.Is(err, substrate.ErrActorBusy) || !errors.Is(err, api.ErrComputeBusy) ||
+				errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, api.ErrCheckpointPending) || ref != (api.SnapshotRef{}) {
+				t.Fatalf("snapshot: ref=%+v err=%v, want only ErrActorBusy", ref, err)
+			}
+			if want := []string{"get:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+				t.Fatalf("calls=%v want %v", m.calls, want)
+			}
+			if !strings.Contains(err.Error(), "space/sess-x") {
+				t.Fatalf("refusal %q does not name the actor", err)
+			}
+			if strings.Contains(output.String(), `"level":"WARN"`) || strings.Contains(output.String(), "memory_state_lost") {
+				t.Fatalf("a busy actor was logged as a refusal: %s", output.String())
+			}
+		})
+	}
+}
+
+// With no recorded instance (a journal written before compute_instance, or a fork child before its
+// first turn) requireInstance accepts any UID, and an actor deleted and created again under the
+// name, from the same template, between the check and the suspend reports the lineage checked.
+// Snapshot compares the UIDs as well and refuses the replacement's capture with
+// api.ErrMemoryStateLost and no ref, leaving it suspended.
+func TestSnapshotRefusesAnActorReplacedBetweenTheCheckAndTheSuspend(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	m := &mockControl{info: running("worker-a")}
+	m.exists("sess-x", substrate.StatusRunning)
+	checked := m.uid("sess-x")
+	m.afterGet = func(name string) {
+		m.afterGet = nil
+		m.delete(name)
+		m.exists(name, substrate.StatusRunning)
+	}
+	b := substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
+		api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}},
+		substrate.WithLogger(logger))
+	ref, err := b.Snapshot(t.Context(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+	replacement := m.uid("sess-x")
+	if replacement == checked {
+		t.Fatalf("the actor was not replaced: UID %q", replacement)
+	}
+	if !errors.Is(err, api.ErrMemoryStateLost) || ref != (api.SnapshotRef{}) {
+		t.Fatalf("snapshot: ref=%+v err=%v, want api.ErrMemoryStateLost", ref, err)
+	}
+	if want := []string{"get:sess-x", "suspend:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("calls=%v want %v", m.calls, want)
+	}
+	for _, part := range []string{"space/sess-x", checked, replacement, "no checkpoint was recorded", "actor remains suspended"} {
+		if !strings.Contains(err.Error(), part) {
+			t.Fatalf("refusal %q does not name %q", err, part)
+		}
+	}
+	if strings.Contains(err.Error(), "gs://") {
+		t.Fatalf("refusal %q names the snapshot URI", err)
+	}
+	if !strings.Contains(output.String(), `"error_kind":"memory_state_lost"`) || !strings.Contains(output.String(), replacement) {
+		t.Fatalf("refusal was not logged for operators: %s", output.String())
+	}
+}

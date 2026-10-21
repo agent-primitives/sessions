@@ -454,10 +454,12 @@ That check and the suspend are separate calls, and v0.5.0's `SuspendActorRequest
 actor reference: no UID, generation or worker precondition. Another caller can suspend the checked
 actor and resume it on a worker that cannot restore its memory before `Snapshot`'s suspend captures
 it, and the suspended actor then holds no worker to compare. So a memory-tier `Snapshot` compares
-the capture the suspend reports with the actor it checked, through `ActorInfo.CaptureLineage`: the
-snapshot generation a suspend of that actor ends with, and the sandbox runtime that snapshot is
-stamped with. The adapter derives it from `last_assigned_generation`, the worker assignment's
-runtime and the newest snapshot, following the suspend workflow
+the capture the suspend reports with the actor it checked. The `ActorInfo.UID` must match, since
+an actor created again under the name from the same template can report the same lineage, and so
+must `ActorInfo.CaptureLineage`: the snapshot generation a suspend of that actor ends with, and the
+sandbox runtime that snapshot is stamped with. The adapter derives it from
+`last_assigned_generation`, the worker assignment's runtime and the newest snapshot, following the
+suspend workflow
 (`cmd/ateapi/internal/controlapi/workflow_suspend.go`). A capture or pause in between followed by a
 resume moves the next capture to a newer generation, and a resume onto a worker of another runtime
 changes the stamp. A single capture or pause with no resume after it takes the generation and stamp
@@ -503,7 +505,9 @@ actor that does not hold the checkpoint the session's journal last recorded, wit
 - Snapshot (`Suspend`, and a stateful `Fork`'s capture of the parent): the Placer passes
   `Incarnation.RecordedCheckpoint`. Suspending the refused actor again is a no-op that would
   return its capture, and the Placer would record it, so `Snapshot` refuses first and the fork
-  tags and clones nothing.
+  tags and clones nothing. A `RESUMING` or `SUSPENDING` actor is `substrate.ErrActorBusy`
+  (`api.ErrComputeBusy`, `ABORTED`) before this or any other check, as for Restore: another host's
+  `Suspend` in flight may still record the capture it is taking, and a retry reads that record.
 
 The actor holds the recorded checkpoint when its newest snapshot is the one the latest `SUSPEND`
 names (`SnapshotRef.ExternalURI`, unique per capture: substrate names each under a new snapshot

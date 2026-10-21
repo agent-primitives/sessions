@@ -1205,3 +1205,52 @@ func TestExecWhoseActorIsDeletedDuringTheResume(t *testing.T) {
 		})
 	}
 }
+
+// Another host's Suspend of the same memory-tier session holds its actor SUSPENDING, the newest
+// generation's upload pending, until it completes and that host records the capture. A Suspend
+// that finds the actor so is ABORTED, which a client retries, not FAILED_PRECONDITION: retrying
+// reads the checkpoint the other host recorded. It suspends nothing and journals nothing.
+func TestSuspendOfAMemoryActorMidSuspendIsAborted(t *testing.T) {
+	ctx := context.Background()
+	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	c := newMemoryHost(t, ctl, store, echoagent.Harness{})
+	sess := mustCreate(t, c)
+	if err := execHi(c, sess); err != nil {
+		t.Fatalf("first turn: %v", err)
+	}
+	if _, err := c.Suspend(ctx, &v1.SuspendRequest{Session: sess}); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	if err := execHi(c, sess); err != nil {
+		t.Fatalf("second turn: %v", err)
+	}
+	// The other host's suspend is in flight: the actor is SUSPENDING and its pending generation
+	// exposes no URI.
+	ctl.mu.Lock()
+	ctl.status[sess], ctl.snapshots[sess] = substrate.StatusTransitioning, ""
+	suspends := ctl.suspends
+	ctl.mu.Unlock()
+	head, err := store.Session(sess).Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = c.Suspend(ctx, &v1.SuspendRequest{Session: sess})
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("suspend of an actor mid-suspend: want Aborted, got %v", err)
+	}
+	ctl.mu.Lock()
+	gotSuspends := ctl.suspends
+	ctl.mu.Unlock()
+	if gotSuspends != suspends {
+		t.Errorf("suspends %d->%d: the refused suspend may snapshot nothing", suspends, gotSuspends)
+	}
+	if got, err := store.Session(sess).Head(); err != nil || got != head {
+		t.Errorf("journal head after the refused suspend = %d (err %v), want %d", got, err, head)
+	}
+}

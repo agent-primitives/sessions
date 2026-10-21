@@ -1450,9 +1450,11 @@ The reference host takes it as `placement.Backend` in
   that actor with `api.ErrMemoryStateLost` wherever it would hand it out (Create, Restore, a
   stateful Fork's clone) and before `Snapshot` suspends it, recorded compute instance or not.
   `SuspendActor` takes no precondition, so `Snapshot` also refuses, with `api.ErrMemoryStateLost`, a
-  suspend whose `ActorInfo.CaptureLineage` differs from the actor it checked (a capture or pause
-  followed by a resume, or a resume onto another runtime, in between); the refused capture stays
-  on the suspended actor. The refusal sticks through the journal (`RT-4i`): for a
+  suspend whose `ActorInfo.UID` or `ActorInfo.CaptureLineage` differs from the actor it checked
+  (a replacement, a capture or pause followed by a resume, or a resume onto another runtime, in
+  between); the refused capture stays on the suspended actor. A RESUMING or SUSPENDING actor is
+  `api.ErrComputeBusy` (`ABORTED`) before `Snapshot`'s other checks, as for Restore, since the
+  operation moving it may still record its capture. The refusal sticks through the journal (`RT-4i`): for a
   `REQUIRES_MEMORY_SNAPSHOT` harness, Create's attach, Restore and `Snapshot` (Suspend, and a
   stateful fork's capture of the parent) refuse with `api.ErrMemoryStateLost`, before `ResumeActor`
   or `SuspendActor`, an actor, SUSPENDED or RUNNING, whose newest snapshot is not the one the latest

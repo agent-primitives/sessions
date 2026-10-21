@@ -176,8 +176,8 @@ not provide.
   hit it.
   Because v0.5.0's `SuspendActor` takes no precondition, a memory-tier Suspend or Fork also refuses
   with `api.ErrMemoryStateLost`, logged at `WARN`, when the actor was captured or paused and then
-  resumed, or resumed on another runtime, between its check and the suspend; the actor is left
-  suspended and no checkpoint is recorded. This fails closed even when the memory survived.
+  resumed, resumed on another runtime, or replaced, between its check and the suspend; the actor is
+  left suspended and no checkpoint is recorded. This fails closed even when the memory survived.
   The refusal sticks: the capture stays on the suspended actor, so for a memory-tier session Exec
   (Create's attach), Resume, Suspend and a stateful Fork's capture of the parent now refuse with
   `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`), logged at `WARN`, before resuming or suspending
@@ -186,8 +186,9 @@ not provide.
   fails closed too, and the session stays refused: an actor holding a capture whose `SUSPEND`
   append failed, a pause or suspend made outside sessions, or a completed upload that a Suspend
   reported as pending (`UNAVAILABLE`, which v0.5.0's synchronous suspend does not leave) is refused
-  the same way, and Suspend again no longer records it. Another host's Suspend can be refused this
-  way between its capture and its append; retry once it is recorded. Nothing in sessions recovers
+  the same way, and Suspend again no longer records it. While another host's Suspend is still
+  capturing, the actor is `SUSPENDING` and Suspend is `ABORTED`. Between that capture and its
+  append, Suspend is refused this way; retry once it is recorded. Nothing in sessions recovers
   such a session: delete or abandon it, and delete the actor named in the warning with
   `options.uid` (and `any_state: true` if the router woke it) to release it. Journal, wire and the
   Sessions API are unchanged: the check reads the `SUSPEND` refs the journal already holds. A crash

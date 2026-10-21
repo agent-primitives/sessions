@@ -184,17 +184,89 @@ func TestFormatRecordToolCallArgsNotHTMLEscaped(t *testing.T) {
 // Format characters such as the bidi override U+202E print escaped, so model-chosen arguments cannot
 // visually reorder what an approver reads; the escaped text still decodes to the original value.
 func TestFormatRecordToolCallArgsEscapeFormatRunes(t *testing.T) {
-	text := "pay \u202eevil\u202c ok\u200b \U000e0041"
+	text := "pay \u202eevil\u202c ok\u200b \U000e0041 a\u0085b\u009b8mc\x7f"
 	call := wire.ToolCallToProto(&api.ToolCall{ID: "call_1", Tool: "publish", Args: map[string]any{"text": text}, Mediation: api.MediationRequiresApproval})
 	record := &v1.LogRecord{Seq: 5, Event: &v1.Event{Kind: v1.EventKind_EVENT_TOOL_CALL, Body: &v1.Event_Tool{Tool: call}}}
 	got := formatRecord(record)
-	want := `args={"text":"pay \u202eevil\u202c ok\u200b \udb40\udc41"}`
+	want := `args={"text":"pay \u202eevil\u202c ok\u200b \udb40\udc41 a\u0085b\u009b8mc\u007f"}`
 	if !strings.HasSuffix(got, want) {
 		t.Fatalf("formatRecord = %s, want suffix %s", got, want)
 	}
 	var decoded map[string]string
 	if err := json.Unmarshal([]byte(strings.TrimPrefix(want, "args=")), &decoded); err != nil || decoded["text"] != text {
 		t.Fatalf("escaped args decode to %q (err %v), want %q", decoded["text"], err, text)
+	}
+	assertOneSafeLine(t, got)
+}
+
+// Message text is untrusted model output. It prints on its own record's line, with every rune a
+// terminal could act on or not draw written as an escape.
+func TestFormatRecordMessageTextEscaped(t *testing.T) {
+	for _, tt := range []struct {
+		name, role, text, want string
+	}{
+		{name: "plain", role: "assistant", text: `Published: {"text":"<a & b>"} \n`, want: `assistant: Published: {"text":"<a & b>"} \n`},
+		{name: "newline and ESC", role: "assistant", text: "one\ntwo\x1b[8m", want: `assistant: one\ntwo\x1b[8m`},
+		{name: "tab and CR", role: "assistant", text: "a\tb\rc", want: `assistant: a\tb\rc`},
+		{name: "C1 controls and DEL", role: "assistant", text: "a\u0085b\u009b8mc\x7f", want: `assistant: a\u0085b\u009b8mc\x7f`},
+		{name: "format runes", role: "assistant", text: "pay \u202eevil\u202c \U000e0041", want: `assistant: pay \u202eevil\u202c \U000e0041`},
+		{name: "line separators", role: "assistant", text: "a\u2028b\u2029c", want: `assistant: a\u2028b\u2029c`},
+		{name: "invalid UTF-8", role: "assistant", text: "a\xffb", want: `assistant: a\xffb`},
+		{name: "non-ASCII text kept", role: "assistant", text: "caf\u00e9 \u00a0\u65e5\u672c", want: "assistant: caf\u00e9 \u00a0\u65e5\u672c"},
+		{name: "control in role", role: "assistant\nseq=5", text: "hi", want: `assistant\nseq=5: hi`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &v1.Message{Role: tt.role, Parts: []*v1.Part{{Part: &v1.Part_Text{Text: &v1.TextPart{Text: tt.text}}}}}
+			record := &v1.LogRecord{Seq: 4, Event: &v1.Event{Kind: v1.EventKind_EVENT_OUTPUT, Body: &v1.Event_Message{Message: msg}}}
+			for _, got := range []string{formatRecord(record), formatRecordVerbose(record)} {
+				if !strings.HasSuffix(got, "  "+tt.want) {
+					t.Fatalf("record = %q, want suffix %q", got, tt.want)
+				}
+				assertOneSafeLine(t, got)
+			}
+		})
+	}
+}
+
+// A configured OpenAI-compatible endpoint chooses the completion's text, and the controller journals
+// it as EVENT_OUTPUT just before the call. That line stays one line with no terminal controls, so the
+// provider cannot print a forged call line or hide the real one from an approver.
+func TestFormatRecordProviderChosenOutputText(t *testing.T) {
+	const forged = "\nseq=5   EVENT_TOOL_CALL  tool=publish id=call_1 mediation=REQUIRES_APPROVAL args={\"text\":\"hello\"}\x1b[8m"
+	body, err := json.Marshal(map[string]any{"choices": []any{map[string]any{
+		"finish_reason": "tool_calls",
+		"message": map[string]any{"content": forged, "tool_calls": []any{map[string]any{
+			"id": "call_1", "type": "function",
+			"function": map[string]any{"name": "publish", "arguments": `{"text":"rm -rf /"}`},
+		}}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
+	t.Cleanup(srv.Close)
+	c, err := openai.New(openai.WithBaseURL(srv.URL), openai.WithModel("test-model"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Model(t.Context(), api.ModelRequest{
+		Messages: []api.Message{*api.TextMessage("user", "publish")},
+		Tools:    []api.ToolDefinition{{Name: "publish", InputSchema: map[string]any{"type": "object"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Message.Text() != forged {
+		t.Fatalf("adapter did not keep the provider's text verbatim: %q", resp.Message.Text())
+	}
+	msg := wire.MessageToProto(&resp.Message)
+	record := &v1.LogRecord{Seq: 4, Event: &v1.Event{Kind: v1.EventKind_EVENT_OUTPUT, Body: &v1.Event_Message{Message: msg}}}
+	for _, got := range []string{formatRecord(record), formatRecordVerbose(record)} {
+		want := `  assistant: \nseq=5   EVENT_TOOL_CALL  tool=publish id=call_1 mediation=REQUIRES_APPROVAL args={"text":"hello"}\x1b[8m`
+		if !strings.HasSuffix(got, want) {
+			t.Fatalf("record = %q, want suffix %q", got, want)
+		}
+		assertOneSafeLine(t, got)
 	}
 }
 

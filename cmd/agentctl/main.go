@@ -454,8 +454,9 @@ func short(h string) string {
 // displayToken, so a provider-chosen ID cannot add a line, hide text with terminal escapes, or fake
 // another field. Arguments print as JSON with sorted keys, so the same call prints the same way every
 // time, and without HTML escaping, so an approver reads <, > and & as the tool will receive them.
-// Format characters (Unicode Cf, such as the bidi override U+202E) print as \uXXXX escapes, so
-// model-chosen text cannot visually reorder the line.
+// Control, format and other non-graphic runes in the arguments (the C1 control U+009B, the bidi
+// override U+202E) print as \uXXXX escapes, so model-chosen text cannot act on the terminal or
+// visually reorder the line.
 func toolCallText(tc *v1.ToolCall) string {
 	args := "null"
 	if tc.GetArgs() != nil {
@@ -485,17 +486,19 @@ func displayToken(s string) string {
 	return strconv.Quote(s)
 }
 
-// escapeFormatRunes replaces each Unicode format character (category Cf) in encoded JSON with its
-// \uXXXX escape, as a UTF-16 surrogate pair above U+FFFF. Such runes occur only inside JSON strings,
-// so the result is still valid JSON that decodes to the same value.
+// escapeFormatRunes replaces each rune in encoded JSON that is not graphic (control characters
+// such as DEL and the C1 controls U+0080-U+009F, format characters such as the bidi override
+// U+202E, private-use and unassigned code points) with its \uXXXX escape, as a UTF-16 surrogate pair
+// above U+FFFF. encoding/json already escapes C0 controls and invalid UTF-8, so such runes occur only
+// inside JSON strings, and the result is still valid JSON that decodes to the same value.
 func escapeFormatRunes(s string) string {
-	if !strings.ContainsFunc(s, isFormatRune) {
+	if !strings.ContainsFunc(s, needsEscape) {
 		return s
 	}
 	var b strings.Builder
 	for _, r := range s {
 		switch {
-		case !isFormatRune(r):
+		case !needsEscape(r):
 			b.WriteRune(r)
 		case r > 0xFFFF:
 			r1, r2 := utf16.EncodeRune(r)
@@ -507,13 +510,44 @@ func escapeFormatRunes(s string) string {
 	return b.String()
 }
 
-func isFormatRune(r rune) bool { return unicode.Is(unicode.Cf, r) }
+// needsEscape reports a rune a terminal may act on or not draw: anything outside the graphic
+// categories (letters, marks, numbers, punctuation, symbols and space separators), so control (Cc),
+// format (Cf), line and paragraph separator (Zl, Zp), private-use and unassigned runes.
+func needsEscape(r rune) bool { return !unicode.IsGraphic(r) }
 
+// escapeText prints untrusted message text on one line: each rune for which needsEscape holds prints
+// as its Go escape (\n, \x1b, \u202e), and each invalid UTF-8 byte as \xNN. Other runes, backslash
+// included, print as they are, so the output is for reading, not for decoding back.
+func escapeText(s string) string {
+	if utf8.ValidString(s) && !strings.ContainsFunc(s, needsEscape) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && size == 1:
+			fmt.Fprintf(&b, `\x%02x`, s[i])
+		case needsEscape(r):
+			q := strconv.QuoteRune(r)
+			b.WriteString(q[1 : len(q)-1])
+		default:
+			b.WriteRune(r)
+		}
+		i += size
+	}
+	return b.String()
+}
+
+// partsText is a message's role and text parts on one line. The role and text are untrusted (a model
+// or provider writes an assistant message, and it is journaled just before the tool call it
+// accompanies), so they print through escapeText: they cannot add a line that looks like another
+// record or hide the following lines with terminal escapes.
 func partsText(m *v1.Message) string {
-	s := m.GetRole() + ":"
+	s := escapeText(m.GetRole()) + ":"
 	for _, p := range m.GetParts() {
 		if t := p.GetText(); t != nil {
-			s += " " + t.GetText()
+			s += " " + escapeText(t.GetText())
 		}
 	}
 	return s

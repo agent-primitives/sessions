@@ -581,6 +581,13 @@ type podHits struct {
 	noopResume   bool
 }
 
+// notStarted matches the error kubectl logs reports for a pod with no logs yet: the kubelet's
+// "is waiting to start" for a container (ContainerCreating, PodInitializing, an image pull;
+// pkg/kubelet/kubelet_pods.go) or the apiserver's "does not have a host assigned" for a pod not
+// yet scheduled (pkg/registry/core/pod/strategy.go). It only labels the hop's detail; the hop is
+// unknown either way.
+var notStarted = regexp.MustCompile(`is waiting to start|does not have a host assigned`)
+
 // noopResumeMethod labels a ResumeActor that ate-api answered with the actor already RUNNING.
 const noopResumeMethod = "ResumeActor (already RUNNING)"
 
@@ -588,8 +595,8 @@ const noopResumeMethod = "ResumeActor (already RUNNING)"
 // id and fallback. The evidence is the earliest line, labelled with every method its pattern
 // matched, in the order they were logged across the pods. A fallback line the bridge caused
 // itself, reading an actor in ownIDs, is not evidence (dropOwnReads). When a pod's logs could not
-// be read (a permission denial, a timeout), only a primary line found elsewhere is evidence; any
-// other result is unknown, never missing or fallback-only.
+// be read (a permission denial, a timeout, a pod not started), only a primary line found elsewhere
+// is evidence; any other result is unknown, never missing or fallback-only.
 //
 // A ResumeActor that resumed nothing is not a primary line. atenet-router calls ResumeActor on
 // every routed request to make sure the actor runs, and ate-api answers at once, with resumed
@@ -607,14 +614,18 @@ func (s *server) podMatch(ctx context.Context, pods []string, ns, sinceArg strin
 		line, src, method string
 	}
 	var first, second, noop []hit
-	var unread []string
+	var unread, pending []string
 	unreadSrc := ""
 	for _, pod := range pods {
 		podArgs := []string{"logs", "-n", ns, pod, "--all-containers", "--timestamps", sinceArg}
 		src := s.kube.command(false, podArgs...)
 		out, err := s.kube.run(ctx, false, podArgs...)
 		if err != nil {
-			unread = append(unread, pod+": "+err.Error())
+			if notStarted.MatchString(err.Error()) {
+				pending = append(pending, pod+": "+err.Error())
+			} else {
+				unread = append(unread, pod+": "+err.Error())
+			}
 			if unreadSrc == "" {
 				unreadSrc = src
 			}
@@ -670,10 +681,20 @@ func (s *server) podMatch(ctx context.Context, pods []string, ns, sinceArg strin
 	case len(first) > 0:
 		m := methods(first)
 		return podHits{evidence: nodeEvidence{State: "observed", Detail: summarize(first[0].line), Method: m, Source: first[0].src}}
-	case len(unread) > 0:
+	case len(unread) > 0 || len(pending) > 0:
 		// The call's line may be in a log that was not read, so neither its absence nor a
 		// fallback-only result (which the caller would turn into "nothing restored") is known.
-		d := "logs not read, so this hop is not known: " + strings.Join(unread, "; ")
+		// A pod whose containers have not started is named apart from a log that could not be
+		// read, but it stays unknown too: the pod list is read after the call, and kubectl's
+		// message alone does not show that no container of the pod ran during it.
+		var parts []string
+		if len(unread) > 0 {
+			parts = append(parts, "logs not read: "+strings.Join(unread, "; "))
+		}
+		if len(pending) > 0 {
+			parts = append(parts, "pod not started: "+strings.Join(pending, "; "))
+		}
+		d := "this hop is not known; " + strings.Join(parts, "; ")
 		if all := append(second, noop...); len(all) > 0 {
 			d += "; the logs read showed only " + methods(all) + " for this session"
 		}

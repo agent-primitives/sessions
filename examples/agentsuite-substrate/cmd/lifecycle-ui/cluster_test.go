@@ -270,6 +270,34 @@ func TestTraceUnreadLogsAreUnknown(t *testing.T) {
 		}
 	})
 
+	// A worker pod that has not started is named as such, apart from a log that could not be
+	// read, and the hop stays unknown.
+	t.Run("worker pod not started", func(t *testing.T) {
+		f := attachCluster(getOnly)
+		f.out["get pods -n agentsuite-demo"] = "pod/agentsessionsd-1\npod/agentsuite-demo-microvm-0\npod/agentsuite-demo-microvm-1\npod/agentsuite-demo-microvm-2\n"
+		f.errs = map[string]string{
+			"logs -n agentsuite-demo agentsuite-demo-microvm-1": `Error from server (BadRequest): container "worker" in pod "agentsuite-demo-microvm-1" is waiting to start: ContainerCreating`,
+			"logs -n agentsuite-demo agentsuite-demo-microvm-2": denied,
+		}
+		w := exec(f).Nodes["worker"]
+		if w.State != "unknown" || strings.Contains(w.Detail, "no workload restored") {
+			t.Fatalf("worker: %+v", w)
+		}
+		want := "this hop is not known; logs not read: agentsuite-demo-microvm-2: " + denied +
+			"; pod not started: agentsuite-demo-microvm-1: "
+		if !strings.HasPrefix(w.Detail, want) || !strings.Contains(w.Detail, "ContainerCreating") {
+			t.Errorf("worker detail %q, want prefix %q", w.Detail, want)
+		}
+
+		delete(f.errs, "logs -n agentsuite-demo agentsuite-demo-microvm-2")
+		f.out["logs -n agentsuite-demo agentsuite-demo-microvm-2"] = ""
+		w = exec(f).Nodes["worker"]
+		if w.State != "unknown" || !strings.HasPrefix(w.Detail, "this hop is not known; pod not started: agentsuite-demo-microvm-1: ") ||
+			strings.Contains(w.Detail, "logs not read") {
+			t.Errorf("worker: %+v", w)
+		}
+	})
+
 	t.Run("router logs unreadable", func(t *testing.T) {
 		f := attachCluster(getOnly)
 		f.errs = map[string]string{"logs -n ate-system atenet-router-1": denied}

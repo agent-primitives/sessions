@@ -148,7 +148,7 @@ function activity(id, op, uid) {
 
 // page loads app.js against a fake bridge. routes maps a path (without its query) to a body or a
 // function of the URL returning one; a returned promise is awaited, so a test can hold a call.
-async function page(search, routes) {
+async function page(search, routes, timers) {
   const doc = fakeDocument();
   const loc = { href: "http://127.0.0.1:8090/" + search, get search() { return new URL(this.href).search; } };
   const fetch = async (p) => {
@@ -172,6 +172,7 @@ async function page(search, routes) {
     setInterval: () => 1,
     clearInterval() {},
     console,
+    ...timers,
   };
   vm.createContext(ctx);
   vm.runInContext(appSource, ctx, { filename: "app.js" });
@@ -257,4 +258,30 @@ test("a call that settles after the user moved to another session is not drawn t
   // Back on A, the settled call is A's latest and is drawn.
   await p.pick(A);
   assert.match(p.caption(), /^Suspend · session aaaaaaaa/);
+});
+
+test("a Create that fails ends its animation and shows the error, with or without a selection", async () => {
+  for (const search of ["", "?session=" + A]) {
+    let animating = false;
+    const failed = { id: 2, op: "create", session: "", lane: "stateless", ok: false, code: "Unavailable", message: "connection refused", started: "2026-10-21T00:00:00Z", durationMs: 3, records: [] };
+    const p = await page(search, routes([activity(1, "exec", A)], { "/api/create": failed }), {
+      setInterval: () => { animating = true; return 1; },
+      clearInterval: () => { animating = false; },
+    });
+    p.$("lane").value = "stateless";
+    // The click handler does not return run's promise; wait for the call to settle.
+    await p.$("create").fire("click");
+    for (let i = 0; i < 50 && !p.$("status").textContent; i++) await flush();
+    await flush();
+    assert.equal(animating, false, "the in-flight animation stopped");
+    assert.doesNotMatch(p.caption(), /in flight/);
+    assert.match(p.caption(), /^Create · agentsessionsd-stateless · Unavailable in 3 ms$/);
+    assert.equal(p.$("status").textContent, "Create failed: Unavailable: connection refused");
+    assert.ok(p.$("status").classList.contains("error"));
+    assert.equal(p.activityParam(), "2");
+    // The selection is unchanged, and picking a session again draws that session's own flow.
+    assert.equal(new URL(p.loc.href).searchParams.get("session"), search ? A : null);
+    await p.pick(A);
+    assert.match(p.caption(), /^Exec · session aaaaaaaa/);
+  }
 });

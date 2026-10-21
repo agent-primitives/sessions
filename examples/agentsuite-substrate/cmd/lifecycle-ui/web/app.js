@@ -570,6 +570,14 @@
   async function settle(act) {
     state.activity.push(act);
     if (act.after) upsertSession(act.after);
+    // A call that made no session (a Create that failed) concerns no session's view, so its
+    // timeline never lists it: draw it now, ending the animation, and name the error.
+    if (!act.session && !act.child) {
+      setStatus((opNames[act.op] || act.op) + " failed: " + Flow.outcome(act) + (act.message ? ": " + act.message : ""), true);
+      await showFlow(act);
+      renderControls();
+      return;
+    }
     if (act.op === "create" && act.ok) {
       await select(act.session);
     } else {

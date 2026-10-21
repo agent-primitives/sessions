@@ -145,8 +145,8 @@
   }
 
   // traceStates merges a trace into a state per node: "off" when not on the call's path; on it, the
-  // trace's state (observed, missing, refused, failed, skipped, unknown), or "pending" with no
-  // trace yet.
+  // trace's state (observed, missing, refused, failed, declined, skipped, unknown), or "pending"
+  // with no trace yet.
   function traceStates(op, trace) {
     const on = new Set(nodesOn(op));
     const out = {};

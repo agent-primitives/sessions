@@ -3,7 +3,7 @@
 # show uses to print files syntax-highlighted (Debian installs it as batcat). It runs with the host's
 # network and Docker socket, so kind, its registry on 127.0.0.1:5001 and the instance metadata
 # endpoint are all the host's.
-FROM golang:1.27
+FROM golang:1.27.3
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends python3 zstd jq xz-utils bat \
 	&& ln -s /usr/bin/batcat /usr/local/bin/bat \

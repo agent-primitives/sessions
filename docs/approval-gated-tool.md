@@ -175,8 +175,15 @@ of two calls' identities, and edits a pending call's arguments in the journal.
 
 - The chain is unkeyed. Someone who can rewrite the journal and recompute every hash can change a
   call and its decision together; see [security](security.md).
-- `APPROVAL_RESULT` carries no separate arguments digest. The binding is the chain position above,
-  so an exported decision is meaningful only together with its journal.
+- `APPROVAL_RESULT` carries no separate arguments digest, by design for now. The decision binds the
+  arguments through the chain (`request_seq` follows the `TOOL_CALL` record whose `content_hash`
+  covers the canonical arguments) plus the hash recheck right before dispatch, so an exported
+  decision is meaningful only together with its journal. An explicit digest is left to the journal
+  export and verifier work and to executor-held credentials, where a decision is checked away from
+  its journal.
+- The daemon, not the executor, refuses changed arguments: the executor checks nothing itself and
+  is never dialed for a mismatched call. Neither check stops a full journal rewrite with recomputed
+  hashes; that needs signing.
 - The harness chooses mediation. The reference tool harness always requests approval; a harness
   you run yourself could emit `CONTROLLER_MEDIATED` and skip the gate for a configured route.
 - The daemon is unauthenticated: anyone who reaches its port can approve. Run it on loopback or a

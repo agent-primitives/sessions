@@ -24,7 +24,7 @@ func (s *Service) Approve(ctx context.Context, req *v1.ApproveRequest) (response
 	if err := s.authorizeMutation(ctx, v1.Sessions_Approve_FullMethodName, req.GetSession(), api.ActionRead, api.ActionApprove); err != nil {
 		return nil, err
 	}
-	finish := observability.Start(ctx, s.logger, "session", "approve", "session_uid", req.GetSession())
+	ctx, finish := observability.Begin(ctx, s.logger, "session", "approve", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 	if req.GetSession() == "" || req.GetExecutionId() == "" || req.GetToolCallId() == "" || req.GetRequestSeq() <= 0 || req.Approved == nil {
 		return nil, status.Error(codes.InvalidArgument, "session, execution_id, tool_call_id, positive request_seq and approved presence are required")
@@ -43,6 +43,7 @@ func (s *Service) Approve(ctx context.Context, req *v1.ApproveRequest) (response
 		}
 		return nil, err
 	}
+	s.chainTrace(ctx, uid)
 	actor := wire.EventFromProto(&v1.Event{Actor: req.GetIdentity()}).Actor
 	if s.auth != nil {
 		// Request provenance is not a verified audit identity. Normalize it before

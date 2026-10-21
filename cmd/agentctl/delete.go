@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"strings"
@@ -23,7 +22,7 @@ func cmdDelete(args []string) error {
 		return err
 	}
 	defer cleanup()
-	sess, err := c.DeleteSession(context.Background(), uid)
+	sess, err := c.DeleteSession(cmdCtx, uid)
 	if err != nil {
 		return err
 	}

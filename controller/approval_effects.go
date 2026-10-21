@@ -141,7 +141,7 @@ func (s *liveSink) completeApproval(ctx context.Context, state *ApprovalState) (
 			s.guard.stop = err
 			return api.ToolResult{}, err
 		}
-		res, err := s.c.tool(ctx, ToolCallContext{SessionUID: s.c.sessionUID}, call)
+		res, err := s.invokeTool(ctx, call)
 		s.c.liveToolCalls++
 		result = res
 		if err != nil {

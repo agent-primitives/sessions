@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -75,7 +74,7 @@ func approval(args []string, approved bool) error {
 		return err
 	}
 	defer cleanup()
-	ctx := context.Background()
+	ctx := cmdCtx
 	if tupleFlags == 0 {
 		sess, err := c.GetSession(ctx, uid)
 		if err != nil {

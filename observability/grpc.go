@@ -17,7 +17,7 @@ const requestIDMetadataKey = "x-request-id"
 func UnaryServerInterceptor(logger *slog.Logger) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
 		ctx = serverRequestContext(ctx)
-		finish := Start(ctx, logger, "grpc", "request", "rpc_method", info.FullMethod, "rpc_kind", "unary")
+		ctx, finish := begin(ctx, logger, slog.LevelInfo, false, "grpc", "request", "rpc_method", info.FullMethod, "rpc_kind", "unary")
 		defer func() {
 			finish(err, "grpc_code", grpcCode(err).String(), "error_kind", grpcErrorKind(err))
 		}()
@@ -29,7 +29,7 @@ func UnaryServerInterceptor(logger *slog.Logger) grpc.UnaryServerInterceptor {
 func StreamServerInterceptor(logger *slog.Logger) grpc.StreamServerInterceptor {
 	return func(srv any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
 		ctx := serverRequestContext(stream.Context())
-		finish := Start(ctx, logger, "grpc", "request", "rpc_method", info.FullMethod, "rpc_kind", "stream")
+		ctx, finish := begin(ctx, logger, slog.LevelInfo, false, "grpc", "request", "rpc_method", info.FullMethod, "rpc_kind", "stream")
 		defer func() {
 			finish(err, "grpc_code", grpcCode(err).String(), "error_kind", grpcErrorKind(err))
 		}()

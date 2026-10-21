@@ -43,6 +43,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/resolver"
@@ -56,6 +57,7 @@ import (
 	"github.com/agent-primitives/sessions/internal/version"
 	"github.com/agent-primitives/sessions/model/openai"
 	"github.com/agent-primitives/sessions/observability"
+	"github.com/agent-primitives/sessions/observability/otelsetup"
 	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/runtime/local"
 	"github.com/agent-primitives/sessions/runtime/remote"
@@ -235,6 +237,16 @@ func Run(args []string, opts ...Option) error {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+
+	shutdownTracing, err := otelsetup.Init(context.Background(), "agentsessionsd")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(ctx)
+	}()
 	if toolConfig != nil {
 		o.executors = toolConfig.factory(logger)
 	}
@@ -308,6 +320,7 @@ func Run(args []string, opts ...Option) error {
 		return err
 	}
 	serverOptions := []grpc.ServerOption{
+		observability.ServerTracing(),
 		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(logger)),
 		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(logger)),
 	}

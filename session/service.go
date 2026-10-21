@@ -19,6 +19,8 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -84,6 +86,54 @@ func NewService(store *sqlitelog.Store, registry *placement.Registry, opts ...Op
 		s.logger = slog.New(slog.DiscardHandler)
 	}
 	return s
+}
+
+// chainTrace links the current operation's span to uid's previous operation and records this one
+// as the latest. One trace per operation keeps spans exportable as they finish; the links are what
+// stitch a session back together across idle gaps, suspensions, and process restarts. The read and
+// the write are one exchange, so overlapping operations never share a predecessor and following
+// the links visits every recorded operation.
+//
+// It is best effort and a no-op when tracing is off: a failed exchange only costs a link.
+func (s *Service) chainTrace(ctx context.Context, uid string) {
+	span := trace.SpanFromContext(ctx)
+	if !span.IsRecording() || !span.SpanContext().IsSampled() || uid == "" {
+		return
+	}
+	span.SetAttributes(attribute.String("agentsessions.session_uid", uid))
+	tp := observability.TraceParent(ctx)
+	if tp == "" {
+		return
+	}
+	prev, err := s.store.ExchangeTraceParent(uid, tp)
+	if err != nil {
+		observability.Logger(ctx, s.logger).Debug("record trace link failed", "session_uid", uid, "error_kind", "store_failed")
+		return
+	}
+	observability.LinkTraceParent(ctx, prev,
+		attribute.String("agentsessions.link", "session.previous_operation"),
+		attribute.String("agentsessions.session_uid", uid),
+	)
+}
+
+// recordTrace makes the current operation uid's latest without linking back, which is how a fork
+// child starts its chain at the fork that created it.
+//
+// Only a sampled, recording span is recorded. With tracing off or the operation dropped by the
+// sampler, ctx can still carry a valid span context (the caller's, propagated in), but no span of
+// this operation will be exported to link to, so tracing off must mean no store writes.
+func (s *Service) recordTrace(ctx context.Context, uid string) {
+	span := trace.SpanFromContext(ctx)
+	if !span.IsRecording() || !span.SpanContext().IsSampled() {
+		return
+	}
+	tp := observability.TraceParent(ctx)
+	if tp == "" {
+		return
+	}
+	if err := s.store.SetLastTraceParent(uid, tp); err != nil {
+		observability.Logger(ctx, s.logger).Debug("record trace link failed", "session_uid", uid, "error_kind", "store_failed")
+	}
 }
 
 func newUID() string {
@@ -163,7 +213,7 @@ func (s *Service) CreateSession(ctx context.Context, req *v1.CreateSessionReques
 	if err := s.auth.global(ctx, v1.Sessions_CreateSession_FullMethodName, api.ActionCreate); err != nil {
 		return nil, err
 	}
-	finish := observability.Start(ctx, s.logger, "session", "create")
+	_, finish := observability.Begin(ctx, s.logger, "session", "create")
 	uid := newUID()
 	defer func() { finish(err, "error_kind", serviceErrorKind(err), "session_uid", uid) }()
 
@@ -247,7 +297,7 @@ func (s *Service) GetSession(ctx context.Context, req *v1.GetSessionRequest) (se
 	if err := s.authorize(ctx, v1.Sessions_GetSession_FullMethodName, req.GetUid(), api.ActionRead); err != nil {
 		return nil, err
 	}
-	finish := observability.Start(ctx, s.logger, "session", "get", "session_uid", req.GetUid())
+	_, finish := observability.Begin(ctx, s.logger, "session", "get", "session_uid", req.GetUid())
 	defer func() {
 		finish(err, "error_kind", serviceErrorKind(err))
 	}()
@@ -277,7 +327,7 @@ func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest)
 		return nil, err
 	}
 	var returned int
-	finish := observability.Start(ctx, s.logger, "session", "list",
+	_, finish := observability.Begin(ctx, s.logger, "session", "list",
 		"project", req.GetProject(),
 		"page_size", req.GetPageSize(),
 	)
@@ -595,7 +645,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		}
 	}
 	var recordsSent, deltasSent int
-	finish := observability.Start(ctx, s.logger, "session", "exec",
+	ctx, finish := observability.Begin(ctx, s.logger, "session", "exec",
 		"session_uid", req.GetSession(),
 		"cas_requested", req.ExpectedLastSeq != nil,
 		"input_count", len(req.GetInputs()),
@@ -698,6 +748,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 			return err
 		}
 	}
+	s.chainTrace(ctx, uid)
 
 	// Unset expected_last_seq means "append at the current head": the single-writer check is opt-in,
 	// so a caller with one writer is not forced to read the cursor first. An explicit value keeps
@@ -852,7 +903,7 @@ func (s *Service) Replay(req *v1.ReplayRequest, stream v1.Sessions_ReplayServer)
 		return err
 	}
 	var recordsSent int
-	finish := observability.Start(ctx, s.logger, "session", "replay",
+	_, finish := observability.Begin(ctx, s.logger, "session", "replay",
 		"session_uid", req.GetSession(),
 		"from_seq", req.GetFromSeq(),
 		"to_seq", req.GetToSeq(),
@@ -905,7 +956,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		return nil, status.Error(codes.FailedPrecondition, "owned fork publication is unavailable")
 	}
 	var childrenCreated int
-	finish := observability.Start(ctx, s.logger, "session", "fork",
+	ctx, finish := observability.Begin(ctx, s.logger, "session", "fork",
 		"parent_session_uid", req.GetSession(),
 		"requested_at_seq", req.GetAtSeq(),
 		"requested_child_count", req.GetCount(),
@@ -933,6 +984,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	if err != nil {
 		return nil, err
 	}
+	s.chainTrace(ctx, req.GetSession())
 	count := int(req.GetCount())
 	if count <= 0 {
 		count = 1
@@ -985,6 +1037,9 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		return nil, forkError(req.GetSession(), err)
 	}
 	childrenCreated = len(children)
+	for _, child := range children {
+		s.recordTrace(ctx, child.UID)
+	}
 	// Finalize metadata after the fan-out as before. Modern children already inherited admission
 	// metadata atomically at their first fence; legacy children retain their publication behavior.
 	// Neither handle construction nor a refused/unprovisioned fork creates phantom rows.
@@ -1050,7 +1105,7 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 	if err := s.authorizeMutation(ctx, v1.Sessions_Suspend_FullMethodName, req.GetSession(), api.ActionSuspend); err != nil {
 		return nil, err
 	}
-	finish := observability.Start(ctx, s.logger, "session", "suspend", "session_uid", req.GetSession())
+	ctx, finish := observability.Begin(ctx, s.logger, "session", "suspend", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 
 	uid := req.GetSession()
@@ -1067,6 +1122,7 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 	if err := deletedSessionError(info); err != nil {
 		return nil, err
 	}
+	s.chainTrace(ctx, uid)
 	stored := info.Harness
 	if stored == "" {
 		stored = s.registry.Default()
@@ -1101,7 +1157,7 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	if err := s.authorizeMutation(ctx, v1.Sessions_Resume_FullMethodName, req.GetSession(), api.ActionResume, api.ActionExec); err != nil {
 		return nil, err
 	}
-	finish := observability.Start(ctx, s.logger, "session", "resume", "session_uid", req.GetSession())
+	ctx, finish := observability.Begin(ctx, s.logger, "session", "resume", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 
 	uid := req.GetSession()
@@ -1118,6 +1174,7 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	if err := deletedSessionError(info); err != nil {
 		return nil, err
 	}
+	s.chainTrace(ctx, uid)
 	log := s.store.Session(uid)
 	stored := info.Harness
 	if stored == "" {

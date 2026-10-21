@@ -147,6 +147,8 @@ not provide.
   back is likewise a reinstall of the older Substrate with an older adapter, not a downgrade over
   v0.5.0 state. An AgentSuite template rendered for v0.5.0 names its sandbox class as `microvm` or
   `gvisor`, not `SANDBOX_CLASS_MICROVM`, so re-render templates for the matching substrate.
+  The AgentSuite demo's `up.sh` and `ui.sh` refuse a kind cluster `up.sh` installed from another
+  substrate commit, or before it recorded the commit; run `down.sh`, then `up.sh`.
 - On agent-substrate v0.5.0, the namespace that runs `agentsessionsd` must carry the label
   `ate.dev/api-access=true`. v0.5.0 denies ingress to `ate-system` by default and admits
   ate-api-server only from its own components and from pods in namespaces with that label, worker

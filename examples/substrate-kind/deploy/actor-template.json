@@ -1,0 +1,41 @@
+{
+  "metadata": {
+    "atespace": "sessions-example",
+    "name": "chat-harness"
+  },
+  "workerSelector": {
+    "matchLabels": {
+      "workload": "sessions-example-microvm"
+    }
+  },
+  "containers": [
+    {
+      "name": "harness",
+      "image": "HARNESS_IMAGE",
+      "command": ["/ko-app/harnessnode"],
+      "env": [
+        {"name": "HARNESS_KIND", "value": "chat"},
+        {"name": "HARNESS_MODEL", "value": "MODEL_NAME"}
+      ],
+      "wakeupProbe": {
+        "httpGet": {"path": "/readyz", "port": 8081},
+        "timeoutSeconds": 120
+      }
+    }
+  ],
+  "resources": {
+    "limits": [
+      {"name": "cpu", "quantity": "1"},
+      {"name": "memory", "quantity": "768Mi"}
+    ]
+  },
+  "snapshotConfig": {
+    "preferredFidelity": "SNAPSHOT_FIDELITY_MEMORY",
+    "storageLocation": "gs://ate-snapshots/sessions-example/chat-harness/",
+    "goldenSnapshotConfig": {"mode": "GOLDEN_SNAPSHOT_MODE_ENABLED"}
+  },
+  "sandboxConfig": {
+    "sandboxClass": "SANDBOX_CLASS_MICROVM",
+    "configName": "microvm"
+  }
+}

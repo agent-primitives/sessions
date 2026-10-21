@@ -18,7 +18,7 @@ import re
 import sys
 from pathlib import Path
 
-SKIP_DIRS = {".git", "node_modules", "dist", ".astro", "_substrate", "vendor"}
+SKIP_DIRS = {".git", "node_modules", "dist", ".astro", "_local", "_substrate", "vendor"}
 
 # Inline links, but not images, and not autolinks. Reference-style links are not used here.
 LINK = re.compile(r"(?<!\!)\[(?P<text>[^\]]*)\]\((?P<target>[^)\s]+)(?:\s+\"[^\"]*\")?\)")

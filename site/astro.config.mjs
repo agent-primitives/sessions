@@ -61,6 +61,7 @@ export default defineConfig({
         {
           label: "Operate it",
           items: [
+            { label: "Durable kind example", slug: "substrate-kind" },
             { label: "Security posture", slug: "security" },
             { label: "Observability", slug: "observability" },
             { label: "Tool executors", slug: "tool-executors" },

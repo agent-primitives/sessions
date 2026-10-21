@@ -191,8 +191,8 @@ would refuse at startup. It does so before it changes the cluster, so a misconfi
 the running daemon, its journal and an existing key in place. `emit check-model` makes the last
 checks: it builds the model client with the daemon's own constructor (`internal/modelconfig`), so it
 refuses the same URLs and paths (no scheme or host, a bad port or `%` escape). The values are copied
-into the Deployment as written. The URL is also printed, the daemon logs the URL and the path, and
-both are written to `${STATE}/agentsessionsd.yaml`, so a credential in either would sit outside the
+into the Deployment as written. The URL is also printed, and both URL and path are written to
+`${STATE}/agentsessionsd.yaml`, so a credential in either would sit outside the
 Secret. `check-model` refuses these forms, which can carry one: userinfo, a query or a fragment in
 the URL; a query other than `api-version`, `@` or a fragment in the path. Its refusals do not repeat
 the URL or the path. It cannot tell a credential placed in a path segment, which is copied like any

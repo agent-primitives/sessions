@@ -130,7 +130,7 @@ if [[ -n "${AGENTSUITE_MODEL_BASE_URL:-}" ]]; then
 	# agentsessionsd refuses model settings its model client cannot be built from at startup.
 	# check-model also refuses a URL with userinfo, a query or a fragment, a path whose query holds
 	# anything but a date-shaped api-version, and an auth header that is not a header name: the URL
-	# is printed below, the daemon logs the URL and path, and both are rendered into the
+	# is printed below, and both URL and path are rendered into the
 	# Deployment's arguments and ${STATE}/agentsessionsd.yaml, so a credential in either would
 	# bypass the Secret that holds MODEL_API_KEY.
 	# The Deployment recreates its pod, and the journal is an emptyDir, so letting such a value

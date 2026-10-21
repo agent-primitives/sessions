@@ -19,6 +19,11 @@ not provide.
   line: control and format characters in message text and arguments print as escapes (`\n`,
   `\x1b`, `\u202e`), so a multi-line reply now prints as one line. `exec` escapes streamed model
   text the same way and prints it on its own line starting `stream:`.
+- A self-contained [durable Substrate kind example](examples/substrate-kind/README.md), using the
+  existing daemon and stock chat harness, declarative templates, persistent SQLite, optional Ollama,
+  and a pod-restart smoke.
+- `agentctl verify --session UID` verifies a session's committed hash chain locally from the Sessions
+  API, including protobuf field presence. It refuses missing records, changed content, and broken links.
 - Go embedders can configure per-route model defaults and allowed IDs with
   `placement.WithModelPolicy`. Registration validates the descriptor against policy; new sessions
   validate their default at creation (`INVALID_ARGUMENT`) and Exec/Resume (`FAILED_PRECONDITION`).
@@ -49,6 +54,11 @@ not provide.
 
 ### Fixed
 
+- SQLite-backed `Replay` preserves the stored protobuf event's field presence, so audit clients
+  can detect presence-only tampering instead of verifying a normalized event. Stored bytes,
+  hashes, and journal/wire schemas are unchanged; no journal migration is required.
+- `agentctl verify` skips `Replay` for a captured empty prefix, avoiding false failures when a
+  concurrent turn appends after the session head was read.
 - Substrate no longer resumes a suspended actor from a checkpoint other than the one the session
   recorded, and no longer treats an older completed snapshot as current while the newest one is
   pending or local-only (see Compatibility).
@@ -80,6 +90,7 @@ not provide.
   writing a receipt. The executor receives a copy of the arguments. Before, an in-process harness
   on the in-memory store could change the approved arguments after the journal was verified,
   because the store kept the harness's argument map. Journals and receipts are unchanged.
+- Daemon startup logs identify the model without copying its provider endpoint, userinfo, or query.
 - Chat Completions status errors, including streaming calls and their journaled errors, now retain
   only the model, HTTP status and bounded `error.code`/`error.param` identifiers, never provider
   messages or raw response bodies. Identifier limits and ordering match the Responses adapter.

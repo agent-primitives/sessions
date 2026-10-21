@@ -527,10 +527,16 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 // Unknown fidelity remains accepted as Memory:false for default stateless replay. Only the
 // external (cold/suspend) kind is supported; substrate has no node-local warm checkpoint API today.
 //
+// Whenever the checkpoint must hold memory (a recorded compute instance or a
+// REQUIRES_MEMORY_SNAPSHOT descriptor), Snapshot reads the actor before suspending, and its first
+// check refuses a resuming or suspending actor (StatusTransitioning) with ErrActorBusy, as Restore
+// and Create's attach refuse it: the operation moving it, such as another host's Suspend, may still
+// record the capture it takes. The checks below apply once the actor has settled.
+//
 // When in.ComputeInstance is set (Placer.Suspend and a stateful fork pass the UID the journal last
 // recorded), the actor under the name must be that one. Snapshot checks it before suspending, so a
-// replacement is refused with api.ErrMemoryStateLost untouched, and again on the actor the suspend
-// reports, since the actor can be replaced between the look and the suspend; substrate's
+// settled replacement is refused with api.ErrMemoryStateLost untouched, and again on the actor the
+// suspend reports, since the actor can be replaced between the look and the suspend; substrate's
 // SuspendActor has no UID precondition to close that window. In the second case the replacement is
 // left suspended, which costs nothing: it holds none of the session's state and the host refuses it
 // on every later turn. An actor that is gone is refused with api.ErrMemoryStateLost as well, since
@@ -560,10 +566,7 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 // does: Snapshot also refuses, before suspending, an actor that does not hold in.RecordedCheckpoint
 // (requireRecordedCheckpoint), as Create's attach and Restore do, so that capture is never resumed
 // or recorded as the session's, whether the actor is still suspended on it or the router woke it.
-// A suspended actor whose newest upload is pending is refused as not ready first. A resuming or
-// suspending actor (StatusTransitioning) is refused with ErrActorBusy before any of these checks,
-// as Restore and Create's attach refuse it: the operation moving it, such as another host's
-// Suspend, may still record the capture it takes.
+// A suspended actor whose newest upload is pending is refused as not ready before that check.
 func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (snapshot api.SnapshotRef, err error) {
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "snapshot_compute",
 		"actor", in.ID,

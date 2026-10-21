@@ -186,10 +186,10 @@ not provide.
   fails closed too, and the session stays refused: an actor holding a capture whose `SUSPEND`
   append failed, a pause or suspend made outside sessions, or a completed upload that a Suspend
   reported as pending (`UNAVAILABLE`, which v0.5.0's synchronous suspend does not leave) is refused
-  the same way, and Suspend again no longer records it. While another host's Suspend is still
-  capturing, the actor is `SUSPENDING` and Suspend is `ABORTED`. Between that capture and its
-  append, Suspend is refused this way; retry once it is recorded. Nothing in sessions recovers
-  such a session: delete or abandon it, and delete the actor named in the warning with
+  the same way, and Suspend again no longer records it. Suspend of a `SUSPENDING` or `RESUMING`
+  actor, such as one another host's Suspend is still capturing, is `ABORTED`. Between that capture
+  and its append, Suspend is refused this way; retry once it is recorded. Nothing in sessions
+  recovers such a session: delete or abandon it, and delete the actor named in the warning with
   `options.uid` (and `any_state: true` if the router woke it) to release it. Journal, wire and the
   Sessions API are unchanged: the check reads the `SUSPEND` refs the journal already holds. A crash
   and resume onto a worker of the same runtime between the check and the suspend is still not

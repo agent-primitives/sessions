@@ -270,6 +270,15 @@
       ": run a turn first. Replay drives the running actor";
   }
 
+  // outcome is a call's result as the page labels it: OK, Declined when the bridge refused it
+  // before any lifecycle call (its gRPC code would read Unknown), else the call's gRPC code.
+  function outcome(act) {
+    if (!act) return "";
+    if (act.ok) return "OK";
+    if (act.declined) return "Declined";
+    return act.code || "failed";
+  }
+
   // concerns says whether an activity belongs to a session's view: its own call, or the fork that
   // made it. A call's result is drawn only beside the session it concerns.
   function concerns(act, uid) {
@@ -295,5 +304,6 @@
     replayNote,
     replayBlock,
     concerns,
+    outcome,
   };
 });

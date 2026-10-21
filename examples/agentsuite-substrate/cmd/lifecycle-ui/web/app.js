@@ -174,7 +174,7 @@
     if (act.child) parts.push("child " + short(act.child));
     const lane = laneOf(act.lane);
     if (lane) parts.push(lane.daemon);
-    if (act.durationMs !== undefined && act.started) parts.push((act.ok ? "OK" : act.code) + " in " + act.durationMs + " ms");
+    if (act.durationMs !== undefined && act.started) parts.push(Flow.outcome(act) + " in " + act.durationMs + " ms");
     return parts.join(" · ");
   }
 
@@ -324,7 +324,7 @@
     const li = el("li", { class: "entry" + (a.ok === false ? " failed" : "") + (state.shown && state.shown.id === a.id ? " current" : ""), tabindex: "0", "data-id": String(a.id) });
     const chip = a.running
       ? el("span", { class: "chip run", text: "running" })
-      : el("span", { class: "chip " + (a.ok ? "ok" : "bad"), text: a.ok ? "OK" : a.code || "failed" });
+      : el("span", { class: "chip " + (a.ok ? "ok" : "bad"), text: Flow.outcome(a) });
     const head = el("div", { class: "row" }, el("span", { class: "op", text: opNames[a.op] || a.op }), chip);
     if (a.durationMs !== undefined && !a.running) head.append(el("span", { class: "chip", text: a.durationMs + " ms" }));
     head.append(el("span", { class: "when", text: clock(a.started) }));
@@ -369,7 +369,7 @@
         if (notes.length) card.append(el("p", { text: notes.join(" ") }));
         li.append(card);
       }
-      li.append(el("p", { class: "msg", text: (a.code ? a.code + ": " : "") + (a.message || "") }));
+      li.append(el("p", { class: "msg", text: (a.declined ? "" : a.code ? a.code + ": " : "") + (a.message || "") }));
     }
     if (!a.running) {
       li.addEventListener("click", () => showFlow(a));

@@ -333,3 +333,10 @@ test("a replay that stopped before the controller draws no routed hop", () => {
   assert.equal(es.grpc, "done");
   for (const e of ["replay", "route", "vm"]) assert.equal(es[e], "off", e);
 });
+
+test("a call the bridge declined reads Declined, not its Unknown gRPC code", () => {
+  assert.equal(Flow.outcome({ ok: true }), "OK");
+  assert.equal(Flow.outcome({ ok: false, declined: true, code: "Unknown" }), "Declined");
+  assert.equal(Flow.outcome({ ok: false, code: "FailedPrecondition" }), "FailedPrecondition");
+  assert.equal(Flow.outcome({ ok: false }), "failed");
+});

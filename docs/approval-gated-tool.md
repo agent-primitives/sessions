@@ -108,8 +108,9 @@ The model's call ID and text vary by model. Each record prints on one line. `age
 a tool name or call ID that contains a space, quote, control or format character as a quoted,
 escaped string. In message text (`EVENT_INPUT`, `EVENT_OUTPUT`) and in the arguments, it writes
 control, format and other non-printing characters as escapes such as `\n`, `\x1b` or `\u202e`.
-So the model's text cannot add a line that looks like a call, or use terminal escapes to hide
-part of the call.
+`exec` prints text the model streams the same way, on its own line starting `stream:`. So the
+model's text cannot add a line that looks like a call, or use terminal escapes to hide part of the
+call.
 
 Stop the daemon and the harness (Ctrl-C) and start them again with the same commands. Nothing
 has run, and the request is still pending; `replay` shows the exact call you are deciding on:

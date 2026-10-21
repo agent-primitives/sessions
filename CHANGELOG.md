@@ -17,7 +17,8 @@ not provide.
 - `agentctl exec` and `replay` print a tool call's tool, ID, mediation and arguments (not its
   idempotency key), so an approver can read the call before deciding. Each record prints on one
   line: control and format characters in message text and arguments print as escapes (`\n`,
-  `\x1b`, `\u202e`), so a multi-line reply now prints as one line.
+  `\x1b`, `\u202e`), so a multi-line reply now prints as one line. `exec` escapes streamed model
+  text the same way and prints it on its own line starting `stream:`.
 - Go embedders can configure per-route model defaults and allowed IDs with
   `placement.WithModelPolicy`. Registration validates the descriptor against policy; new sessions
   validate their default at creation (`INVALID_ARGUMENT`) and Exec/Resume (`FAILED_PRECONDITION`).

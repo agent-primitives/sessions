@@ -268,7 +268,10 @@ func cmdGet(args []string) error {
 	return nil
 }
 
-func cmdExec(args []string) error {
+func cmdExec(args []string) error { return runExec(args, os.Stdout) }
+
+// runExec runs one turn and writes it to w as it happens.
+func runExec(args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
 	cfg := commonFlags(fs)
 	var sess, input, harness string
@@ -284,26 +287,60 @@ func cmdExec(args []string) error {
 
 	// One call: an empty session is created by the server, and leaving ExpectedLastSeq nil appends
 	// at the head. Records print as they commit rather than after the turn.
+	out := &execOutput{w: w}
+	defer out.endStream()
 	_, err = c.Exec(context.Background(), client.ExecOptions{
 		Session: sess,
 		Inputs:  []string{input},
 		Harness: harness,
 		OnSession: func(s *v1.Session) {
 			if sess == "" {
-				fmt.Printf("session %s\n", s.GetMetadata().GetUid())
+				out.line(fmt.Sprintf("session %s", s.GetMetadata().GetUid()))
 			}
 		},
-		OnRecord: printRecord,
-		OnDelta: func(d *v1.Delta) {
-			// Deltas are transport: print them raw so output appears as the model produces it,
-			// then the finalized EVENT_OUTPUT record prints normally when it commits.
-			fmt.Print(d.GetChunk())
-			if d.GetDone() {
-				fmt.Println()
-			}
-		},
+		OnRecord: func(r *v1.LogRecord) { out.line(formatRecord(r)) },
+		OnDelta:  out.delta,
 	})
 	return err
+}
+
+// execOutput writes an exec turn as it arrives: whole lines (the session UID, committed records)
+// and the model's streamed text. Streamed text is as untrusted as the committed message it
+// previews, so it prints through the same escapeText and on its own "stream:" line, closed before
+// the next whole line: a chunk cannot end the line, act on the terminal (hiding the tool call
+// record that follows), or pass for a record. Each rune is escaped on its own, so a terminal
+// sequence split across chunks (ESC in one, "[8m" in the next) is still inert.
+type execOutput struct {
+	w         io.Writer
+	streaming bool // a "stream:" line is open
+}
+
+func (o *execOutput) line(s string) {
+	o.endStream()
+	_, _ = fmt.Fprintln(o.w, s)
+}
+
+// delta prints a chunk on the open stream line, opening one if needed, and closes the line when the
+// model's response is done. The done frame is not relied on to close it: a failed model call sends
+// none, so the next whole line or the end of the turn closes it instead.
+func (o *execOutput) delta(d *v1.Delta) {
+	if chunk := d.GetChunk(); chunk != "" {
+		if !o.streaming {
+			_, _ = io.WriteString(o.w, "stream: ")
+			o.streaming = true
+		}
+		_, _ = io.WriteString(o.w, escapeText(chunk))
+	}
+	if d.GetDone() {
+		o.endStream()
+	}
+}
+
+func (o *execOutput) endStream() {
+	if o.streaming {
+		_, _ = fmt.Fprintln(o.w)
+		o.streaming = false
+	}
 }
 
 func cmdReplay(args []string) error {

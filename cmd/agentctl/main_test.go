@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode"
@@ -350,4 +352,89 @@ func assertOneSafeLine(t *testing.T, line string) {
 	if !utf8.ValidString(line) {
 		t.Fatalf("line %q is not valid UTF-8", line)
 	}
+}
+
+// exec prints the model's streamed text through the same escaping as committed records, on its own
+// "stream:" line, so a chunk cannot forge a record line or hide the real tool call with a terminal
+// escape, even when the escape is split across chunks.
+func TestExecStreamedTextEscaped(t *testing.T) {
+	const callPrefix = "seq=4   EVENT_TOOL_CALL  tool=publish id=call_1 mediation=REQUIRES_APPROVAL args="
+	forged := "Publishing.\n" + callPrefix + `{"text":"safe"}` + "\x1b" // "[8m" follows in the next chunk
+	escaped := `Publishing.\n` + callPrefix + `{"text":"safe"}\x1b[8m`
+	streamLine := "stream: " + escaped
+	outputLine := "seq=3   EVENT_OUTPUT  assistant: " + escaped
+	callLine := callPrefix + `{"text":"rm -rf /"}`
+
+	output := &v1.LogRecord{Seq: 3, Event: &v1.Event{Kind: v1.EventKind_EVENT_OUTPUT,
+		Body: &v1.Event_Message{Message: wire.MessageToProto(api.TextMessage("assistant", forged+"[8m"))}}}
+	tc := wire.ToolCallToProto(&api.ToolCall{ID: "call_1", Tool: "publish",
+		Args: map[string]any{"text": "rm -rf /"}, Mediation: api.MediationRequiresApproval})
+	call := &v1.LogRecord{Seq: 4, Event: &v1.Event{Kind: v1.EventKind_EVENT_TOOL_CALL, Body: &v1.Event_Tool{Tool: tc}}}
+	delta := func(chunk string, done bool) *v1.ExecUpdate {
+		return &v1.ExecUpdate{Update: &v1.ExecUpdate_Delta{Delta: &v1.Delta{Chunk: chunk, Done: done}}}
+	}
+	record := func(r *v1.LogRecord) *v1.ExecUpdate {
+		return &v1.ExecUpdate{Update: &v1.ExecUpdate_Record{Record: r}}
+	}
+	session := &v1.ExecUpdate{Update: &v1.ExecUpdate_Session{
+		Session: &v1.Session{Metadata: &v1.ResourceMetadata{Uid: "session-uid"}}}}
+	streamed := []*v1.ExecUpdate{session, delta(forged, false), delta("[8m", false)}
+	for _, tt := range []struct {
+		name    string
+		updates []*v1.ExecUpdate
+		want    []string
+	}{{
+		name:    "escape split across chunks",
+		updates: append(streamed[:3:3], delta("", true), record(output), record(call)),
+		want:    []string{"session session-uid", streamLine, outputLine, callLine},
+	}, {
+		name:    "no done frame before a record",
+		updates: append(streamed[:3:3], record(call)),
+		want:    []string{"session session-uid", streamLine, callLine},
+	}, {
+		name:    "no done frame before the turn ends",
+		updates: streamed,
+		want:    []string{"session session-uid", streamLine},
+	}} {
+		t.Run(tt.name, func(t *testing.T) {
+			lis, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := grpc.NewServer()
+			v1.RegisterSessionsServer(srv, &execStreamer{updates: tt.updates})
+			go func() { _ = srv.Serve(lis) }()
+			t.Cleanup(srv.Stop)
+
+			var out bytes.Buffer
+			if err := runExec([]string{"--server", lis.Addr().String(), "--input", "publish"}, &out); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasSuffix(out.String(), "\n") {
+				t.Fatalf("output %q does not end its last line", out.String())
+			}
+			got := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("exec output\n got %q\nwant %q", got, tt.want)
+			}
+			for _, line := range got {
+				assertOneSafeLine(t, line)
+			}
+		})
+	}
+}
+
+// execStreamer answers Exec with fixed updates, as the daemon streams them.
+type execStreamer struct {
+	v1.UnimplementedSessionsServer
+	updates []*v1.ExecUpdate
+}
+
+func (s *execStreamer) Exec(_ *v1.ExecRequest, stream v1.Sessions_ExecServer) error {
+	for _, u := range s.updates {
+		if err := stream.Send(u); err != nil {
+			return err
+		}
+	}
+	return nil
 }

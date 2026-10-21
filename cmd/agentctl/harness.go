@@ -9,6 +9,7 @@ import (
 	"time"
 
 	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/observability"
 	"github.com/agent-primitives/sessions/sqlitelog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -79,7 +80,7 @@ func cmdHarness(args []string) error {
 			return fmt.Errorf("parse HarnessSpec %s: %w", specPath, err)
 		}
 	}
-	conn, err := grpc.NewClient(server, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(server, grpc.WithTransportCredentials(insecure.NewCredentials()), observability.ClientTracing())
 	if err != nil {
 		return fmt.Errorf("operator server %s: %w", server, err)
 	}
@@ -88,22 +89,22 @@ func cmdHarness(args []string) error {
 	var out proto.Message
 	switch op {
 	case "register":
-		ctx, cancel := context.WithTimeout(context.Background(), harnessRPCTimeout)
+		ctx, cancel := context.WithTimeout(cmdCtx, harnessRPCTimeout)
 		defer cancel()
 		out, err = c.RegisterHarness(ctx, &v1.RegisterHarnessRequest{Name: name, Spec: spec})
 	case "get":
-		ctx, cancel := context.WithTimeout(context.Background(), harnessRPCTimeout)
+		ctx, cancel := context.WithTimeout(cmdCtx, harnessRPCTimeout)
 		defer cancel()
 		out, err = c.GetHarness(ctx, &v1.GetHarnessRequest{Name: name, Observe: observe})
 	case "retire":
-		ctx, cancel := context.WithTimeout(context.Background(), harnessRPCTimeout)
+		ctx, cancel := context.WithTimeout(cmdCtx, harnessRPCTimeout)
 		defer cancel()
 		out, err = c.RetireHarness(ctx, &v1.RetireHarnessRequest{Name: name, Reason: reason})
 	case "list":
 		all := &v1.ListHarnessesResponse{}
 		token := ""
 		for {
-			ctx, cancel := context.WithTimeout(context.Background(), harnessRPCTimeout)
+			ctx, cancel := context.WithTimeout(cmdCtx, harnessRPCTimeout)
 			page, callErr := c.ListHarnesses(ctx, &v1.ListHarnessesRequest{PageSize: int32(pageSize), PageToken: token, IncludeRetired: includeRetired})
 			cancel()
 			if callErr != nil {

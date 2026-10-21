@@ -25,6 +25,9 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -301,6 +304,64 @@ func TestSubstrateDialsATEAPIWithTLSAndToken(t *testing.T) {
 				t.Fatalf("server saw no call: %v", err)
 			}
 		})
+	}
+}
+
+// An ate-api call made inside a traced session operation carries its traceparent, so the actor
+// lifecycle RPCs join the session's trace instead of starting their own.
+func TestSubstratePropagatesTraceToATEAPI(t *testing.T) {
+	prevTP, prevProp := otel.GetTracerProvider(), otel.GetTextMapPropagator()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		_ = tp.Shutdown(context.Background())
+		otel.SetTracerProvider(prevTP)
+		otel.SetTextMapPropagator(prevProp)
+	})
+
+	certPEM, keyPEM := selfSignedCert(t, "api.ate-system.svc")
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan metadata.MD, 1)
+	srv := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})),
+		grpc.UnknownServiceHandler(func(_ any, stream grpc.ServerStream) error {
+			md, _ := metadata.FromIncomingContext(stream.Context())
+			got <- md
+			return nil
+		}),
+	)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	var conn grpc.ClientConnInterface
+	f := parseFlags(t, func(c grpc.ClientConnInterface) substrate.ControlClient { conn = c; return nil },
+		"-substrate-harness", "w=t/w", "-substrate-atespace", "s", "-ateapi-addr", lis.Addr().String(), "-ateapi-insecure-skip-verify")
+	_, closeConn, err := f.Backends(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeConn()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	ctx, span := tp.Tracer("test").Start(ctx, "runtime.substrate.create_actor")
+	defer span.End()
+	_ = conn.Invoke(ctx, "/ateapi.Control/CreateActor", &emptypb.Empty{}, &emptypb.Empty{})
+	select {
+	case md := <-got:
+		want := span.SpanContext().TraceID().String()
+		if h := md.Get("traceparent"); len(h) != 1 || !strings.Contains(h[0], want) {
+			t.Fatalf("traceparent = %q, want one carrying trace %s", h, want)
+		}
+	case <-ctx.Done():
+		t.Fatal("server saw no call")
 	}
 }
 

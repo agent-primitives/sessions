@@ -131,8 +131,9 @@ not provide.
   release the worker, delete the substrate actor named in the warning with `DeleteActor` and
   `any_state: true` (`kubectl ate delete actor <actor> -a <atespace> --any-state`): the actor is
   still `RUNNING`, and v0.5.0 refuses a plain delete of it with `FAILED_PRECONDITION`. Set
-  `options.uid` to the warning's `actor_uid`, or with `kubectl ate` check the actor's current UID
-  first, so a later actor created under the same name is not deleted.
+  `options.uid` to the warning's `actor_uid` so a later actor created under the same name is
+  refused with `ABORTED` instead of deleted. `kubectl ate` sends no UID: checking the UID with
+  `get` first is a separate read and cannot stop a replacement created before the delete.
   Stateless sessions are unaffected, and clusters whose workers share one runtime do not hit it.
   The adapter reports it through the new `ActorInfo.MemoryNotRestored`; another
   `runtime/substrate.ControlClient` implementation that leaves it false keeps the old behavior. See

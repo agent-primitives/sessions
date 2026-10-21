@@ -66,6 +66,10 @@ The substrate build of `agentsessionsd` adds these flags:
 The other flags only configure `-substrate-harness` entries; given without one, the daemon refuses
 to start rather than ignore them.
 
+On Substrate v0.5.0, the namespace that runs `agentsessionsd` must carry the label
+`ate.dev/api-access=true`, or its Control calls time out: see
+[namespace access to ate-api-server](#substrate-v050-namespace-access-to-ate-api-server).
+
 The tier is declared, not discovered: placement gates on it before an actor exists, and nothing
 checks it against the image's own `Describe`. Declaring a `REQUIRES_MEMORY_SNAPSHOT` harness as
 stateless lets fork and a lost actor rebuild it by replay, which loses its RAM state, so declare what
@@ -356,6 +360,26 @@ out-of-band paused (local-only) attachment even for default stateless backends.
 The client-side GetActor → ResumeActor check still races lifecycle operations; atomic expected
 snapshot/state validation must be supplied by Substrate.
 
+### Substrate v0.5.0: namespace access to ate-api-server
+
+Substrate v0.5.0 denies ingress to every `ate-system` pod by default (substrate #2522,
+`manifests/ate-install/ate-system-networkpolicies.yaml`, applied by both the `base` and the `kind`
+install kustomizations). Its `ate-api-server` policy admits TCP 443 from the control-plane
+components (`ate-controller`, `atelet`, `atenet-egress`, `atenet-router`) and from pods in
+namespaces labeled `ate.dev/api-access: "true"`, excluding pods labeled `ate.dev/worker-pool`.
+
+So the namespace that runs `agentsessionsd`, or any other Sessions host or client that calls
+Control, must carry `ate.dev/api-access: "true"` in its `metadata.labels`. Without it every Control
+call fails with gRPC `Unavailable` and `dial tcp <ate-api-server pod IP>:443: i/o timeout`; the
+conformance Job failed that way on its first v0.5.0 run. `deploy/substrate/namespace.yaml`
+(`ate-agentsessions`, the conformance Job's namespace) and the AgentSuite example's
+`deploy/namespace.yaml` (`agentsuite-demo`) carry the label. Worker pods stay excluded in a labeled
+namespace, so a WorkerPool that shares it gets no API access. The label is not needed to reach
+harnesses: the same manifest's `atenet-router` policy admits any source on the router's data
+ports. The policies only take effect where the network plugin enforces NetworkPolicy; the kind
+cluster CI uses does. The previous pin (`96dffb28`) installs none of them, so the label has no
+effect there.
+
 ### Substrate v0.5.0: paused actors, suspend durability and runtime fallback
 
 The adapter pins agent-substrate v0.5.0 (`SUBSTRATE_REF` in `.github/workflows/substrate-e2e.yml`,
@@ -635,7 +659,10 @@ current substrate supports: through `atenet-router`, the cluster's actor ingress
   request, then forwards over mTLS to the worker's atunnel, which checks the actor is assigned to it
   and proxies to port 80 over the actor's private veth.
 - Substrate removed the worker pod-IP:80 ingress on purpose (substrate #559), so there is no direct
-  path to fall back on, and the conformance Job needs no NetworkPolicy exception.
+  path to fall back on, and the conformance Job needs no NetworkPolicy exception to reach a harness.
+  Its Control calls to ate-api-server need its namespace's `ate.dev/api-access=true` label on
+  v0.5.0: see
+  [namespace access to ate-api-server](#substrate-v050-namespace-access-to-ate-api-server).
 
 ```mermaid
 flowchart LR
@@ -810,9 +837,11 @@ renamed `cmd/ateom-microvm` to `cmd/ateworker-microvm` and the module to `go.ate
 
 The workflow applies only the namespace and the micro-VM WorkerPools
 (`deploy/substrate/namespace.yaml`, `echo-microvm-workerpool.yaml`,
-`counter-microvm-workerpool.yaml`). ActorTemplates are substrate API resources in an atespace, so the
-suite creates its own through Control with the harness image the workflow built (`HARNESS_IMAGE`) and
-waits for each golden snapshot.
+`counter-microvm-workerpool.yaml`). The namespace carries `ate.dev/api-access=true`, which every
+tier's Job needs to reach ate-api-server on v0.5.0
+([namespace access](#substrate-v050-namespace-access-to-ate-api-server)). ActorTemplates are
+substrate API resources in an atespace, so the suite creates its own through Control with the
+harness image the workflow built (`HARNESS_IMAGE`) and waits for each golden snapshot.
 
 The suite runs in three passes against that one cluster, all through `hack/run-e2e-job.sh`: the
 stateless tier and the suspend-under-an-idle-stream check first, so a break there fails before the

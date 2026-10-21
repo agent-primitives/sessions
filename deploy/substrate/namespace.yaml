@@ -1,7 +1,15 @@
 # The namespace every agentsessions WorkerPool and the conformance Job live in. Apply it before any
 # deploy/substrate/*-workerpool.yaml.
+#
+# Substrate v0.5.0 denies ingress to ate-system by default and admits ate-api-server only from its
+# own components and from pods in namespaces labeled ate.dev/api-access=true, worker pods (labeled
+# ate.dev/worker-pool) excluded: agent-substrate
+# manifests/ate-install/ate-system-networkpolicies.yaml. The conformance Job calls Control from
+# here, so the namespace carries the label; the WorkerPools' worker pods in it stay excluded.
 
 apiVersion: v1
 kind: Namespace
 metadata:
   name: ate-agentsessions
+  labels:
+    ate.dev/api-access: "true"

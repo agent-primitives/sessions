@@ -128,6 +128,16 @@ not provide.
   back is likewise a reinstall of the older Substrate with an older adapter, not a downgrade over
   v0.5.0 state. An AgentSuite template rendered for v0.5.0 names its sandbox class as `microvm` or
   `gvisor`, not `SANDBOX_CLASS_MICROVM`, so re-render templates for the matching substrate.
+- On agent-substrate v0.5.0, the namespace that runs `agentsessionsd` must carry the label
+  `ate.dev/api-access=true`. v0.5.0 denies ingress to `ate-system` by default and admits
+  ate-api-server only from its own components and from pods in namespaces with that label, worker
+  pods (`ate.dev/worker-pool`) excluded (substrate
+  `manifests/ate-install/ate-system-networkpolicies.yaml`). Without it every Control call fails
+  `Unavailable` with a dial `i/o timeout`. `deploy/substrate/namespace.yaml` and the AgentSuite
+  example's `deploy/namespace.yaml` now carry the label; label any other namespace that runs a
+  Sessions host or client against the ate-api. The previous pin installs no such policy, so the
+  label has no effect there. See
+  [namespace access](docs/substrate-conformance.md#substrate-v050-namespace-access-to-ate-api-server).
 - On a v0.5.0 cluster with more than one sandbox runtime, a memory-tier session whose actor was
   resumed on a worker that cannot restore its snapshot's recorded runtime (substrate restores its
   files only when no matching worker has room) is refused with `FAILED_PRECONDITION`

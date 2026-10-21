@@ -615,12 +615,17 @@
     state.pending = { id: -1, op: "exec", session: uid, input: text, output: "", records: [], started: new Date().toISOString(), running: true };
     renderTimeline();
     let act = null;
-    let failed = "";
+    // rejected is set only by a non-ok HTTP response: the bridge answered that it did not run the
+    // turn. Any other error (fetch, read or parse) leaves the outcome unknown, since the bridge
+    // sends its status line with the first record, while Exec may already be committing them.
+    let rejected = "";
+    let lost = "";
     try {
       const res = await fetch("/api/exec", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: uid, input: text }) });
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
-        throw new Error(e.error || res.statusText);
+        rejected = e.error || res.statusText || "HTTP " + res.status;
+        throw new Error(rejected);
       }
       const reader = res.body.getReader();
       const dec = new TextDecoder();
@@ -647,7 +652,7 @@
         }
       }
     } catch (err) {
-      failed = err.message;
+      if (!rejected) lost = err.message || String(err);
     }
     state.pending = null;
     state.busy = false;
@@ -655,8 +660,11 @@
     else {
       // The bridge never reported how the call ended: end the animation, draw the flow shown
       // before the call again, say why, and re-read the journal, which shows any record it wrote.
-      setStatus(failed ? "Exec failed: " + failed
-        : "Exec ended without a result: the stream closed before the bridge reported the call's outcome, which is unknown; the journal shows what was written.", true);
+      // Only an HTTP refusal is a definite failure; a lost connection is not, so it must not
+      // invite a retry of a turn that may have completed.
+      setStatus(rejected ? "Exec failed: " + rejected
+        : lost ? "Exec outcome unknown: the connection to the bridge failed (" + lost + ") before it reported the call's outcome; the journal shows what was written."
+          : "Exec ended without a result: the stream closed before the bridge reported the call's outcome, which is unknown; the journal shows what was written.", true);
       clearInterval(animTimer);
       renderTimeline();
       renderControls();

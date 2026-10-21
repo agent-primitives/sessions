@@ -146,14 +146,30 @@ function activity(id, op, uid) {
   return { id, op, session: uid, lane: "stateless", ok: true, started: "2026-10-21T00:00:00Z", durationMs: 5, records: [] };
 }
 
-// Stream is a route body that /api/exec streams as NDJSON lines, then ends.
+// Stream is a route body that /api/exec streams as NDJSON lines, then ends, or, given an error,
+// rejects the next read as a dropped connection does. A string message is sent as a raw line.
 class Stream {
-  constructor(msgs) {
+  constructor(msgs, err) {
     this.msgs = msgs;
+    this.err = err;
   }
   reader() {
-    const chunks = this.msgs.map((m) => new TextEncoder().encode(JSON.stringify(m) + "\n"));
-    return { read: async () => (chunks.length ? { value: chunks.shift(), done: false } : { value: undefined, done: true }) };
+    const chunks = this.msgs.map((m) => new TextEncoder().encode((typeof m === "string" ? m : JSON.stringify(m)) + "\n"));
+    return {
+      read: async () => {
+        if (chunks.length) return { value: chunks.shift(), done: false };
+        if (this.err) throw this.err;
+        return { value: undefined, done: true };
+      },
+    };
+  }
+}
+
+// Refusal is a route body the bridge answers with a non-ok HTTP status and a JSON error.
+class Refusal {
+  constructor(status, error) {
+    this.status = status;
+    this.error = error;
   }
 }
 
@@ -168,6 +184,7 @@ async function page(search, routes, timers) {
     if (r === undefined) throw new Error("fake bridge: no route " + u.pathname);
     const body = await (typeof r === "function" ? r(u) : r);
     if (body instanceof Stream) return { ok: true, status: 200, statusText: "OK", body: { getReader: () => body.reader() } };
+    if (body instanceof Refusal) return { ok: false, status: body.status, statusText: "Bad Request", json: async () => ({ error: body.error }) };
     return { ok: true, status: 200, statusText: "OK", json: async () => body };
   };
   const ctx = {
@@ -358,7 +375,16 @@ test("an Exec with no final result ends its animation, restores the flow and say
   for (const c of [
     { name: "the stream ends without the activity", exec: () => new Stream([{ type: "record", data: { seq: 1, kind: "INPUT", text: "hi" } }]),
       status: /^Exec ended without a result: the stream closed before the bridge reported the call's outcome, which is unknown/ },
-    { name: "the request fails", exec: () => { throw new Error("Failed to fetch"); }, status: /^Exec failed: Failed to fetch$/ },
+    { name: "the bridge refuses the call", exec: () => new Refusal(400, "input: want 1 to 4000 characters"),
+      status: /^Exec failed: input: want 1 to 4000 characters$/ },
+    // Only a refusal is a definite failure: a connection lost after the 200 (or before the
+    // response, which the bridge sends with its first record) leaves the outcome unknown.
+    { name: "the read is rejected after a record", exec: () => new Stream([{ type: "record", data: { seq: 1, kind: "INPUT", text: "hi" } }], new TypeError("network error")),
+      status: /^Exec outcome unknown: the connection to the bridge failed \(network error\) before it reported the call's outcome; the journal shows what was written\.$/ },
+    { name: "a line is not JSON", exec: () => new Stream([{ type: "record", data: { seq: 1, kind: "INPUT", text: "hi" } }, "{trunc"]),
+      status: /^Exec outcome unknown: the connection to the bridge failed \(.+\) before it reported the call's outcome/ },
+    { name: "the request fails", exec: () => { throw new TypeError("Failed to fetch"); },
+      status: /^Exec outcome unknown: the connection to the bridge failed \(Failed to fetch\)/ },
   ]) {
     let animating = false;
     let journalReads = 0;

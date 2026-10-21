@@ -21,8 +21,10 @@ cd examples/agentsuite-substrate
 
 `ui.sh` uses the example's settings (`AGENTSUITE_DEMO_CLUSTER`, `AGENTSUITE_DEMO_WORK`,
 `AGENTSUITE_DEMO_SANDBOX`), so give it the ones `up.sh` ran with. `LIFECYCLE_UI_PORT` moves the page
-off 8090. The port-forwards use 18180 to 18184. The requirements are the example's, so micro-VMs
-need `/dev/kvm` in the Docker host and an arm64 Mac cannot run them.
+off 8090. The port-forwards use 18180 to 18184; `ui.sh` stops before changing anything if one of
+them, or the page's port, is already taken, so it never talks to another run's forwards. The
+requirements are the example's, so micro-VMs need `/dev/kvm` in the Docker host and an arm64 Mac
+cannot run them.
 
 ## What the page does
 

@@ -25,6 +25,17 @@ fail() {
 	echo "ui.sh: $*" >&2
 	exit 1
 }
+listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+# The forwards' fixed ports and the page's. A port someone else holds (another ui.sh, against
+# another cluster) would answer for this run, so refuse before anything changes.
+if [[ -z "${1:-}" ]]; then
+	for p in 18180 18181 18182 18183 18184 "${PORT}"; do
+		if listening "${p}"; then
+			fail "127.0.0.1:${p} is already in use (another ui.sh or port-forward?); stop it first; nothing was changed"
+		fi
+	done
+fi
 
 (cd "${EXAMPLE}" && go build -o "${BIN}" ./cmd/lifecycle-ui)
 
@@ -78,11 +89,17 @@ else
 fi
 
 PIDS=()
-cleanup() { for p in "${PIDS[@]}"; do kill "${p}" 2>/dev/null || true; done; }
+FWD_PORTS=()
+FWD_DIR="$(mktemp -d)"
+cleanup() {
+	for p in ${PIDS[@]+"${PIDS[@]}"}; do kill "${p}" 2>/dev/null || true; done
+	rm -rf "${FWD_DIR}"
+}
 trap cleanup EXIT
 forward() { # namespace service local:remote
-	"${K[@]}" -n "$1" port-forward "svc/$2" "$3" >/dev/null 2>&1 &
+	"${K[@]}" -n "$1" port-forward --address 127.0.0.1 "svc/$2" "$3" >"${FWD_DIR}/${3%%:*}.log" 2>&1 &
 	PIDS+=($!)
+	FWD_PORTS+=("${3%%:*}")
 }
 step "port-forwards to this machine's loopback"
 forward "${NS}" agentsessionsd 18180:8080
@@ -94,16 +111,19 @@ if ${FAKE}; then
 	forward "${NS}" fakemodel 18184:8080
 	MODEL_ARGS=(-model-base-url http://127.0.0.1:18184/v1 -model-stats http://127.0.0.1:18184/stats)
 fi
-ports=(18180 18181 18183)
-if [[ -n "${VOLUMES}" ]]; then ports+=(18182); fi
-if ${FAKE}; then ports+=(18184); fi
-listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
-for p in "${ports[@]}"; do
+# A forward is up when its own kubectl says it bound the port; a listener alone could be another
+# process's. A kubectl that exits (the port was taken after the check above) stops the run.
+forwarding() { grep -q "^Forwarding from 127.0.0.1:$1 " "${FWD_DIR}/$1.log"; }
+for i in "${!FWD_PORTS[@]}"; do
+	p="${FWD_PORTS[i]}"
 	for _ in $(seq 30); do
-		if listening "${p}"; then break; fi
+		if forwarding "${p}"; then break; fi
+		kill -0 "${PIDS[i]}" 2>/dev/null || break
 		sleep 1
 	done
-	listening "${p}" || fail "port-forward to 127.0.0.1:${p} did not come up"
+	kill -0 "${PIDS[i]}" 2>/dev/null ||
+		fail "port-forward to 127.0.0.1:${p} exited: $(tail -n 1 "${FWD_DIR}/${p}.log")"
+	forwarding "${p}" || fail "port-forward to 127.0.0.1:${p} did not come up"
 done
 
 step "the page: ${URL}"

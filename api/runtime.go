@@ -16,16 +16,20 @@ var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was supers
 // gone or came back without that state. Create returns it rather than create fresh compute when the
 // journal already records a started turn on that harness (SessionSpec.StartedTurns). Restore
 // returns it for any such session whose compute no longer exists, whatever the journal records,
-// since the snapshot it would restore went with the compute; the recorded compute, still there,
-// keeps the restore error whatever snapshot it holds (see InstanceRestorer). A backend also returns
+// since the snapshot it would restore went with the compute; the recorded compute, still there
+// after a failed restore, keeps the restore error whatever snapshot it holds (see
+// InstanceRestorer). A backend also returns
 // it from Create, Restore, Fork and Snapshot when the compute is there but did not get back the
 // memory its snapshot held (substrate resuming it on a worker that restored only its files). The
 // host returns it when the compute a turn or a Resume was placed on reports another
 // Incarnation.ComputeInstance than the journal recorded: the compute was replaced under the same
 // name. Snapshot returns it when the compute behind Incarnation.ID is not the instance the caller
-// required (a stateful fork). The journal cannot rebuild the state (I4), so fresh compute would
-// continue the journal with a harness that has forgotten it. The caller cannot fix this by
-// retrying; the session service reports it as FAILED_PRECONDITION.
+// required (a stateful fork). A backend whose compute can hold a snapshot the journal never
+// recorded returns it from Create, Restore and Snapshot when the compute holds one other than the
+// checkpoint the journal last recorded (SessionSpec.RecordedCheckpoint,
+// Incarnation.RecordedCheckpoint, Restore's ref). The journal cannot rebuild the state (I4), so
+// fresh compute would continue the journal with a harness that has forgotten it. The caller cannot
+// fix this by retrying; the session service reports it as FAILED_PRECONDITION.
 var ErrMemoryStateLost = errors.New("runtime: session's in-memory harness state is lost")
 
 // ErrInvalidCheckpoint reports that a runtime cannot produce or resume a checkpoint with the
@@ -68,7 +72,9 @@ type Runtime interface {
 	// latest one the journal recorded). A backend that sets ComputeInstance refuses with
 	// ErrMemoryStateLost when another instance is there, or none is, before it captures anything
 	// if it can tell, and in any case before returning a ref: a snapshot of a replacement would
-	// hand its callers compute that holds none of the session's state.
+	// hand its callers compute that holds none of the session's state. in.RecordedCheckpoint is
+	// the checkpoint the journal last recorded; a backend may refuse, with ErrMemoryStateLost,
+	// compute that holds another one (see Incarnation.RecordedCheckpoint).
 	Snapshot(ctx context.Context, in Incarnation, kind SnapshotKind) (SnapshotRef, error)
 
 	// Restore brings an incarnation back from a snapshot. Sub-second on memory-capable
@@ -157,6 +163,13 @@ type Incarnation struct {
 	// fork pass that recorded instance to Snapshot, which refuses another one.
 	// Empty records nothing and skips the check.
 	ComputeInstance string
+	// RecordedCheckpoint, on the Incarnation passed to Snapshot, is the checkpoint the session's
+	// journal last recorded for the session (see SessionSpec.RecordedCheckpoint); the zero value
+	// means none. Suspend and a stateful fork set it. A backend whose compute can hold a snapshot
+	// the journal never recorded (substrate: a capture a memory-tier Snapshot refused) refuses with
+	// ErrMemoryStateLost, before capturing, compute that holds another one: capturing it again
+	// would record state that is not the session's. Create, Restore and Fork leave it empty.
+	RecordedCheckpoint SnapshotRef
 }
 
 // SessionSpec is what a Runtime needs to create an incarnation.
@@ -179,6 +192,18 @@ type SessionSpec struct {
 	// one another host sharing the journal recorded while this call was being placed. A backend that
 	// does not need it does not call it. Nil declares a session with no started turns on this harness.
 	StartedTurns func() (int, error)
+	// RecordedCheckpoint reads the checkpoint the session's journal last recorded for this session:
+	// the SnapshotRef of its latest SUSPEND whose Local names the session, or a zero SnapshotRef
+	// (ExternalURI "") when there is none, as for a session never suspended or a fork child before
+	// its first Suspend (a parent's SUSPEND in a child's copied prefix is not the child's).
+	//
+	// A backend whose compute can hold a snapshot the journal never recorded (substrate: a capture a
+	// memory-tier Snapshot refused stays on the actor) compares it with the snapshot the existing
+	// compute holds before attaching to or resuming it, and refuses another with
+	// ErrMemoryStateLost. Like StartedTurns it is a function, so the backend reads the journal only
+	// after it has read the compute, and sees a SUSPEND another host recorded in between. A backend
+	// that does not need it does not call it. Nil declares no recorded checkpoint.
+	RecordedCheckpoint func() (SnapshotRef, error)
 	// resource requests, env, mounts elided for v0
 }
 

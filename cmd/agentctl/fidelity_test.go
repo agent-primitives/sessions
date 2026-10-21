@@ -26,7 +26,7 @@ import (
 type volumesTemplate struct {
 	mu     sync.Mutex
 	actors map[string]substrate.ActorStatus
-	// captures counts each actor's captures, for CaptureLineage.
+	// captures counts each actor's captures, for CaptureLineage and NoCapture.
 	captures map[string]int
 }
 
@@ -37,7 +37,7 @@ func (v *volumesTemplate) info(name string) substrate.ActorInfo {
 	if v.actors[name] != substrate.StatusSuspended {
 		n++
 	}
-	info := substrate.ActorInfo{Status: v.actors[name], Worker: "w", UID: "uid-" + name, CaptureLineage: fmt.Sprintf("capture-%d", n)}
+	info := substrate.ActorInfo{Status: v.actors[name], Worker: "w", UID: "uid-" + name, CaptureLineage: fmt.Sprintf("capture-%d", n), NoCapture: v.captures[name] == 0}
 	if info.Status == substrate.StatusSuspended {
 		info.Snapshot, info.SnapshotFidelity = "gs://snap/"+name, substrate.SnapshotFidelityVolumes
 	}

@@ -467,7 +467,9 @@ func TestPendingNewestSnapshotRefusesCaptureAndRestore(t *testing.T) {
 				desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
 			}
 			b := substrate.New(FromClient(f), "space", substrate.ObjectRef{Name: "echo"}, desc, opts...)
-			ref, err := b.Snapshot(t.Context(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+			// The journal recorded the older generation; the pending one is a later capture.
+			in := api.Incarnation{ID: "sess-x", RecordedCheckpoint: api.SnapshotRef{Local: "sess-x", ExternalURI: "old", Memory: true}}
+			ref, err := b.Snapshot(t.Context(), in, api.SnapshotExternal)
 			if !errors.Is(err, substrate.ErrSnapshotNotReady) || !errors.Is(err, substrate.ErrSnapshotNotRestorable) || ref != (api.SnapshotRef{}) {
 				t.Fatalf("pending capture returned ref=%+v err=%v", ref, err)
 			}
@@ -490,7 +492,21 @@ func TestPendingNewestSnapshotRefusesCaptureAndRestore(t *testing.T) {
 				}
 			}
 			latest.DurableSnapshot.Status = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
-			ref, err = b.Snapshot(t.Context(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+			if mode == "memory" {
+				// Completed, it is a capture the journal never recorded: a memory-tier Suspend
+				// refuses to record it, and Resume to resume it.
+				f.calls = nil
+				ref, err = b.Snapshot(t.Context(), in, api.SnapshotExternal)
+				if !errors.Is(err, api.ErrMemoryStateLost) || ref != (api.SnapshotRef{}) || !reflect.DeepEqual(f.calls, []string{"get:sess-x"}) {
+					t.Fatalf("completed unrecorded capture: ref=%+v err=%v calls=%v", ref, err, f.calls)
+				}
+				f.calls = nil
+				if _, err := b.Restore(t.Context(), in.RecordedCheckpoint); !errors.Is(err, api.ErrMemoryStateLost) || !reflect.DeepEqual(f.calls, []string{"get:sess-x"}) {
+					t.Fatalf("restore of the recorded checkpoint: err=%v calls=%v", err, f.calls)
+				}
+				return
+			}
+			ref, err = b.Snapshot(t.Context(), in, api.SnapshotExternal)
 			if err != nil || ref.ExternalURI != "latest" {
 				t.Fatalf("completed capture: ref=%+v err=%v", ref, err)
 			}
@@ -737,7 +753,10 @@ func TestResumeNotFoundOnAnExistingActorIsNotLostState(t *testing.T) {
 			return err
 		},
 		"create": func(b *substrate.Backend) error {
-			_, err := b.Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x", StartedTurns: turns})
+			_, err := b.Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x", StartedTurns: turns,
+				RecordedCheckpoint: func() (api.SnapshotRef, error) {
+					return api.SnapshotRef{Local: "sess-x", ExternalURI: uri, Memory: true}, nil
+				}})
 			return err
 		},
 	}
@@ -824,7 +843,23 @@ func TestSuspendHoldsOnlyADurableNewestGeneration(t *testing.T) {
 					desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
 				}
 				b := substrate.New(FromClient(f), "space", substrate.ObjectRef{Name: "echo"}, desc)
-				ref, err := b.Snapshot(t.Context(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+				in := api.Incarnation{ID: "sess-x"}
+				if memory {
+					// A memory tier suspends only an actor holding the checkpoint the journal
+					// recorded, so the newest generation is this suspend's own capture.
+					a.Status.State = atepb.ActorState_ACTOR_STATE_RUNNING
+					a.Status.WorkerAssignment = &atepb.WorkerAssignment{WorkerPod: "w"}
+					a.Status.Snapshots = a.Status.Snapshots[:1]
+					a.Status.LastAssignedGeneration = 1
+					in.RecordedCheckpoint = api.SnapshotRef{Local: "sess-x", ExternalURI: "older", Memory: true}
+					f.onSuspend = func() {
+						a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
+						a.Status.WorkerAssignment = nil
+						a.Status.Snapshots = append(a.Status.Snapshots, tc.newest)
+						a.Status.LastAssignedGeneration = 2
+					}
+				}
+				ref, err := b.Snapshot(t.Context(), in, api.SnapshotExternal)
 				if !slices.Contains(f.calls, "suspend:sess-x") {
 					t.Fatalf("calls=%v want a SuspendActor", f.calls)
 				}
@@ -846,7 +881,8 @@ func TestSuspendHoldsOnlyADurableNewestGeneration(t *testing.T) {
 // SUSPENDED and its newest generation is node-local. The adapter reports it suspended with no held
 // checkpoint, so Restore and Create's attach refuse before ResumeActor rather than resume the
 // older durable generation, and a pause in progress (SUSPENDING) is busy. A Suspend uploads the
-// paused generation (a paused-origin suspend), after which Restore proceeds from it.
+// paused generation (a paused-origin suspend), after which Restore proceeds from it. A memory tier
+// refuses that upload instead: the pause is a capture the session's journal did not record.
 func TestPausedActorIsHeldOnlyAfterSuspendUploadsIt(t *testing.T) {
 	const completed = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
 	for _, mode := range []string{"default", "volumes", "memory"} {
@@ -902,7 +938,16 @@ func TestPausedActorIsHeldOnlyAfterSuspendUploadsIt(t *testing.T) {
 				paused.Locality = ""
 				paused.DurableSnapshot = &atepb.SnapshotStorage{Status: completed, Object: &atepb.ObjectSnapshot{SnapshotUri: "promoted"}}
 			}
-			ref, err := b.Snapshot(t.Context(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+			in := api.Incarnation{ID: "sess-x", RecordedCheckpoint: api.SnapshotRef{Local: "sess-x", ExternalURI: "older", Memory: true}}
+			if mode == "memory" {
+				f.calls = nil
+				ref, err := b.Snapshot(t.Context(), in, api.SnapshotExternal)
+				if !errors.Is(err, api.ErrMemoryStateLost) || ref != (api.SnapshotRef{}) || !reflect.DeepEqual(f.calls, []string{"get:sess-x"}) {
+					t.Fatalf("memory-tier suspend of a paused actor: ref=%+v err=%v calls=%v, want api.ErrMemoryStateLost before suspending", ref, err, f.calls)
+				}
+				return
+			}
+			ref, err := b.Snapshot(t.Context(), in, api.SnapshotExternal)
 			if err != nil || ref.ExternalURI != "promoted" {
 				t.Fatalf("suspend of paused actor: ref=%+v err=%v want the promoted generation", ref, err)
 			}
@@ -1209,7 +1254,9 @@ func TestSnapshotRefusesACaptureAfterAnIncompatibleResume(t *testing.T) {
 			f.onSuspend = func() { f.actor = tc.capture }
 			b := substrate.New(FromClient(f), "space", substrate.ObjectRef{Name: "counter"},
 				api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}})
-			ref, err := b.Snapshot(t.Context(), api.Incarnation{ID: "sess-x", ComputeInstance: uid}, api.SnapshotExternal)
+			// The journal recorded the generation the actor was resumed from.
+			recorded := api.SnapshotRef{Local: "sess-x", ExternalURI: f.actor.GetStatus().GetSnapshots()[0].GetDurableSnapshot().GetObject().GetSnapshotUri(), Memory: true}
+			ref, err := b.Snapshot(t.Context(), api.Incarnation{ID: "sess-x", ComputeInstance: uid, RecordedCheckpoint: recorded}, api.SnapshotExternal)
 			if want := []string{"get:sess-x", "suspend:sess-x"}; !reflect.DeepEqual(f.calls, want) {
 				t.Fatalf("calls = %v, want %v", f.calls, want)
 			}
@@ -1224,6 +1271,49 @@ func TestSnapshotRefusesACaptureAfterAnIncompatibleResume(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), uid) || strings.Contains(err.Error(), "gs://") {
 				t.Fatalf("refusal %q must name the actor UID and no snapshot URI", err)
+			}
+		})
+	}
+}
+
+// NoCapture follows substrate v0.5.0's snapshot ownership: an actor is created with no snapshot or
+// with its source tag's (a fork's, or the template's golden tag) as generation 1 owned by the tag,
+// and every suspend or pause adds a generation owned by the actor. Anything else, including
+// evidence this client cannot read, is not proof of no capture.
+func TestNoCaptureFollowsSnapshotOwnership(t *testing.T) {
+	const completed = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+	seed := func() *atepb.Snapshot {
+		s := durableSnapshot(1, "gs://b/atespaces/space/tags/golden", completed)
+		s.Owner = atepb.SnapshotOwner_SNAPSHOT_OWNER_TAG
+		return s
+	}
+	status := func(last int32, snaps ...*atepb.Snapshot) *atepb.ActorStatus {
+		return &atepb.ActorStatus{State: atepb.ActorState_ACTOR_STATE_SUSPENDED, Snapshots: snaps, LastAssignedGeneration: last}
+	}
+	unspecified := seed()
+	unspecified.Owner = atepb.SnapshotOwner_SNAPSHOT_OWNER_UNSPECIFIED
+	unknown := status(1, seed())
+	unknown.ProtoReflect().SetUnknown(protowire.AppendVarint(protowire.AppendTag(nil, 99, protowire.VarintType), 1))
+	for _, tc := range []struct {
+		name string
+		st   *atepb.ActorStatus
+		want bool
+	}{
+		{name: "created without a snapshot", st: status(0), want: true},
+		{name: "created from a tag", st: status(1, seed()), want: true},
+		{name: "running from its tag", st: &atepb.ActorStatus{State: atepb.ActorState_ACTOR_STATE_RUNNING, Snapshots: []*atepb.Snapshot{seed()}, LastAssignedGeneration: 1, WorkerAssignment: &atepb.WorkerAssignment{WorkerPod: "w"}}, want: true},
+		{name: "captured", st: status(1, durableSnapshot(1, "gs://b/s1", completed))},
+		{name: "captured after its tag", st: status(2, seed(), durableSnapshot(2, "gs://b/s2", completed))},
+		{name: "paused", st: status(2, seed(), pausedSnapshot(2))},
+		{name: "a generation assigned past its tag", st: status(2, seed())},
+		{name: "a generation assigned and none held", st: status(1)},
+		{name: "owner unspecified", st: status(1, unspecified)},
+		{name: "no status"},
+		{name: "fields this client does not read", st: unknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := actorInfo(&atepb.Actor{Metadata: runningActor().GetMetadata(), Status: tc.st}).NoCapture; got != tc.want {
+				t.Fatalf("NoCapture = %v, want %v", got, tc.want)
 			}
 		})
 	}

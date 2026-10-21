@@ -107,7 +107,8 @@ not provide.
 ### Compatibility
 
 - Substrate Resume of a suspended actor now refuses a held checkpoint the actor no longer holds
-  (`FAILED_PRECONDITION`); Suspend again before Resume. A suspended actor's newest snapshot still
+  (`FAILED_PRECONDITION`); Suspend again before Resume (a memory-tier session cannot: see the
+  v0.5.0 runtime-fallback entry below). A suspended actor's newest snapshot still
   uploading is `UNAVAILABLE` (`api.ErrCheckpointPending`) for Exec, Suspend, Resume and Fork: once it
   completes, Suspend again to record it before Resume. A newest local-only checkpoint, including an
   out-of-band paused actor, is `FAILED_PRECONDITION`. Every Restore reads the actor first, so
@@ -156,12 +157,31 @@ not provide.
   Because v0.5.0's `SuspendActor` takes no precondition, a memory-tier Suspend or Fork also refuses
   with `api.ErrMemoryStateLost`, logged at `WARN`, when the actor was captured, paused or moved to
   another runtime between its check and the suspend; the actor is left suspended and no checkpoint
-  is recorded. This fails closed even when the memory survived. The refusal is not durable: delete
-  that actor before the session's next turn, which would otherwise resume the capture.
-  The adapter reports these through the new `ActorInfo.MemoryNotRestored` and
-  `ActorInfo.CaptureLineage`. Another `runtime/substrate.ControlClient` implementation that leaves
-  `MemoryNotRestored` false keeps the old behavior, but one that leaves `CaptureLineage` empty can
-  no longer suspend or fork a memory-tier session. See
+  is recorded. This fails closed even when the memory survived.
+  The refusal sticks: the capture stays on the suspended actor, so for a memory-tier session Exec
+  (Create's attach), Resume, Suspend and a stateful Fork's capture of the parent now refuse with
+  `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`), logged at `WARN`, before resuming or suspending
+  an actor (suspended, or woken by the router) whose newest snapshot is not the one the session's
+  latest `SUSPEND` names, or that holds a capture of its own when no `SUSPEND` is recorded. This
+  fails closed too, and the session stays refused: an actor holding a capture whose `SUSPEND`
+  append failed, a pause or suspend made outside sessions, or a completed upload that a Suspend
+  reported as pending (`UNAVAILABLE`, which v0.5.0's synchronous suspend does not leave) is refused
+  the same way, and Suspend again no longer records it. Another host's Suspend can be refused this
+  way between its capture and its append; retry once it is recorded. Nothing in sessions recovers
+  such a session: delete or abandon it, and delete the actor named in the warning with
+  `options.uid` (and `any_state: true` if the router woke it) to release it. Journal, wire and the
+  Sessions API are unchanged: the check reads the `SUSPEND` refs the journal already holds. A crash
+  and resume onto a worker of the same runtime between the check and the suspend is still not
+  caught; a precondition on substrate's `SuspendActor` would close it. Stateless sessions are
+  unaffected.
+  The adapter reports these through the new `ActorInfo.MemoryNotRestored`,
+  `ActorInfo.CaptureLineage` and `ActorInfo.NoCapture`, and the Placer passes the recorded
+  checkpoint through the new `api.SessionSpec.RecordedCheckpoint` and
+  `api.Incarnation.RecordedCheckpoint`, which other backends may ignore. Another
+  `runtime/substrate.ControlClient` implementation that leaves `MemoryNotRestored` false keeps the
+  old behavior, but one that leaves `CaptureLineage` empty can no longer suspend or fork a
+  memory-tier session, and one that leaves `NoCapture` false refuses every memory-tier session with
+  no `SUSPEND` recorded once its actor exists. See
   [runtime fallback](docs/substrate-conformance.md#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback).
 - SQLite schema v6 adds model-admission flags for new sessions; genuine pre-policy sessions,
   including empty sessions, remain legacy. Fork inherits admission metadata atomically. Existing
@@ -355,10 +375,12 @@ not provide.
   actor is replaced between the failed resume and `Restore`'s `GetActor` is `INTERNAL`; with it, the
   backend compares the actor's UID with the one the journal last recorded, read through the new
   optional `api.InstanceRestorer`, which the Placer uses in place of `Restore`: only another UID is
-  `FAILED_PRECONDITION`. The recorded actor keeps the resume error whatever snapshot it holds, so one
-  holding a newer snapshot than the journal's last `SUSPEND` (that append failed after the snapshot,
-  or another host suspended it again) stays recoverable. With no UID recorded to compare, a
-  replacement that does not hold the session's snapshot is `FAILED_PRECONDITION`, and an actor with
+  `FAILED_PRECONDITION`. After an admitted resume fails, the recorded actor keeps the resume error
+  whatever snapshot it holds; one holding a newer snapshot than the journal's last `SUSPEND` (that
+  append failed after the snapshot, or another host suspended it again) is now refused before the
+  resume when the session is memory-tier (see the v0.5.0 runtime-fallback entry). With no UID
+  recorded to compare, a replacement that does not hold the session's snapshot is
+  `FAILED_PRECONDITION`, and an actor with
   neither to compare, or whose journal cannot be read, keeps the resume error. An `Exec` whose
   `SUSPENDED` actor is deleted before its resume is treated as a missing actor
   (`FAILED_PRECONDITION` for a memory-tier session with started turns, a new actor otherwise), and

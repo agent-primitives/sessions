@@ -416,11 +416,12 @@ func (c *cloningControl) SuspendActor(ctx context.Context, a substrate.ActorRef)
 		race()
 	}
 	c.calls = append(c.calls, "suspend:"+a.Name)
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: "uid-" + a.Name, CaptureLineage: c.lineage()}, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: "uid-" + a.Name, CaptureLineage: c.lineage(), NoCapture: true}, nil
 }
 
 // lineage is every actor's CaptureLineage: each stays SUSPENDED holding c.snapshot, so a suspend
-// captures nothing new.
+// captures nothing new. Every actor reports NoCapture too: c.snapshot stands in for the capture a
+// running parent's first suspend would take, and these tests are about the Placer's ordering.
 func (c *cloningControl) lineage() string { return "held:" + c.snapshot }
 
 func (c *cloningControl) ResumeActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -432,7 +433,7 @@ func (c *cloningControl) ResumeActor(_ context.Context, a substrate.ActorRef) (s
 // what a stateful fork checks the parent against around its tag. It is not recorded in calls: the
 // backend's own tests pin that bracket, and these tests are about the Placer's ordering.
 func (c *cloningControl) GetActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: "uid-" + a.Name, CaptureLineage: c.lineage()}, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: "uid-" + a.Name, CaptureLineage: c.lineage(), NoCapture: true}, nil
 }
 
 func (c *cloningControl) TagActor(_ context.Context, source substrate.ActorRef, tag substrate.SnapshotID) error {
@@ -791,14 +792,15 @@ func TestResumeIgnoresInheritedParentSnapshotRef(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A realistic parent: a turn, a suspend/resume cycle of its OWN, then another turn. The fork point
-	// is after all of it, so the parent's SUSPEND record lands inside the copied prefix.
+	// is after all of it, so the parent's SUSPEND record lands inside the copied prefix. It names the
+	// snapshot the fake parent holds, so the fork's capture finds the checkpoint the journal recorded.
 	rec, err := parent.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "hi")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	rec, err = parent.Append(rec.Seq, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{
 		Kind:     api.LifecycleSuspend,
-		Snapshot: &api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-earlier", Memory: true},
+		Snapshot: &api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-now", Memory: true},
 	}})
 	if err != nil {
 		t.Fatal(err)

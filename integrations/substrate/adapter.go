@@ -231,6 +231,7 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 			len(st.ProtoReflect().GetUnknown()) == 0,
 		MemoryNotRestored: memoryNotRestored(a),
 		CaptureLineage:    captureLineage(st),
+		NoCapture:         noCapture(st),
 		Status:            actorStatus(st.GetState()),
 		Worker:            st.GetWorkerAssignment().GetWorkerPod(),
 		Snapshot:          snap.GetDurableSnapshot().GetObject().GetSnapshotUri(),
@@ -322,6 +323,26 @@ func captureLineage(st *atepb.ActorStatus) string {
 		stamp = base64.RawStdEncoding.EncodeToString(b)
 	}
 	return fmt.Sprintf("generation %d runtime %s", gen, stamp)
+}
+
+// noCapture is ActorInfo.NoCapture: the actor holds no snapshot captured from it. Substrate v0.5.0
+// creates an actor with no snapshot, or with the one snapshot of its source tag (a fork's, or the
+// template's golden tag) as generation 1, owned by the tag (CreateActor in
+// cmd/ateapi/internal/controlapi/actor.go). Every suspend or pause of the actor assigns a new
+// generation owned by the actor (ensureMarkedSuspending in workflow_suspend.go, newLocalSnapshot in
+// snapshot_helpers.go). So the newest snapshot owned by a tag at the last assigned generation, or
+// no snapshot and no generation assigned, means no capture. An unspecified owner, a missing status
+// or fields this client does not read are not evidence, so they report false.
+func noCapture(st *atepb.ActorStatus) bool {
+	if st == nil || len(st.ProtoReflect().GetUnknown()) != 0 {
+		return false
+	}
+	newest := heldSnapshot(st)
+	if newest == nil {
+		return st.GetLastAssignedGeneration() == 0
+	}
+	return newest.GetOwner() == atepb.SnapshotOwner_SNAPSHOT_OWNER_TAG &&
+		newest.GetGeneration() == st.GetLastAssignedGeneration()
 }
 
 // runtimeRestores reports whether an actor running under assigned can have restored the memory of

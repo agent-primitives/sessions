@@ -408,8 +408,16 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	// turns this Placer ran count: a turn ExecRequest.harness sent to another harness left no state in
 	// this one's compute. The backend counts when it has seen the compute is missing, not here, so a
 	// turn another host journals in between is not missed (see api.SessionSpec.StartedTurns).
+	// It also reads the checkpoint the journal last recorded, after it has read the compute, so a
+	// memory-tier backend can refuse compute holding a snapshot the journal never recorded.
 	spec := &api.SessionSpec{SessionUID: sessionUID, StartedTurns: func() (int, error) {
 		return p.startedTurns(log)
+	}, RecordedCheckpoint: func() (api.SnapshotRef, error) {
+		recs, err := log.Read(1)
+		if err != nil {
+			return api.SnapshotRef{}, fmt.Errorf("placement: read session journal: %w", err)
+		}
+		return recordedCheckpoint(recs, sessionUID), nil
 	}}
 	createFinished := observability.StartDebug(ctx, p.logger, "placement", "create_compute",
 		"session_uid", sessionUID)
@@ -997,8 +1005,10 @@ func (p *Placer) suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	if err != nil {
 		return api.SnapshotRef{}, fmt.Errorf("placement: read session journal: %w", err)
 	}
+	// Pass the checkpoint the journal last recorded too, so the backend refuses compute holding a
+	// snapshot the journal never recorded (one an earlier Snapshot refused) instead of capturing it.
 	instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
-	inc := api.Incarnation{ID: sessionUID, ComputeInstance: instance}
+	inc := api.Incarnation{ID: sessionUID, ComputeInstance: instance, RecordedCheckpoint: recordedCheckpoint(recs, sessionUID)}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
 	if err != nil {
 		return api.SnapshotRef{}, err
@@ -1526,8 +1536,11 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if err != nil {
 		return api.SnapshotRef{}, nil, fmt.Errorf("placement: read parent journal: %w", err)
 	}
+	// The parent's recorded checkpoint goes along, as in suspend, so a capture an earlier Snapshot
+	// refused is not captured again and handed to the children.
 	instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
-	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID, ComputeInstance: instance}, api.SnapshotExternal)
+	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID, ComputeInstance: instance,
+		RecordedCheckpoint: recordedCheckpoint(recs, parentUID)}, api.SnapshotExternal)
 	if err != nil {
 		if errors.Is(err, api.ErrInvalidCheckpoint) {
 			return api.SnapshotRef{}, nil, fmt.Errorf("%w: %w", ErrUnplaceable, err)
@@ -1644,6 +1657,15 @@ func (p *Placer) ranHere(recorded string) bool {
 	}
 	q, ok := p.registry.lookup(recorded)
 	return !ok || q == p
+}
+
+// recordedCheckpoint is api.SessionSpec.RecordedCheckpoint: the session's own latest SUSPEND ref,
+// or the zero SnapshotRef when it records none, which includes lastSuspendRef's fallback.
+func recordedCheckpoint(recs []eventlog.Record, sessionUID string) api.SnapshotRef {
+	if ref := lastSuspendRef(recs, sessionUID); ref.ExternalURI != "" {
+		return ref
+	}
+	return api.SnapshotRef{}
 }
 
 // lastSuspendRef returns the SnapshotRef from the most recent SUSPEND event THIS session wrote, or —

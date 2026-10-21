@@ -56,6 +56,9 @@ type mockControl struct {
 	runtime          string
 	getNoLineage     bool
 	suspendNoLineage bool
+	// captureUnknown makes NoCapture false whatever the actor holds, as a ControlClient that cannot
+	// tell whether a snapshot was captured from the actor reports it.
+	captureUnknown bool
 }
 
 // workerRuntime is the sandbox runtime of the worker a running actor holds.
@@ -142,11 +145,14 @@ func (m *mockControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (s
 	if m.suspendErr != nil {
 		return substrate.ActorInfo{}, m.suspendErr
 	}
+	snap := "gs://snap/" + a.Name
 	if m.statusOf(a.Name) == substrate.StatusRunning {
 		m.capture(a.Name)
+		snap = m.captureURI(a.Name)
+	} else if held := m.snapshots[a.Name]; held != "" {
+		snap = held // suspending a suspended actor is a no-op that keeps its snapshot
 	}
 	m.exists(a.Name, substrate.StatusSuspended)
-	snap := "gs://snap/" + a.Name
 	if m.suspendNoSnapshot {
 		snap = ""
 	}
@@ -159,7 +165,22 @@ func (m *mockControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (s
 	if m.suspendNoLineage {
 		lineage = ""
 	}
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: m.info.Worker, Snapshot: snap, SnapshotFidelity: m.info.SnapshotFidelity, UID: uid, CaptureLineage: lineage}, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: m.info.Worker, Snapshot: snap, SnapshotFidelity: m.info.SnapshotFidelity, UID: uid, CaptureLineage: lineage, NoCapture: m.noCapture(a.Name)}, nil
+}
+
+// captureURI is the external snapshot of the actor's newest capture. Every capture gets its own, as
+// substrate names each under a fresh snapshot name; the first keeps the plain form.
+func (m *mockControl) captureURI(name string) string {
+	if m.gens[name] <= 1 {
+		return "gs://snap/" + name
+	}
+	return fmt.Sprintf("gs://snap/%s/gen-%d", name, m.gens[name])
+}
+
+// noCapture is ActorInfo.NoCapture: no capture of the actor was recorded (see capture), unless a
+// test says it cannot tell.
+func (m *mockControl) noCapture(name string) bool {
+	return m.gens[name] == 0 && !m.captureUnknown
 }
 
 // holds records the external snapshot an actor currently holds.
@@ -174,8 +195,7 @@ func (m *mockControl) DeleteActor(ctx context.Context, a substrate.ActorRef) err
 		return err
 	}
 	m.calls = append(m.calls, "delete:"+a.Name)
-	delete(m.actors, a.Name)
-	delete(m.uids, a.Name)
+	m.delete(a.Name)
 	return nil
 }
 func (m *mockControl) GetActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -199,10 +219,10 @@ func (m *mockControl) GetActor(ctx context.Context, a substrate.ActorRef) (subst
 		if m.info.NoSnapshotHistory && m.snapshots[a.Name] == "" {
 			fidelity = substrate.SnapshotFidelityUnknown
 		}
-		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: fidelity, SnapshotNotReady: m.info.SnapshotNotReady, SnapshotPending: m.info.SnapshotPending, NoSnapshotHistory: m.info.NoSnapshotHistory, MemoryNotRestored: m.info.MemoryNotRestored, UID: uid, CaptureLineage: lineage}, nil
+		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: fidelity, SnapshotNotReady: m.info.SnapshotNotReady, SnapshotPending: m.info.SnapshotPending, NoSnapshotHistory: m.info.NoSnapshotHistory, MemoryNotRestored: m.info.MemoryNotRestored, UID: uid, CaptureLineage: lineage, NoCapture: m.noCapture(a.Name)}, nil
 	}
 	if m.status != substrate.StatusUnknown { // canned state for the suspend/restore cases
-		return substrate.ActorInfo{Status: m.status, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: m.info.SnapshotFidelity, MemoryNotRestored: m.info.MemoryNotRestored, UID: m.uid(a.Name), CaptureLineage: lineage}, nil
+		return substrate.ActorInfo{Status: m.status, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: m.info.SnapshotFidelity, MemoryNotRestored: m.info.MemoryNotRestored, UID: m.uid(a.Name), CaptureLineage: lineage, NoCapture: m.noCapture(a.Name)}, nil
 	}
 	return substrate.ActorInfo{}, substrate.ErrActorNotFound
 }
@@ -701,9 +721,11 @@ func TestRestoreReplacementPrecedesFidelityError(t *testing.T) {
 	}
 }
 
-// A RUNNING memory actor keeps main's no-op Resume, whatever snapshot it now holds, unless a
-// nonempty observed UID differs from the recorded one. Missing evidence is not proof of loss. A
-// proven replacement is loss before readiness; a stale SUSPENDED ref without proof is not.
+// A RUNNING memory actor keeps main's no-op Resume while it holds the recorded snapshot, unless a
+// nonempty observed UID differs from the recorded one. Missing UID evidence is not proof of loss.
+// A proven replacement is loss before readiness. An actor, RUNNING or SUSPENDED, that holds a
+// snapshot other than the held ref is loss too: the journal never recorded that capture (one a
+// Snapshot refused, say), so its RAM cannot be shown to be the session's.
 func TestRestoreOfMemoryActorIsGatedOnRecordedUID(t *testing.T) {
 	for _, tc := range []struct {
 		name, recorded string
@@ -711,8 +733,9 @@ func TestRestoreOfMemoryActorIsGatedOnRecordedUID(t *testing.T) {
 		pending        bool
 		noUID          bool
 		unreadable     bool
+		holds          string // the actor's snapshot: "" is the held ref's
 		wantCalls      []string
-		lost, stale    bool
+		lost           bool
 	}{
 		{name: "suspended replaced", recorded: "old-uid", suspended: true, wantCalls: []string{"get:s", "read-record"}, lost: true},
 		{name: "suspended record unreadable", suspended: true, unreadable: true, wantCalls: []string{"get:s", "read-record"}},
@@ -722,8 +745,11 @@ func TestRestoreOfMemoryActorIsGatedOnRecordedUID(t *testing.T) {
 		{name: "running missing observed", recorded: "uid-s", noUID: true, wantCalls: []string{"get:s", "resume:s"}},
 		{name: "running missing recorded", wantCalls: []string{"get:s", "read-record", "resume:s"}},
 		{name: "suspended pending replaced", recorded: "old-uid", suspended: true, pending: true, wantCalls: []string{"get:s", "read-record"}, lost: true},
-		{name: "suspended stale matching", recorded: "uid-s", suspended: true, wantCalls: []string{"get:s", "read-record"}, stale: true},
-		{name: "suspended stale missing observed", recorded: "old-uid", suspended: true, noUID: true, wantCalls: []string{"get:s"}, stale: true},
+		{name: "suspended holding the held ref", recorded: "uid-s", suspended: true, wantCalls: []string{"get:s", "read-record", "resume:s"}},
+		{name: "suspended stale matching", recorded: "uid-s", suspended: true, holds: "newer", wantCalls: []string{"get:s", "read-record"}, lost: true},
+		{name: "suspended stale missing observed", recorded: "old-uid", suspended: true, noUID: true, holds: "newer", wantCalls: []string{"get:s"}, lost: true},
+		{name: "running stale matching", recorded: "uid-s", holds: "newer", wantCalls: []string{"get:s", "read-record"}, lost: true},
+		{name: "running stale missing observed", recorded: "uid-s", noUID: true, holds: "newer", wantCalls: []string{"get:s"}, lost: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &mockControl{info: running("w"), getNoUID: tc.noUID, uids: map[string]string{"s": "uid-s"}}
@@ -733,7 +759,10 @@ func TestRestoreOfMemoryActorIsGatedOnRecordedUID(t *testing.T) {
 				status = substrate.StatusSuspended
 			}
 			m.exists("s", status)
-			m.holds("s", "newer") // the URI check applies only to a SUSPENDED actor
+			if tc.holds == "" {
+				tc.holds = "held"
+			}
+			m.holds("s", tc.holds)
 			inc, err := newMemoryBackend(m).RestoreInstance(t.Context(), api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, func() (string, error) {
 				m.calls = append(m.calls, "read-record")
 				if tc.unreadable {
@@ -745,7 +774,7 @@ func TestRestoreOfMemoryActorIsGatedOnRecordedUID(t *testing.T) {
 				t.Fatalf("calls=%v want %v (err=%v)", m.calls, tc.wantCalls, err)
 			}
 			if tc.lost {
-				if !errors.Is(err, substrate.ErrMemoryStateLost) || !errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, api.ErrCheckpointPending) || !reflect.DeepEqual(inc, api.Incarnation{}) {
+				if !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrSnapshotNotRestorable) || errors.Is(err, api.ErrCheckpointPending) || !reflect.DeepEqual(inc, api.Incarnation{}) {
 					t.Fatalf("replaced actor: inc=%+v err=%v, want ErrMemoryStateLost only", inc, err)
 				}
 				return
@@ -755,12 +784,6 @@ func TestRestoreOfMemoryActorIsGatedOnRecordedUID(t *testing.T) {
 				if !errors.Is(err, errJournalUnreadable) || !errors.Is(err, substrate.ErrSnapshotNotRestorable) || errors.Is(err, api.ErrMemoryStateLost) ||
 					errors.Is(err, api.ErrInvalidCheckpoint) || errors.Is(err, api.ErrComputeBusy) || !reflect.DeepEqual(inc, api.Incarnation{}) {
 					t.Fatalf("unreadable record: inc=%+v err=%v, want a non-loss refusal wrapping the read error", inc, err)
-				}
-				return
-			}
-			if tc.stale {
-				if !errors.Is(err, api.ErrInvalidCheckpoint) || !errors.Is(err, substrate.ErrSnapshotNotRestorable) || errors.Is(err, api.ErrMemoryStateLost) || !reflect.DeepEqual(inc, api.Incarnation{}) {
-					t.Fatalf("stale ref: inc=%+v err=%v, want ErrInvalidCheckpoint, not loss", inc, err)
 				}
 				return
 			}
@@ -1193,6 +1216,8 @@ func replace(m *mockCloner, name string) {
 func (m *mockControl) delete(name string) {
 	delete(m.actors, name)
 	delete(m.uids, name)
+	delete(m.gens, name) // an actor created again under the name has no captures
+	delete(m.stamps, name)
 }
 
 // The likeliest reason a fork fails partway is that the caller's deadline expired or it went away.
@@ -2256,9 +2281,13 @@ func TestSnapshotRefusesACaptureTheMemoryCheckDidNotSee(t *testing.T) {
 				logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelWarn}))
 				m := &mockControl{info: running("worker-a")}
 				m.exists("sess-x", substrate.StatusRunning)
+				in := api.Incarnation{ID: "sess-x"}
 				if tc.suspended {
+					// Suspended on a capture the journal recorded.
 					m.capture("sess-x")
 					m.exists("sess-x", substrate.StatusSuspended)
+					m.holds("sess-x", m.captureURI("sess-x"))
+					in.RecordedCheckpoint = api.SnapshotRef{Local: "sess-x", ExternalURI: m.captureURI("sess-x"), Memory: true}
 				}
 				m.afterGet = func(string) {
 					m.afterGet = nil
@@ -2273,7 +2302,6 @@ func TestSnapshotRefusesACaptureTheMemoryCheckDidNotSee(t *testing.T) {
 				b := substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
 					api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: resumability}},
 					substrate.WithLogger(logger))
-				in := api.Incarnation{ID: "sess-x"}
 				if memory {
 					in.ComputeInstance = m.uid("sess-x")
 				} else if tc.between != nil {
@@ -2344,5 +2372,119 @@ func TestSnapshotRequiresACaptureLineage(t *testing.T) {
 	m.exists("sess-x", substrate.StatusRunning)
 	if _, err := backendFor(m, false).Snapshot(t.Context(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal); err != nil {
 		t.Fatalf("stateless snapshot: %v", err)
+	}
+}
+
+// A memory-tier actor is attached to, resumed or captured only while it holds the checkpoint the
+// session's journal last recorded: the snapshot that SUSPEND names or, with none recorded, no
+// capture at all (NoCapture). Anything else is a capture the journal never accepted, such as one a
+// Snapshot refused, and is refused with api.ErrMemoryStateLost before ResumeActor or SuspendActor,
+// suspended or already resumed by something else. The refusal names no snapshot URI and is logged
+// at Warn. A recorded checkpoint that cannot be read refuses without being loss. A stateless
+// harness is not checked.
+func TestMemoryActorMustHoldTheRecordedCheckpoint(t *testing.T) {
+	const recordedURI = "gs://snap/sess-x"
+	errRead := errors.New("journal unreadable")
+	for _, tc := range []struct {
+		name     string
+		status   substrate.ActorStatus
+		holds    string // the actor's snapshot; a non-empty one is a capture
+		recorded string // the recorded checkpoint's URI, "" for none
+		unknown  bool   // the client cannot tell whether the actor holds a capture
+		readErr  bool
+		want     error // nil: attached, resumed or captured
+	}{
+		{name: "suspended on the recorded checkpoint", status: substrate.StatusSuspended, holds: recordedURI, recorded: recordedURI},
+		{name: "running from the recorded checkpoint", status: substrate.StatusRunning, holds: recordedURI, recorded: recordedURI},
+		{name: "running, nothing recorded and no capture", status: substrate.StatusRunning},
+		{name: "suspended on another capture", status: substrate.StatusSuspended, holds: "gs://snap/sess-x/gen-2", recorded: recordedURI, want: api.ErrMemoryStateLost},
+		{name: "running from another capture", status: substrate.StatusRunning, holds: "gs://snap/sess-x/gen-2", recorded: recordedURI, want: api.ErrMemoryStateLost},
+		{name: "suspended on a capture, nothing recorded", status: substrate.StatusSuspended, holds: recordedURI, want: api.ErrMemoryStateLost},
+		{name: "running from a capture, nothing recorded", status: substrate.StatusRunning, holds: recordedURI, want: api.ErrMemoryStateLost},
+		{name: "running, nothing recorded, capture unknown", status: substrate.StatusRunning, unknown: true, want: api.ErrMemoryStateLost},
+		{name: "recorded checkpoint unreadable", status: substrate.StatusSuspended, holds: recordedURI, recorded: recordedURI, readErr: true, want: errRead},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, memory := range []bool{true, false} {
+				for _, op := range []string{"create", "restore", "snapshot"} {
+					if tc.readErr && op != "create" {
+						continue // only Create reads the journal; Restore and Snapshot are handed it
+					}
+					var output bytes.Buffer
+					logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelWarn}))
+					m := &mockControl{info: running("worker-a"), captureUnknown: tc.unknown}
+					m.info.SnapshotFidelity = substrate.SnapshotFidelityMemory
+					m.exists("sess-x", tc.status)
+					if tc.holds != "" {
+						m.capture("sess-x")
+						m.holds("sess-x", tc.holds)
+					}
+					resumability := api.ResumabilityStatelessReplay
+					if memory {
+						resumability = api.ResumabilityRequiresMemorySnapshot
+					}
+					b := substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
+						api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: resumability}},
+						substrate.WithLogger(logger))
+					recorded := api.SnapshotRef{}
+					if tc.recorded != "" {
+						recorded = api.SnapshotRef{Local: "sess-x", ExternalURI: tc.recorded, Memory: true}
+					}
+					var err error
+					switch op {
+					case "create":
+						_, err = b.Create(t.Context(), &api.SessionSpec{SessionUID: "sess-x", RecordedCheckpoint: func() (api.SnapshotRef, error) {
+							m.calls = append(m.calls, "read-checkpoint")
+							if tc.readErr {
+								return api.SnapshotRef{}, errRead
+							}
+							return recorded, nil
+						}})
+					case "restore":
+						ref := recorded
+						if ref.Local == "" {
+							ref.Local = "sess-x" // Placer.Resume's ref when the journal records no SUSPEND
+						}
+						_, err = b.Restore(t.Context(), ref)
+					case "snapshot":
+						_, err = b.Snapshot(t.Context(), api.Incarnation{ID: "sess-x", RecordedCheckpoint: recorded}, api.SnapshotExternal)
+					}
+					acted := slices.ContainsFunc(m.calls, func(c string) bool {
+						return strings.HasPrefix(c, "resume:") || strings.HasPrefix(c, "suspend:")
+					})
+					if !memory && op == "restore" && tc.status == substrate.StatusSuspended && tc.holds != tc.recorded && tc.recorded != "" {
+						// A stateless Restore already refuses a held ref a suspended actor no longer holds.
+						if !errors.Is(err, api.ErrInvalidCheckpoint) || errors.Is(err, api.ErrMemoryStateLost) {
+							t.Fatalf("stateless restore of a stale ref: %v, want ErrInvalidCheckpoint only", err)
+						}
+						continue
+					}
+					if !memory || tc.want == nil {
+						if err != nil {
+							t.Fatalf("memory=%v %s: %v, want success", memory, op, err)
+						}
+						if !memory && slices.Contains(m.calls, "read-checkpoint") {
+							t.Fatalf("stateless %s read the recorded checkpoint: %v", op, m.calls)
+						}
+						continue
+					}
+					if !errors.Is(err, tc.want) || acted {
+						t.Fatalf("%s: err=%v calls=%v, want %v before any resume or suspend", op, err, m.calls, tc.want)
+					}
+					if tc.readErr {
+						if errors.Is(err, api.ErrMemoryStateLost) {
+							t.Fatalf("%s: an unreadable journal is not lost state: %v", op, err)
+						}
+						continue
+					}
+					if strings.Contains(err.Error(), "gs://") || !strings.Contains(err.Error(), "space/sess-x") {
+						t.Fatalf("%s: refusal %q must name the actor and no snapshot URI", op, err)
+					}
+					if !strings.Contains(output.String(), `"error_kind":"memory_state_lost"`) || !strings.Contains(output.String(), m.uid("sess-x")) {
+						t.Fatalf("%s: refusal was not logged for operators: %s", op, output.String())
+					}
+				}
+			}
+		})
 	}
 }

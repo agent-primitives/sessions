@@ -33,7 +33,10 @@ type suspendControl struct {
 	snapshotFidelity substrate.SnapshotFidelity
 	afterSuspend     func()
 	afterResume      func()
-	created          int // actors created so far, for server-assigned UIDs
+	// beforeSuspend, when set, runs once as SuspendActor starts: after the backend's check and
+	// before this suspend acts, the window another caller's suspend and resume can land in.
+	beforeSuspend func()
+	created       int // actors created so far, for server-assigned UIDs
 }
 
 type suspendActor struct {
@@ -47,7 +50,7 @@ type suspendActor struct {
 	// memoryLost models a resume that landed on a worker of another sandbox runtime and restored
 	// the snapshot's volumes only; GetActor reports it as MemoryNotRestored while the actor runs.
 	memoryLost bool
-	// captures counts the actor's captures, for CaptureLineage.
+	// captures counts the actor's captures, for CaptureLineage and NoCapture.
 	captures int
 }
 
@@ -119,6 +122,11 @@ func (c *suspendControl) ResumeActor(_ context.Context, ref substrate.ActorRef) 
 
 func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef) (substrate.ActorInfo, error) {
 	c.calls = append(c.calls, "suspend:"+ref.Name)
+	if c.beforeSuspend != nil {
+		hook := c.beforeSuspend
+		c.beforeSuspend = nil
+		hook()
+	}
 	if c.snapshotErr != nil {
 		return substrate.ActorInfo{}, c.snapshotErr
 	}
@@ -127,7 +135,7 @@ func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef)
 		return substrate.ActorInfo{}, status.Error(codes.NotFound, "actor does not exist")
 	}
 	if a.status == substrate.StatusSuspended && a.snapshot.Name != "" {
-		return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid, CaptureLineage: a.lineage()}, nil
+		return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid, CaptureLineage: a.lineage(), NoCapture: a.captures == 0}, nil
 	}
 	a.captures++
 	a.snapshot = substrate.SnapshotID{Atespace: ref.Atespace, Name: fmt.Sprintf("snap-%s-%d", ref.Name, len(c.snapshots)+1)}
@@ -138,7 +146,7 @@ func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef)
 		c.afterSuspend = nil
 		hook()
 	}
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid, CaptureLineage: a.lineage()}, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid, CaptureLineage: a.lineage(), NoCapture: a.captures == 0}, nil
 }
 
 func (c *suspendControl) DeleteActor(_ context.Context, ref substrate.ActorRef) error {
@@ -169,7 +177,7 @@ func (c *suspendControl) GetActor(_ context.Context, ref substrate.ActorRef) (su
 }
 
 func (c *suspendControl) info(ref substrate.ActorRef, a *suspendActor) substrate.ActorInfo {
-	info := substrate.ActorInfo{Status: a.status, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid, CaptureLineage: a.lineage()}
+	info := substrate.ActorInfo{Status: a.status, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid, CaptureLineage: a.lineage(), NoCapture: a.captures == 0}
 	if a.worker {
 		info.Worker = ref.Name
 		info.MemoryNotRestored = a.memoryLost
@@ -816,6 +824,100 @@ func TestSuspendRefusesLostMemoryWithoutARecordedInstance(t *testing.T) {
 			}
 			if after := len(suspendRecords(t, log)); after != before {
 				t.Fatalf("journal grew from %d to %d records: no SUSPEND may be recorded", before, after)
+			}
+		})
+	}
+}
+
+// A memory-tier Suspend refuses a capture it did not check (another caller suspended the actor and
+// resumed it on a worker that restored only its files, in between), and the actor is left holding
+// that capture. The refusal sticks: Exec, Resume, a new Suspend and a stateful Fork each compare
+// the actor with the checkpoint the journal last recorded and refuse it with
+// api.ErrMemoryStateLost, before resuming, suspending or tagging it, whether it is still suspended
+// or something (the router) resumed it since, and nothing is journaled. That holds for a session
+// suspended before and for one whose first Suspend was the refused one. A stateless session has no
+// such check and carries on.
+func TestRefusedCaptureStaysRefusedOnEveryPath(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		memory, suspended bool // suspended: the session has a recorded SUSPEND before the refused one
+	}{
+		{name: "memory, suspended before", memory: true, suspended: true},
+		{name: "memory, first suspend", memory: true},
+		{name: "stateless", suspended: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			ctl := newSuspendControl()
+			p, _ := newSuspendPlacer(t, ctl, tc.memory)
+			store := newSuspendStore(t)
+			log := store.Session("session")
+			ref := substrate.ActorRef{Atespace: "space", Name: "session"}
+			execSuspendTurn(t, p, log, "session", "first")
+			if tc.suspended {
+				if _, err := p.Suspend(ctx, log, "session"); err != nil {
+					t.Fatalf("suspend: %v", err)
+				}
+				execSuspendTurn(t, p, log, "session", "second")
+			}
+			// Between the check and this suspend, another caller captures the actor and resumes it on
+			// a worker that restores only its files: its RAM no longer holds the session's turns.
+			ctl.beforeSuspend = func() {
+				a := ctl.actors[ref]
+				a.captures++
+				a.snapshot = substrate.SnapshotID{Atespace: "space", Name: "snap-foreign"}
+				ctl.snapshots[a.snapshot] = suspendSnapshot{turns: a.turns, template: a.template}
+				a.turns = 0
+			}
+			_, err := p.Suspend(ctx, log, "session")
+			if !tc.memory {
+				if err != nil {
+					t.Fatalf("stateless suspend: %v", err)
+				}
+				execSuspendTurn(t, p, log, "session", "third")
+				return
+			}
+			if !errors.Is(err, api.ErrMemoryStateLost) {
+				t.Fatalf("suspend: %v, want api.ErrMemoryStateLost", err)
+			}
+			head, err := log.Head()
+			if err != nil {
+				t.Fatal(err)
+			}
+			child := store.Session("child")
+			paths := map[string]func() error{
+				"exec": func() error {
+					_, err := p.Exec(ctx, log, "session", []api.Message{*api.TextMessage("user", "next")}, head)
+					return err
+				},
+				"resume":  func() error { return p.Resume(ctx, log, "session") },
+				"suspend": func() error { _, err := p.Suspend(ctx, log, "session"); return err },
+				"fork": func() error {
+					return p.Fork(ctx, log, "session", []placement.ForkChild{{UID: "child", Log: child}}, head)
+				},
+			}
+			for _, woken := range []bool{false, true} {
+				if woken {
+					// The router resumes an actor on any request addressed to it, from the snapshot
+					// it holds: the refused capture.
+					a := ctl.actors[ref]
+					a.status, a.worker = substrate.StatusRunning, true
+				}
+				for _, name := range []string{"exec", "resume", "suspend", "fork"} {
+					ctl.calls = nil
+					if err := paths[name](); !errors.Is(err, api.ErrMemoryStateLost) {
+						t.Fatalf("woken=%v %s: %v, want api.ErrMemoryStateLost", woken, name, err)
+					}
+					if len(ctl.calls) != 0 {
+						t.Fatalf("woken=%v %s: calls=%v, want no resume, suspend or tag", woken, name, ctl.calls)
+					}
+					if got, err := log.Head(); err != nil || got != head {
+						t.Fatalf("woken=%v %s: head %d (err %v), want %d: nothing may be journaled", woken, name, got, err, head)
+					}
+					if _, exists := ctl.actors[substrate.ActorRef{Atespace: "space", Name: "child"}]; exists {
+						t.Fatalf("woken=%v %s created a fork child", woken, name)
+					}
+				}
 			}
 		})
 	}

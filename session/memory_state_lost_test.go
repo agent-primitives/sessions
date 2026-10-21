@@ -970,11 +970,11 @@ func TestResumeWhoseActorIsReplacedAfterTheFailedResumeIsRefused(t *testing.T) {
 }
 
 // The session's own actor can hold a newer snapshot than the journal's last SUSPEND names: the
-// SUSPEND append failed after the snapshot was taken, or another host woke and suspended it again.
-// Restore refuses that stale checkpoint before resuming (FAILED_PRECONDITION), without declaring
-// the recorded actor's memory lost. Another UID remains FAILED_PRECONDITION, as lost memory. Neither
-// refusal journals anything; recovery of the recorded actor requires an explicit new checkpoint,
-// not retrying the stale ref.
+// SUSPEND append failed after the snapshot was taken, another host woke and suspended it again, or
+// a memory-tier Snapshot refused the capture. The journal cannot tell these apart, so Resume
+// refuses that snapshot before resuming as lost memory (FAILED_PRECONDITION), as it does another
+// UID. Neither refusal journals anything, and a new Suspend is refused the same way rather than
+// recording the unrecorded snapshot as the session's, so the session stays refused.
 func TestResumeOfTheRecordedActorHoldingANewerSnapshot(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -1048,15 +1048,16 @@ func TestResumeOfTheRecordedActorHoldingANewerSnapshot(t *testing.T) {
 				return
 			}
 			ctl.resumeErr = nil
-			// An explicit checkpoint records the actor's current snapshot before it is restored.
-			if _, err := c.Suspend(ctx, &v1.SuspendRequest{Session: sess}); err != nil {
-				t.Fatalf("new checkpoint: %v", err)
+			// A new checkpoint would record the unrecorded snapshot as the session's: refused, and so
+			// is the next turn.
+			if _, err := c.Suspend(ctx, &v1.SuspendRequest{Session: sess}); status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("new checkpoint: %v, want FailedPrecondition", err)
 			}
-			if _, err := c.Resume(ctx, &v1.ResumeRequest{Session: sess}); err != nil {
-				t.Fatalf("resume of new checkpoint: %v", err)
+			if err := execHi(c, sess); status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("turn on the unrecorded snapshot: %v, want FailedPrecondition", err)
 			}
-			if err := execHi(c, sess); err != nil {
-				t.Fatalf("turn after the new checkpoint: %v", err)
+			if got, err := store.Session(sess).Head(); err != nil || got != head {
+				t.Errorf("journal head after the refusals = %d (err %v), want %d", got, err, head)
 			}
 		})
 	}

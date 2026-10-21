@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -39,6 +40,11 @@ type lifecycleControl struct {
 	// vanishOnSuspend deletes the actor as SuspendActor starts, as a delete landing between the
 	// backend's GetActor and its SuspendActor would.
 	vanishOnSuspend bool
+	// beforeSuspend, when set, runs once as SuspendActor starts, with l.mu held, so a test can act on
+	// the actor in the window between the backend's check and its suspend.
+	beforeSuspend func(a *atepb.Actor)
+	// runtime is the sandbox runtime ResumeActor binds a worker of; a capture is stamped with it.
+	runtime *atepb.SandboxRuntime
 }
 
 func newLifecycleControl() *lifecycleControl {
@@ -86,7 +92,7 @@ func (l *lifecycleControl) ResumeActor(_ context.Context, in *atepb.ResumeActorR
 		return nil, status.Errorf(codes.NotFound, "Actor %s not found", name)
 	}
 	a.Status.State = atepb.ActorState_ACTOR_STATE_RUNNING
-	a.Status.WorkerAssignment = &atepb.WorkerAssignment{WorkerPod: "worker-" + name}
+	a.Status.WorkerAssignment = &atepb.WorkerAssignment{WorkerPod: "worker-" + name, SandboxRuntime: l.runtime}
 	return &atepb.ResumeActorResponse{Actor: a, Resumed: true}, nil
 }
 
@@ -95,6 +101,13 @@ func (l *lifecycleControl) SuspendActor(_ context.Context, in *atepb.SuspendActo
 	defer l.mu.Unlock()
 	name := in.GetActor().GetName()
 	l.record("suspend:" + name)
+	if l.beforeSuspend != nil {
+		hook := l.beforeSuspend
+		l.beforeSuspend = nil
+		if a, ok := l.actors[name]; ok {
+			hook(a)
+		}
+	}
 	if l.vanishOnSuspend {
 		delete(l.actors, name)
 		delete(l.completed, name)
@@ -110,7 +123,9 @@ func (l *lifecycleControl) SuspendActor(_ context.Context, in *atepb.SuspendActo
 			st = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
 		}
 		uri := fmt.Sprintf("gs://b/atespaces/space/actors/%s/snapshots/s%d", name, gen)
-		a.Status.Snapshots = append(a.Status.Snapshots, durableSnapshot(gen, uri, st))
+		snap := durableSnapshot(gen, uri, st)
+		snap.SandboxRuntime = a.Status.GetWorkerAssignment().GetSandboxRuntime()
+		a.Status.Snapshots = append(a.Status.Snapshots, snap)
 		if l.completeOnSuspend {
 			l.completed[name] = uri
 		}
@@ -269,6 +284,7 @@ func TestStatefulForkDetectsNewerGeneration(t *testing.T) {
 	if _, err := b.Restore(ctx, snap); err != nil {
 		t.Fatal(err)
 	}
+	parent.RecordedCheckpoint = snap // as the Placer passes the SUSPEND the first snapshot recorded
 	if _, err := b.Snapshot(ctx, parent, api.SnapshotExternal); err != nil {
 		t.Fatal(err)
 	}
@@ -305,5 +321,96 @@ func TestSnapshotOfAnActorDeletedBeforeTheSuspendIsLostState(t *testing.T) {
 	}
 	if want := []string{"suspend:parent"}; !reflect.DeepEqual(ctl.calls, want) {
 		t.Fatalf("calls=%v want %v: the check before the suspend (GetActor, not recorded) passes", ctl.calls, want)
+	}
+}
+
+// The sticky refusal over the real adapter. A memory-tier Snapshot checks the actor, another caller
+// suspends it and resumes it on a worker of another sandbox runtime (which restores only its
+// files), and the suspend that follows captures that RAM; Snapshot refuses it, and substrate leaves
+// the actor SUSPENDED holding that capture. The session's next turn (Create's attach), its Resume
+// (Restore of the recorded checkpoint), a new Suspend, and a stateful fork's capture of the parent
+// each find the actor holding a snapshot the journal did not record and refuse it with
+// api.ErrMemoryStateLost before resuming or suspending it, also after the router woke it. With
+// nothing in between, the same suspend is recorded and the next turn resumes from it.
+func TestRefusedCaptureStaysRefusedOverTheAdapter(t *testing.T) {
+	rtA := sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h1")
+	rtB := sandboxRuntime("gvisor", "architecture", "amd64")
+	for _, foreign := range []bool{false, true} {
+		t.Run(fmt.Sprintf("foreign suspend and resume=%v", foreign), func(t *testing.T) {
+			ctx := t.Context()
+			ctl := newLifecycleControl()
+			ctl.runtime = rtA
+			b := memoryBackend(ctl)
+			parent, err := b.Create(ctx, &api.SessionSpec{SessionUID: "parent"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The session was suspended once and resumed: the journal records generation 1.
+			recorded, err := b.Snapshot(ctx, parent, api.SnapshotExternal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := b.Restore(ctx, recorded); err != nil {
+				t.Fatal(err)
+			}
+			if foreign {
+				ctl.beforeSuspend = func(a *atepb.Actor) {
+					gen := a.Status.LastAssignedGeneration + 1
+					snap := durableSnapshot(gen, fmt.Sprintf("gs://b/atespaces/space/actors/parent/snapshots/s%d", gen), atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+					snap.SandboxRuntime = rtA
+					a.Status.Snapshots = append(a.Status.Snapshots, snap)
+					a.Status.LastAssignedGeneration = gen
+					a.Status.WorkerAssignment = &atepb.WorkerAssignment{WorkerPod: "worker-b", SandboxRuntime: rtB}
+				}
+			}
+			parent.RecordedCheckpoint = recorded
+			ref, err := b.Snapshot(ctx, parent, api.SnapshotExternal)
+			if !foreign {
+				if err != nil || ref.ExternalURI == "" || ref == recorded {
+					t.Fatalf("snapshot: ref=%+v err=%v, want a new checkpoint", ref, err)
+				}
+				recorded = ref // the Placer records it as the session's SUSPEND
+				ctl.calls = nil
+				if _, err := b.Create(ctx, &api.SessionSpec{SessionUID: "parent", RecordedCheckpoint: func() (api.SnapshotRef, error) { return recorded, nil }}); err != nil {
+					t.Fatalf("next turn: %v", err)
+				}
+				if want := []string{"resume:parent"}; !reflect.DeepEqual(ctl.calls, want) {
+					t.Fatalf("calls=%v want %v", ctl.calls, want)
+				}
+				return
+			}
+			if !errors.Is(err, api.ErrMemoryStateLost) || ref != (api.SnapshotRef{}) {
+				t.Fatalf("snapshot: ref=%+v err=%v, want api.ErrMemoryStateLost", ref, err)
+			}
+			paths := map[string]func() error{
+				"next turn": func() error {
+					_, err := b.Create(ctx, &api.SessionSpec{SessionUID: "parent", StartedTurns: func() (int, error) { return 2, nil },
+						RecordedCheckpoint: func() (api.SnapshotRef, error) { return recorded, nil }})
+					return err
+				},
+				"resume": func() error { _, err := b.Restore(ctx, recorded); return err },
+				"suspend or fork capture": func() error {
+					_, err := b.Snapshot(ctx, api.Incarnation{ID: "parent", ComputeInstance: parent.ComputeInstance, RecordedCheckpoint: recorded}, api.SnapshotExternal)
+					return err
+				},
+			}
+			for _, woken := range []bool{false, true} {
+				if woken {
+					// The router resumes it from the capture, on a worker of the runtime that capture
+					// was stamped with, so nothing reports its memory as not restored.
+					ctl.actors["parent"].Status.State = atepb.ActorState_ACTOR_STATE_RUNNING
+					ctl.actors["parent"].Status.WorkerAssignment = &atepb.WorkerAssignment{WorkerPod: "worker-c", SandboxRuntime: rtB}
+				}
+				for name, path := range paths {
+					ctl.calls = nil
+					if err := path(); !errors.Is(err, api.ErrMemoryStateLost) || strings.Contains(err.Error(), "gs://") {
+						t.Fatalf("woken=%v %s: %v, want api.ErrMemoryStateLost naming no snapshot URI", woken, name, err)
+					}
+					if len(ctl.calls) != 0 {
+						t.Fatalf("woken=%v %s: calls=%v, want no resume or suspend", woken, name, ctl.calls)
+					}
+				}
+			}
+		})
 	}
 }

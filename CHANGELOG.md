@@ -126,11 +126,12 @@ not provide.
   files only when no matching worker has room) is refused with `FAILED_PRECONDITION`
   (`api.ErrMemoryStateLost`) on Exec, Resume, Suspend and Fork rather than run its turns without
   the session's RAM, and stays refused while that actor runs. Suspend refuses it whether or not
-  the journal recorded a compute instance. The first refusal per actor is logged at `WARN`; delete
-  the session to release the actor's worker. Stateless sessions are unaffected, and clusters whose
-  workers share one runtime do not hit it. The adapter reports it through the new
-  `ActorInfo.MemoryNotRestored`; another `runtime/substrate.ControlClient` implementation that
-  leaves it false keeps the old behavior. See
+  the journal recorded a compute instance. The first refusal per actor is logged at `WARN`. The
+  actor keeps its worker until it is deleted, and `DeleteSession` does not stop it (#88): delete
+  the substrate actor named in the warning with substrate's `DeleteActor` to release the worker.
+  Stateless sessions are unaffected, and clusters whose workers share one runtime do not hit it.
+  The adapter reports it through the new `ActorInfo.MemoryNotRestored`; another
+  `runtime/substrate.ControlClient` implementation that leaves it false keeps the old behavior. See
   [runtime fallback](docs/substrate-conformance.md#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback).
 - SQLite schema v6 adds model-admission flags for new sessions; genuine pre-policy sessions,
   including empty sessions, remain legacy. Fork inherits admission metadata atomically. Existing

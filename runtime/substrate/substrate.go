@@ -1206,9 +1206,10 @@ func (b *Backend) incarnation(ctx context.Context, uid string, info ActorInfo) (
 // and the actor; outcome says what was left behind.
 //
 // Outside a fork's clone, which Fork tears down, the actor keeps its worker and every later turn
-// is refused until the session is deleted, so the first refusal for each actor UID is also logged
-// at Warn for operators; repeats are not. Stop forgets the session's entry when it deletes the
-// actor, and Fork when it tears the clone down.
+// is refused until the actor itself is deleted (DeleteSession does not stop it; an operator must
+// delete the substrate actor), so the first refusal for each actor UID is also logged at Warn for
+// operators; repeats are not. Stop forgets the session's entry when it deletes the actor, and
+// Fork when it tears the clone down.
 func (b *Backend) memoryNotRestored(ctx context.Context, name string, info ActorInfo, outcome string) error {
 	if prev, loaded := b.memoryLostWarned.Swap(name, info.UID); !loaded || prev != info.UID {
 		observability.Logger(ctx, b.logger).WarnContext(ctx, "refused a memory-tier actor that did not restore its memory snapshot",

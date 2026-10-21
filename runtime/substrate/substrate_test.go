@@ -2076,9 +2076,9 @@ func TestSnapshotRefusesLostRAMWithoutARecordedInstance(t *testing.T) {
 	}
 }
 
-// The refused actor keeps its worker until the session is deleted, so the first refusal for each
-// actor UID is logged at Warn for operators; repeated turns do not log again, an actor with another
-// UID does, and Stop forgets the session.
+// The refused actor keeps its worker until the actor itself is deleted (DeleteSession does not stop
+// it), so the first refusal for each actor UID is logged at Warn for operators; repeated turns do not
+// log again, an actor with another UID does, and Stop forgets the session.
 func TestMemoryNotRestoredWarnsOncePerActor(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelWarn}))

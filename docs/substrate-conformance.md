@@ -399,10 +399,13 @@ that actor (it no longer holds the recorded snapshot), but Create's attach does 
 journal-held URI. Stateless sessions rebuild from the journal and are placed as before. A cluster
 whose workers all share one sandbox runtime, as the e2e kind cluster does, never hits the fallback.
 
-The refused actor keeps its worker until the session is deleted. The backend logs the first
-refusal for each actor UID at `WARN` (`error_kind=memory_state_lost`, with `atespace`, `actor`,
-`actor_uid` and `worker`); operators should delete such a session to release the worker, since
-nothing in sessions brings the lost memory back.
+The refused actor keeps its worker until the actor itself is deleted. `DeleteSession` does not
+release it: Delete never contacts the runtime or calls Stop (see the
+[FAQ](faq.md#does-deleting-a-session-stop-its-actor-or-erase-its-history) and #88). The backend
+logs the first refusal for each actor UID at `WARN` (`error_kind=memory_state_lost`, with
+`atespace`, `actor`, `actor_uid` and `worker`). Nothing in sessions brings the lost memory back, so
+operators should delete or abandon the session and then delete the substrate actor named in the
+warning (`atespace`/`actor`) with substrate's `DeleteActor` to release the worker.
 
 **Known limit — effective resume source can differ from durable evidence:** the adapter maps
 a paused actor to suspended but reports only durable checkpoint evidence. At the

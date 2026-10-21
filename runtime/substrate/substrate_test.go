@@ -3,6 +3,7 @@ package substrate_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -566,6 +567,7 @@ func TestSnapshotRequiresObservedFidelity(t *testing.T) {
 				switch mode {
 				case "memory":
 					b = newMemoryBackend(m)
+					m.exists(in.ID, substrate.StatusRunning) // a memory-tier snapshot looks first
 					wantFidelity = substrate.SnapshotFidelityMemory
 				case "recorded memory instance":
 					b = newBackend(m)
@@ -598,6 +600,7 @@ func TestRefusedCheckpointCannotBeResumed(t *testing.T) {
 				if mode == "memory" {
 					makeBackend = func() *substrate.Backend { return newMemoryBackend(m) }
 					m.info.SnapshotFidelity = substrate.SnapshotFidelityVolumes
+					m.exists("s", substrate.StatusRunning) // a memory-tier snapshot looks first
 				}
 				switch observation {
 				case "missing URI":
@@ -1666,23 +1669,37 @@ func TestSnapshotRefusesAReplacedActor(t *testing.T) {
 		}
 	}
 
+	// With no recorded instance any UID is accepted, but a memory-tier backend still looks first,
+	// for MemoryNotRestored.
 	m = newRunning()
 	if _, err := newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x"}, api.SnapshotExternal); err != nil {
 		t.Fatalf("snapshot with no instance required: %v", err)
 	}
-	if want := []string{"suspend:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+	if want := []string{"get:sess-x", "suspend:sess-x"}; !reflect.DeepEqual(m.calls, want) {
 		t.Fatalf("calls=%v want %v", m.calls, want)
 	}
 
 	// A memory-tier actor with no recorded instance (a fork child whose FORK marker records no clone,
 	// before its first turn) must still report a UID from the suspend: the ControlClient contract
 	// requires one. A stateless backend does not depend on it.
-	m = newRunning()
-	m.suspendNoUID = true
-	_, err = newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
-	if err == nil || errors.Is(err, api.ErrMemoryStateLost) || !strings.Contains(err.Error(), "reported no UID") ||
-		strings.Contains(err.Error(), "instance \"\"") {
-		t.Fatalf("memory-tier suspend with no UID and no recorded instance: err=%v, want a plain error saying the actor reported no UID", err)
+	for _, tc := range []struct {
+		name      string
+		set       func(*mockControl)
+		wantCalls []string
+	}{
+		{"look", func(m *mockControl) { m.getNoUID = true }, []string{"get:sess-x"}},
+		{"suspend", func(m *mockControl) { m.suspendNoUID = true }, []string{"get:sess-x", "suspend:sess-x"}},
+	} {
+		m = newRunning()
+		tc.set(m)
+		_, err = newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+		if err == nil || errors.Is(err, api.ErrMemoryStateLost) || !strings.Contains(err.Error(), "reported no UID") ||
+			strings.Contains(err.Error(), "instance \"\"") {
+			t.Fatalf("memory-tier %s with no UID and no recorded instance: err=%v, want a plain error saying the actor reported no UID", tc.name, err)
+		}
+		if !reflect.DeepEqual(m.calls, tc.wantCalls) {
+			t.Fatalf("memory-tier %s with no UID and no recorded instance: calls=%v want %v", tc.name, m.calls, tc.wantCalls)
+		}
 	}
 	m = newRunning()
 	m.suspendNoUID = true
@@ -1930,6 +1947,7 @@ func TestCheckpointRefusalNamesActorAndFidelity(t *testing.T) {
 					t.Errorf("%s: refusal exposes the snapshot URI: %v", operation, err)
 				}
 			}
+			m.exists("s", substrate.StatusRunning) // a memory-tier snapshot looks first
 			_, err := tc.makeBackend(m).Snapshot(t.Context(), api.Incarnation{ID: "s"}, api.SnapshotExternal)
 			check("snapshot", err)
 			_, err = tc.makeBackend(m).Restore(t.Context(), api.SnapshotRef{Local: "s"})
@@ -2029,6 +2047,101 @@ func TestSnapshotRefusesAMemoryActorThatLostItsRAM(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "nothing was snapshotted") {
 		t.Fatalf("refusal %q does not say nothing was snapshotted", err)
+	}
+}
+
+// With no recorded instance (a journal without compute_instance, or no turn yet), a
+// REQUIRES_MEMORY_SNAPSHOT backend still looks before suspending and refuses an actor that lost
+// its RAM; a stateless backend suspends as before, without the look.
+func TestSnapshotRefusesLostRAMWithoutARecordedInstance(t *testing.T) {
+	for _, memory := range []bool{true, false} {
+		t.Run(fmt.Sprintf("memory=%v", memory), func(t *testing.T) {
+			m := &mockControl{info: running("worker-b")}
+			m.info.MemoryNotRestored = true
+			m.exists("sess-x", substrate.StatusRunning)
+			ref, err := backendFor(m, memory).Snapshot(t.Context(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
+			if !memory {
+				if err != nil || !reflect.DeepEqual(m.calls, []string{"suspend:sess-x"}) {
+					t.Fatalf("stateless snapshot: ref=%+v err=%v calls=%v", ref, err, m.calls)
+				}
+				return
+			}
+			if !errors.Is(err, api.ErrMemoryStateLost) || ref != (api.SnapshotRef{}) {
+				t.Fatalf("snapshot: ref=%+v err=%v, want api.ErrMemoryStateLost", ref, err)
+			}
+			if want := []string{"get:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+				t.Fatalf("calls=%v want %v: the actor must not be suspended", m.calls, want)
+			}
+		})
+	}
+}
+
+// The refused actor keeps its worker until the session is deleted, so the first refusal for each
+// actor UID is logged at Warn for operators; repeated turns do not log again, an actor with another
+// UID does, and Stop forgets the session.
+func TestMemoryNotRestoredWarnsOncePerActor(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	m := &mockControl{info: running("worker-b")}
+	m.info.MemoryNotRestored = true
+	m.exists("sess-x", substrate.StatusRunning)
+	b := substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
+		api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}},
+		substrate.WithLogger(logger))
+	refuse := func() {
+		t.Helper()
+		if _, err := b.Create(t.Context(), &api.SessionSpec{SessionUID: "sess-x"}); !errors.Is(err, api.ErrMemoryStateLost) {
+			t.Fatalf("create: err=%v, want api.ErrMemoryStateLost", err)
+		}
+		if _, err := b.Snapshot(t.Context(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal); !errors.Is(err, api.ErrMemoryStateLost) {
+			t.Fatalf("snapshot: err=%v, want api.ErrMemoryStateLost", err)
+		}
+	}
+	warnings := func() []map[string]any {
+		t.Helper()
+		var got []map[string]any
+		for _, line := range bytes.Split(bytes.TrimSpace(output.Bytes()), []byte("\n")) {
+			if len(line) == 0 {
+				continue
+			}
+			var rec map[string]any
+			if err := json.Unmarshal(line, &rec); err != nil {
+				t.Fatal(err)
+			}
+			if rec["level"] == "WARN" && rec["error_kind"] == "memory_state_lost" {
+				got = append(got, rec)
+			}
+		}
+		return got
+	}
+
+	first := m.uid("sess-x")
+	refuse()
+	refuse()
+	got := warnings()
+	if len(got) != 1 {
+		t.Fatalf("warnings=%v, want one for actor %s", got, first)
+	}
+	for key, want := range map[string]string{"atespace": "space", "actor": "sess-x", "actor_uid": first, "worker": "worker-b"} {
+		if got[0][key] != want {
+			t.Fatalf("warning %v: %s=%v, want %q", got[0], key, got[0][key], want)
+		}
+	}
+
+	m.uids["sess-x"] = "uid-replacement"
+	refuse()
+	if got := warnings(); len(got) != 2 || got[1]["actor_uid"] != "uid-replacement" {
+		t.Fatalf("warnings=%v, want a second one for the replacement", got)
+	}
+
+	if err := b.Stop(t.Context(), api.Incarnation{ID: "sess-x"}); err != nil {
+		t.Fatal(err)
+	}
+	m.exists("sess-x", substrate.StatusRunning)
+	m.uids["sess-x"] = "uid-replacement"
+	refuse()
+	if got := warnings(); len(got) != 3 {
+		t.Fatalf("warnings=%v, want a third one after Stop forgot the session", got)
 	}
 }
 

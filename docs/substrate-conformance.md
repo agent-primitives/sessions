@@ -382,19 +382,27 @@ runtime has room, `ResumeActor` drops the constraint, binds another worker and r
 snapshot at VOLUMES scope (`canRelaxRuntime` and the restore in
 `cmd/ateapi/internal/controlapi/workflow_resume.go`), then returns the actor `RUNNING` with no
 error. The adapter compares the two runtimes on every actor it reads, the way substrate matches
-them (same sandbox class and schema version, every recorded attribute equal), and reports a
-mismatch on a newest durable MEMORY snapshot as `ActorInfo.MemoryNotRestored`. A template's golden
-snapshot holds no session state and is ignored; a fork clone's borrowed snapshot counts. For a
-`REQUIRES_MEMORY_SNAPSHOT` harness the backend refuses that actor with `api.ErrMemoryStateLost`
-(`FAILED_PRECONDITION`) on Restore, on Create's attach or resume, and for a stateful fork's clone,
-which it tears down. The refusal names the session, the actor and its UID. The actor is left
-running and every later turn is refused the same way. `Snapshot` with a recorded compute instance
-refuses it before suspending, so the lost state is not recorded as the session's checkpoint. A
-suspend outside sessions writes a snapshot on the new runtime and clears the evidence: Restore of
-the held ref still refuses that actor (it no longer holds the recorded snapshot), but Create's
-attach does not compare the journal-held URI. Stateless sessions rebuild from the journal and are
-placed as before. A cluster whose workers all share one sandbox runtime, as the e2e
-kind cluster does, never hits the fallback.
+them (same sandbox class and schema version, every recorded attribute equal). It compares the
+snapshot substrate restores from: the latest `COMPLETED` durable generation, even when a newer one
+is still pending, and none at all when a node-local checkpoint pins the resume to its node, since
+substrate never relaxes that one. A mismatch on a MEMORY snapshot is reported as
+`ActorInfo.MemoryNotRestored`. A template's golden snapshot holds no session state and is ignored;
+a fork clone's borrowed snapshot counts. For a `REQUIRES_MEMORY_SNAPSHOT` harness the backend
+refuses that actor with `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) on Restore, on Create's
+attach or resume, and for a stateful fork's clone, which it tears down. The refusal names the
+session, the actor and its UID. The actor is left running and every later turn is refused the same
+way. `Snapshot` of a memory-tier session refuses it before suspending, whether or not the journal
+recorded a compute instance (a journal written before `compute_instance`, or a session with no turn
+yet), so the lost state is never recorded as the session's checkpoint. A suspend outside sessions
+writes a snapshot on the new runtime and clears the evidence: Restore of the held ref still refuses
+that actor (it no longer holds the recorded snapshot), but Create's attach does not compare the
+journal-held URI. Stateless sessions rebuild from the journal and are placed as before. A cluster
+whose workers all share one sandbox runtime, as the e2e kind cluster does, never hits the fallback.
+
+The refused actor keeps its worker until the session is deleted. The backend logs the first
+refusal for each actor UID at `WARN` (`error_kind=memory_state_lost`, with `atespace`, `actor`,
+`actor_uid` and `worker`); operators should delete such a session to release the worker, since
+nothing in sessions brings the lost memory back.
 
 **Known limit — effective resume source can differ from durable evidence:** the adapter maps
 a paused actor to suspended but reports only durable checkpoint evidence. At the

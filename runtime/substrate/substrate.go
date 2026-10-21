@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/agent-primitives/sessions/api"
@@ -128,12 +129,13 @@ type ActorInfo struct {
 	// captures and actors seeded from a fork tag do not receive this exemption.
 	NoSnapshotHistory bool
 	// MemoryNotRestored is positive control-plane evidence that the actor holds a worker that did
-	// not restore the process memory of its newest MEMORY snapshot carrying session state (its own
-	// capture, or a fork tag's), so its RAM is not that snapshot's. Substrate since v0.5.0 does this
-	// when no worker matching the snapshot's recorded sandbox runtime has room: it restores the
-	// snapshot's volumes only on another worker. A template's golden snapshot holds no session state
-	// and never sets it. It stays set while the actor runs on that worker. False is not proof that
-	// memory was restored (see the effective-source limits in sessions issue #192).
+	// not restore the process memory of the MEMORY snapshot its resume restored from, when that
+	// snapshot carries session state (its own capture, or a fork tag's), so its RAM is not that
+	// snapshot's. Substrate since v0.5.0 does this when no worker matching the snapshot's recorded
+	// sandbox runtime has room: it restores the snapshot's volumes only on another worker. A
+	// template's golden snapshot holds no session state and never sets it. It stays set while the
+	// actor runs on that worker. False is not proof that memory was restored (see the
+	// effective-source limits in sessions issue #192).
 	MemoryNotRestored bool
 	// UID is the actor's server-assigned identity (substrate ResourceMetadata.uid). It is fixed for the
 	// actor's lifetime, suspends and resumes included, and differs for an actor created later under the
@@ -231,6 +233,8 @@ type Backend struct {
 	router      string         // host:port of the atenet-router ingress the harness is reached through
 	logger      *slog.Logger
 	volumesOnly bool
+	// memoryLostWarned maps an actor name to the UID memoryNotRestored last warned about.
+	memoryLostWarned sync.Map
 }
 
 var _ api.Runtime = (*Backend)(nil)
@@ -393,7 +397,7 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 		return api.Incarnation{}, fmt.Errorf("substrate: resume actor: %w", err)
 	}
 	resumeFinished(nil, "actor_status", info.Status)
-	inc, err = b.incarnation(sessionUID, info)
+	inc, err = b.incarnation(ctx, sessionUID, info)
 	return inc, err
 }
 
@@ -427,7 +431,7 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation
 	default:
 		return api.Incarnation{}, true, fmt.Errorf("substrate: actor %q is in state %v, not placeable", ref.Name, info.Status)
 	}
-	inc, err = b.incarnation(ref.Name, info)
+	inc, err = b.incarnation(ctx, ref.Name, info)
 	return inc, true, err
 }
 
@@ -469,10 +473,10 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 // the state it held went with it. An actor that reports no UID is refused with a plain error: it
 // cannot be compared, and that is a ControlClient fault, not evidence of a replacement. A
 // REQUIRES_MEMORY_SNAPSHOT backend refuses a suspend that reports no UID even when no instance is
-// recorded (a fork child whose FORK marker records no clone, before its first turn). With an
-// instance recorded, an actor that reports MemoryNotRestored is refused with
-// api.ErrMemoryStateLost before suspending, so its RAM-less state is never recorded as the
-// session's checkpoint.
+// recorded (a fork child whose FORK marker records no clone, before its first turn). Whenever the
+// checkpoint must hold memory, recorded instance or not, an actor that reports MemoryNotRestored
+// is refused with api.ErrMemoryStateLost before suspending, so its RAM-less state is never
+// recorded as the session's checkpoint.
 func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (snapshot api.SnapshotRef, err error) {
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "snapshot_compute",
 		"actor", in.ID,
@@ -497,7 +501,11 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 		"atespace", b.atespace,
 		"reason", "snapshot",
 	)
-	if in.ComputeInstance != "" {
+	if memoryRequired {
+		// Look before suspending whenever the checkpoint must hold memory, with or without a
+		// recorded instance: a journal without one (written before EXECUTION_START recorded
+		// compute_instance, or before the session's first turn) is the same session after a
+		// refused cross-runtime Restore.
 		info, err := b.ctl.GetActor(ctx, b.ref(in.ID))
 		if err != nil {
 			err = b.instanceGone(in, "get actor before snapshot", err)
@@ -509,9 +517,10 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 			return api.SnapshotRef{}, err
 		}
 		// Suspending an actor that came back without its memory would record a MEMORY checkpoint
-		// of a harness that lost the session's state, and a later Restore would accept it.
+		// of a harness that lost the session's state, stamped with the new worker's runtime, and a
+		// later Restore would accept it.
 		if info.MemoryNotRestored {
-			err := b.memoryNotRestored(in.ID, info, "nothing was snapshotted for the session")
+			err := b.memoryNotRestored(ctx, in.ID, info, "nothing was snapshotted for the session")
 			suspendFinished(err, "error_kind", "memory_state_lost")
 			return api.SnapshotRef{}, err
 		}
@@ -702,7 +711,7 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 		return api.Incarnation{}, fmt.Errorf("substrate: resume (restore) actor: %w", err)
 	}
 	resumeFinished(nil, "actor_status", info.Status)
-	inc, err = b.incarnation(name, info)
+	inc, err = b.incarnation(ctx, name, info)
 	return inc, err
 }
 
@@ -959,11 +968,13 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 		return api.Incarnation{}, fmt.Errorf("%w: fork child %s/%s was replaced between its create and resume (clone %q, now %q); its cloned RAM is gone, no child was created, and the replacement may have been woken by this fork's resume and is left running, not suspended or deleted",
 			ErrActorBusy, childRef.Atespace, childRef.Name, created.UID, info.UID)
 	}
-	inc, err = b.incarnation(child, info)
+	inc, err = b.incarnation(ctx, child, info)
 	if err != nil {
-		// The clone was created and resumed but is not reported RUNNING. Fork returns no handle, so
-		// without this the actor could hold a worker forever under a name nobody upstream still has.
+		// The clone was created and resumed but is not reported RUNNING, or came back without the
+		// parent's RAM. Fork returns no handle, so without this the actor could hold a worker
+		// forever under a name nobody upstream still has.
 		b.destroyChild(ctx, child)
+		b.memoryLostWarned.Delete(child)
 		return api.Incarnation{}, err
 	}
 	return inc, nil
@@ -1087,6 +1098,7 @@ func (b *Backend) Stop(ctx context.Context, in api.Incarnation) (err error) {
 		return fmt.Errorf("substrate: delete actor: %w", err)
 	}
 	deleteFinished(nil)
+	b.memoryLostWarned.Delete(in.ID)
 	if cloner, ok := b.ctl.(SnapshotCloner); ok {
 		_ = cloner.DeleteTag(ctx, SnapshotID{Atespace: b.atespace, Name: forkTag(in.ID)})
 	}
@@ -1161,7 +1173,7 @@ const TargetActorHeader = "ate-target-actor"
 // stateful Fork's clone) comes through here, so a REQUIRES_MEMORY_SNAPSHOT actor that reports
 // MemoryNotRestored is refused with api.ErrMemoryStateLost on each of them, on this turn and on
 // every later one while it keeps running on that worker. A stateless harness is not checked.
-func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, error) {
+func (b *Backend) incarnation(ctx context.Context, uid string, info ActorInfo) (api.Incarnation, error) {
 	if info.Status != StatusRunning {
 		return api.Incarnation{}, fmt.Errorf("substrate: actor %q is %v after resume, want running", uid, info.Status)
 	}
@@ -1173,7 +1185,7 @@ func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, erro
 		}
 		instance = info.UID
 		if info.MemoryNotRestored {
-			return api.Incarnation{}, b.memoryNotRestored(uid, info, "the actor was left running")
+			return api.Incarnation{}, b.memoryNotRestored(ctx, uid, info, "the actor was left running")
 		}
 	}
 	return api.Incarnation{
@@ -1192,7 +1204,17 @@ func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, erro
 // session whose actor reports ActorInfo.MemoryNotRestored: the actor is the session's (same UID),
 // but its RAM is not the snapshot's, and the journal cannot rebuild it (I4). It names the session
 // and the actor; outcome says what was left behind.
-func (b *Backend) memoryNotRestored(name string, info ActorInfo, outcome string) error {
+//
+// Outside a fork's clone, which Fork tears down, the actor keeps its worker and every later turn
+// is refused until the session is deleted, so the first refusal for each actor UID is also logged
+// at Warn for operators; repeats are not. Stop forgets the session's entry when it deletes the
+// actor, and Fork when it tears the clone down.
+func (b *Backend) memoryNotRestored(ctx context.Context, name string, info ActorInfo, outcome string) error {
+	if prev, loaded := b.memoryLostWarned.Swap(name, info.UID); !loaded || prev != info.UID {
+		observability.Logger(ctx, b.logger).WarnContext(ctx, "refused a memory-tier actor that did not restore its memory snapshot",
+			"component", "runtime.substrate", "atespace", b.atespace, "actor", name, "actor_uid", info.UID,
+			"worker", info.Worker, "error_kind", "memory_state_lost")
+	}
 	return fmt.Errorf("%w: actor %s/%s (UID %q) of session %q on harness %q runs on a worker that "+
 		"did not restore its memory snapshot (substrate restored its volumes only), so the session's "+
 		"in-RAM state is gone; %s",

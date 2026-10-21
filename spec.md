@@ -1421,11 +1421,11 @@ The reference host takes it as `placement.Backend` in
   cold-boot and lose RAM. Both cases remain open in
   [issue #192](https://github.com/agent-primitives/sessions/issues/192); held-URI/readiness checks
   do not solve effective-source validation. Sessions does not call `PauseActor`. A resume that
-  Substrate v0.5.0 binds to a worker whose sandbox runtime cannot restore the newest MEMORY
-  snapshot's recorded runtime restores its volumes only; the adapter reports it as
+  Substrate v0.5.0 binds to a worker whose sandbox runtime cannot restore the recorded runtime of
+  the MEMORY snapshot it restores from restores its volumes only; the adapter reports it as
   `ActorInfo.MemoryNotRestored`, and for a `REQUIRES_MEMORY_SNAPSHOT` harness the backend refuses
   that actor with `api.ErrMemoryStateLost` wherever it would hand it out (Create, Restore, a
-  stateful Fork's clone) and before `Snapshot` suspends a recorded instance.
+  stateful Fork's clone) and before `Snapshot` suspends it, recorded compute instance or not.
   `Snapshot` and `Restore` do not create missing actors. When no actor exists (for example a fresh
   session before any `Create` reached `CreateActor`, and not a fork child, or an actor deleted
   outside the host) both fail with the control API's `NOT_FOUND` (substrate module pinned in

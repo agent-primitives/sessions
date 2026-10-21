@@ -44,6 +44,9 @@ type suspendActor struct {
 	sourceTag substrate.SnapshotID
 	template  substrate.ObjectRef
 	uid       string
+	// memoryLost models a resume that landed on a worker of another sandbox runtime and restored
+	// the snapshot's volumes only; GetActor reports it as MemoryNotRestored while the actor runs.
+	memoryLost bool
 }
 
 type suspendSnapshot struct {
@@ -156,6 +159,7 @@ func (c *suspendControl) info(ref substrate.ActorRef, a *suspendActor) substrate
 	info := substrate.ActorInfo{Status: a.status, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid}
 	if a.worker {
 		info.Worker = ref.Name
+		info.MemoryNotRestored = a.memoryLost
 	}
 	return info
 }
@@ -738,6 +742,67 @@ func TestSuspendFailuresPreserveActorAndJournal(t *testing.T) {
 				}
 				execSuspendTurn(t, p, log, "session", "second")
 				assertSuspendOutputs(t, log, []string{"echo:first", "echo:second"})
+			}
+		})
+	}
+}
+
+// A memory-tier session whose journal records no compute instance (a journal written before
+// EXECUTION_START carried compute_instance, or one with no turn yet) is still checked for lost
+// memory before the suspend: after a Restore refused on another sandbox runtime, the actor runs
+// without its RAM, and suspending it would record that as the session's MEMORY checkpoint, which
+// the next Restore would accept. A stateless session has nothing in RAM to lose and suspends.
+func TestSuspendRefusesLostMemoryWithoutARecordedInstance(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		memory bool
+		legacy bool
+	}{
+		{name: "memory, journal without compute_instance", memory: true, legacy: true},
+		{name: "memory, no turn yet", memory: true},
+		{name: "stateless, journal without compute_instance", legacy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctl := newSuspendControl()
+			p, _ := newSuspendPlacer(t, ctl, tc.memory)
+			log := newSuspendStore(t).Session("session")
+			if tc.legacy {
+				desc, err := (echoagent.Harness{}).Describe(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				fence, err := log.NewFence()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := log.Append(0, fence, api.Event{ExecutionID: "e1", Kind: api.EventExecutionStart,
+					ExecutionStart: &api.ExecutionStart{Harness: desc.ID, HarnessVersion: desc.Version}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ref := substrate.ActorRef{Atespace: "space", Name: "session"}
+			ctl.actors[ref] = &suspendActor{status: substrate.StatusRunning, worker: true, uid: ctl.newUID(), memoryLost: true}
+			before := len(suspendRecords(t, log))
+
+			got, err := p.Suspend(t.Context(), log, "session")
+			if !tc.memory {
+				if err != nil {
+					t.Fatalf("stateless suspend: %v", err)
+				}
+				assertSuspendRef(t, log, got)
+				return
+			}
+			if !errors.Is(err, api.ErrMemoryStateLost) || got != (api.SnapshotRef{}) {
+				t.Fatalf("suspend: ref=%+v err=%v, want api.ErrMemoryStateLost", got, err)
+			}
+			if len(ctl.calls) != 0 {
+				t.Fatalf("calls=%v: the actor must not be suspended", ctl.calls)
+			}
+			if a := ctl.actors[ref]; a.status != substrate.StatusRunning || !a.worker || a.snapshot.Name != "" {
+				t.Fatalf("actor=%+v: no snapshot may be taken", a)
+			}
+			if after := len(suspendRecords(t, log)); after != before {
+				t.Fatalf("journal grew from %d to %d records: no SUSPEND may be recorded", before, after)
 			}
 		})
 	}

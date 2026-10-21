@@ -227,7 +227,7 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 			st.GetState() == atepb.ActorState_ACTOR_STATE_SUSPENDED &&
 			st.GetLastAssignedGeneration() == 0 && len(st.GetSnapshots()) == 0 &&
 			len(st.ProtoReflect().GetUnknown()) == 0,
-		MemoryNotRestored: memoryNotRestored(a, snap),
+		MemoryNotRestored: memoryNotRestored(a),
 		Status:            actorStatus(st.GetState()),
 		Worker:            st.GetWorkerAssignment().GetWorkerPod(),
 		Snapshot:          snap.GetDurableSnapshot().GetObject().GetSnapshotUri(),
@@ -237,30 +237,47 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 }
 
 // memoryNotRestored reports that the actor holds a worker whose sandbox runtime cannot restore the
-// process memory of held, the newest snapshot when it is durable and COMPLETED (nil otherwise).
+// process memory of the snapshot ResumeActor restores from. That is substrate's own choice
+// (requiredSnapshotRuntime and canRelaxRuntime in
+// cmd/ateapi/internal/controlapi/workflow_resume.go), not heldSnapshot's: a node-local checkpoint
+// pins the resume to its node and is never relaxed, so any snapshot with a locality rules the
+// fallback out; otherwise the source is the latest COMPLETED durable generation, even when a newer
+// generation is still PENDING or local-only.
 //
 // Since substrate v0.5.0 a snapshot records the runtime it was taken under
-// (Snapshot.sandbox_runtime, agent-substrate/substrate#2536) and an assignment the runtime the actor
-// was started or restored under (WorkerAssignment.sandbox_runtime). When no worker matching the
-// snapshot's runtime has room, ResumeActor drops that constraint (canRelaxRuntime in
-// cmd/ateapi/internal/controlapi/workflow_resume.go), binds another worker, restores the snapshot at
-// VOLUMES scope (runtimeIncompatible there) and still returns the actor RUNNING with no error.
-// Comparing the two runtimes on the response is the only evidence the client gets. The assignment
-// is not relabeled while the actor runs, and every snapshot taken on it is stamped with its
-// runtime, so the evidence holds until the next capture.
+// (Snapshot.sandbox_runtime, agent-substrate/substrate#2536) and an assignment the runtime the
+// actor was started or restored under (WorkerAssignment.sandbox_runtime). When no worker matching
+// the snapshot's runtime has room, ResumeActor drops that constraint (canRelaxRuntime), binds
+// another worker, restores the snapshot at VOLUMES scope (runtimeIncompatible in the same file)
+// and still returns the actor RUNNING with no error. Comparing the two runtimes on the response is
+// the only evidence the client gets. The assignment is not relabeled while the actor runs, and
+// every snapshot taken on it is stamped with its runtime, so the evidence holds until the next
+// capture.
 //
 // Only MEMORY snapshots count: that is the state a relaxed restore drops. A snapshot with no
 // recorded runtime imposes no constraint, so it is never relaxed. A tag-owned snapshot on an actor
 // created without a source tag is the template's golden snapshot (CreateActor in
 // cmd/ateapi/internal/controlapi/actor.go), which holds no session state; a fork clone keeps its
 // source_tag, so its borrowed snapshot counts.
-func memoryNotRestored(a *atepb.Actor, held *atepb.Snapshot) bool {
-	assignment := a.GetStatus().GetWorkerAssignment()
-	recorded := held.GetSandboxRuntime()
+func memoryNotRestored(a *atepb.Actor) bool {
+	st := a.GetStatus()
+	pinned := slices.ContainsFunc(st.GetSnapshots(), func(s *atepb.Snapshot) bool { return s.GetLocality() != "" })
+	assignment := st.GetWorkerAssignment()
+	if assignment == nil || pinned {
+		return false
+	}
+	completed := atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+	var src *atepb.Snapshot
+	for _, snap := range st.GetSnapshots() {
+		if snap.GetDurableSnapshot().GetStatus() == completed && (src == nil || snap.GetGeneration() >= src.GetGeneration()) {
+			src = snap
+		}
+	}
+	recorded := src.GetSandboxRuntime()
 	switch {
-	case assignment == nil, recorded == nil,
-		held.GetFidelity() != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
-		held.GetOwner() == atepb.SnapshotOwner_SNAPSHOT_OWNER_TAG && a.GetSourceTag() == nil:
+	case recorded == nil,
+		src.GetFidelity() != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+		src.GetOwner() == atepb.SnapshotOwner_SNAPSHOT_OWNER_TAG && a.GetSourceTag() == nil:
 		return false
 	}
 	return !runtimeRestores(assignment.GetSandboxRuntime(), recorded)

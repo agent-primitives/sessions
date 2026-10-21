@@ -1005,11 +1005,25 @@ func TestMemoryNotRestoredComparesRuntimes(t *testing.T) {
 			a.SourceTag = &atepb.ObjectRef{Atespace: "space", Name: "fork-sess-x"}
 			return a
 		}},
-		{name: "older generation stamped elsewhere", actor: func() *atepb.Actor {
+		{name: "only the newest completed generation's stamp is compared", actor: func() *atepb.Actor {
 			a := runtimeRunningActor(stamp, sandboxRuntime("gvisor"))
 			newest := durableSnapshot(2, "gs://b/s2", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
 			newest.SandboxRuntime = sandboxRuntime("gvisor")
 			a.Status.Snapshots = append(a.Status.Snapshots, newest)
+			return a
+		}},
+		{name: "newer pending generation: the completed one is restored", reason: true, actor: func() *atepb.Actor {
+			a := runtimeRunningActor(stamp, sandboxRuntime("gvisor"))
+			pending := durableSnapshot(2, "", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)
+			pending.SandboxRuntime = sandboxRuntime("gvisor")
+			a.Status.Snapshots = append(a.Status.Snapshots, pending)
+			a.Status.LastAssignedGeneration = 2
+			return a
+		}},
+		{name: "local checkpoint pins the resume to its node", actor: func() *atepb.Actor {
+			a := runtimeRunningActor(stamp, sandboxRuntime("gvisor"))
+			a.Status.Snapshots = append(a.Status.Snapshots, pausedSnapshot(2))
+			a.Status.LastAssignedGeneration = 2
 			return a
 		}},
 		{name: "suspended actor holds no worker", actor: func() *atepb.Actor {
@@ -1083,6 +1097,12 @@ func TestRestoreRefusesAMemoryResumeOnAnotherRuntime(t *testing.T) {
 			f.actor, f.calls = f.resumed, nil
 			if _, err := b.Create(t.Context(), &api.SessionSpec{SessionUID: "sess-x"}); !errors.Is(err, api.ErrMemoryStateLost) || !reflect.DeepEqual(f.calls, []string{"get:sess-x"}) {
 				t.Fatalf("attach after refusal: err=%v calls=%v", err, f.calls)
+			}
+			// A Suspend with no recorded instance (a journal without compute_instance) looks too,
+			// so the RAM-less actor is never captured as the session's MEMORY checkpoint.
+			f.calls = nil
+			if _, err := b.Snapshot(t.Context(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal); !errors.Is(err, api.ErrMemoryStateLost) || !reflect.DeepEqual(f.calls, []string{"get:sess-x"}) {
+				t.Fatalf("suspend after refusal: err=%v calls=%v", err, f.calls)
 			}
 		})
 	}

@@ -301,7 +301,7 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 	// root filesystem without memory (at v0.5.0, cmd/ateapi/internal/apivalidation/
 	// actor_template.go, ValidateCustom_CreateActorTemplateRequest_ActorTemplate). Refuse it here, so
 	// no template is emitted that template creation would reject.
-	if fidelity == atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS && class != "microvm" {
+	if fidelity == atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS && class != SandboxClassMicroVM {
 		return nil, fmt.Errorf("snapshot.fidelity %q with sandbox.class %q: substrate takes a ROOTFS snapshot only on microvm", b.Snapshot.Fidelity, b.Sandbox.Class)
 	}
 	name := TemplateName(c.Suite, c.Agent.ID, m[1], b.Digest(), o)
@@ -382,14 +382,20 @@ func resourceLimits(cpu, memory string) *atepb.Resources {
 	return &atepb.Resources{Limits: limits}
 }
 
-// sandboxClass is the SandboxConfig.sandbox_class for a binding's sandbox.class. Since substrate
-// v0.5.0 the field is the class name itself ("microvm" or "gvisor"), not an enum.
+// The sandbox classes a binding's sandbox.class can name. Since substrate v0.5.0
+// SandboxConfig.sandbox_class is the class name itself, not an enum, so these are also its values.
+const (
+	SandboxClassMicroVM = "microvm"
+	SandboxClassGVisor  = "gvisor"
+)
+
+// sandboxClass is the SandboxConfig.sandbox_class for a binding's sandbox.class.
 func sandboxClass(s string) (string, error) {
 	switch s {
-	case "microvm", "gvisor":
+	case SandboxClassMicroVM, SandboxClassGVisor:
 		return s, nil
 	}
-	return "", fmt.Errorf("sandbox.class %q: want microvm or gvisor", s)
+	return "", fmt.Errorf("sandbox.class %q: want %s or %s", s, SandboxClassMicroVM, SandboxClassGVisor)
 }
 
 func snapshotFidelity(s string) (atepb.SnapshotFidelity, error) {

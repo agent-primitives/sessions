@@ -94,11 +94,11 @@ not provide.
 ### Compatibility
 
 - Substrate Resume of a suspended actor now refuses a held checkpoint the actor no longer holds
-  (`FAILED_PRECONDITION`); Suspend again before Resume. A newest snapshot still uploading is
-  `UNAVAILABLE` (`api.ErrCheckpointPending`) for Exec, Suspend, Resume and Fork: once it completes,
-  Suspend again to record it before Resume. A newest local-only checkpoint, including out-of-band
-  PAUSED state, is `FAILED_PRECONDITION`. Every Restore reads the actor first, so control-read
-  failures refuse.
+  (`FAILED_PRECONDITION`); Suspend again before Resume. A suspended actor's newest snapshot still
+  uploading is `UNAVAILABLE` (`api.ErrCheckpointPending`) for Exec, Suspend, Resume and Fork: once it
+  completes, Suspend again to record it before Resume. A newest local-only checkpoint, including
+  out-of-band PAUSED state, is `FAILED_PRECONDITION`. Every Restore reads the actor first, so
+  control-read failures refuse.
   Resume of a running actor still succeeds, and a resuming or suspending actor is `ABORTED`. See
   [Substrate conformance](docs/substrate-conformance.md#held-checkpoint-restore-and-readiness).
 - SQLite schema v6 adds model-admission flags for new sessions; genuine pre-policy sessions,

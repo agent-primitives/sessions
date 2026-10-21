@@ -302,9 +302,11 @@ func memoryNotRestored(a *atepb.Actor) bool {
 //     stamp.
 //
 // So the SuspendActor response reports the value an earlier GetActor did only if the suspend
-// captured the state that read saw. Any capture or pause in between assigns a new generation, and
-// a resume onto a worker of another runtime changes the stamp; a crash, revert and resume onto a
-// worker of the same runtime changes neither. "" when the status is missing or the runtime cannot
+// captured the state that read saw. A capture or pause in between followed by a resume moves the
+// next capture to a newer generation, and a resume onto a worker of another runtime changes the
+// stamp. A single capture or pause with no resume after it takes the predicted generation and
+// stamp, so the suspend that follows reports the value the read did; so does a crash, revert and
+// resume onto a worker of the same runtime. "" when the status is missing or the runtime cannot
 // be encoded, which the backend refuses for a memory-tier Snapshot.
 func captureLineage(st *atepb.ActorStatus) string {
 	if st == nil {

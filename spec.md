@@ -1446,15 +1446,16 @@ The reference host takes it as `placement.Backend` in
   that actor with `api.ErrMemoryStateLost` wherever it would hand it out (Create, Restore, a
   stateful Fork's clone) and before `Snapshot` suspends it, recorded compute instance or not.
   `SuspendActor` takes no precondition, so `Snapshot` also refuses, with `api.ErrMemoryStateLost`, a
-  suspend whose `ActorInfo.CaptureLineage` differs from the actor it checked (a capture, pause or
-  move to another runtime in between); the refused capture stays on the suspended actor. The refusal
-  sticks through the journal (`RT-4i`): for a `REQUIRES_MEMORY_SNAPSHOT` harness, Create's attach,
-  Restore and `Snapshot` (Suspend, and a stateful fork's capture of the parent) refuse with
-  `api.ErrMemoryStateLost`, before `ResumeActor` or `SuspendActor`, an actor, SUSPENDED or RUNNING,
-  whose newest snapshot is not the one the latest recorded `SUSPEND` names or, with none recorded,
-  that holds a capture of its own (`ActorInfo.NoCapture` false). It fails closed: a capture whose
-  `SUSPEND` append failed, another host's capture before its append, or a suspend or pause outside
-  sessions is refused too, and nothing in sessions recovers the session after it. One window
+  suspend whose `ActorInfo.CaptureLineage` differs from the actor it checked (a capture or pause
+  followed by a resume, or a resume onto another runtime, in between); the refused capture stays
+  on the suspended actor. The refusal sticks through the journal (`RT-4i`): for a
+  `REQUIRES_MEMORY_SNAPSHOT` harness, Create's attach, Restore and `Snapshot` (Suspend, and a
+  stateful fork's capture of the parent) refuse with `api.ErrMemoryStateLost`, before `ResumeActor`
+  or `SuspendActor`, an actor, SUSPENDED or RUNNING, whose newest snapshot is not the one the latest
+  recorded `SUSPEND` names or, with none recorded, that holds a capture of its own
+  (`ActorInfo.NoCapture` false). It fails closed: a capture whose `SUSPEND` append failed, another
+  host's capture before its append, or a suspend or pause outside sessions is refused too, and
+  nothing in sessions recovers the session after it. One window
   remains: a crash, revert and resume onto a worker of the same runtime between the check and the
   suspend keeps the lineage and the newest snapshot, so the capture lacks the turns since the last
   checkpoint. Only a precondition on `SuspendActor` that substrate enforces (the worker assignment,

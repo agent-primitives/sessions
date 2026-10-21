@@ -156,9 +156,9 @@ not provide.
   delete. Stateless sessions are unaffected, and clusters whose workers share one runtime do not
   hit it.
   Because v0.5.0's `SuspendActor` takes no precondition, a memory-tier Suspend or Fork also refuses
-  with `api.ErrMemoryStateLost`, logged at `WARN`, when the actor was captured, paused or moved to
-  another runtime between its check and the suspend; the actor is left suspended and no checkpoint
-  is recorded. This fails closed even when the memory survived.
+  with `api.ErrMemoryStateLost`, logged at `WARN`, when the actor was captured or paused and then
+  resumed, or resumed on another runtime, between its check and the suspend; the actor is left
+  suspended and no checkpoint is recorded. This fails closed even when the memory survived.
   The refusal sticks: the capture stays on the suspended actor, so for a memory-tier session Exec
   (Create's attach), Resume, Suspend and a stateful Fork's capture of the parent now refuse with
   `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`), logged at `WARN`, before resuming or suspending

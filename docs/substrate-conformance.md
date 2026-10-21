@@ -460,8 +460,11 @@ the capture the suspend reports with the actor it checked, through `ActorInfo.Ca
 snapshot generation a suspend of that actor ends with, and the sandbox runtime that snapshot is
 stamped with. The adapter derives it from `last_assigned_generation`, the worker assignment's
 runtime and the newest snapshot, following the suspend workflow
-(`cmd/ateapi/internal/controlapi/workflow_suspend.go`). A capture or pause in between assigns a new
-generation, and a resume onto a worker of another runtime changes the stamp. Any change is
+(`cmd/ateapi/internal/controlapi/workflow_suspend.go`). A capture or pause in between followed by a
+resume moves the next capture to a newer generation, and a resume onto a worker of another runtime
+changes the stamp. A single capture or pause with no resume after it takes the generation and stamp
+the check predicted, so it is recorded (see
+[outside suspends](#substrate-v050-outside-suspends-and-router-auto-resume)). Any change is
 `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`), logged at `WARN`; no `SUSPEND` is recorded and the
 actor is left suspended. The check fails closed: a capture and resume onto a compatible worker in
 that window is refused too, although the memory survived. A `ControlClient` that reports no lineage

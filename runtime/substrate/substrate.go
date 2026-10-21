@@ -142,10 +142,12 @@ type ActorInfo struct {
 	// that capture will be stamped with; for one mid-capture or without a worker it is the newest
 	// snapshot's generation and stamp, which a suspend completes or leaves as it is. So a suspend
 	// that captures the state an earlier read saw reports the value that read did. A capture or
-	// pause by another caller in between assigns a new generation and changes it, as does a move to
-	// a worker of another sandbox runtime; a crash and resume onto a worker of the same runtime does
-	// not. The value is opaque: compare it only for equality. "" means the client cannot tell, and a
-	// memory-tier Snapshot refuses it (see Backend.Snapshot).
+	// pause by another caller in between followed by a resume changes it (the next capture gets a
+	// newer generation), as does a resume onto a worker of another sandbox runtime. A single capture
+	// or pause with no resume after it is the capture that read predicted and leaves it as it was,
+	// as does a crash and resume onto a worker of the same runtime. The value is opaque: compare it
+	// only for equality. "" means the client cannot tell, and a memory-tier Snapshot refuses it (see
+	// Backend.Snapshot).
 	CaptureLineage string
 	// NoCapture is positive control-plane evidence that the actor holds no snapshot captured from it:
 	// it has no snapshot, or its newest is the one it was created with, borrowed from a tag (the
@@ -546,11 +548,13 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 // capture then holds RAM that is not the session's, and the evidence is gone: a suspended actor
 // holds no worker to compare. So whenever the checkpoint must hold memory, Snapshot also requires
 // the suspend to report the CaptureLineage the check saw, and refuses any other with
-// api.ErrMemoryStateLost and no ref; the actor is left suspended. That fails closed: a capture,
-// pause, or suspend and resume by another caller in the window is refused even when the memory
-// survived. A lineage missing from either read is a plain error, before suspending when the check
-// reports none. A crash and resume onto a worker of the same runtime keeps the lineage, so that
-// window remains; only a precondition on SuspendActor itself would close it.
+// api.ErrMemoryStateLost and no ref; the actor is left suspended. That fails closed: a capture or
+// pause by another caller followed by a resume in the window is refused even when the memory
+// survived. A single capture or pause with no resume after it is the capture this suspend would
+// have taken: the suspend reports the lineage checked and it is recorded. A lineage missing from
+// either read is a plain error, before suspending when the check reports none. A crash and resume
+// onto a worker of the same runtime keeps the lineage, so that window remains; only a precondition
+// on SuspendActor itself would close it.
 //
 // The refused capture stays on the suspended actor, and nothing on the actor marks it. The journal
 // does: Snapshot also refuses, before suspending, an actor that does not hold in.RecordedCheckpoint
@@ -681,9 +685,10 @@ func (b *Backend) requireCheckedCapture(ctx context.Context, name string, checke
 	observability.Logger(ctx, b.logger).WarnContext(ctx, "refused a memory-tier snapshot whose capture is not of the state checked before the suspend",
 		"component", "runtime.substrate", "atespace", b.atespace, "actor", name, "actor_uid", after.UID,
 		"error_kind", "memory_state_lost")
-	return fmt.Errorf("%w: actor %s/%s (UID %q) was captured or paused by another operation, or moved to "+
-		"a worker of another sandbox runtime, between the memory check and this suspend, so the snapshot "+
-		"cannot be shown to hold the session's in-RAM state; no checkpoint was recorded for the session; "+
+	return fmt.Errorf("%w: actor %s/%s (UID %q) was captured or paused by another operation and "+
+		"resumed, or resumed on a worker of another sandbox runtime, between the memory check and "+
+		"this suspend, so the snapshot cannot be shown to hold the session's in-RAM state; no "+
+		"checkpoint was recorded for the session; "+
 		"actor remains suspended",
 		api.ErrMemoryStateLost, b.atespace, name, after.UID)
 }

@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"net"
@@ -27,6 +28,7 @@ import (
 	"github.com/agent-primitives/sessions/harness/chatagent"
 	"github.com/agent-primitives/sessions/harness/counteragent"
 	"github.com/agent-primitives/sessions/harness/echoagent"
+	"github.com/agent-primitives/sessions/harness/toolagent"
 	"github.com/agent-primitives/sessions/harnesswire"
 	"github.com/agent-primitives/sessions/observability"
 	"github.com/agent-primitives/sessions/runtime/substrate"
@@ -96,14 +98,18 @@ func main() {
 }
 
 // selectHarness picks the harness this node serves, by HARNESS_KIND (default "echo"). One image
-// serves both conformance tiers: "echo" and "chat" are STATELESS_REPLAY; "counter" requires a memory
-// snapshot. Chat's model ID is supplied by HARNESS_MODEL; provider configuration stays on the host.
+// serves both conformance tiers: "echo", "chat" and "tool" are STATELESS_REPLAY; "counter" requires
+// a memory snapshot. "tool" offers the model the approval-gated publish tool. The model ID for chat
+// and tool is supplied by HARNESS_MODEL; provider configuration stays on the host.
 func selectHarness() (api.Harness, error) {
-	switch env("HARNESS_KIND", "echo") {
-	case "chat":
+	switch kind := env("HARNESS_KIND", "echo"); kind {
+	case "chat", "tool":
 		model := os.Getenv("HARNESS_MODEL")
 		if model == "" {
-			return nil, errors.New("HARNESS_MODEL is required when HARNESS_KIND=chat")
+			return nil, fmt.Errorf("HARNESS_MODEL is required when HARNESS_KIND=%s", kind)
+		}
+		if kind == "tool" {
+			return toolagent.Harness{Model: model, Tools: []api.ToolDefinition{toolagent.PublishTool()}}, nil
 		}
 		return chatagent.Harness{Model: model}, nil
 	case "counter":

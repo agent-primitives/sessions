@@ -78,6 +78,11 @@ const meta = {
     description:
       "What is protected, what is not, and how to deploy it accordingly. Read before exposing a host.",
   },
+  "approval-gated-tool.md": {
+    title: "Approval-gated tool example",
+    description:
+      "A model calls a tool on the stock daemon; the session parks, survives a restart, and runs the call once after approval.",
+  },
   "tool-executors.md": {
     title: "Tool executors",
     description:

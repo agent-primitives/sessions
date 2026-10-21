@@ -28,13 +28,19 @@ import (
 
 func runSocketDaemon(t *testing.T, harnessAddr, journal, config string) (*client.Client, func()) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(t.Context())
-	addrs := make(chan string, 1)
-	done := make(chan error, 1)
 	args := []string{"-journal", journal, "-addr", "127.0.0.1:0", "-model", "m", "-harness", "h=" + harnessAddr}
 	if config != "" {
 		args = append(args, "-tool-executors", writeToolConfig(t, config))
 	}
+	return runDaemon(t, args)
+}
+
+// runDaemon runs the stock daemon's Run with args until the returned stop, or the test's end.
+func runDaemon(t *testing.T, args []string) (*client.Client, func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	addrs := make(chan string, 1)
+	done := make(chan error, 1)
 	go func() { done <- Run(args, withContext(ctx), withListening(func(addr string) { addrs <- addr })) }()
 	var addr string
 	select {

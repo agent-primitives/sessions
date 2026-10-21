@@ -57,7 +57,8 @@ The harness emits `publish` using `CONTROLLER_MEDIATED` or `REQUIRES_APPROVAL`, 
 nonempty call ID and idempotency key; it must not perform the gated effect itself.
 For approval, Exec parks **before any socket connection**. RPC/SDK Approve only commits
 the decision; Resume executes. CLI approve/deny do both. Denial never dials. See
-[approval recovery](interaction-model.md#approval-decisions-and-recovery).
+[approval recovery](interaction-model.md#approval-decisions-and-recovery). For the whole flow
+with a model calling the tool, see the [approval-gated tool example](approval-gated-tool.md).
 
 **Only static CLI `-harness` entries receive these executors.** Built-in echo/chat and
 HarnessRegistry-registered harnesses do not. A route naming one fails startup, rather than

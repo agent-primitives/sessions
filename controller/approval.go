@@ -24,6 +24,10 @@ type ApprovalState struct {
 	Request, Decision, Receipt *eventlog.Record
 	Head                       int64
 	Inherited, Completed       bool
+
+	// callRecord is the journaled TOOL_CALL record whose Event.ToolCall is Call. Its content_hash
+	// covers the call's canonical arguments; the request and decision extend the chain from it.
+	callRecord eventlog.Record
 }
 
 // InspectApproval selects the latest execution by first-seen non-lifecycle identity, then its
@@ -217,7 +221,7 @@ func inspectApprovalExecution(execution approvalExecution, head, forkSeq int64) 
 			if call.IdempotencyKey == "" {
 				return nil, fmt.Errorf("%w: approval call: %w", ErrInvalidExecutionLog, ErrMissingIdempotencyKey)
 			}
-			last = &ApprovalState{ExecutionID: execution.id, Call: call, Head: head, Inherited: record.Seq < forkSeq}
+			last = &ApprovalState{ExecutionID: execution.id, Call: call, Head: head, Inherited: record.Seq < forkSeq, callRecord: *record}
 			states = append(states, last)
 		case api.EventApprovalRequest:
 			if event.Approval == nil || last == nil || !open || last.Request != nil {

@@ -19,14 +19,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 
@@ -262,7 +268,10 @@ func cmdGet(args []string) error {
 	return nil
 }
 
-func cmdExec(args []string) error {
+func cmdExec(args []string) error { return runExec(args, os.Stdout) }
+
+// runExec runs one turn and writes it to w as it happens.
+func runExec(args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
 	cfg := commonFlags(fs)
 	var sess, input, harness string
@@ -278,26 +287,60 @@ func cmdExec(args []string) error {
 
 	// One call: an empty session is created by the server, and leaving ExpectedLastSeq nil appends
 	// at the head. Records print as they commit rather than after the turn.
+	out := &execOutput{w: w}
+	defer out.endStream()
 	_, err = c.Exec(context.Background(), client.ExecOptions{
 		Session: sess,
 		Inputs:  []string{input},
 		Harness: harness,
 		OnSession: func(s *v1.Session) {
 			if sess == "" {
-				fmt.Printf("session %s\n", s.GetMetadata().GetUid())
+				out.line(fmt.Sprintf("session %s", s.GetMetadata().GetUid()))
 			}
 		},
-		OnRecord: printRecord,
-		OnDelta: func(d *v1.Delta) {
-			// Deltas are transport: print them raw so output appears as the model produces it,
-			// then the finalized EVENT_OUTPUT record prints normally when it commits.
-			fmt.Print(d.GetChunk())
-			if d.GetDone() {
-				fmt.Println()
-			}
-		},
+		OnRecord: func(r *v1.LogRecord) { out.line(formatRecord(r)) },
+		OnDelta:  out.delta,
 	})
 	return err
+}
+
+// execOutput writes an exec turn as it arrives: whole lines (the session UID, committed records)
+// and the model's streamed text. Streamed text is as untrusted as the committed message it
+// previews, so it prints through the same escapeText and on its own "stream:" line, closed before
+// the next whole line: a chunk cannot end the line, act on the terminal (hiding the tool call
+// record that follows), or pass for a record. Each rune is escaped on its own, so a terminal
+// sequence split across chunks (ESC in one, "[8m" in the next) is still inert.
+type execOutput struct {
+	w         io.Writer
+	streaming bool // a "stream:" line is open
+}
+
+func (o *execOutput) line(s string) {
+	o.endStream()
+	_, _ = fmt.Fprintln(o.w, s)
+}
+
+// delta prints a chunk on the open stream line, opening one if needed, and closes the line when the
+// model's response is done. The done frame is not relied on to close it: a failed model call sends
+// none, so the next whole line or the end of the turn closes it instead.
+func (o *execOutput) delta(d *v1.Delta) {
+	if chunk := d.GetChunk(); chunk != "" {
+		if !o.streaming {
+			_, _ = io.WriteString(o.w, "stream: ")
+			o.streaming = true
+		}
+		_, _ = io.WriteString(o.w, escapeText(chunk))
+	}
+	if d.GetDone() {
+		o.endStream()
+	}
+}
+
+func (o *execOutput) endStream() {
+	if o.streaming {
+		_, _ = fmt.Fprintln(o.w)
+		o.streaming = false
+	}
 }
 
 func cmdReplay(args []string) error {
@@ -390,13 +433,20 @@ func lifecycle(args []string, which string) error {
 	return nil
 }
 
-func printRecord(r *v1.LogRecord) {
+func printRecord(r *v1.LogRecord) { fmt.Println(formatRecord(r)) }
+
+// formatRecord is one record's line: its seq and kind, a message's text, and a tool call's tool,
+// ID, mediation and arguments, so an operator can read the call an approval would authorize.
+func formatRecord(r *v1.LogRecord) string {
 	ev := r.GetEvent()
 	line := fmt.Sprintf("seq=%-3d %s", r.GetSeq(), ev.GetKind())
 	if msg := ev.GetMessage(); msg != nil {
 		line += "  " + partsText(msg)
 	}
-	fmt.Println(line)
+	if tc := ev.GetTool(); tc != nil {
+		line += "  " + toolCallText(tc)
+	}
+	return line
 }
 
 // formatRecordVerbose is printRecord's line plus the record's chain links (content_hash and
@@ -418,6 +468,9 @@ func formatRecordVerbose(r *v1.LogRecord) string {
 	if msg := ev.GetMessage(); msg != nil {
 		line += "  " + partsText(msg)
 	}
+	if tc := ev.GetTool(); tc != nil {
+		line += "  " + toolCallText(tc)
+	}
 	return line
 }
 
@@ -434,11 +487,104 @@ func short(h string) string {
 	return h
 }
 
+// toolCallText shows a tool call without its idempotency key. The tool name and call ID print as
+// displayToken, so a provider-chosen ID cannot add a line, hide text with terminal escapes, or fake
+// another field. Arguments print as JSON with sorted keys, so the same call prints the same way every
+// time, and without HTML escaping, so an approver reads <, > and & as the tool will receive them.
+// Control, format and other non-graphic runes in the arguments (the C1 control U+009B, the bidi
+// override U+202E) print as \uXXXX escapes, so model-chosen text cannot act on the terminal or
+// visually reorder the line.
+func toolCallText(tc *v1.ToolCall) string {
+	args := "null"
+	if tc.GetArgs() != nil {
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(tc.GetArgs().AsMap()); err == nil {
+			args = escapeFormatRunes(strings.TrimSuffix(buf.String(), "\n"))
+		} else {
+			args = "(not JSON)"
+		}
+	}
+	return fmt.Sprintf("tool=%s id=%s mediation=%s args=%s", displayToken(tc.GetTool()), displayToken(tc.GetId()),
+		strings.TrimPrefix(tc.GetMediation().String(), "MEDIATION_"), args)
+}
+
+// displayToken prints an untrusted identifier bare when it is valid UTF-8 made only of printable,
+// non-space runes other than '"' and '\\'; otherwise, or when empty, it prints as a Go quoted
+// string, which escapes control characters (newline, ESC), format characters (Cf) and invalid
+// bytes. A bare token therefore never contains a space, so it cannot be read as two fields.
+func displayToken(s string) string {
+	if s != "" && utf8.ValidString(s) && !strings.ContainsFunc(s, func(r rune) bool {
+		return !unicode.IsPrint(r) || r == ' ' || r == '"' || r == '\\'
+	}) {
+		return s
+	}
+	return strconv.Quote(s)
+}
+
+// escapeFormatRunes replaces each rune in encoded JSON that is not graphic (control characters
+// such as DEL and the C1 controls U+0080-U+009F, format characters such as the bidi override
+// U+202E, private-use and unassigned code points) with its \uXXXX escape, as a UTF-16 surrogate pair
+// above U+FFFF. encoding/json already escapes C0 controls and invalid UTF-8, so such runes occur only
+// inside JSON strings, and the result is still valid JSON that decodes to the same value.
+func escapeFormatRunes(s string) string {
+	if !strings.ContainsFunc(s, needsEscape) {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case !needsEscape(r):
+			b.WriteRune(r)
+		case r > 0xFFFF:
+			r1, r2 := utf16.EncodeRune(r)
+			fmt.Fprintf(&b, `\u%04x\u%04x`, r1, r2)
+		default:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		}
+	}
+	return b.String()
+}
+
+// needsEscape reports a rune a terminal may act on or not draw: anything outside the graphic
+// categories (letters, marks, numbers, punctuation, symbols and space separators), so control (Cc),
+// format (Cf), line and paragraph separator (Zl, Zp), private-use and unassigned runes.
+func needsEscape(r rune) bool { return !unicode.IsGraphic(r) }
+
+// escapeText prints untrusted message text on one line: each rune for which needsEscape holds prints
+// as its Go escape (\n, \x1b, \u202e), and each invalid UTF-8 byte as \xNN. Other runes, backslash
+// included, print as they are, so the output is for reading, not for decoding back.
+func escapeText(s string) string {
+	if utf8.ValidString(s) && !strings.ContainsFunc(s, needsEscape) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && size == 1:
+			fmt.Fprintf(&b, `\x%02x`, s[i])
+		case needsEscape(r):
+			q := strconv.QuoteRune(r)
+			b.WriteString(q[1 : len(q)-1])
+		default:
+			b.WriteRune(r)
+		}
+		i += size
+	}
+	return b.String()
+}
+
+// partsText is a message's role and text parts on one line. The role and text are untrusted (a model
+// or provider writes an assistant message, and it is journaled just before the tool call it
+// accompanies), so they print through escapeText: they cannot add a line that looks like another
+// record or hide the following lines with terminal escapes.
 func partsText(m *v1.Message) string {
-	s := m.GetRole() + ":"
+	s := escapeText(m.GetRole()) + ":"
 	for _, p := range m.GetParts() {
 		if t := p.GetText(); t != nil {
-			s += " " + t.GetText()
+			s += " " + escapeText(t.GetText())
 		}
 	}
 	return s

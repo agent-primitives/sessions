@@ -9,6 +9,16 @@ not provide.
 
 ### Added
 
+- An approval-gated tool runs on the stock daemon with no custom host: the reference harness
+  `harness/toolagent` (served by `harnessnode` with `HARNESS_KIND=tool`) offers the model a
+  `publish` tool, turns each model tool call into a `REQUIRES_APPROVAL` call keyed by execution and
+  call ID, and feeds results back until the model answers. See the
+  [approval-gated tool example](docs/approval-gated-tool.md).
+- `agentctl exec` and `replay` print a tool call's tool, ID, mediation and arguments (not its
+  idempotency key), so an approver can read the call before deciding. Each record prints on one
+  line: control and format characters in message text and arguments print as escapes (`\n`,
+  `\x1b`, `\u202e`), so a multi-line reply now prints as one line. `exec` escapes streamed model
+  text the same way and prints it on its own line starting `stream:`.
 - Go embedders can configure per-route model defaults and allowed IDs with
   `placement.WithModelPolicy`. Registration validates the descriptor against policy; new sessions
   validate their default at creation (`INVALID_ARGUMENT`) and Exec/Resume (`FAILED_PRECONDITION`).
@@ -64,6 +74,12 @@ not provide.
 
 ### Security
 
+- Before an approved `REQUIRES_APPROVAL` call reaches its executor, the controller recomputes the
+  `content_hash` of the call's journaled `TOOL_CALL` record over the call it sends and refuses a
+  mismatch with `controller.ErrJournalTampered` (`DATA_LOSS`), without calling the executor or
+  writing a receipt. The executor receives a copy of the arguments. Before, an in-process harness
+  on the in-memory store could change the approved arguments after the journal was verified,
+  because the store kept the harness's argument map. Journals and receipts are unchanged.
 - Chat Completions status errors, including streaming calls and their journaled errors, now retain
   only the model, HTTP status and bounded `error.code`/`error.param` identifiers, never provider
   messages or raw response bodies. Identifier limits and ordering match the Responses adapter.

@@ -348,3 +348,51 @@ func TestHistoryDropsReusedCallIDOfFailedTurn(t *testing.T) {
 		t.Fatalf("history after the failed turn\n got %s\nwant %s", got, want)
 	}
 }
+
+// An in-process executor's Output reaches the model in its journal form: the SQLite journal stores
+// it as a protobuf Struct, which reads a nil list or map back as empty and output it cannot hold
+// as none. Rendering the live value instead would send the model a request replay cannot reproduce.
+func TestToolOutputRendersInJournalForm(t *testing.T) {
+	for name, tc := range map[string]struct {
+		output   map[string]any
+		rendered string
+	}{
+		"nil list and map": {map[string]any{"items": []any(nil), "meta": map[string]any(nil), "n": 2}, `{"items":[],"meta":{},"n":2}`},
+		"not JSON":         {map[string]any{"f": func() {}}, "Tool returned no output."},
+	} {
+		t.Run(name, func(t *testing.T) {
+			log := newLog(t)
+			model := &scriptedModel{}
+			h := toolagent.Harness{Model: "m", Tools: []api.ToolDefinition{publish}}
+			park := parkedTurn(t, log, model, h, "publish hello")
+			if _, err := controller.Approve(log, api.ApprovalDecision{ExecutionID: park.Ref.ExecutionID, ToolCallID: park.Ref.ToolCallID, RequestSeq: park.Ref.RequestSeq, Approved: true}); err != nil {
+				t.Fatal(err)
+			}
+			c, err := controller.New(log, model.call, controller.WithSessionUID("s"), controller.WithToolExecutor(
+				func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+					return api.ToolResult{Output: tc.output}, nil
+				}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.Resume(t.Context(), h); err != nil {
+				t.Fatal(err)
+			}
+			live := model.requests[len(model.requests)-1].Messages
+			if got := live[len(live)-1].Parts[0].ToolResult.Content[0].Text.Text; got != tc.rendered {
+				t.Fatalf("live tool result text = %s, want %s", got, tc.rendered)
+			}
+			c, err = controller.New(log, nil, controller.WithSessionUID("s"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			outputs, err := c.Replay(t.Context(), h)
+			if err != nil {
+				t.Fatalf("Replay = %v", err)
+			}
+			if got := outputs[len(outputs)-1]; got != "done: "+tc.rendered {
+				t.Fatalf("replayed outputs = %q", outputs)
+			}
+		})
+	}
+}

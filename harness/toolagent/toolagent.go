@@ -13,6 +13,7 @@ import (
 	"errors"
 
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/wire"
 )
 
 // MaxModelCalls bounds the model calls in one turn, so a model that keeps calling tools cannot
@@ -133,6 +134,9 @@ func idempotencyKey(executionID, callID string) string {
 // toolMessage renders a result for the model: text Content as is, otherwise the error or the
 // output as JSON. Receipt fields (codes, approval sequence numbers) are journal evidence, not
 // model input.
+//
+// The output renders in its journal form (journalOutput), so a live turn sends the model the same
+// request as a replay or resume that reads the receipt back from a journal.
 func toolMessage(id string, result api.ToolResult) api.Message {
 	text := ""
 	for _, part := range result.Content {
@@ -141,14 +145,15 @@ func toolMessage(id string, result api.ToolResult) api.Message {
 		}
 	}
 	if text == "" {
+		output := journalOutput(result.Output)
 		switch {
 		case result.IsError && result.Error != "":
 			text = "Tool error: " + result.Error
 		case result.IsError:
 			text = "Tool error."
-		case result.Output != nil:
+		case output != nil:
 			// encoding/json sorts map keys, so a replayed turn renders the same request.
-			if data, err := json.Marshal(result.Output); err == nil {
+			if data, err := json.Marshal(output); err == nil {
 				text = string(data)
 			} else {
 				text = "Tool returned output that is not JSON."
@@ -158,6 +163,18 @@ func toolMessage(id string, result api.ToolResult) api.Message {
 		}
 	}
 	return api.Message{Role: "tool", Parts: []api.Part{{ToolResult: &api.ToolResult{ID: id, IsError: result.IsError, Content: api.TextMessage("tool", text).Parts}}}}
+}
+
+// journalOutput is output as a journal reads it back: the wire form, a protobuf Struct, converted
+// to a map again. A nil list or map comes back empty and a Go integer as a float64; output that
+// neither a Struct nor JSON can hold (a func value) comes back nil, as no output. Output that
+// arrived over the wire (a remote harness) is already in this form, and converting it again
+// changes nothing.
+func journalOutput(output map[string]any) map[string]any {
+	if output == nil {
+		return nil
+	}
+	return wire.ToolResultFromProto(wire.ToolResultToProto(&api.ToolResult{Output: output})).Output
 }
 
 // historyMessages rebuilds earlier turns for the model: inputs, completions and the results of

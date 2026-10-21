@@ -285,3 +285,59 @@ test("a Create that fails ends its animation and shows the error, with or withou
     assert.match(p.caption(), /^Exec · session aaaaaaaa/);
   }
 });
+
+// rows is the journal table's rows, as text.
+const rows = (p) => p.$("journal").querySelector("tbody").children.map((r) => r.textContent);
+
+function record(seq, kind) {
+  return { seq, kind, hash: "h" + seq, prev: "h" + (seq - 1) };
+}
+
+test("a journal read that a newer read of the same session overtook is dropped", async () => {
+  // A, then B, then A again while the first read of A is still out: only the newest read renders.
+  let release;
+  const held = new Promise((r) => { release = r; });
+  let readsOfA = 0;
+  const p = await page("?session=" + B, routes([], {
+    "/api/journal": (u) => {
+      if (u.searchParams.get("session") !== A) return { records: [record(1, "INPUT")], verified: true };
+      readsOfA++;
+      // The first read of A is slow and older: one record. The second has both.
+      return readsOfA === 1
+        ? held.then(() => ({ records: [record(1, "INPUT")], verified: true }))
+        : { records: [record(1, "INPUT"), record(2, "OUTPUT")], verified: true };
+    },
+  }));
+  const first = p.pick(A);
+  for (let i = 0; i < 20 && readsOfA < 1; i++) await flush();
+  assert.equal(readsOfA, 1, "the first read of A is out");
+  await p.pick(B);
+  await p.pick(A);
+  assert.equal(rows(p).length, 2);
+  release();
+  await first;
+  assert.deepEqual(rows(p).map((r) => r.split("h")[0]), ["1INPUT", "2OUTPUT"]);
+  assert.equal(p.$("journal-meta").textContent, "2 records · hash chain verified here");
+});
+
+test("an actor read that a newer read of the same session overtook is dropped", async () => {
+  let fail;
+  const held = new Promise((_, reject) => { fail = reject; });
+  let readsOfA = 0;
+  const p = await page("?session=" + B, routes([], {
+    "/api/actor": (u) => {
+      if (u.searchParams.get("session") !== A) return { available: false, error: "cluster reads are off" };
+      readsOfA++;
+      return readsOfA === 1 ? held : { available: false, error: "the newest read" };
+    },
+  }));
+  const first = p.pick(A);
+  for (let i = 0; i < 20 && readsOfA < 1; i++) await flush();
+  await p.pick(B);
+  await p.pick(A);
+  fail(new Error("the stale read"));
+  await first;
+  const text = p.$("actor").textContent;
+  assert.match(text, /the newest read/);
+  assert.doesNotMatch(text, /the stale read/);
+});

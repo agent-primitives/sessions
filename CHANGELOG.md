@@ -64,6 +64,12 @@ not provide.
 
 ### Security
 
+- Before an approved `REQUIRES_APPROVAL` call reaches its executor, the controller recomputes the
+  `content_hash` of the call's journaled `TOOL_CALL` record over the call it sends and refuses a
+  mismatch with `controller.ErrJournalTampered` (`DATA_LOSS`), without calling the executor or
+  writing a receipt. The executor receives a copy of the arguments. Before, an in-process harness
+  on the in-memory store could change the approved arguments after the journal was verified,
+  because the store kept the harness's argument map. Journals and receipts are unchanged.
 - Chat Completions status errors, including streaming calls and their journaled errors, now retain
   only the model, HTTP status and bounded `error.code`/`error.param` identifiers, never provider
   messages or raw response bodies. Identifier limits and ordering match the Responses adapter.

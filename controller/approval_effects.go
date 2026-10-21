@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/eventlog"
 )
 
 // ErrApprovalBlocked rejects a new turn while this session owns an approval intent without receipt.
@@ -133,7 +134,14 @@ func (s *liveSink) completeApproval(ctx context.Context, state *ApprovalState) (
 			s.guard.stop = ErrMissingToolExecutor
 			return api.ToolResult{}, s.guard.stop
 		}
-		res, err := s.c.tool(ctx, ToolCallContext{SessionUID: s.c.sessionUID}, *state.Call)
+		call, err := approvedCall(state)
+		if err != nil {
+			// The call no longer matches what was approved. Refuse before dialing and write no
+			// receipt: this is evidence failure, not an executor outcome.
+			s.guard.stop = err
+			return api.ToolResult{}, err
+		}
+		res, err := s.c.tool(ctx, ToolCallContext{SessionUID: s.c.sessionUID}, call)
 		s.c.liveToolCalls++
 		result = res
 		if err != nil {
@@ -167,6 +175,27 @@ func (s *liveSink) completeApproval(ctx context.Context, state *ApprovalState) (
 	approval := *decision
 	result.Approval = &approval
 	return result, nil
+}
+
+// approvedCall returns a copy of the call an approved decision authorizes, for the executor. The
+// decision names the request that follows the journaled TOOL_CALL record in the verified hash
+// chain, so that record's content_hash, computed over the call's RFC 8785 canonical arguments with
+// its ID, tool, mediation and idempotency key, is the approved hash. Recomputing it over the copy
+// right before dispatch refuses arguments that changed after the journal was verified, such as a
+// map the in-memory store shares with a harness that mutated it; the executor receives exactly
+// that copy. A mismatch wraps ErrJournalTampered.
+func approvedCall(state *ApprovalState) (api.ToolCall, error) {
+	record := state.callRecord
+	if record.Seq <= 0 || record.Event.Kind != api.EventToolCall || record.Event.ToolCall != state.Call {
+		return api.ToolCall{}, fmt.Errorf("%w: approved call has no journaled record", ErrReplayDiverged)
+	}
+	call := *state.Call
+	call.Args = cloneArgs(call.Args)
+	record.Event.ToolCall = &call
+	if err := verifyRecords(record.PrevHash, []eventlog.Record{record}); err != nil {
+		return api.ToolCall{}, fmt.Errorf("approved tool call does not match its journaled record: %w", err)
+	}
+	return call, nil
 }
 
 func approvalEvidence(scan *approvalScan, executionID string) map[string]*ApprovalState {

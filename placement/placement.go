@@ -1178,9 +1178,9 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		}
 	}
 	// A backend that can tell instances apart reads the one this harness's turns last ran on (or the
-	// clone a fork child's FORK marker recorded, before its first turn), so a failed restore with an
-	// instance recorded is reported as lost state only when that instance is gone or replaced. It
-	// reads the journal when it decides, not here, so a turn another host journals meanwhile is seen.
+	// clone a fork child's FORK marker recorded, before its first turn). It can refuse a replacement
+	// before resume and classify permanent loss after a failure. Each callback reads the journal
+	// when the backend decides, so a turn another host journals between those checks is seen.
 	if r, ok := p.backend.(api.InstanceRestorer); ok {
 		inc, err = r.RestoreInstance(ctx, ref, func() (string, error) {
 			recs, err := log.Read(1)

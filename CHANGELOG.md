@@ -39,6 +39,9 @@ not provide.
 
 ### Fixed
 
+- Substrate no longer resumes a suspended actor from a checkpoint other than the one the session
+  recorded, and no longer treats an older completed snapshot as current while the newest one is
+  pending or local-only (see Compatibility).
 - Cancelling `Resume` while an approved `REQUIRES_APPROVAL` call is in flight no longer records a
   permanent `EXECUTOR_ERROR` receipt. When `Resume`'s context has ended and the executor's
   error is that context's error, no receipt, `ERROR` or `END` is written: the call stays pending and
@@ -90,6 +93,14 @@ not provide.
 
 ### Compatibility
 
+- Substrate Resume of a suspended actor now refuses a held checkpoint the actor no longer holds
+  (`FAILED_PRECONDITION`); Suspend again before Resume. A suspended actor's newest snapshot still
+  uploading is `UNAVAILABLE` (`api.ErrCheckpointPending`) for Exec, Suspend, Resume and Fork: once it
+  completes, Suspend again to record it before Resume. A newest local-only checkpoint, including
+  out-of-band PAUSED state, is `FAILED_PRECONDITION`. Every Restore reads the actor first, so
+  control-read failures refuse.
+  Resume of a running actor still succeeds, and a resuming or suspending actor is `ABORTED`. See
+  [Substrate conformance](docs/substrate-conformance.md#held-checkpoint-restore-and-readiness).
 - SQLite schema v6 adds model-admission flags for new sessions; genuine pre-policy sessions,
   including empty sessions, remain legacy. Fork inherits admission metadata atomically. Existing
   journal bytes, hashes and `ModelCall` format are unchanged. Before upgrading, stop every older

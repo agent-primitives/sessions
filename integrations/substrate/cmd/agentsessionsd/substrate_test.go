@@ -510,9 +510,10 @@ func serveRouter(t *testing.T, h api.Harness, routed chan<- string) string {
 
 // fakeControl is a minimal lifecycle-faithful substrate.ControlClient.
 type fakeControl struct {
-	mu     sync.Mutex
-	actors map[string]substrate.ActorStatus
-	calls  []string
+	mu        sync.Mutex
+	actors    map[string]substrate.ActorStatus
+	snapshots map[string]string
+	calls     []string
 }
 
 func (f *fakeControl) log() []string {
@@ -545,7 +546,11 @@ func (f *fakeControl) SuspendActor(_ context.Context, a substrate.ActorRef) (sub
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "suspend:"+a.Atespace+"/"+a.Name)
 	f.actors[a.Name] = substrate.StatusSuspended
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: "mem://" + a.Name, UID: "uid-" + a.Name}, nil
+	if f.snapshots == nil {
+		f.snapshots = map[string]string{}
+	}
+	f.snapshots[a.Name] = "mem://" + a.Name
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: f.snapshots[a.Name], UID: "uid-" + a.Name}, nil
 }
 
 func (f *fakeControl) DeleteActor(_ context.Context, a substrate.ActorRef) error {
@@ -553,6 +558,7 @@ func (f *fakeControl) DeleteActor(_ context.Context, a substrate.ActorRef) error
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "delete:"+a.Atespace+"/"+a.Name)
 	delete(f.actors, a.Name)
+	delete(f.snapshots, a.Name)
 	return nil
 }
 
@@ -563,7 +569,7 @@ func (f *fakeControl) GetActor(_ context.Context, a substrate.ActorRef) (substra
 	if !ok {
 		return substrate.ActorInfo{}, substrate.ErrActorNotFound
 	}
-	return substrate.ActorInfo{Status: st, UID: "uid-" + a.Name}, nil
+	return substrate.ActorInfo{Status: st, Snapshot: f.snapshots[a.Name], UID: "uid-" + a.Name}, nil
 }
 
 func selfSignedCert(t *testing.T, host string) (certPEM, keyPEM []byte) {

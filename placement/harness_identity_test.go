@@ -140,6 +140,43 @@ func TestPlacerResumeIdentityChecksUseConnectedHarness(t *testing.T) {
 	}
 }
 
+// Main-era stateless journals may have Memory:true without a URI; the descriptor, not that
+// legacy bit, determines whether live/no-held-checkpoint recovery is permitted.
+func TestPlacerResumeOfLegacyStatelessEmptyMemoryRef(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("legacy")
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(0, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{
+		Kind: api.LifecycleSuspend, Snapshot: &api.SnapshotRef{Local: "legacy", Memory: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	ctl := &cloningControl{}
+	backend := substrate.New(ctl, "space", substrate.ObjectRef{Name: "echo"}, api.Descriptor{
+		ID: "connected-id", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay},
+	})
+	p := placement.New(backend, echoModelForIdentity,
+		placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
+			return &identityToolHarness{}, func() error { return nil }, nil
+		}))
+	if err := p.Resume(t.Context(), log, "legacy"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(ctl.calls, []string{"resume:legacy"}) {
+		t.Fatalf("legacy recovery: %v", ctl.calls)
+	}
+	if err := log.Verify(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A substrate descriptor describes configured placement needs, not the version in restored RAM.
 // Refusing its stale declaration would prevent a compatible connected harness from recovering.
 func TestPlacerResumeDoesNotVersionCheckConfiguredMemoryDescriptor(t *testing.T) {
@@ -164,19 +201,28 @@ func TestPlacerResumeDoesNotVersionCheckConfiguredMemoryDescriptor(t *testing.T)
 		}
 	}
 	h := &identityToolHarness{version: "restored-v1"}
-	var closes, tools atomic.Int32
-	ctl := &cloningControl{snapshot: ref.ExternalURI}
+	var dials, closes, tools atomic.Int32
+	ctl := &cloningControl{snapshot: "different-snapshot"}
 	backend := substrate.New(ctl, "space", substrate.ObjectRef{Name: "new-image"}, api.Descriptor{
 		ID: "configured-id", Version: "new-image-v2", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot},
 	})
 	p := placement.New(backend, echoModelForIdentity,
 		placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
+			dials.Add(1)
 			return h, func() error { closes.Add(1); return nil }, nil
 		}),
 		dedupAllTools, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 			tools.Add(1)
 			return api.ToolResult{Output: map[string]any{"receipt": "restored"}}, nil
 		}))
+	before := toolRecords(t, log)
+	if err := p.Resume(t.Context(), log, "memory-identity", placement.WithResumeHarness("memory-alias")); !errors.Is(err, substrate.ErrSnapshotNotRestorable) {
+		t.Fatalf("wrong held snapshot: %v, want ErrSnapshotNotRestorable", err)
+	}
+	if dials.Load() != 0 || h.runs.Load() != 0 || tools.Load() != 0 || len(ctl.calls) != 0 || !reflect.DeepEqual(before, toolRecords(t, log)) {
+		t.Fatal("refused Restore dialed, resumed, redrove a tool or changed the journal")
+	}
+	ctl.snapshot = ref.ExternalURI
 	if err := p.Resume(t.Context(), log, "memory-identity", placement.WithResumeHarness("memory-alias")); err != nil {
 		t.Fatalf("compatible restored version refused because configured image differs: %v", err)
 	}

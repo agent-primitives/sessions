@@ -201,7 +201,16 @@ func (ad *Adapter) DeleteTag(ctx context.Context, tag substrate.SnapshotID) erro
 func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 	st := a.GetStatus()
 	snap := heldSnapshot(st)
+	durable := snap.GetDurableSnapshot().GetStatus()
+	notReady := snap != nil && durable != atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+	if notReady {
+		snap = nil // never expose an older completed generation as the held checkpoint
+	}
 	return substrate.ActorInfo{
+		SnapshotNotReady: notReady,
+		// Only an explicit PENDING upload can complete by waiting; a local-only or unrecognized
+		// durable status needs inspection and a new durable checkpoint.
+		SnapshotPending: notReady && durable == atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING,
 		// Unknown legacy fields (notably pre-list external_snapshot) are not proof of no history.
 		NoSnapshotHistory: st != nil && a.GetMetadata().GetUid() != "" &&
 			st.GetState() == atepb.ActorState_ACTOR_STATE_SUSPENDED &&
@@ -215,20 +224,14 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 	}
 }
 
-// heldSnapshot returns the external snapshot the actor holds: the highest-generation entry of
-// ActorStatus.snapshots whose durable copy is COMPLETED, or nil when there is none. URI and fidelity
-// are read from this same entry. Substrate copies it on CreateTag and uses it for durable resume
-// (findLatestDurableSnapshot in substrate's cmd/ateapi/internal/controlapi/snapshot_helpers.go).
-// A node-local pause checkpoint takes precedence on resume and is not reported by this helper.
-// Comparing its URI before and after a tag proves which snapshot the tag took. The entry is picked
-// by the same rule (on equal generations the later entry wins) before its URI is read: if that entry
-// has no URI, actorInfo reports an empty handle rather than naming an older completed generation
-// the tag would not copy.
+// heldSnapshot selects the highest generation before inspecting durable readiness; later ties win.
+// A newest pending or local-only checkpoint makes actorInfo report not ready with no URI/fidelity,
+// rather than exposing an older completed generation. This deliberately refuses more than
+// Substrate's latest-completed durable selection to avoid silently restoring stale state.
+// A completed entry with no URI never falls back either. A tag-seeded actor borrows generation 1.
 //
-// Entries that are not candidates: a PENDING durable copy is still being written (a suspend in
-// flight), and an entry with no durable copy is a node-local pause checkpoint, which a tag cannot
-// copy. An actor seeded from a tag holds the tag's snapshot as generation 1 until its own first
-// suspend, so a fork child reports the borrowed URI, under the tag's prefix.
+// This is not effective restore-source evidence: Substrate can prefer node-local state or downgrade
+// after an ActorTemplate UID change. Those limits remain tracked separately in sessions issue #192.
 //
 // Substrate f03327bd replaced the single ActorStatus.external_snapshot (field 4) with this list. A
 // server older than that still sends field 4, which this client does not read, so it reports no
@@ -237,9 +240,6 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 func heldSnapshot(st *atepb.ActorStatus) *atepb.Snapshot {
 	var held *atepb.Snapshot
 	for _, snap := range st.GetSnapshots() {
-		if snap.GetDurableSnapshot().GetStatus() != atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED {
-			continue
-		}
 		if held == nil || snap.GetGeneration() >= held.GetGeneration() {
 			held = snap
 		}

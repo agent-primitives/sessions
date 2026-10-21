@@ -627,7 +627,7 @@ func TestSuspendRetainsForkPinUntilExplicitStop(t *testing.T) {
 	if want := []string{"suspend:child", "delete:child", "untag:fork-child"}; !reflect.DeepEqual(ctl.calls, want) {
 		t.Fatalf("destructive teardown=%v want %v", ctl.calls, want)
 	}
-	if _, err := backend.Restore(ctx, ref); !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound) {
+	if _, err := backend.Restore(ctx, ref); !errors.Is(err, substrate.ErrSnapshotNotRestorable) || !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound) {
 		t.Fatalf("Stop must remain destructive, restore err=%v", err)
 	}
 	if a, exists := ctl.actors[siblingActor]; !exists || !a.worker || a.sourceTag != siblingTag || ctl.tags[siblingTag] != source {

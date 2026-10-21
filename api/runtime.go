@@ -32,6 +32,11 @@ var ErrMemoryStateLost = errors.New("runtime: session's in-memory harness state 
 // service reports it as FAILED_PRECONDITION, not an internal transport failure.
 var ErrInvalidCheckpoint = errors.New("runtime: checkpoint does not meet the required contract")
 
+// ErrCheckpointPending reports that a checkpoint's durable copy is still uploading. No usable
+// checkpoint is returned and nothing is journaled; the upload may complete without operator
+// intervention. The session service reports it as UNAVAILABLE, unlike an invalid checkpoint.
+var ErrCheckpointPending = errors.New("runtime: checkpoint upload is pending")
+
 // ErrComputeBusy reports that the session's compute is in the middle of another operation (another
 // host resuming or suspending it, say), so the backend could not place onto it or act on it right
 // now. Nothing was journaled, and the state settles on its own, so the session service reports it
@@ -91,10 +96,12 @@ type Runtime interface {
 
 // InstanceRestorer is an optional extension of Runtime for a backend that sets
 // Incarnation.ComputeInstance. RestoreInstance is Restore with a way to read the compute instance the
-// journal last recorded for the session's harness, so that when the restore fails the backend can
-// tell whether that instance is gone or replaced. recorded returns "" when no instance is recorded;
-// the backend calls it only after a failed restore, when it decides, so a turn another host journaled
-// before then is seen. A backend reports ErrMemoryStateLost from RestoreInstance only when it can
+// journal last recorded for the session's harness, so the backend can distinguish that instance from
+// a replacement before reattaching, and classify permanent loss after a failed restore. recorded
+// returns "" when no instance is recorded. The backend may call it during admission and again after
+// a failed restore; each call must read current journal state, so another host's intervening turn is
+// seen. A read failure can refuse admission before any resume. A backend reports ErrMemoryStateLost
+// from RestoreInstance only when it can
 // show the recorded instance gone or replaced or, with none recorded, finds an instance it cannot
 // tell from a replacement, and otherwise returns the restore error: an instance that is still there
 // may fail a restore for another reason. The host calls RestoreInstance in place of Restore when the

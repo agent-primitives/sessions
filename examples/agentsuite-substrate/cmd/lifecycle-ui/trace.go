@@ -44,19 +44,9 @@ func (k *kube) run(ctx context.Context, plugin bool, args ...string) ([]byte, er
 	if len(args) == 0 || !readVerbs[args[0]] {
 		return nil, fmt.Errorf("cluster read refused: %q is not get or logs", strings.Join(args, " "))
 	}
-	bin := k.kubectl
-	if plugin {
-		bin = k.ate
-	}
+	bin, full := k.argv(plugin, args...)
 	if bin == "" {
 		return nil, errors.New("cluster reads are off")
-	}
-	full := append([]string{}, args...)
-	if k.kubeconfig != "" {
-		full = append(full, "--kubeconfig", k.kubeconfig)
-	}
-	if k.context != "" {
-		full = append(full, "--context", k.context)
 	}
 	run := k.exec
 	if run == nil {
@@ -76,6 +66,43 @@ func (k *kube) run(ctx context.Context, plugin bool, args ...string) ([]byte, er
 		}
 	}
 	return run(ctx, bin, full...)
+}
+
+// argv is the binary and arguments run uses for a read: the plugin or kubectl, with the demo's
+// kubeconfig and context appended.
+func (k *kube) argv(plugin bool, args ...string) (string, []string) {
+	bin := k.kubectl
+	if plugin {
+		bin = k.ate
+	}
+	full := append([]string{}, args...)
+	if k.kubeconfig != "" {
+		full = append(full, "--kubeconfig", k.kubeconfig)
+	}
+	if k.context != "" {
+		full = append(full, "--context", k.context)
+	}
+	return bin, full
+}
+
+// command is the read run makes, as a shell command line a reader can paste: the evidence's
+// Source. Arguments with characters a shell would treat specially are single-quoted.
+func (k *kube) command(plugin bool, args ...string) string {
+	bin, full := k.argv(plugin, args...)
+	words := make([]string, 0, len(full)+1)
+	for _, w := range append([]string{bin}, full...) {
+		words = append(words, shellQuote(w))
+	}
+	return strings.Join(words, " ")
+}
+
+var shellSafe = regexp.MustCompile(`^[A-Za-z0-9_./:=,@%+-]+$`)
+
+func shellQuote(w string) string {
+	if shellSafe.MatchString(w) {
+		return w
+	}
+	return "'" + strings.ReplaceAll(w, "'", `'\''`) + "'"
 }
 
 // actorView is the actor as substrate reports it.
@@ -265,9 +292,10 @@ func (s *server) trace(ctx context.Context, a *activity) traceView {
 	}
 	switch {
 	case a.Declined:
-		// No Sessions call was made, so no later hop was reached.
+		// No lifecycle call was made (at most the bridge's GetSession), so no later hop was reached.
 		for _, n := range []string{"daemon", "ateapi", "worker", "actor", "router"} {
-			t.Nodes[n] = nodeEvidence{State: "skipped", Detail: "the bridge declined the call; no Sessions call was made"}
+			t.Nodes[n] = nodeEvidence{State: "skipped",
+				Detail: "the bridge declined the call before Sessions.Replay; no lifecycle call was made"}
 		}
 	case s.kube == nil:
 		for _, n := range []string{"daemon", "ateapi", "worker", "actor", "router"} {
@@ -377,7 +405,7 @@ func replayBridgeDetail(a *activity) string {
 	case a.FailedAt != "bridge":
 		return "Sessions.Replay (journal) failed; controller.Replay did not run"
 	case r == nil:
-		return "Sessions.Replay (journal); the journal did not load, so controller.Replay did not run"
+		return "Sessions.Replay (journal); nothing to re-run or the chain did not verify, so controller.Replay did not run"
 	}
 	return "Sessions.Replay (journal), verified; controller.Replay did not run"
 }
@@ -389,8 +417,9 @@ func (s *server) traceCluster(ctx context.Context, a *activity, daemon string, i
 	// line is read with its timestamp and kept only inside the call's own window.
 	w := window{from: a.Started.Add(-250 * time.Millisecond), to: a.Started.Add(time.Duration(a.DurationMS)*time.Millisecond + 2*time.Second)}
 	// agentsessionsd: its own "operation finished" line for this call.
-	src := fmt.Sprintf("kubectl -n %s logs deploy/%s %s", k.namespace, daemon, sinceArg)
-	if out, err := k.run(ctx, false, "logs", "-n", k.namespace, "deploy/"+daemon, "--timestamps", sinceArg); err != nil {
+	daemonArgs := []string{"logs", "-n", k.namespace, "deploy/" + daemon, "--timestamps", sinceArg}
+	src := k.command(false, daemonArgs...)
+	if out, err := k.run(ctx, false, daemonArgs...); err != nil {
 		t.Nodes["daemon"] = nodeEvidence{State: "unknown", Detail: err.Error(), Source: src}
 	} else {
 		t.Nodes["daemon"] = match(out, w, daemonPattern(a), src)
@@ -443,18 +472,24 @@ func (s *server) traceCluster(ctx context.Context, a *activity, daemon string, i
 				t.Nodes["worker"] = nodeEvidence{State: "skipped", Detail: d, Source: t.Nodes["worker"].Source}
 			}
 		} else {
-			t.Nodes["ateapi"] = nodeEvidence{State: "skipped", Detail: "replay drives the running actor; no lifecycle call"}
+			t.Nodes["ateapi"] = nodeEvidence{State: "skipped",
+				Detail: "no lifecycle call: the bridge replays only a session Sessions reports LIVE " +
+					"(atenet-router's ResumeActor on each routed request is not shown)"}
 			t.Nodes["worker"] = nodeEvidence{State: "skipped", Detail: "atunnel in the worker pod forwards the stream (not logged per request)"}
 		}
-		if a.Op == "exec" || a.Op == "replay" {
+		switch {
+		case a.Op == "replay" && (a.Replay == nil || a.Replay.ControllerCalls < 0):
+			t.Nodes["router"] = nodeEvidence{State: "skipped",
+				Detail: "controller.Replay did not run, so no turn was routed"}
+		case a.Op == "exec" || a.Op == "replay":
 			t.Nodes["router"] = s.podMatch(ctx, pods.router, "ate-system", sinceArg, w, routeOK, nil, nil, idRe, false).evidence
-		} else {
+		default:
 			t.Nodes["router"] = nodeEvidence{State: "skipped", Detail: "no turn is routed"}
 		}
 	}
 	// The actor: its state as ate-api reports it now, the fork's child when there is one.
 	target := ids[len(ids)-1]
-	src = fmt.Sprintf("kubectl ate get actor %s -a %s -o json", target, k.atespace)
+	src = k.command(true, "get", "actor", target, "-a", k.atespace, "-o", "json")
 	if av, err := k.actor(ctx, target); err != nil {
 		t.Nodes["actor"] = nodeEvidence{State: "missing", Detail: err.Error(), Source: src}
 	} else {
@@ -561,8 +596,9 @@ func (s *server) podMatch(ctx context.Context, pods []string, ns, sinceArg strin
 	}
 	var first, second, noop []hit
 	for _, pod := range pods {
-		src := fmt.Sprintf("kubectl -n %s logs %s --all-containers %s", ns, pod, sinceArg)
-		out, err := s.kube.run(ctx, false, "logs", "-n", ns, pod, "--all-containers", "--timestamps", sinceArg)
+		podArgs := []string{"logs", "-n", ns, pod, "--all-containers", "--timestamps", sinceArg}
+		src := s.kube.command(false, podArgs...)
+		out, err := s.kube.run(ctx, false, podArgs...)
 		if err != nil {
 			continue
 		}
@@ -623,7 +659,8 @@ func (s *server) podMatch(ctx context.Context, pods []string, ns, sinceArg strin
 		d := "only " + m + " for this session during the call; " + summarize(all[0].line)
 		return podHits{evidence: nodeEvidence{State: "observed", Detail: d, Method: m, Source: all[0].src}, fallbackOnly: true, noopResume: len(noop) > 0}
 	}
-	return podHits{evidence: nodeEvidence{State: "missing", Detail: "no line for this session during the call", Source: "kubectl -n " + ns + " logs <pod> " + sinceArg}}
+	src := s.kube.command(false, "logs", "-n", ns, "<pod>", "--all-containers", "--timestamps", sinceArg)
+	return podHits{evidence: nodeEvidence{State: "missing", Detail: "no line for this session during the call", Source: src}}
 }
 
 // window is the span of one call; a log line outside it belongs to another call.

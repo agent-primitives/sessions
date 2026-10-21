@@ -574,3 +574,68 @@ func TestRunInjectWritesFilesOnly(t *testing.T) {
 		t.Errorf("missing render: err = %v", err)
 	}
 }
+
+// A replay's router hop is searched only when controller.Replay ran; a replay that stopped before
+// it routed no turn, so the hop is skipped, not missing.
+func TestTraceReplayRoutesOnlyWhenTheControllerRan(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		a      activity
+		router string
+	}{
+		{"held", activity{OK: true, Replay: &replayResult{Turns: 1, ControllerCalls: 0}}, "observed"},
+		{"controller failed", activity{FailedAt: "bridge", Message: "replay: unavailable", Replay: &replayResult{ControllerCalls: 0}}, "observed"},
+		{"stopped before the controller", activity{FailedAt: "bridge", Message: "read fake model stats: refused", Replay: &replayResult{ControllerCalls: -1}}, "skipped"},
+		{"nothing to re-run", activity{FailedAt: "bridge", Message: "session sess-abc has no completed turn: nothing to re-execute"}, "skipped"},
+		{"Replay RPC failed", activity{Code: "Unavailable", Message: "daemon down"}, "skipped"},
+	} {
+		f := attachCluster("")
+		f.out["logs -n agentsuite-demo deploy/agentsessionsd"] = at(5*time.Millisecond) + `msg="operation finished" component=session operation=replay session_uid=sess-abc phase=finish outcome=success`
+		s := traceServer(f)
+		s.lanes = []*lane{{Name: "stateless", Daemon: "agentsessionsd"}}
+		a := c.a
+		a.ID, a.Op, a.Lane, a.Session, a.Started, a.DurationMS = 1, "replay", "stateless", "sess-abc", t0, 400
+		tr := s.trace(context.Background(), &a)
+		if got := tr.Nodes["router"]; got.State != c.router {
+			t.Errorf("%s: router %+v, want %s", c.name, got, c.router)
+		}
+		if c.router == "skipped" && !strings.Contains(tr.Nodes["router"].Detail, "controller.Replay did not run") {
+			t.Errorf("%s: router detail %q", c.name, tr.Nodes["router"].Detail)
+		}
+	}
+}
+
+// Every Source is the read the bridge ran, kubeconfig, context and plugin path included, so a
+// reader can paste it.
+func TestTraceSourcesAreTheCommandsRun(t *testing.T) {
+	f := attachCluster("")
+	s := traceServer(f)
+	s.lanes = []*lane{{Name: "stateless", Daemon: "agentsessionsd"}}
+	s.kube.ate = "/work dir/bin/kubectl-ate"
+	s.kube.kubeconfig = "/work dir/cluster/kubeconfig"
+	s.kube.context = "kind-agentsuite-demo"
+	tr := s.trace(context.Background(), &activity{ID: 1, Op: "exec", Lane: "stateless", Session: "sess-abc", OK: true, Started: t0, DurationMS: 400})
+	want := map[string]string{
+		"actor": "'/work dir/bin/kubectl-ate' get actor sess-abc -a agentsuite-demo -o json " +
+			"--kubeconfig '/work dir/cluster/kubeconfig' --context kind-agentsuite-demo",
+		"daemon": "kubectl logs -n agentsuite-demo deploy/agentsessionsd --timestamps --since-time=" + tr.Since +
+			" --kubeconfig '/work dir/cluster/kubeconfig' --context kind-agentsuite-demo",
+		"router": "kubectl logs -n ate-system atenet-router-1 --all-containers --timestamps --since-time=" + tr.Since +
+			" --kubeconfig '/work dir/cluster/kubeconfig' --context kind-agentsuite-demo",
+	}
+	for n, w := range want {
+		if got := tr.Nodes[n].Source; got != w {
+			t.Errorf("%s source\n got %s\nwant %s", n, got, w)
+		}
+	}
+	ran := map[string]bool{}
+	for _, c := range f.calls {
+		ran[strings.Join(c, " ")] = true
+	}
+	if !ran["/work dir/bin/kubectl-ate get actor sess-abc -a agentsuite-demo -o json --kubeconfig /work dir/cluster/kubeconfig --context kind-agentsuite-demo"] {
+		t.Errorf("the actor read the source names did not run: %q", f.calls)
+	}
+	if got := shellQuote("it's"); got != `'it'\''s'` {
+		t.Errorf("shellQuote = %s", got)
+	}
+}

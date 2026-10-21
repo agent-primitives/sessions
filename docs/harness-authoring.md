@@ -713,8 +713,9 @@ HARNESS_KIND=chat HARNESS_MODEL=gemma3:1b \
 
 This starts only the harness endpoint and readiness probe, not a Sessions server. A remote-runtime
 host must place and connect to it and supply the model implementation. `HARNESS_MODEL` is required
-for chat and is validated before listeners open. Echo remains the default; counter remains the
-memory-snapshot example.
+for chat and tool and is validated before listeners open. Echo remains the default; counter remains
+the memory-snapshot example. `HARNESS_KIND=tool` serves `harness/toolagent`, which offers the model
+an approval-gated `publish` tool; see the [approval-gated tool example](approval-gated-tool.md).
 
 Only the model ID belongs in the harness environment. Keep provider URLs and credentials on the
 host. Repository-owned hosts can reuse `internal/modelconfig.New` with an explicit `Config`

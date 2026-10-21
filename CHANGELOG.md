@@ -9,6 +9,11 @@ not provide.
 
 ### Added
 
+- An approval-gated tool runs on the stock daemon with no custom host: the reference harness
+  `harness/toolagent` (served by `harnessnode` with `HARNESS_KIND=tool`) offers the model a
+  `publish` tool, turns each model tool call into a `REQUIRES_APPROVAL` call keyed by execution and
+  call ID, and feeds results back until the model answers. See the
+  [approval-gated tool example](docs/approval-gated-tool.md).
 - `agentctl exec` and `replay` print a tool call's tool, ID, mediation and arguments (not its
   idempotency key), so an approver can read the call before deciding.
 - Go embedders can configure per-route model defaults and allowed IDs with

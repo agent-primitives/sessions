@@ -33,6 +33,8 @@ type fakeControl struct {
 	createErr  error
 	resumeErr  error
 	suspendErr error
+	// resumed, when set, is the actor ResumeActor returns instead of actor.
+	resumed *atepb.Actor
 	// lastSuspend is the last SuspendActor request; onSuspend, when set, runs before it answers.
 	lastSuspend *atepb.SuspendActorRequest
 	onSuspend   func()
@@ -59,6 +61,9 @@ func (f *fakeControl) ResumeActor(_ context.Context, in *atepb.ResumeActorReques
 	f.calls = append(f.calls, "resume:"+in.GetActor().GetAtespace()+"/"+in.GetActor().GetName())
 	if f.resumeErr != nil {
 		return nil, f.resumeErr
+	}
+	if f.resumed != nil {
+		return &atepb.ResumeActorResponse{Actor: f.resumed, Resumed: true}, nil
 	}
 	return &atepb.ResumeActorResponse{Actor: f.actor, Resumed: true}, nil
 }
@@ -931,5 +936,154 @@ func TestGetActorDecodesPausedWireFormat(t *testing.T) {
 	info := decodeActorInfo(t, wireMessage(7, st))
 	if info.Status != substrate.StatusSuspended || !info.SnapshotNotReady || info.SnapshotPending || info.Snapshot != "" {
 		t.Fatalf("decoded info=%+v, want a suspended actor holding no durable checkpoint", info)
+	}
+}
+
+// sandboxRuntime is a v0.5.0 runtime stamp: a sandbox class and v1 compatibility attributes.
+func sandboxRuntime(class string, attrs ...string) *atepb.SandboxRuntime {
+	rt := &atepb.SandboxRuntime{SandboxClass: class, Version: &atepb.VersionedSandboxCompat{SchemaVersion: "v1"}}
+	for i := 0; i+1 < len(attrs); i += 2 {
+		rt.Version.Attributes = append(rt.Version.Attributes, &atepb.AttributeEntry{Key: attrs[i], Value: attrs[i+1]})
+	}
+	return rt
+}
+
+// runtimeRunningActor is runningActor with its newest MEMORY snapshot stamped with recorded and its
+// worker assignment with assigned, as ResumeActor reports them at v0.5.0.
+func runtimeRunningActor(recorded, assigned *atepb.SandboxRuntime) *atepb.Actor {
+	a := runningActor()
+	a.Status.Snapshots[0].SandboxRuntime = recorded
+	a.Status.WorkerAssignment.SandboxRuntime = assigned
+	return a
+}
+
+// A resume that falls back to another runtime (canRelaxRuntime in substrate v0.5.0) restores the
+// snapshot's volumes only, so the actor's RAM is not the snapshot's. The comparison follows
+// substrate's own runtime match, not byte equality.
+func TestMemoryNotRestoredComparesRuntimes(t *testing.T) {
+	stamp := sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h1")
+	for _, tc := range []struct {
+		name   string
+		actor  func() *atepb.Actor
+		reason bool
+	}{
+		{name: "same runtime", actor: func() *atepb.Actor {
+			return runtimeRunningActor(stamp, sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h1"))
+		}},
+		{name: "worker reports extra attributes", actor: func() *atepb.Actor {
+			return runtimeRunningActor(stamp, sandboxRuntime("microvm", "architecture", "amd64", "cpu_features", "avx2", "sandbox_runtime_hash", "h1"))
+		}},
+		{name: "other sandbox class", reason: true, actor: func() *atepb.Actor {
+			return runtimeRunningActor(stamp, sandboxRuntime("gvisor", "architecture", "amd64", "sandbox_runtime_hash", "h1"))
+		}},
+		{name: "other runtime hash", reason: true, actor: func() *atepb.Actor {
+			return runtimeRunningActor(stamp, sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h2"))
+		}},
+		{name: "worker lacks a recorded attribute", reason: true, actor: func() *atepb.Actor {
+			return runtimeRunningActor(stamp, sandboxRuntime("microvm", "architecture", "amd64"))
+		}},
+		{name: "other schema version", reason: true, actor: func() *atepb.Actor {
+			rt := sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h1")
+			rt.Version.SchemaVersion = "v2"
+			return runtimeRunningActor(stamp, rt)
+		}},
+		{name: "assignment without a runtime", reason: true, actor: func() *atepb.Actor { return runtimeRunningActor(stamp, nil) }},
+		{name: "snapshot without a runtime stamp", actor: func() *atepb.Actor { return runtimeRunningActor(nil, sandboxRuntime("gvisor")) }},
+		{name: "volumes snapshot", actor: func() *atepb.Actor {
+			a := runtimeRunningActor(stamp, sandboxRuntime("gvisor"))
+			a.Status.Snapshots[0].Fidelity = atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
+			return a
+		}},
+		{name: "golden snapshot", actor: func() *atepb.Actor {
+			a := runtimeRunningActor(stamp, sandboxRuntime("gvisor"))
+			a.Status.Snapshots[0].Owner = atepb.SnapshotOwner_SNAPSHOT_OWNER_TAG
+			return a
+		}},
+		{name: "fork clone's borrowed snapshot", reason: true, actor: func() *atepb.Actor {
+			a := runtimeRunningActor(stamp, sandboxRuntime("gvisor"))
+			a.Status.Snapshots[0].Owner = atepb.SnapshotOwner_SNAPSHOT_OWNER_TAG
+			a.SourceTag = &atepb.ObjectRef{Atespace: "space", Name: "fork-sess-x"}
+			return a
+		}},
+		{name: "older generation stamped elsewhere", actor: func() *atepb.Actor {
+			a := runtimeRunningActor(stamp, sandboxRuntime("gvisor"))
+			newest := durableSnapshot(2, "gs://b/s2", atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+			newest.SandboxRuntime = sandboxRuntime("gvisor")
+			a.Status.Snapshots = append(a.Status.Snapshots, newest)
+			return a
+		}},
+		{name: "suspended actor holds no worker", actor: func() *atepb.Actor {
+			a := runtimeRunningActor(stamp, nil)
+			a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
+			a.Status.WorkerAssignment = nil
+			return a
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeControl{actor: tc.actor()}
+			info, err := FromClient(f).GetActor(t.Context(), substrate.ActorRef{Atespace: "space", Name: "sess-x"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.MemoryNotRestored != tc.reason {
+				t.Fatalf("MemoryNotRestored = %v, want %v", info.MemoryNotRestored, tc.reason)
+			}
+		})
+	}
+}
+
+// After a resume of a memory-tier session, an assignment whose runtime cannot restore the held
+// snapshot's recorded runtime is lost state, refused before any turn runs; a stateless session
+// rebuilds from its journal and is placed as before.
+func TestRestoreRefusesAMemoryResumeOnAnotherRuntime(t *testing.T) {
+	stamp := sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h1")
+	const uri = "gs://b/atespaces/space/actors/u1/snapshots/s1"
+	for _, tc := range []struct {
+		name     string
+		memory   bool
+		assigned *atepb.SandboxRuntime
+		lost     bool
+	}{
+		{name: "memory, same runtime", memory: true, assigned: sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h1")},
+		{name: "memory, other runtime", memory: true, assigned: sandboxRuntime("gvisor", "architecture", "amd64"), lost: true},
+		{name: "stateless, other runtime", assigned: sandboxRuntime("gvisor", "architecture", "amd64")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			suspended := runtimeRunningActor(stamp, nil)
+			suspended.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
+			suspended.Status.WorkerAssignment = nil
+			f := &fakeControl{actor: suspended, resumed: runtimeRunningActor(stamp, tc.assigned)}
+			desc := api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}
+			if tc.memory {
+				desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
+			}
+			b := substrate.New(FromClient(f), "space", substrate.ObjectRef{Name: "counter"}, desc)
+			inc, err := b.Restore(t.Context(), api.SnapshotRef{Local: "sess-x", ExternalURI: uri, Memory: true})
+			if want := []string{"get:sess-x", "resume:space/sess-x"}; !reflect.DeepEqual(f.calls, want) {
+				t.Fatalf("calls = %v, want %v", f.calls, want)
+			}
+			if !tc.lost {
+				if err != nil || inc.ID != "sess-x" {
+					t.Fatalf("restore: inc=%+v err=%v", inc, err)
+				}
+				return
+			}
+			if !errors.Is(err, api.ErrMemoryStateLost) || inc.ID != "" {
+				t.Fatalf("restore: inc=%+v err=%v, want api.ErrMemoryStateLost", inc, err)
+			}
+			for _, part := range []string{`session "sess-x"`, "space/sess-x", suspended.GetMetadata().GetUid(), "volumes only"} {
+				if !strings.Contains(err.Error(), part) {
+					t.Fatalf("refusal %q does not name %q", err, part)
+				}
+			}
+			if strings.Contains(err.Error(), uri) {
+				t.Fatalf("refusal %q names the snapshot URI", err)
+			}
+			// The actor stays running on that worker, so the next turn's attach refuses too.
+			f.actor, f.calls = f.resumed, nil
+			if _, err := b.Create(t.Context(), &api.SessionSpec{SessionUID: "sess-x"}); !errors.Is(err, api.ErrMemoryStateLost) || !reflect.DeepEqual(f.calls, []string{"get:sess-x"}) {
+				t.Fatalf("attach after refusal: err=%v calls=%v", err, f.calls)
+			}
+		})
 	}
 }

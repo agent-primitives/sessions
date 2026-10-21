@@ -127,6 +127,14 @@ type ActorInfo struct {
 	// checkpoint. It permits initial attachment between CreateActor and the first ResumeActor;
 	// captures and actors seeded from a fork tag do not receive this exemption.
 	NoSnapshotHistory bool
+	// MemoryNotRestored is positive control-plane evidence that the actor holds a worker that did
+	// not restore the process memory of its newest MEMORY snapshot carrying session state (its own
+	// capture, or a fork tag's), so its RAM is not that snapshot's. Substrate since v0.5.0 does this
+	// when no worker matching the snapshot's recorded sandbox runtime has room: it restores the
+	// snapshot's volumes only on another worker. A template's golden snapshot holds no session state
+	// and never sets it. It stays set while the actor runs on that worker. False is not proof that
+	// memory was restored (see the effective-source limits in sessions issue #192).
+	MemoryNotRestored bool
 	// UID is the actor's server-assigned identity (substrate ResourceMetadata.uid). It is fixed for the
 	// actor's lifetime, suspends and resumes included, and differs for an actor created later under the
 	// same name, which is how the backend tells a replacement apart. A REQUIRES_MEMORY_SNAPSHOT harness
@@ -461,7 +469,10 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 // the state it held went with it. An actor that reports no UID is refused with a plain error: it
 // cannot be compared, and that is a ControlClient fault, not evidence of a replacement. A
 // REQUIRES_MEMORY_SNAPSHOT backend refuses a suspend that reports no UID even when no instance is
-// recorded (a fork child whose FORK marker records no clone, before its first turn).
+// recorded (a fork child whose FORK marker records no clone, before its first turn). With an
+// instance recorded, an actor that reports MemoryNotRestored is refused with
+// api.ErrMemoryStateLost before suspending, so its RAM-less state is never recorded as the
+// session's checkpoint.
 func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (snapshot api.SnapshotRef, err error) {
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "snapshot_compute",
 		"actor", in.ID,
@@ -495,6 +506,13 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 		}
 		if err := b.requireInstance(in, info.UID); err != nil {
 			suspendFinished(err, "error_kind", snapshotErrorKind(err, "actor_uid_missing"))
+			return api.SnapshotRef{}, err
+		}
+		// Suspending an actor that came back without its memory would record a MEMORY checkpoint
+		// of a harness that lost the session's state, and a later Restore would accept it.
+		if info.MemoryNotRestored {
+			err := b.memoryNotRestored(in.ID, info, "nothing was snapshotted for the session")
+			suspendFinished(err, "error_kind", "memory_state_lost")
 			return api.SnapshotRef{}, err
 		}
 	}
@@ -1138,6 +1156,11 @@ const TargetActorHeader = "ate-target-actor"
 // which the host records and compares per turn; an actor that reports no UID is refused, since the
 // host could not tell it from a replacement. A stateless harness's state is in the journal, so a
 // replaced actor is fine and no instance is set.
+//
+// Every path that hands out an actor (Create's new, attached or resumed actor, Restore and a
+// stateful Fork's clone) comes through here, so a REQUIRES_MEMORY_SNAPSHOT actor that reports
+// MemoryNotRestored is refused with api.ErrMemoryStateLost on each of them, on this turn and on
+// every later one while it keeps running on that worker. A stateless harness is not checked.
 func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, error) {
 	if info.Status != StatusRunning {
 		return api.Incarnation{}, fmt.Errorf("substrate: actor %q is %v after resume, want running", uid, info.Status)
@@ -1149,6 +1172,9 @@ func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, erro
 				"from the actor that holds the session's in-RAM state", b.atespace, uid)
 		}
 		instance = info.UID
+		if info.MemoryNotRestored {
+			return api.Incarnation{}, b.memoryNotRestored(uid, info, "the actor was left running")
+		}
 	}
 	return api.Incarnation{
 		ID:           uid,
@@ -1160,6 +1186,17 @@ func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, erro
 		// when the backend looked, not which one the router reaches later.
 		ComputeInstance: instance,
 	}, nil
+}
+
+// memoryNotRestored is the api.ErrMemoryStateLost refusal for a REQUIRES_MEMORY_SNAPSHOT
+// session whose actor reports ActorInfo.MemoryNotRestored: the actor is the session's (same UID),
+// but its RAM is not the snapshot's, and the journal cannot rebuild it (I4). It names the session
+// and the actor; outcome says what was left behind.
+func (b *Backend) memoryNotRestored(name string, info ActorInfo, outcome string) error {
+	return fmt.Errorf("%w: actor %s/%s (UID %q) of session %q on harness %q runs on a worker that "+
+		"did not restore its memory snapshot (substrate restored its volumes only), so the session's "+
+		"in-RAM state is gone; %s",
+		api.ErrMemoryStateLost, b.atespace, name, info.UID, name, b.descriptor.ID, outcome)
 }
 
 func substrateErrorKind(err error) string {

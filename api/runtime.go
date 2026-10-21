@@ -13,17 +13,19 @@ var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was supers
 
 // ErrMemoryStateLost reports that a backend cannot give a session whose harness keeps its state
 // only in RAM (REQUIRES_MEMORY_SNAPSHOT) the compute that held that state, because the compute is
-// gone. Create returns it rather than create fresh compute when the journal already records a
-// started turn on that harness (SessionSpec.StartedTurns). Restore returns it for any such session
-// whose compute no longer exists, whatever the journal records, since the snapshot it would restore
-// went with the compute; the recorded compute, still there, keeps the restore error whatever
-// snapshot it holds (see InstanceRestorer). The host returns it when the compute a turn or a
-// Resume was placed on reports another Incarnation.ComputeInstance than the journal recorded: the
-// compute was replaced under the same name. Snapshot returns it when the compute behind
-// Incarnation.ID is not the instance the caller required (a stateful fork). The journal cannot
-// rebuild the state (I4), so fresh compute would continue the journal with a harness that has
-// forgotten it. The caller cannot fix this by retrying; the session service reports it as
-// FAILED_PRECONDITION.
+// gone or came back without that state. Create returns it rather than create fresh compute when the
+// journal already records a started turn on that harness (SessionSpec.StartedTurns). Restore
+// returns it for any such session whose compute no longer exists, whatever the journal records,
+// since the snapshot it would restore went with the compute; the recorded compute, still there,
+// keeps the restore error whatever snapshot it holds (see InstanceRestorer). A backend also returns
+// it from Create, Restore, Fork and Snapshot when the compute is there but did not get back the
+// memory its snapshot held (substrate resuming it on a worker that restored only its files). The
+// host returns it when the compute a turn or a Resume was placed on reports another
+// Incarnation.ComputeInstance than the journal recorded: the compute was replaced under the same
+// name. Snapshot returns it when the compute behind Incarnation.ID is not the instance the caller
+// required (a stateful fork). The journal cannot rebuild the state (I4), so fresh compute would
+// continue the journal with a harness that has forgotten it. The caller cannot fix this by
+// retrying; the session service reports it as FAILED_PRECONDITION.
 var ErrMemoryStateLost = errors.New("runtime: session's in-memory harness state is lost")
 
 // ErrInvalidCheckpoint reports that a runtime cannot produce or resume a checkpoint with the

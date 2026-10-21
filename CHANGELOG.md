@@ -98,8 +98,11 @@ not provide.
   a Suspend uploads its snapshot, and a pausing one is `ABORTED`. Suspend stays synchronous:
   v0.5.0's `SuspendActor` has no durability option and returns once the newest generation is
   `COMPLETED`. The adapter still records a checkpoint only when that generation is `COMPLETED`;
-  a pending upload fails Suspend with `UNAVAILABLE`. Journal and schema are unchanged. See
-  [Substrate v0.5.0](docs/substrate-conformance.md#substrate-v050-paused-actors-and-suspend-durability).
+  a pending upload fails Suspend with `UNAVAILABLE`. v0.5.0 can also resume a memory snapshot on
+  a worker of another sandbox runtime, restoring only its files; the backend then refuses a
+  memory-tier session with `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) instead of running
+  its turn without the session's RAM. Journal and schema are unchanged. See
+  [Substrate v0.5.0](docs/substrate-conformance.md#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback).
 
 ### Compatibility
 
@@ -117,11 +120,16 @@ not provide.
   busy: Exec refuses it, Restore of a held checkpoint refuses it with `FAILED_PRECONDITION`, and
   Restore with no held checkpoint passes it to `ResumeActor`. Rolling back means rolling back
   both. An AgentSuite template rendered for v0.5.0 names its sandbox class as `microvm` or
-  `gvisor`, not `SANDBOX_CLASS_MICROVM`, so re-render templates for the matching substrate. Since
-  v0.5.0 a resume whose snapshot's recorded sandbox runtime matches no worker with room restores
-  at VOLUMES scope on another worker, which loses a memory-tier session's RAM without a refusal;
-  clusters whose workers share one runtime do not hit it. See the
-  [known limit](docs/substrate-conformance.md#held-checkpoint-restore-and-readiness).
+  `gvisor`, not `SANDBOX_CLASS_MICROVM`, so re-render templates for the matching substrate.
+- On a v0.5.0 cluster with more than one sandbox runtime, a memory-tier session whose actor was
+  resumed on a worker that cannot restore its snapshot's recorded runtime (substrate restores its
+  files only when no matching worker has room) is refused with `FAILED_PRECONDITION`
+  (`api.ErrMemoryStateLost`) on Exec, Resume, Suspend and Fork rather than run its turns without
+  the session's RAM, and stays refused while that actor runs. Stateless sessions are unaffected,
+  and clusters whose workers share one runtime do not hit it. The adapter reports it through the
+  new `ActorInfo.MemoryNotRestored`; another `runtime/substrate.ControlClient` implementation that
+  leaves it false keeps the old behavior. See
+  [runtime fallback](docs/substrate-conformance.md#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback).
 - SQLite schema v6 adds model-admission flags for new sessions; genuine pre-policy sessions,
   including empty sessions, remain legacy. Fork inherits admission metadata atomically. Existing
   journal bytes, hashes and `ModelCall` format are unchanged. Before upgrading, stop every older

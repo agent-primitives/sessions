@@ -356,7 +356,7 @@ out-of-band paused (local-only) attachment even for default stateless backends.
 The client-side GetActor → ResumeActor check still races lifecycle operations; atomic expected
 snapshot/state validation must be supplied by Substrate.
 
-### Substrate v0.5.0: paused actors and suspend durability
+### Substrate v0.5.0: paused actors, suspend durability and runtime fallback
 
 The adapter pins agent-substrate v0.5.0 (`SUBSTRATE_REF` in `.github/workflows/substrate-e2e.yml`,
 `e8d40c33`). v0.5.0 has no `PAUSED` or `PAUSING` actor state: a paused actor is `SUSPENDED` with a
@@ -375,6 +375,27 @@ returning an older completed generation. Substrate after v0.5.0 adds
 synchronous suspend explicitly before it moves past v0.5.0, and
 `TestSuspendActorRequestHasNoDurabilityOption` fails on a pin that adds the field.
 
+**Runtime fallback is refused for memory-tier sessions.** Since v0.5.0 a snapshot records the
+sandbox runtime it was taken under (`Snapshot.sandbox_runtime`) and a worker assignment the runtime
+the actor runs under (`WorkerAssignment.sandbox_runtime`). When no worker matching the snapshot's
+runtime has room, `ResumeActor` drops the constraint, binds another worker and restores the
+snapshot at VOLUMES scope (`canRelaxRuntime` and the restore in
+`cmd/ateapi/internal/controlapi/workflow_resume.go`), then returns the actor `RUNNING` with no
+error. The adapter compares the two runtimes on every actor it reads, the way substrate matches
+them (same sandbox class and schema version, every recorded attribute equal), and reports a
+mismatch on a newest durable MEMORY snapshot as `ActorInfo.MemoryNotRestored`. A template's golden
+snapshot holds no session state and is ignored; a fork clone's borrowed snapshot counts. For a
+`REQUIRES_MEMORY_SNAPSHOT` harness the backend refuses that actor with `api.ErrMemoryStateLost`
+(`FAILED_PRECONDITION`) on Restore, on Create's attach or resume, and for a stateful fork's clone,
+which it tears down. The refusal names the session, the actor and its UID. The actor is left
+running and every later turn is refused the same way. `Snapshot` with a recorded compute instance
+refuses it before suspending, so the lost state is not recorded as the session's checkpoint. A
+suspend outside sessions writes a snapshot on the new runtime and clears the evidence: Restore of
+the held ref still refuses that actor (it no longer holds the recorded snapshot), but Create's
+attach does not compare the journal-held URI. Stateless sessions rebuild from the journal and are
+placed as before. A cluster whose workers all share one sandbox runtime, as the e2e
+kind cluster does, never hits the fallback.
+
 **Known limit — effective resume source can differ from durable evidence:** the adapter maps
 a paused actor to suspended but reports only durable checkpoint evidence. At the
 pinned Substrate, resume can restore something other than the durable checkpoint the adapter
@@ -386,11 +407,7 @@ here, so a durable VOLUMES checkpoint can pass validation while resume restores 
 Likewise, when a durable snapshot's recorded `ActorTemplate` UID differs from the
 actor's current template UID (for example because the template was deleted and recreated under the
 same name), pinned Substrate restores at VOLUMES scope: a memory-tier session can pass durable
-MEMORY validation yet still cold-boot and lose RAM. Since v0.5.0 the same downgrade happens when
-the snapshot's recorded `SandboxRuntime` matches no worker with room: the resume drops the runtime
-constraint and restores at VOLUMES scope on another worker (`canRelaxRuntime` and the restore in
-`cmd/ateapi/internal/controlapi/workflow_resume.go`). A cluster whose workers all share one sandbox
-runtime, as the e2e kind cluster does, does not hit it.
+MEMORY validation yet still cold-boot and lose RAM.
 Sessions does not call `PauseActor`. These effective-source cases remain open in
 [issue #192](https://github.com/agent-primitives/sessions/issues/192); neither the conservative
 local-only refusal nor held-URI validation solves them. These checks provide no boot-scoped

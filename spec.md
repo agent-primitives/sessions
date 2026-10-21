@@ -1259,12 +1259,13 @@ The reference host takes it as `placement.Backend` in
   instance differs from the recorded one, and again after a failed restore, to see turns journaled
   meanwhile; `runtime/substrate` refuses without resuming when the first read fails. A
   `REQUIRES_MEMORY_SNAPSHOT` backend reports `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) from
-  `Restore` only when it finds the compute that held the session's memory gone or replaced, since a
-  retry cannot help then, or, with no compute instance recorded to compare (`RT-4h`), finds compute
-  it cannot tell from a replacement; otherwise it returns the restore error, since compute that is
-  still there can fail a restore for another reason. With no recorded instance, `runtime/substrate`
-  reports lost after a `NOT_FOUND` resume whenever the actor does not hold the session's snapshot,
-  if a lifecycle change races the held-ref preflight (§13.4).
+  `Restore` only when it finds the compute that held the session's memory gone or replaced, or back
+  without that memory (`runtime/substrate`: resumed on a worker that restored only its volumes,
+  §13.4), since a retry cannot help then, or, with no compute instance recorded to compare
+  (`RT-4h`), finds compute it cannot tell from a replacement; otherwise it returns the restore
+  error, since compute that is still there can fail a restore for another reason. With no recorded
+  instance, `runtime/substrate` reports lost after a `NOT_FOUND` resume whenever the actor does not
+  hold the session's snapshot, if a lifecycle change races the held-ref preflight (§13.4).
 - The returned `Incarnation.ID` is used by the reference host only for diagnostics; every in-repo
   backend sets it to the session uid.
 - `RT-4d`: The `Incarnation` returned by `Create` and `Restore` MUST carry an `Address` at which
@@ -1278,7 +1279,8 @@ The reference host takes it as `placement.Backend` in
   forked child's from `Fork`, or a suspended one, since `Exec` on a cold session goes through
   `Create`, not `Restore`. `Create` MUST NOT fail because the incarnation exists. For a
   `REQUIRES_MEMORY_SNAPSHOT` harness it MUST attach to a live incarnation and bring back a
-  suspended one's captured memory rather than start a fresh one; `runtime/substrate` does both.
+  suspended one's captured memory rather than start a fresh one; `runtime/substrate` does both,
+  and fails with `api.ErrMemoryStateLost` when the actor comes back without that memory (§13.4).
   When no incarnation exists for such a harness and `StartedTurns` reports any, `Create` MUST fail
   with `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) instead of starting fresh compute: the
   journal cannot rebuild the lost memory. A `STATELESS_REPLAY` backend MAY start fresh, since the
@@ -1418,7 +1420,12 @@ The reference host takes it as `placement.Backend` in
   restores at VOLUMES scope: a memory-tier session can pass durable MEMORY validation yet still
   cold-boot and lose RAM. Both cases remain open in
   [issue #192](https://github.com/agent-primitives/sessions/issues/192); held-URI/readiness checks
-  do not solve effective-source validation. Sessions does not call `PauseActor`.
+  do not solve effective-source validation. Sessions does not call `PauseActor`. A resume that
+  Substrate v0.5.0 binds to a worker whose sandbox runtime cannot restore the newest MEMORY
+  snapshot's recorded runtime restores its volumes only; the adapter reports it as
+  `ActorInfo.MemoryNotRestored`, and for a `REQUIRES_MEMORY_SNAPSHOT` harness the backend refuses
+  that actor with `api.ErrMemoryStateLost` wherever it would hand it out (Create, Restore, a
+  stateful Fork's clone) and before `Snapshot` suspends a recorded instance.
   `Snapshot` and `Restore` do not create missing actors. When no actor exists (for example a fresh
   session before any `Create` reached `CreateActor`, and not a fork child, or an actor deleted
   outside the host) both fail with the control API's `NOT_FOUND` (substrate module pinned in

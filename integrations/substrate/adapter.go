@@ -13,6 +13,7 @@ package ateadapter
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/agent-primitives/sessions/runtime/substrate"
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
@@ -226,12 +227,68 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 			st.GetState() == atepb.ActorState_ACTOR_STATE_SUSPENDED &&
 			st.GetLastAssignedGeneration() == 0 && len(st.GetSnapshots()) == 0 &&
 			len(st.ProtoReflect().GetUnknown()) == 0,
-		Status:           actorStatus(st.GetState()),
-		Worker:           st.GetWorkerAssignment().GetWorkerPod(),
-		Snapshot:         snap.GetDurableSnapshot().GetObject().GetSnapshotUri(),
-		SnapshotFidelity: snapshotFidelity(snap.GetFidelity()),
-		UID:              a.GetMetadata().GetUid(),
+		MemoryNotRestored: memoryNotRestored(a, snap),
+		Status:            actorStatus(st.GetState()),
+		Worker:            st.GetWorkerAssignment().GetWorkerPod(),
+		Snapshot:          snap.GetDurableSnapshot().GetObject().GetSnapshotUri(),
+		SnapshotFidelity:  snapshotFidelity(snap.GetFidelity()),
+		UID:               a.GetMetadata().GetUid(),
 	}
+}
+
+// memoryNotRestored reports that the actor holds a worker whose sandbox runtime cannot restore the
+// process memory of held, the newest snapshot when it is durable and COMPLETED (nil otherwise).
+//
+// Since substrate v0.5.0 a snapshot records the runtime it was taken under
+// (Snapshot.sandbox_runtime, agent-substrate/substrate#2536) and an assignment the runtime the actor
+// was started or restored under (WorkerAssignment.sandbox_runtime). When no worker matching the
+// snapshot's runtime has room, ResumeActor drops that constraint (canRelaxRuntime in
+// cmd/ateapi/internal/controlapi/workflow_resume.go), binds another worker, restores the snapshot at
+// VOLUMES scope (runtimeIncompatible there) and still returns the actor RUNNING with no error.
+// Comparing the two runtimes on the response is the only evidence the client gets. The assignment
+// is not relabeled while the actor runs, and every snapshot taken on it is stamped with its
+// runtime, so the evidence holds until the next capture.
+//
+// Only MEMORY snapshots count: that is the state a relaxed restore drops. A snapshot with no
+// recorded runtime imposes no constraint, so it is never relaxed. A tag-owned snapshot on an actor
+// created without a source tag is the template's golden snapshot (CreateActor in
+// cmd/ateapi/internal/controlapi/actor.go), which holds no session state; a fork clone keeps its
+// source_tag, so its borrowed snapshot counts.
+func memoryNotRestored(a *atepb.Actor, held *atepb.Snapshot) bool {
+	assignment := a.GetStatus().GetWorkerAssignment()
+	recorded := held.GetSandboxRuntime()
+	switch {
+	case assignment == nil, recorded == nil,
+		held.GetFidelity() != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+		held.GetOwner() == atepb.SnapshotOwner_SNAPSHOT_OWNER_TAG && a.GetSourceTag() == nil:
+		return false
+	}
+	return !runtimeRestores(assignment.GetSandboxRuntime(), recorded)
+}
+
+// runtimeRestores reports whether an actor running under assigned can have restored the memory of
+// a snapshot stamped with recorded. It restates Matches and MatchesCompat in substrate v0.5.0
+// internal/hardware/hardware.go, which ResumeActor uses for that decision and which is not
+// importable: the sandbox classes are equal, the compatibility schema versions are equal and
+// nonempty, and every attribute recorded on the snapshot is present on assigned with an equal
+// value. Attributes only assigned has are ignored. A missing assigned runtime cannot restore it.
+func runtimeRestores(assigned, recorded *atepb.SandboxRuntime) bool {
+	if assigned == nil || assigned.GetSandboxClass() != recorded.GetSandboxClass() {
+		return false
+	}
+	have, want := assigned.GetVersion(), recorded.GetVersion()
+	if have == nil || want == nil || have.GetSchemaVersion() == "" ||
+		have.GetSchemaVersion() != want.GetSchemaVersion() {
+		return false
+	}
+	for _, attr := range want.GetAttributes() {
+		if !slices.ContainsFunc(have.GetAttributes(), func(got *atepb.AttributeEntry) bool {
+			return got.GetKey() == attr.GetKey() && got.GetValue() == attr.GetValue()
+		}) {
+			return false
+		}
+	}
+	return true
 }
 
 // heldSnapshot selects the highest generation before inspecting durable readiness; later ties win.

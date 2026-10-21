@@ -143,10 +143,10 @@ func (m *mockControl) GetActor(ctx context.Context, a substrate.ActorRef) (subst
 		if m.info.NoSnapshotHistory && m.snapshots[a.Name] == "" {
 			fidelity = substrate.SnapshotFidelityUnknown
 		}
-		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: fidelity, SnapshotNotReady: m.info.SnapshotNotReady, SnapshotPending: m.info.SnapshotPending, NoSnapshotHistory: m.info.NoSnapshotHistory, UID: uid}, nil
+		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: fidelity, SnapshotNotReady: m.info.SnapshotNotReady, SnapshotPending: m.info.SnapshotPending, NoSnapshotHistory: m.info.NoSnapshotHistory, MemoryNotRestored: m.info.MemoryNotRestored, UID: uid}, nil
 	}
 	if m.status != substrate.StatusUnknown { // canned state for the suspend/restore cases
-		return substrate.ActorInfo{Status: m.status, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: m.info.SnapshotFidelity, UID: m.uid(a.Name)}, nil
+		return substrate.ActorInfo{Status: m.status, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name], SnapshotFidelity: m.info.SnapshotFidelity, MemoryNotRestored: m.info.MemoryNotRestored, UID: m.uid(a.Name)}, nil
 	}
 	return substrate.ActorInfo{}, substrate.ErrActorNotFound
 }
@@ -1938,4 +1938,116 @@ func TestCheckpointRefusalNamesActorAndFidelity(t *testing.T) {
 			check("create", err)
 		})
 	}
+}
+
+// A memory-tier actor that came back without its snapshot's memory (ActorInfo.MemoryNotRestored)
+// is refused with api.ErrMemoryStateLost on every path that hands an actor out, and is never
+// suspended into a checkpoint that would launder the loss. A stateless session is placed as before.
+func TestMemoryNotRestoredIsLostStateForAMemoryHarness(t *testing.T) {
+	lostRunning := running("worker-b")
+	lostRunning.MemoryNotRestored = true
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, memory bool) (*mockControl, error)
+		// calls is the control-plane sequence for a memory harness.
+		calls []string
+	}{
+		{
+			name:  "restore resumes a suspended actor",
+			calls: []string{"get:sess-x", "resume:sess-x"},
+			run: func(t *testing.T, memory bool) (*mockControl, error) {
+				m := &mockControl{info: lostRunning}
+				m.exists("sess-x", substrate.StatusSuspended)
+				m.holds("sess-x", "gs://snap/sess-x")
+				_, err := backendFor(m, memory).Restore(t.Context(), api.SnapshotRef{Local: "sess-x", ExternalURI: "gs://snap/sess-x", Memory: true})
+				return m, err
+			},
+		},
+		{
+			name:  "restore of a running actor",
+			calls: []string{"get:sess-x", "resume:sess-x"},
+			run: func(t *testing.T, memory bool) (*mockControl, error) {
+				m := &mockControl{info: lostRunning}
+				m.exists("sess-x", substrate.StatusRunning)
+				_, err := backendFor(m, memory).Restore(t.Context(), api.SnapshotRef{Local: "sess-x"})
+				return m, err
+			},
+		},
+		{
+			name:  "create resumes a suspended actor",
+			calls: []string{"get:sess-x", "resume:sess-x"},
+			run: func(t *testing.T, memory bool) (*mockControl, error) {
+				m := &mockControl{info: lostRunning}
+				m.exists("sess-x", substrate.StatusSuspended)
+				m.holds("sess-x", "gs://snap/sess-x")
+				_, err := backendFor(m, memory).Create(t.Context(), &api.SessionSpec{SessionUID: "sess-x"})
+				return m, err
+			},
+		},
+		{
+			name:  "create attaches to a running actor",
+			calls: []string{"get:sess-x"},
+			run: func(t *testing.T, memory bool) (*mockControl, error) {
+				m := &mockControl{info: lostRunning}
+				m.exists("sess-x", substrate.StatusRunning)
+				_, err := backendFor(m, memory).Create(t.Context(), &api.SessionSpec{SessionUID: "sess-x"})
+				return m, err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := tc.run(t, true)
+			if !errors.Is(err, api.ErrMemoryStateLost) {
+				t.Fatalf("memory harness: err=%v, want api.ErrMemoryStateLost", err)
+			}
+			for _, part := range []string{`session "sess-x"`, "space/sess-x", `harness "counter"`, m.uid("sess-x")} {
+				if !strings.Contains(err.Error(), part) {
+					t.Fatalf("refusal %q does not name %q", err, part)
+				}
+			}
+			if !reflect.DeepEqual(m.calls, tc.calls) {
+				t.Fatalf("calls=%v want %v", m.calls, tc.calls)
+			}
+			if _, err := tc.run(t, false); err != nil {
+				t.Fatalf("stateless harness: %v", err)
+			}
+		})
+	}
+}
+
+func TestSnapshotRefusesAMemoryActorThatLostItsRAM(t *testing.T) {
+	m := &mockControl{info: running("worker-b")}
+	m.info.MemoryNotRestored = true
+	m.exists("sess-x", substrate.StatusRunning)
+	in := api.Incarnation{ID: "sess-x", ComputeInstance: m.uid("sess-x")}
+	ref, err := newMemoryBackend(m).Snapshot(t.Context(), in, api.SnapshotExternal)
+	if !errors.Is(err, api.ErrMemoryStateLost) || ref != (api.SnapshotRef{}) {
+		t.Fatalf("snapshot: ref=%+v err=%v, want api.ErrMemoryStateLost", ref, err)
+	}
+	if want := []string{"get:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("calls=%v want %v: the actor must not be suspended", m.calls, want)
+	}
+	if !strings.Contains(err.Error(), "nothing was snapshotted") {
+		t.Fatalf("refusal %q does not say nothing was snapshotted", err)
+	}
+}
+
+func TestForkRefusesACloneThatLostTheParentRAM(t *testing.T) {
+	m := newClonerWithSuspendedParent()
+	m.info.MemoryNotRestored = true
+	_, err := newMemoryBackend(m).Fork(t.Context(), api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true}, api.ForkOpts{ChildSessionUID: "child"})
+	if !errors.Is(err, api.ErrMemoryStateLost) {
+		t.Fatalf("fork: err=%v, want api.ErrMemoryStateLost", err)
+	}
+	if _, ok := m.actors["child"]; ok || !slices.Contains(m.calls, "untag:fork-child") {
+		t.Fatalf("refused clone was not torn down: calls=%v", m.calls)
+	}
+}
+
+func backendFor(m *mockControl, memory bool) *substrate.Backend {
+	if memory {
+		return newMemoryBackend(m)
+	}
+	return substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
+		api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}})
 }

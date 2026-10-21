@@ -27,7 +27,7 @@ Run half (run.mmd, start of chapter 4), each also a row of the traced turn:
 
 - agentctl -> agentsessionsd, Sessions.Exec: cmd/agentctl/main.go:275.
 - agentsessionsd (its substrate adapter, in process) -> ate-api, CreateActor and ResumeActor:
-  integrations/substrate/adapter.go:58,80. The substrate build passes its flags to the server's
+  integrations/substrate/adapter.go:59,81. The substrate build passes its flags to the server's
   `WithHarnessBackends` hook (integrations/substrate/cmd/agentsessionsd/main.go:22), and the server
   calls the hook's `Backends` at startup (internal/agentsessionsd/agentsessionsd.go:273), which dials
   the ate-api and wraps the connection in the adapter
@@ -36,7 +36,7 @@ Run half (run.mmd, start of chapter 4), each also a row of the traced turn:
   substrate cmd/ateapi/internal/controlapi/workflow_resume.go:765, which sends RestoreWorkload to
   the worker pod's ateom (cmd/atelet/main.go:1319, the client from cmd/atelet/main.go:1616).
 - agentsessionsd -> atenet-router, harnesswire stream: the actor is named in the ate-target-actor
-  header (runtime/substrate/substrate.go:1130,1157).
+  header (runtime/substrate/substrate.go:1148,1183).
 - atenet-router -> worker :443: substrate cmd/atenet/internal/router/ingress/ingress.go:140-142
   ("Route ok", targetAddr workerIP:443).
 - worker -> harness, "starts it": ateom-microvm's RestoreWorkload (substrate

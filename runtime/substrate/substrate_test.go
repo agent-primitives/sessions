@@ -2846,8 +2846,9 @@ func TestSnapshotRefusesAnActorReplacedBetweenTheCheckAndTheSuspend(t *testing.T
 // the recorded checkpoint (attach reads it again) and refuse it with api.ErrMemoryStateLost: no
 // incarnation, the actor left running and neither suspended nor deleted, the refusal logged for
 // operators. Every later attach, Restore and Snapshot then refuses it before any resume or suspend.
-// A SUSPEND another host recorded in that window is read by attach and accepted. A stateless
-// session is not checked.
+// A SUSPEND another host recorded in that window is read by attach and accepted; Restore, which
+// holds the ref it was given, refuses it, and a retry with the new ref gets the running actor. A
+// stateless session is not checked.
 func TestResumeThatRestoresAnUnrecordedCaptureIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -2859,6 +2860,7 @@ func TestResumeThatRestoresAnUnrecordedCaptureIsRefused(t *testing.T) {
 		{name: "restore", op: "restore"},
 		{name: "attach", op: "attach"},
 		{name: "attach after another host recorded the capture", op: "attach", recordedMeanwhile: true},
+		{name: "restore after another host recorded the capture", op: "restore", recordedMeanwhile: true},
 	} {
 		for _, memory := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/memory=%v", tc.name, memory), func(t *testing.T) {
@@ -2905,6 +2907,21 @@ func TestResumeThatRestoresAnUnrecordedCaptureIsRefused(t *testing.T) {
 				}
 				if want := []string{"get:sess-x", "resume:sess-x"}; !reflect.DeepEqual(m.calls, want) {
 					t.Fatalf("calls=%v want %v", m.calls, want)
+				}
+				if memory && tc.recordedMeanwhile && tc.op == "restore" {
+					// Restore's ref was read before the other host's SUSPEND: refused. A retry
+					// reads the new ref and gets the actor the resume left running.
+					if !errors.Is(err, api.ErrMemoryStateLost) || !reflect.DeepEqual(inc, api.Incarnation{}) {
+						t.Fatalf("restore: inc=%+v err=%v, want api.ErrMemoryStateLost and no incarnation", inc, err)
+					}
+					m.calls = nil
+					if inc, err = b.Restore(ctx, other); err != nil || inc.ID != "sess-x" {
+						t.Fatalf("restore retried with the new ref: inc=%+v err=%v, want the actor handed out", inc, err)
+					}
+					if want := []string{"get:sess-x", "resume:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+						t.Fatalf("retry calls=%v want %v", m.calls, want)
+					}
+					return
 				}
 				if !memory || tc.recordedMeanwhile {
 					if err != nil || inc.ID != "sess-x" {

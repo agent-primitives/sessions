@@ -530,19 +530,20 @@ the session stays refused:
 - a suspend whose upload was still pending when it returned, once the upload completes (not at
   v0.5.0, whose `SuspendActor` returns only after it completes).
 
-Restore and Create's attach check again after a successful `ResumeActor`, on the actor its
-response reports: Restore against its held ref, and attach against `RecordedCheckpoint` read
-again, so a `SUSPEND` another host appended in between is accepted. Between the check and the
-resume, another operation can leave a capture the journal never accepted on the actor, such as
-another host's `Snapshot` that refused one, and `ResumeActor` restores whatever the actor holds by
-then, on a worker of the runtime that capture is stamped with, so `ActorInfo.MemoryNotRestored` is
-false. A mismatch is `api.ErrMemoryStateLost`, logged at `WARN` like the refusals above with
-`actor_status` `running`. The actor already runs that capture's RAM. The backend leaves it running
-and does not hand it out, suspend it or delete it; the Placer dials no harness and journals
-nothing. Every later turn, Resume, Suspend and Fork refuses it before any control call, since it
-still holds that capture. Recovery is the same as for every refusal here, below. The check sees
-only what the response reports; it is not a precondition on the resume, which v0.5.0's
-`ResumeActorRequest` (the actor's `ObjectRef` only) cannot carry.
+Restore and Create's attach check again after a successful `ResumeActor`, on the actor its response
+reports: Restore against its held ref, and attach against `RecordedCheckpoint` read again, so a
+`SUSPEND` another host appended in between is accepted by attach. Restore refuses that one, since
+its ref was read before the append; the refusal clears on retry, which reads the new ref and finds
+the running actor holding it. Between the check and the resume, another operation can leave a
+capture the journal never accepted on the actor, such as another host's `Snapshot` that refused one,
+and `ResumeActor` restores whatever the actor holds by then, on a worker of the runtime that capture
+is stamped with, so `ActorInfo.MemoryNotRestored` is false. A mismatch is `api.ErrMemoryStateLost`,
+logged at `WARN` like the refusals above with `actor_status` `running`. The actor already runs that
+capture's RAM. The backend leaves it running and does not hand it out, suspend it or delete it; the
+Placer dials no harness and journals nothing. Every later turn, Resume, Suspend and Fork refuse it
+before any mutating control call, since it still holds that capture. Recovery is the same as for
+every refusal here, below. The check sees only what the response reports; it is not a precondition
+on the resume, which v0.5.0's `ResumeActorRequest` (the actor's `ObjectRef` only) cannot carry.
 
 Nothing in sessions recovers the session's memory after such a refusal. Delete or abandon the
 session, and delete the substrate actor named in the warning to release its snapshot, or its worker

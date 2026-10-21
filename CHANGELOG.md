@@ -209,7 +209,9 @@ not provide.
   `runtime/substrate.ControlClient` implementation that leaves `MemoryNotRestored` false keeps the
   old behavior, but one that leaves `CaptureLineage` empty can no longer suspend or fork a
   memory-tier session, and one that leaves `NoCapture` false refuses every memory-tier session with
-  no `SUSPEND` recorded once its actor exists. See
+  no `SUSPEND` recorded once its actor exists. `ResumeActor` must now report `Snapshot` and
+  `NoCapture` as `GetActor` does: one that does not refuses every memory-tier `Restore`, and every
+  `Create` that resumes a suspended memory-tier actor. See
   [runtime fallback](docs/substrate-conformance.md#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback).
 - SQLite schema v6 adds model-admission flags for new sessions; genuine pre-policy sessions,
   including empty sessions, remain legacy. Fork inherits admission metadata atomically. Existing

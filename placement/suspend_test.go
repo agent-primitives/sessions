@@ -1129,8 +1129,8 @@ func TestOutsideSuspendsEndAMemorySession(t *testing.T) {
 // actor holding a capture the journal never accepted (another host's refused Snapshot, of RAM that
 // lost the session's turns), and the resume restores it. Resume and Exec refuse the actor the
 // resume reports with api.ErrMemoryStateLost: the actor is left running on its worker, nothing is
-// suspended, deleted or journaled. Every later Exec, Resume, Suspend
-// and Fork refuses it with no control call. A stateless session carries on.
+// suspended, deleted or journaled. Every later Exec, Resume, Suspend and Fork refuses it with no
+// mutating control call. A stateless session carries on.
 func TestRefusedResumeLeavesTheActorRunningAndJournalsNothing(t *testing.T) {
 	ref := substrate.ActorRef{Atespace: "space", Name: "session"}
 	for _, op := range []string{"resume", "exec"} {
@@ -1196,7 +1196,7 @@ func TestRefusedResumeLeavesTheActorRunningAndJournalsNothing(t *testing.T) {
 						t.Fatalf("later %s: %v, want api.ErrMemoryStateLost", name, err)
 					}
 					if len(ctl.calls) != 0 {
-						t.Fatalf("later %s: calls=%v, want no control call", name, ctl.calls)
+						t.Fatalf("later %s: calls=%v, want no mutating control call", name, ctl.calls)
 					}
 					if got, err := log.Head(); err != nil || got != head {
 						t.Fatalf("later %s: head %d (err %v), want %d", name, got, err, head)

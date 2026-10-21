@@ -429,7 +429,13 @@
 
   // ---- actor ----
 
+  // Each actor or journal read takes a number, and only the newest one renders: an older read of
+  // the same session (A, then B, then A again before the first read of A returns) is dropped.
+  let actorRead = 0;
+  let journalRead = 0;
+
   async function loadActor() {
+    const read = ++actorRead;
     const box = $("actor");
     box.replaceChildren();
     const s = sessionByID(state.selected);
@@ -441,10 +447,10 @@
     try {
       out = await getJSON("/api/actor?session=" + encodeURIComponent(s.uid));
     } catch (err) {
-      if (state.selected === s.uid) box.append(el("p", { class: "empty", text: "Actor read failed: " + err.message }));
+      if (read === actorRead && state.selected === s.uid) box.append(el("p", { class: "empty", text: "Actor read failed: " + err.message }));
       return;
     }
-    if (state.selected !== s.uid) return;
+    if (read !== actorRead || state.selected !== s.uid) return;
     box.replaceChildren();
     const lane = laneOf(s.lane);
     if (!out.available || out.error) {
@@ -486,6 +492,7 @@
   // ---- journal ----
 
   async function loadJournal() {
+    const read = ++journalRead;
     const tb = $("journal").querySelector("tbody");
     const meta = $("journal-meta");
     tb.replaceChildren();
@@ -497,13 +504,13 @@
     try {
       j = await getJSON("/api/journal?session=" + encodeURIComponent(uid));
     } catch (err) {
-      if (state.selected !== uid) return;
+      if (read !== journalRead || state.selected !== uid) return;
       meta.textContent = "read failed";
       meta.className = "meta bad";
       tb.append(el("tr", {}, el("td", { colspan: "4", class: "text", text: err.message })));
       return;
     }
-    if (state.selected !== uid) return;
+    if (read !== journalRead || state.selected !== uid) return;
     state.journal = j;
     const seen = state.lastSeqSeen[uid] || 0;
     const s = sessionByID(uid);
@@ -608,11 +615,17 @@
     state.pending = { id: -1, op: "exec", session: uid, input: text, output: "", records: [], started: new Date().toISOString(), running: true };
     renderTimeline();
     let act = null;
+    // rejected is set only by a non-ok HTTP response: the bridge answered that it did not run the
+    // turn. Any other error (fetch, read or parse) leaves the outcome unknown, since the bridge
+    // sends its status line with the first record, while Exec may already be committing them.
+    let rejected = "";
+    let lost = "";
     try {
       const res = await fetch("/api/exec", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: uid, input: text }) });
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
-        throw new Error(e.error || res.statusText);
+        rejected = e.error || res.statusText || "HTTP " + res.status;
+        throw new Error(rejected);
       }
       const reader = res.body.getReader();
       const dec = new TextDecoder();
@@ -639,14 +652,23 @@
         }
       }
     } catch (err) {
-      setStatus("Exec failed: " + err.message, true);
+      if (!rejected) lost = err.message || String(err);
     }
     state.pending = null;
     state.busy = false;
     if (act) await settle(act);
     else {
+      // The bridge never reported how the call ended: end the animation, draw the flow shown
+      // before the call again, say why, and re-read the journal, which shows any record it wrote.
+      // Only an HTTP refusal is a definite failure; a lost connection is not, so it must not
+      // invite a retry of a turn that may have completed.
+      setStatus(rejected ? "Exec failed: " + rejected
+        : lost ? "Exec outcome unknown: the connection to the bridge failed (" + lost + ") before it reported the call's outcome; the journal shows what was written."
+          : "Exec ended without a result: the stream closed before the bridge reported the call's outcome, which is unknown; the journal shows what was written.", true);
       clearInterval(animTimer);
       renderTimeline();
+      renderControls();
+      await Promise.all([showFlow(state.shown), loadJournal(), loadActor()]);
     }
     renderControls();
   }

@@ -247,6 +247,14 @@
     const ctl = r.controllerCalls >= 0
       ? "the controller counted " + r.controllerCalls + " model calls before it stopped"
       : "the controller did not re-run any turn";
+    // Every daemon calls the same fake model, so its counter moving is not the replay's call unless
+    // the controller counted one.
+    const moved = r.fakeBefore >= 0 && r.fakeAfter >= 0 && r.fakeAfter !== r.fakeBefore;
+    if (!r.modelCalled && moved && r.controllerCalls === 0) {
+      return "Replay not confirmed. The journal (" + r.records + " records, " + turns + ", head " + r.head +
+        ") verified before the run; the controller counted 0 model calls" + fake + ". The daemons share that " +
+        "counter, so the move cannot be attributed to this replay. Zero model calls is not established.";
+    }
     const verdict = r.modelCalled ? "The replay called the model." : "Zero model calls is not established.";
     return "Replay did not complete. The journal (" + r.records + " records, " + turns + ", head " +
       r.head + ") verified before the run; " + ctl + fake + ". " + verdict;

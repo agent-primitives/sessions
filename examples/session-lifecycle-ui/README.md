@@ -34,7 +34,7 @@ cannot run them.
 | Send turn | `Sessions.Exec`, streamed to the page record by record | the reply, then the actor `RUNNING` |
 | Suspend, Resume | `Sessions.Suspend`, `Sessions.Resume` | the actor `SUSPENDED` with its newest snapshot's generation and fidelity, then `RUNNING` with the same actor UID |
 | Fork at seq N | `Sessions.Fork` at the journal row you select (the head by default) | the child session, which you can open |
-| Replay | `Sessions.Replay` reads the journal; the bridge verifies the hash chain, then runs the controller's replay against the session's actor through the atenet-router, as [`cmd/replay`](../agentsuite-substrate/cmd/replay) does | the turns re-run, the controller's model-call count and the fake model's counter before and after; it fails on any model call |
+| Replay | `Sessions.Replay` reads the journal; the bridge verifies the hash chain, then runs the controller's replay against the session's actor through the atenet-router, as [`cmd/replay`](../agentsuite-substrate/cmd/replay) does | the turns re-run, the controller's model-call count and the fake model's counter before and after; it fails on any model call the controller counts, and when the fake counter moves |
 | A refused call | the call's `FAILED_PRECONDITION` | a card with the session, actor, required and observed fidelity, and the daemon's message unchanged |
 
 Replay is not a Sessions RPC: the API streams the journal, and re-execution exists only in process
@@ -43,7 +43,10 @@ does what `cmd/replay` does, on the stateless tier only, since a memory-tier har
 conversation in RAM. Only a replay that completes claims the re-run and zero model calls. One that
 stops after the journal read (a dropped port-forward, an actor the router cannot reach) is marked as
 failing in the bridge, lists the counters it read, and draws the model as unknown, or as called if
-a counter moved.
+the controller counted a call. Every daemon calls the same fake model, so its counter also counts
+turns from another tab or `ui.sh check`. A replay during which that counter moved while the
+controller counted no call fails too, but the move is not attributed to it: the model is drawn as
+unknown.
 
 The bridge also replays only a session that Sessions reports `COMPUTE_LIVE`, and the Replay button
 is off otherwise. The replay's turns go through atenet-router, which resumes a suspended actor on
@@ -113,6 +116,8 @@ suspend, resume and fork, only the worker's restore or checkpoint line lights th
 actor: the actor's state shows what it is now, not that this call changed it.
 
 A hop with no matching line is drawn dashed: no line was found, not proof that the step did not run.
+A hop with a pod whose logs could not be read (a permission denial, a timeout) is unknown, with the
+error, unless a pod that was read has the call's own line; it is never drawn as not seen or skipped.
 Select a box to see its line and the command that fetched it. Lines are matched by their `kubectl
 logs --timestamps` time against the bridge's clock, from 250 ms before the call to 2 s after it.
 That holds for kind on this machine; against a cluster whose clock is further off, hops show as not

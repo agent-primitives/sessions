@@ -146,6 +146,33 @@ function activity(id, op, uid) {
   return { id, op, session: uid, lane: "stateless", ok: true, started: "2026-10-21T00:00:00Z", durationMs: 5, records: [] };
 }
 
+// Stream is a route body that /api/exec streams as NDJSON lines, then ends, or, given an error,
+// rejects the next read as a dropped connection does. A string message is sent as a raw line.
+class Stream {
+  constructor(msgs, err) {
+    this.msgs = msgs;
+    this.err = err;
+  }
+  reader() {
+    const chunks = this.msgs.map((m) => new TextEncoder().encode((typeof m === "string" ? m : JSON.stringify(m)) + "\n"));
+    return {
+      read: async () => {
+        if (chunks.length) return { value: chunks.shift(), done: false };
+        if (this.err) throw this.err;
+        return { value: undefined, done: true };
+      },
+    };
+  }
+}
+
+// Refusal is a route body the bridge answers with a non-ok HTTP status and a JSON error.
+class Refusal {
+  constructor(status, error) {
+    this.status = status;
+    this.error = error;
+  }
+}
+
 // page loads app.js against a fake bridge. routes maps a path (without its query) to a body or a
 // function of the URL returning one; a returned promise is awaited, so a test can hold a call.
 async function page(search, routes, timers) {
@@ -156,6 +183,8 @@ async function page(search, routes, timers) {
     const r = routes[u.pathname];
     if (r === undefined) throw new Error("fake bridge: no route " + u.pathname);
     const body = await (typeof r === "function" ? r(u) : r);
+    if (body instanceof Stream) return { ok: true, status: 200, statusText: "OK", body: { getReader: () => body.reader() } };
+    if (body instanceof Refusal) return { ok: false, status: body.status, statusText: "Bad Request", json: async () => ({ error: body.error }) };
     return { ok: true, status: 200, statusText: "OK", json: async () => body };
   };
   const ctx = {
@@ -283,5 +312,106 @@ test("a Create that fails ends its animation and shows the error, with or withou
     assert.equal(new URL(p.loc.href).searchParams.get("session"), search ? A : null);
     await p.pick(A);
     assert.match(p.caption(), /^Exec · session aaaaaaaa/);
+  }
+});
+
+// rows is the journal table's rows, as text.
+const rows = (p) => p.$("journal").querySelector("tbody").children.map((r) => r.textContent);
+
+function record(seq, kind) {
+  return { seq, kind, hash: "h" + seq, prev: "h" + (seq - 1) };
+}
+
+test("a journal read that a newer read of the same session overtook is dropped", async () => {
+  // A, then B, then A again while the first read of A is still out: only the newest read renders.
+  let release;
+  const held = new Promise((r) => { release = r; });
+  let readsOfA = 0;
+  const p = await page("?session=" + B, routes([], {
+    "/api/journal": (u) => {
+      if (u.searchParams.get("session") !== A) return { records: [record(1, "INPUT")], verified: true };
+      readsOfA++;
+      // The first read of A is slow and older: one record. The second has both.
+      return readsOfA === 1
+        ? held.then(() => ({ records: [record(1, "INPUT")], verified: true }))
+        : { records: [record(1, "INPUT"), record(2, "OUTPUT")], verified: true };
+    },
+  }));
+  const first = p.pick(A);
+  for (let i = 0; i < 20 && readsOfA < 1; i++) await flush();
+  assert.equal(readsOfA, 1, "the first read of A is out");
+  await p.pick(B);
+  await p.pick(A);
+  assert.equal(rows(p).length, 2);
+  release();
+  await first;
+  assert.deepEqual(rows(p).map((r) => r.split("h")[0]), ["1INPUT", "2OUTPUT"]);
+  assert.equal(p.$("journal-meta").textContent, "2 records · hash chain verified here");
+});
+
+test("an actor read that a newer read of the same session overtook is dropped", async () => {
+  let fail;
+  const held = new Promise((_, reject) => { fail = reject; });
+  let readsOfA = 0;
+  const p = await page("?session=" + B, routes([], {
+    "/api/actor": (u) => {
+      if (u.searchParams.get("session") !== A) return { available: false, error: "cluster reads are off" };
+      readsOfA++;
+      return readsOfA === 1 ? held : { available: false, error: "the newest read" };
+    },
+  }));
+  const first = p.pick(A);
+  for (let i = 0; i < 20 && readsOfA < 1; i++) await flush();
+  await p.pick(B);
+  await p.pick(A);
+  fail(new Error("the stale read"));
+  await first;
+  const text = p.$("actor").textContent;
+  assert.match(text, /the newest read/);
+  assert.doesNotMatch(text, /the stale read/);
+});
+
+test("an Exec with no final result ends its animation, restores the flow and says so", async () => {
+  for (const c of [
+    { name: "the stream ends without the activity", exec: () => new Stream([{ type: "record", data: { seq: 1, kind: "INPUT", text: "hi" } }]),
+      status: /^Exec ended without a result: the stream closed before the bridge reported the call's outcome, which is unknown/ },
+    { name: "the bridge refuses the call", exec: () => new Refusal(400, "input: want 1 to 4000 characters"),
+      status: /^Exec failed: input: want 1 to 4000 characters$/ },
+    // Only a refusal is a definite failure: a connection lost after the 200 (or before the
+    // response, which the bridge sends with its first record) leaves the outcome unknown.
+    { name: "the read is rejected after a record", exec: () => new Stream([{ type: "record", data: { seq: 1, kind: "INPUT", text: "hi" } }], new TypeError("network error")),
+      status: /^Exec outcome unknown: the connection to the bridge failed \(network error\) before it reported the call's outcome; the journal shows what was written\.$/ },
+    { name: "a line is not JSON", exec: () => new Stream([{ type: "record", data: { seq: 1, kind: "INPUT", text: "hi" } }, "{trunc"]),
+      status: /^Exec outcome unknown: the connection to the bridge failed \(.+\) before it reported the call's outcome/ },
+    { name: "the request fails", exec: () => { throw new TypeError("Failed to fetch"); },
+      status: /^Exec outcome unknown: the connection to the bridge failed \(Failed to fetch\)/ },
+  ]) {
+    let animating = false;
+    let journalReads = 0;
+    const p = await page("?session=" + A, routes([activity(1, "exec", A)], {
+      "/api/exec": c.exec,
+      "/api/journal": () => {
+        journalReads++;
+        return { records: [], verified: true };
+      },
+    }), {
+      setInterval: () => { animating = true; return 1; },
+      clearInterval: () => { animating = false; },
+    });
+    const before = p.caption();
+    assert.match(before, /^Exec · session aaaaaaaa/, c.name);
+    const readsBefore = journalReads;
+    p.$("input").value = "hi";
+    await p.$("composer").fire("submit");
+    for (let i = 0; i < 50 && !p.$("status").textContent; i++) await flush();
+    for (let i = 0; i < 5; i++) await flush();
+    assert.equal(animating, false, c.name + ": the in-flight animation stopped");
+    assert.doesNotMatch(p.caption(), /in flight/, c.name);
+    assert.equal(p.caption(), before, c.name + ": the flow drawn before the call is back");
+    assert.match(p.$("status").textContent, c.status, c.name);
+    assert.ok(p.$("status").classList.contains("error"), c.name);
+    assert.equal(p.$("send").disabled, false, c.name + ": the controls are back");
+    assert.equal(p.$("timeline").querySelectorAll(".entry").length, 1, c.name + ": no running entry is left");
+    assert.ok(journalReads > readsBefore, c.name + ": the journal is read again, since the turn may have written records");
   }
 });

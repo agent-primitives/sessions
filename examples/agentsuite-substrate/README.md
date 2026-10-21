@@ -58,6 +58,7 @@ The recipe is for a disposable kind cluster you trust: nothing in it authenticat
 | `demo/` | The recorded demo: `driver.sh`, `smoke-microvm.sh`, `present.awk`, `demo.tape`, `record.sh`, `chapters.py`, the build and run diagrams (`build.mmd`, `run.mmd`, checked arrow by arrow in `diagrams.md`, spliced in by `splice.py`), the helpers its screens run (`split-view.py`, `trace-turn.sh`, `trace-hop.py`, `image-files.sh`, `wait-golden.sh`), `bat.conf` and the tools image (`Dockerfile.tools`). |
 | `fakemodel/`, `cmd/fakemodel` | A deterministic OpenAI-compatible endpoint. Its reply lists the user's issues so far, and `GET /stats` reports how many calls it has served. |
 | `cmd/replay` | Reads the journal over the Sessions API, verifies the chain, and runs the controller's replay against the session's actor through the router. |
+| `cmd/lifecycle-ui` | The loopback bridge and page of the [session lifecycle UI](../session-lifecycle-ui), which drives this example from a browser. |
 | `deploy/` | The micro-VM and gVisor WorkerPools, the fake model, and `agentsessionsd` (the substrate build, `integrations/substrate/cmd/agentsessionsd`), rendered once per tier. |
 
 The suite is validated with kaimahi's `agentsuite` package, imported as a Go module at kaimahi

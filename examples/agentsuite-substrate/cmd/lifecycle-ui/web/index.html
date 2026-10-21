@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Session lifecycle · AgentSessions on agent-substrate</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="flow.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1>Session lifecycle</h1>
+      <p class="sub">AgentSessions on agent-substrate, micro-VM actors</p>
+    </div>
+    <ul class="lanes" id="lanes" aria-label="Daemons"></ul>
+    <button type="button" class="ghost" id="theme" aria-label="Switch to the dark theme">Dark theme</button>
+  </header>
+
+  <section class="toolbar" aria-label="Lifecycle calls">
+    <div class="group">
+      <label for="session">Session</label>
+      <select id="session"><option value="">No session yet</option></select>
+    </div>
+    <div class="group">
+      <label for="lane">New on</label>
+      <select id="lane"></select>
+      <button type="button" id="create">Create</button>
+    </div>
+    <div class="group actions">
+      <button type="button" id="suspend" disabled>Suspend</button>
+      <button type="button" id="resume" disabled>Resume</button>
+      <button type="button" id="fork" disabled>Fork at head</button>
+      <button type="button" id="replay" disabled>Replay</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite"></p>
+  </section>
+
+  <section class="flow" aria-labelledby="flow-title">
+    <div class="flow-head">
+      <h2 id="flow-title">Request flow</h2>
+      <p class="caption" id="flow-caption">Make a call to see the path it takes.</p>
+      <ul class="legend" aria-label="Legend">
+        <li><span class="key observed"></span>seen in logs or state</li>
+        <li><span class="key missing"></span>on the path, not seen</li>
+        <li><span class="key forwarded"></span>passed through, logs nothing</li>
+        <li><span class="key refused"></span>refused, declined or failed</li>
+      </ul>
+    </div>
+    <svg id="flow" role="group" aria-label="Request flow diagram"></svg>
+    <p class="evidence" id="evidence" aria-live="polite"></p>
+  </section>
+
+  <main class="columns">
+    <section class="col" aria-labelledby="timeline-title">
+      <div class="col-head">
+        <h2 id="timeline-title">Timeline</h2>
+        <span class="meta" id="timeline-meta"></span>
+      </div>
+      <ol class="timeline" id="timeline"></ol>
+      <form class="composer" id="composer">
+        <label class="sr" for="input">Turn input</label>
+        <input id="input" autocomplete="off" maxlength="4000" placeholder="Select or create a session first" disabled>
+        <button type="submit" id="send" disabled>Send turn</button>
+      </form>
+    </section>
+
+    <section class="col" aria-labelledby="actor-title">
+      <div class="col-head">
+        <h2 id="actor-title">Actor</h2>
+        <button type="button" class="ghost small" id="actor-refresh" disabled>Refresh</button>
+      </div>
+      <div class="actor" id="actor"></div>
+    </section>
+
+    <section class="col" aria-labelledby="journal-title">
+      <div class="col-head">
+        <h2 id="journal-title">Journal</h2>
+        <span class="meta" id="journal-meta"></span>
+      </div>
+      <div class="journal-wrap">
+        <table class="journal" id="journal">
+          <thead><tr><th scope="col">seq</th><th scope="col">event</th><th scope="col">content</th><th scope="col">hash</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

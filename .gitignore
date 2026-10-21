@@ -35,6 +35,9 @@ go.work.sum
 /agentnode
 /agentctl
 /harnessnode
+# lifecycle-ui bridge built in place (ui.sh builds it outside the tree)
+/examples/agentsuite-substrate/lifecycle-ui
+/examples/agentsuite-substrate/cmd/lifecycle-ui/lifecycle-ui
 
 # substrate-e2e clone (cloned by the workflow / local repro)
 /_substrate/

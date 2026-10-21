@@ -25,7 +25,7 @@ Build half (build.mmd, end of chapter 2):
 
 Run half (run.mmd, start of chapter 4), each also a row of the traced turn:
 
-- agentctl -> agentsessionsd, Sessions.Exec: cmd/agentctl/main.go:275.
+- agentctl -> agentsessionsd, Sessions.Exec: cmd/agentctl/main.go:292.
 - agentsessionsd (its substrate adapter, in process) -> ate-api, CreateActor and ResumeActor:
   integrations/substrate/adapter.go:61,83. The substrate build passes its flags to the server's
   `WithHarnessBackends` hook (integrations/substrate/cmd/agentsessionsd/main.go:22), and the server

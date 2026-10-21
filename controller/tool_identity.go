@@ -62,3 +62,35 @@ func recordedToolResult(call *api.ToolCall, result *api.ToolResult) (api.ToolRes
 	}
 	return *result, nil
 }
+
+// cloneArgs deep-copies the JSON-shaped containers of tool arguments (maps and []any), so a copy
+// checked against the journal cannot be changed through a map or slice another holder shares.
+// Scalars are values; other Go types are outside the JSON-shaped tool domain and are not copied.
+func cloneArgs(args map[string]any) map[string]any {
+	if args == nil {
+		return nil
+	}
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		out[k] = cloneArg(v)
+	}
+	return out
+}
+
+func cloneArg(v any) any {
+	switch v := v.(type) {
+	case map[string]any:
+		return cloneArgs(v)
+	case []any:
+		if v == nil {
+			return v
+		}
+		out := make([]any, len(v))
+		for i, e := range v {
+			out[i] = cloneArg(e)
+		}
+		return out
+	default:
+		return v
+	}
+}

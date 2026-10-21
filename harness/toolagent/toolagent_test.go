@@ -288,3 +288,63 @@ func (s *recordingSink) Model(_ context.Context, req api.ModelRequest) (api.Mode
 	s.req = req
 	return api.ModelResponse{Message: *api.TextMessage("assistant", "ok")}, nil
 }
+
+// A completion that reuses an answered call ID fails its turn after the host journaled it. A later
+// turn's history keeps the answered call once, with its result, and drops the reused one: a
+// provider refuses an assistant tool call that no tool result follows.
+func TestHistoryDropsReusedCallIDOfFailedTurn(t *testing.T) {
+	log := newLog(t)
+	var requests []api.ModelRequest
+	modelFn := func(_ context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+		requests = append(requests, req)
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == "user" && last.Text() == "again" {
+			return api.ModelResponse{Message: *api.TextMessage("assistant", "ok")}, nil
+		}
+		// The first call, and the same ID again once its result arrives.
+		return api.ModelResponse{Message: api.Message{Role: "assistant", Parts: []api.Part{
+			{ToolCall: &api.ToolCall{ID: "call_1", Tool: "publish", Args: map[string]any{"text": "hello"}}},
+		}}}, nil
+	}
+	h := toolagent.Harness{Model: "m", Tools: []api.ToolDefinition{publish}}
+	newController := func() *controller.Controller {
+		c, err := controller.New(log, modelFn, controller.WithSessionUID("s"), controller.WithToolExecutor(
+			func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				return api.ToolResult{Output: map[string]any{"text": "published"}}, nil
+			}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	exec := func(input string) error {
+		head, err := log.Head()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return newController().Exec(t.Context(), h, []api.Message{*api.TextMessage("user", input)}, head)
+	}
+	var park *api.ApprovalParkedError
+	if err := exec("publish hello"); !errors.As(err, &park) {
+		t.Fatalf("Exec = %v, want a park", err)
+	}
+	if _, err := controller.Approve(log, api.ApprovalDecision{ExecutionID: park.Ref.ExecutionID, ToolCallID: park.Ref.ToolCallID, RequestSeq: park.Ref.RequestSeq, Approved: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newController().Resume(t.Context(), h); !errors.Is(err, toolagent.ErrInvalidToolCall) {
+		t.Fatalf("Resume = %v, want %v", err, toolagent.ErrInvalidToolCall)
+	}
+	if err := exec("again"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := json.Marshal(requests[len(requests)-1].Messages)
+	want, _ := json.Marshal([]api.Message{
+		*api.TextMessage("user", "publish hello"),
+		{Role: "assistant", Parts: []api.Part{{ToolCall: &api.ToolCall{ID: "call_1", Tool: "publish", Args: map[string]any{"text": "hello"}}}}},
+		{Role: "tool", Parts: []api.Part{{ToolResult: &api.ToolResult{ID: "call_1", Content: api.TextMessage("tool", `{"text":"published"}`).Parts}}}},
+		*api.TextMessage("user", "again"),
+	})
+	if string(got) != string(want) {
+		t.Fatalf("history after the failed turn\n got %s\nwant %s", got, want)
+	}
+}

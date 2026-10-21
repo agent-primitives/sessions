@@ -162,7 +162,9 @@ func toolMessage(id string, result api.ToolResult) api.Message {
 
 // historyMessages rebuilds earlier turns for the model: inputs, completions and the results of
 // their tool calls. A tool call with no result in the journal (a turn that failed or is still
-// parked) is dropped from its completion, because a provider refuses an unanswered call.
+// parked) is dropped from its completion, because a provider refuses an unanswered call. Each
+// result answers one call: a later completion in the same execution that reused an answered ID
+// failed its turn (Run refuses it after the host journaled it), so it is dropped too.
 func historyMessages(history []api.Event) []api.Message {
 	type callKey struct{ execution, id string }
 	answered := map[callKey]api.ToolResult{}
@@ -205,6 +207,7 @@ func historyMessages(history []api.Event) []api.Message {
 			if offered[key] {
 				messages = append(messages, toolMessage(key.id, answered[key]))
 				delete(offered, key)
+				delete(answered, key)
 			}
 		}
 	}

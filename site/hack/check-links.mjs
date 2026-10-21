@@ -51,7 +51,7 @@ for (const file of htmlFiles) {
 
   // data-src carries the cast path the player fetches at runtime, and poster the image a video
   // shows before it plays, so each is a link like any other.
-  for (const [, attr, href] of html.matchAll(/\b(href|src|data-src|poster)="([^"]+)"/g)) {
+  for (const [, attr, href] of html.matchAll(/\s(href|src|data-src|poster)="([^"]+)"/g)) {
     // A .md target means the rewrite missed it. GitHub links are intentional and fine.
     if (attr === "href" && href.includes(".md") && !href.includes("github.com")) {
       failures.push({ where, href, why: "unrewritten .md link" });

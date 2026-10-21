@@ -289,3 +289,47 @@ test("a lifecycle call's vm edge needs the worker's line, not only the actor's s
   }
   assert.equal(Flow.edgeLabel("resume", "vm", nodes("observed"), "done"), "restore");
 });
+
+test("replay is offered only on a stateless session Sessions reports LIVE", () => {
+  const stateless = { tier: "STATELESS_REPLAY" };
+  const live = { uid: "s1", computeState: "COMPUTE_LIVE" };
+  assert.equal(Flow.replayBlock(live, stateless, true), "");
+  // Suspended: routing the replay's turns would wake the actor outside Sessions.
+  assert.match(Flow.replayBlock({ uid: "s1", computeState: "COMPUTE_COLD" }, stateless, true), /^Suspended: Resume first/);
+  // Created, no turn yet: no running actor to drive.
+  assert.match(Flow.replayBlock({ uid: "s1", computeState: "COMPUTE_NONE" }, stateless, true), /^Compute is none: run a turn first/);
+  assert.match(Flow.replayBlock({ uid: "s1" }, stateless, true), /^Compute is unknown/);
+  assert.match(Flow.replayBlock(live, { tier: "REQUIRES_MEMORY_SNAPSHOT" }, true), /memory tier/);
+  assert.match(Flow.replayBlock(live, stateless, false), /-router/);
+  assert.notEqual(Flow.replayBlock(null, stateless, true), "");
+});
+
+test("a call's result belongs only beside the session it was made on", () => {
+  // Session A's replay settles after the operator moved to B: it is not drawn beside B.
+  const onA = { id: 4, op: "replay", session: "A" };
+  assert.equal(Flow.concerns(onA, "A"), true);
+  assert.equal(Flow.concerns(onA, "B"), false);
+  // A fork concerns its source and its child.
+  const fork = { id: 5, op: "fork", session: "A", child: "C" };
+  assert.equal(Flow.concerns(fork, "C"), true);
+  assert.equal(Flow.concerns(fork, "B"), false);
+  assert.equal(Flow.concerns(onA, ""), false);
+  assert.equal(Flow.concerns(null, "A"), false);
+});
+
+test("a replay that stopped before the controller draws no routed hop", () => {
+  // The bridge marks the router skipped when controller.Replay did not run.
+  const trace = {
+    nodes: {
+      browser: { state: "observed" },
+      bridge: { state: "failed" },
+      daemon: { state: "observed" },
+      router: { state: "skipped" },
+      actor: { state: "observed" },
+      model: { state: "skipped" },
+    },
+  };
+  const es = Flow.edgeStates("replay", trace);
+  assert.equal(es.grpc, "done");
+  for (const e of ["replay", "route", "vm"]) assert.equal(es[e], "off", e);
+});

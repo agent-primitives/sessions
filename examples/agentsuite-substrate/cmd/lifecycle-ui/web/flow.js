@@ -252,6 +252,30 @@
       r.head + ") verified before the run; " + ctl + fake + ". " + verdict;
   }
 
+  // replayBlock is why the Replay button is off for a session, or "" when it may run. The bridge
+  // declines the same cases; this keeps the button from offering them. Replay drives the session's
+  // running actor through atenet-router, which resumes a suspended actor on any routed request, so
+  // only a session Sessions reports COMPUTE_LIVE is offered.
+  function replayBlock(session, lane, replayOn) {
+    if (!session || !lane) return "Select a session";
+    if (!replayOn) return "Replay is off: start the page with -router";
+    if (lane.tier !== "STATELESS_REPLAY") {
+      return "Replay re-runs turns on the live actor; the memory tier keeps its conversation in RAM";
+    }
+    if (session.computeState === "COMPUTE_LIVE") return "";
+    if (session.computeState === "COMPUTE_COLD") {
+      return "Suspended: Resume first. Replay drives the running actor, and routing its turns would wake the actor outside Sessions";
+    }
+    return "Compute is " + String(session.computeState || "unknown").replace("COMPUTE_", "").toLowerCase() +
+      ": run a turn first. Replay drives the running actor";
+  }
+
+  // concerns says whether an activity belongs to a session's view: its own call, or the fork that
+  // made it. A call's result is drawn only beside the session it concerns.
+  function concerns(act, uid) {
+    return Boolean(act && uid) && (act.session === uid || act.child === uid);
+  }
+
   return {
     VIEW,
     NODE_W,
@@ -269,5 +293,7 @@
     refusalRows,
     failedNode,
     replayNote,
+    replayBlock,
+    concerns,
   };
 });

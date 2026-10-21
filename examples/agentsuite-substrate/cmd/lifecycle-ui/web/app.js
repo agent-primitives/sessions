@@ -283,6 +283,9 @@
   // ---- selection ----
 
   async function select(uid) {
+    // While a call is in flight its result is drawn beside the session it was made on, so the
+    // selection stays put (the session picker is disabled; this covers a fork's "Open the child").
+    if (state.busy && uid !== state.selected) return;
     state.selected = uid;
     state.forkSeq = 0;
     $("session").value = uid;
@@ -303,8 +306,10 @@
     $("suspend").disabled = !has || busy;
     $("resume").disabled = !has || busy;
     $("fork").disabled = !has || busy;
-    $("replay").disabled = !has || busy || !state.config.replay || !lane || lane.tier !== "STATELESS_REPLAY";
-    $("replay").title = lane && lane.tier !== "STATELESS_REPLAY" ? "Replay re-runs turns on the live actor; the memory tier keeps its conversation in RAM" : "";
+    const block = Flow.replayBlock(s, lane, state.config.replay);
+    $("replay").disabled = busy || block !== "";
+    $("replay").title = has ? block : "";
+    $("session").disabled = busy;
     $("fork").textContent = state.forkSeq > 0 ? "Fork at seq " + state.forkSeq : "Fork at head";
     $("create").disabled = busy;
     $("input").disabled = !has || busy;
@@ -316,7 +321,7 @@
   // ---- timeline ----
 
   function entryFor(a) {
-    const li = el("li", { class: "entry" + (a.ok === false ? " failed" : "") + (state.shown && state.shown.id === a.id ? " current" : ""), tabindex: "0" });
+    const li = el("li", { class: "entry" + (a.ok === false ? " failed" : "") + (state.shown && state.shown.id === a.id ? " current" : ""), tabindex: "0", "data-id": String(a.id) });
     const chip = a.running
       ? el("span", { class: "chip run", text: "running" })
       : el("span", { class: "chip " + (a.ok ? "ok" : "bad"), text: a.ok ? "OK" : a.code || "failed" });
@@ -377,9 +382,11 @@
 
   function renderTimeline() {
     const ol = $("timeline");
+    // Rebuilding drops the entry that has keyboard focus; it gets focus back below.
+    const focused = ol.contains(document.activeElement) ? document.activeElement.dataset.id : undefined;
     ol.replaceChildren();
     const uid = state.selected;
-    const acts = state.activity.filter((a) => a.session === uid || a.child === uid);
+    const acts = state.activity.filter((a) => Flow.concerns(a, uid));
     if (state.pending && state.pending.session === uid) acts.push(state.pending);
     $("timeline-meta").textContent = uid ? acts.length + " call" + (acts.length === 1 ? "" : "s") + " from this page" : "";
     if (!uid) {
@@ -397,6 +404,10 @@
       return;
     }
     for (const a of acts) ol.append(entryFor(a));
+    if (focused !== undefined) {
+      const again = ol.querySelector('.entry[data-id="' + focused + '"]');
+      if (again) again.focus({ preventScroll: true });
+    }
     // Keep the entry whose flow is drawn in view (its top first, for a tall refusal card); while a
     // turn streams, follow the newest entry.
     const current = ol.querySelector(".entry.current");
@@ -418,7 +429,7 @@
     try {
       out = await getJSON("/api/actor?session=" + encodeURIComponent(s.uid));
     } catch (err) {
-      box.append(el("p", { class: "empty", text: "Actor read failed: " + err.message }));
+      if (state.selected === s.uid) box.append(el("p", { class: "empty", text: "Actor read failed: " + err.message }));
       return;
     }
     if (state.selected !== s.uid) return;
@@ -474,6 +485,7 @@
     try {
       j = await getJSON("/api/journal?session=" + encodeURIComponent(uid));
     } catch (err) {
+      if (state.selected !== uid) return;
       meta.textContent = "read failed";
       meta.className = "meta bad";
       tb.append(el("tr", {}, el("td", { colspan: "4", class: "text", text: err.message })));
@@ -552,6 +564,14 @@
       renderTimeline();
       await Promise.all([loadJournal(), loadActor()]);
     }
+    // The controls (Replay needs COMPUTE_LIVE) follow what Sessions reports now, for every session.
+    try {
+      await loadSessions();
+    } catch (err) {
+      setStatus("Session list read failed: " + err.message, true);
+    }
+    renderControls();
+    if (!Flow.concerns(act, state.selected)) return;
     const url = new URL(location.href);
     url.searchParams.set("activity", act.id);
     history.replaceState(null, "", url);
@@ -655,7 +675,7 @@
     const uid = params.get("session") || "";
     await select(sessionByID(uid) ? uid : "");
     const want = Number(params.get("activity"));
-    const act = state.activity.find((a) => a.id === want) || state.activity.filter((a) => a.session === state.selected || a.child === state.selected).slice(-1)[0];
+    const act = state.activity.find((a) => a.id === want) || state.activity.filter((a) => Flow.concerns(a, state.selected)).slice(-1)[0];
     if (act) await showFlow(act);
     renderTimeline();
   }

@@ -43,8 +43,9 @@
     { id: "replay", from: "bridge", to: "router", label: "replay: controller.Replay through a port-forward" },
   ];
 
-  // The edges each call may take, in request order. Exec skips the restore when the actor is
-  // already running (it only reads it with GetActor); the trace shows which ones the call took.
+  // The edges each call may take, in request order. Exec and Resume skip the restore when the actor
+  // is already running (exec only reads it with GetActor; Resume gets resumed=false back); the
+  // trace shows which ones the call took.
   const paths = {
     create: ["http", "grpc"],
     exec: ["http", "grpc", "control", "herd", "vm", "wire", "route", "model"],
@@ -70,10 +71,16 @@
 
   // The node whose evidence shows an edge was taken, where that is not the edge's target. A turn
   // reaches the actor through atenet-router and atunnel in the worker pod, which logs nothing per
-  // request, so the router's line naming the session is the evidence for both hops.
+  // request, so the router's line naming the session is the evidence for both hops. A lifecycle
+  // call's restore or checkpoint is the worker's RestoreWorkload or CheckpointWorkload line: the
+  // actor's state read shows the actor, not that this call changed it (a Resume of a RUNNING
+  // actor restores nothing).
   const witness = {
     exec: { route: "router", vm: "router" },
     replay: { route: "router", vm: "router" },
+    suspend: { vm: "worker" },
+    resume: { vm: "worker" },
+    fork: { vm: "worker" },
   };
 
   const nodeByID = new Map(nodes.map((n) => [n.id, n]));

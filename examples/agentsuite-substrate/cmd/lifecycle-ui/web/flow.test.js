@@ -213,3 +213,41 @@ test("refusal rows keep reading order and drop missing fields", () => {
   ]);
   assert.deepEqual(Flow.refusalRows({ actor: "ns/s1" }), [["Actor", "ns/s1"]]);
 });
+
+test("a resume of a running actor lights the no-op ResumeActor and no restore", () => {
+  const trace = {
+    nodes: {
+      browser: { state: "observed" },
+      bridge: { state: "observed" },
+      daemon: { state: "observed" },
+      ateapi: { state: "observed", method: "GetActor + ResumeActor (already RUNNING)" },
+      worker: { state: "skipped" },
+      actor: { state: "observed" },
+    },
+  };
+  const es = Flow.edgeStates("resume", trace);
+  assert.equal(es.control, "done");
+  assert.equal(Flow.edgeLabel("resume", "control", trace, es.control), "GetActor + ResumeActor (already RUNNING)");
+  assert.equal(es.herd, "off");
+  assert.equal(es.vm, "off");
+  assert.notEqual(Flow.edgeLabel("resume", "vm", trace, es.vm), "restore");
+  assert.equal(Flow.nodeStates("resume", trace).worker, "skipped");
+});
+
+test("a lifecycle call's vm edge needs the worker's line, not only the actor's state", () => {
+  const nodes = (worker) => ({
+    nodes: {
+      browser: { state: "observed" },
+      bridge: { state: "observed" },
+      daemon: { state: "observed" },
+      ateapi: { state: "observed" },
+      worker: { state: worker },
+      actor: { state: "observed" },
+    },
+  });
+  for (const op of ["suspend", "resume", "fork"]) {
+    assert.equal(Flow.edgeStates(op, nodes("observed")).vm, "done", op);
+    assert.equal(Flow.edgeStates(op, nodes("missing")).vm, "missing", op);
+  }
+  assert.equal(Flow.edgeLabel("resume", "vm", nodes("observed"), "done"), "restore");
+});

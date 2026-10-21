@@ -87,9 +87,17 @@ child's first turn. The atelet arrow then stays off, and the worker pod is drawn
 the router's line is the evidence for the turn's hops through the pod's atunnel to the actor, since
 atunnel logs nothing per request. Two kinds of line name the session without being the daemon's
 call, and the trace leaves both out. atenet-router calls `ResumeActor` on every routed request, and
-ate-api answers at once, resuming nothing, when the actor runs; only a `ResumeActor` whose logged
-response says `"resumed":true` counts. And the bridge's own actor reads (`kubectl ate get actor`,
-after every call) log `GetActor` lines.
+ate-api answers at once, resuming nothing, when the actor runs; outside a Resume, only a
+`ResumeActor` whose logged response says `"resumed":true` counts. And the bridge's own actor reads
+(`kubectl ate get actor`, after every call) log `GetActor` lines.
+
+Resume on a session whose actor is already running is allowed and restores nothing: the daemon reads
+the actor with `GetActor`, still calls `ResumeActor`, and ate-api answers with `resumed` unset
+(substrate `cmd/ateapi/internal/controlapi/workflow_resume.go`). No turn is routed during a Resume,
+so that line is the daemon's. The control arrow reads `GetActor + ResumeActor (already RUNNING)`,
+the atelet arrow and the arrow into the actor stay off, and the worker pod is dimmed as skipped. For
+suspend, resume and fork, only the worker's restore or checkpoint line lights the arrow into the
+actor: the actor's state shows what it is now, not that this call changed it.
 
 A hop with no matching line is drawn dashed: no line was found, not proof that the step did not run.
 Select a box to see its line and the command that fetched it. Lines are matched by their `kubectl

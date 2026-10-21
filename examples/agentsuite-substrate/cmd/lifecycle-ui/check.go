@@ -150,9 +150,13 @@ func placed(turn bool) map[string]string {
 // restored, and the router carries the turn.
 var attached = map[string]string{"daemon": "observed", "ateapi": "observed", "worker": "skipped", "actor": "observed", "router": "observed", "model": "observed"}
 
+// alreadyRunning is a Resume of an actor that is RUNNING: the daemon's ResumeActor gets
+// resumed=false back, nothing is restored, and no turn is routed.
+var alreadyRunning = map[string]string{"daemon": "observed", "ateapi": "observed", "worker": "skipped", "actor": "observed", "router": "skipped"}
+
 // traceWant prints the page's evidence for one call and fails when a hop is not in the state
-// want gives it, or its method is not the one methods gives it.
-func (c *checker) traceWant(ctx context.Context, a *activity, want, methods map[string]string) error {
+// want gives it, or its method is not one of those methods gives it.
+func (c *checker) traceWant(ctx context.Context, a *activity, want map[string]string, methods map[string][]string) error {
 	var t traceView
 	if err := c.get(ctx, fmt.Sprintf("/api/trace?id=%d", a.ID), &t); err != nil {
 		return err
@@ -172,10 +176,10 @@ func (c *checker) traceWant(ctx context.Context, a *activity, want, methods map[
 			continue
 		}
 		got := t.Nodes[n]
-		if got.State != st || (methods[n] != "" && got.Method != methods[n]) {
+		if got.State != st || (len(methods[n]) > 0 && !containsString(methods[n], got.Method)) {
 			w := st
-			if methods[n] != "" {
-				w += " [" + methods[n] + "]"
+			if len(methods[n]) > 0 {
+				w += " [" + strings.Join(methods[n], " or ") + "]"
 			}
 			c.unseen = append(c.unseen, fmt.Sprintf("%s (activity %d): %s is %s [%s], want %s", a.Op, a.ID, n, got.State, got.Method, w))
 			fmt.Printf("  MISS %s trace: %s is %s [%s], want %s\n", a.Op, n, got.State, got.Method, w)
@@ -262,10 +266,10 @@ func (c *checker) run(ctx context.Context) error {
 			}
 		}
 		if i == 0 {
-			if err := c.traceWant(ctx, a, placed(true), map[string]string{"ateapi": "CreateActor + ResumeActor", "worker": "RestoreWorkload"}); err != nil {
+			if err := c.traceWant(ctx, a, placed(true), map[string][]string{"ateapi": {"CreateActor + ResumeActor"}, "worker": {"RestoreWorkload"}}); err != nil {
 				return err
 			}
-		} else if err := c.traceWant(ctx, a, attached, map[string]string{"ateapi": "GetActor"}); err != nil {
+		} else if err := c.traceWant(ctx, a, attached, map[string][]string{"ateapi": {"GetActor"}}); err != nil {
 			return err
 		}
 	}
@@ -275,6 +279,25 @@ func (c *checker) run(ctx context.Context) error {
 	}
 	actorUID := av.UID
 	if err := c.expect(av.State == "RUNNING", "actor %s/%s is RUNNING", cfg.Atespace, sid); err != nil {
+		return err
+	}
+
+	c.step("resume while RUNNING: a no-op, nothing restored")
+	if a, err = c.call(ctx, "/api/resume", map[string]string{"session": sid}); err != nil {
+		return err
+	}
+	if err := c.expect(a.OK, "Resume of a running session OK%s", a.Message); err != nil {
+		return err
+	}
+	// The daemon reads the actor before it resumes it (runtime/substrate requireRestoreSnapshot). That
+	// GetActor is left out when it lands within readLag of the bridge's own read just before the call.
+	if err := c.traceWant(ctx, a, alreadyRunning, map[string][]string{"ateapi": {"GetActor + " + noopResumeMethod, noopResumeMethod}}); err != nil {
+		return err
+	}
+	if av, err = c.actor(ctx, sid); err != nil {
+		return err
+	}
+	if err := c.expect(av.State == "RUNNING" && av.UID == actorUID, "the same actor (UID %s) is still RUNNING", actorUID); err != nil {
 		return err
 	}
 
@@ -292,7 +315,7 @@ func (c *checker) run(ctx context.Context) error {
 		"actor SUSPENDED with a completed snapshot (%+v)", av.Snapshots); err != nil {
 		return err
 	}
-	if err := c.traceWant(ctx, a, placed(false), map[string]string{"ateapi": "SuspendActor", "worker": "CheckpointWorkload"}); err != nil {
+	if err := c.traceWant(ctx, a, placed(false), map[string][]string{"ateapi": {"SuspendActor"}, "worker": {"CheckpointWorkload"}}); err != nil {
 		return err
 	}
 
@@ -303,7 +326,7 @@ func (c *checker) run(ctx context.Context) error {
 	if err := c.expect(a.OK, "Resume OK%s", a.Message); err != nil {
 		return err
 	}
-	if err := c.traceWant(ctx, a, placed(false), map[string]string{"ateapi": "ResumeActor", "worker": "RestoreWorkload"}); err != nil {
+	if err := c.traceWant(ctx, a, placed(false), map[string][]string{"ateapi": {"ResumeActor"}, "worker": {"RestoreWorkload"}}); err != nil {
 		return err
 	}
 	ex, _, err := c.exec(ctx, sid, "also, my password expired")
@@ -359,7 +382,7 @@ func (c *checker) run(ctx context.Context) error {
 		return err
 	}
 	child := a.Child
-	if err := c.traceWant(ctx, a, placed(false), map[string]string{"ateapi": "CreateActor + ResumeActor", "worker": "RestoreWorkload"}); err != nil {
+	if err := c.traceWant(ctx, a, placed(false), map[string][]string{"ateapi": {"CreateActor + ResumeActor"}, "worker": {"RestoreWorkload"}}); err != nil {
 		return err
 	}
 	if ex, _, err = c.exec(ctx, child, "actually, the printer is on fire"); err != nil {
@@ -369,7 +392,7 @@ func (c *checker) run(ctx context.Context) error {
 		return err
 	}
 	// Fork resumed the child's actor before handing it out, so its first turn attaches too.
-	if err := c.traceWant(ctx, ex, attached, map[string]string{"ateapi": "GetActor"}); err != nil {
+	if err := c.traceWant(ctx, ex, attached, map[string][]string{"ateapi": {"GetActor"}}); err != nil {
 		return err
 	}
 	if c.fake {

@@ -353,14 +353,29 @@ func (s *server) traceCluster(ctx context.Context, a *activity, daemon string, i
 			if a.Op == "suspend" {
 				api, om = ateapiSuspend, ateomSuspend
 			}
-			ah := s.podMatch(ctx, pods.ateapi, "ate-system", sinceArg, w, api, ateapiGet, ids, idRe)
+			// Resume on a RUNNING actor: Backend.RestoreInstance reads the actor (GetActor), finds it
+			// RUNNING and still calls ResumeActor, a no-op ate-api answers at once; that is the call's
+			// own line. No turn is routed during a Resume, so the router's no-op resumes are not in
+			// its window.
+			ah := s.podMatch(ctx, pods.ateapi, "ate-system", sinceArg, w, api, ateapiGet, ids, idRe, a.Op == "resume")
 			t.Nodes["ateapi"] = ah.evidence
-			t.Nodes["worker"] = s.podMatch(ctx, pods.workers, k.namespace, sinceArg, w, om, nil, nil, idRe).evidence
+			t.Nodes["worker"] = s.podMatch(ctx, pods.workers, k.namespace, sinceArg, w, om, nil, nil, idRe, false).evidence
+			switch {
+			case ah.noopResume:
+				ev := t.Nodes["ateapi"]
+				ev.Detail = "the actor was already RUNNING, so ate-api resumed nothing: " + ev.Detail
+				t.Nodes["ateapi"] = ev
+			case ah.fallbackOnly && a.Op == "exec":
+				ev := t.Nodes["ateapi"]
+				ev.Detail = "the actor was attached as it was: " + ev.Detail
+				t.Nodes["ateapi"] = ev
+			}
 			if ah.fallbackOnly && t.Nodes["worker"].State == "missing" {
 				// The substrate runtime reads the actor first on every placement and attaches to a
 				// RUNNING one without another call (runtime/substrate Backend.Create): the second and
-				// later turns of a session, and a fork child's first. Nothing was restored.
-				d := "no workload restored or checkpointed: ate-api saw only GetActor for this session during the call"
+				// later turns of a session, and a fork child's first. A Resume of a RUNNING actor gets
+				// resumed=false back. Either way nothing was restored.
+				d := "no workload restored or checkpointed: ate-api saw only " + ah.evidence.Method + " for this session during the call"
 				if a.Op == "exec" {
 					d += "; the turn reaches the actor through atunnel in this pod, which logs nothing per request"
 				}
@@ -371,7 +386,7 @@ func (s *server) traceCluster(ctx context.Context, a *activity, daemon string, i
 			t.Nodes["worker"] = nodeEvidence{State: "skipped", Detail: "atunnel in the worker pod forwards the stream (not logged per request)"}
 		}
 		if a.Op == "exec" || a.Op == "replay" {
-			t.Nodes["router"] = s.podMatch(ctx, pods.router, "ate-system", sinceArg, w, routeOK, nil, nil, idRe).evidence
+			t.Nodes["router"] = s.podMatch(ctx, pods.router, "ate-system", sinceArg, w, routeOK, nil, nil, idRe, false).evidence
 		} else {
 			t.Nodes["router"] = nodeEvidence{State: "skipped", Detail: "no turn is routed"}
 		}
@@ -452,23 +467,30 @@ func podNames(out []byte) []string {
 	return names
 }
 
-// podHits is what podMatch found: the evidence, and whether it rests on the fallback alone.
+// podHits is what podMatch found: the evidence, whether it rests on the fallback alone (no
+// primary line that did the work), and whether that includes a ResumeActor that resumed nothing.
 type podHits struct {
 	evidence     nodeEvidence
 	fallbackOnly bool
+	noopResume   bool
 }
+
+// noopResumeMethod labels a ResumeActor that ate-api answered with the actor already RUNNING.
+const noopResumeMethod = "ResumeActor (already RUNNING)"
 
 // podMatch searches the pods' logs since the call for lines with the id and primary, else with the
 // id and fallback. The evidence is the earliest line, labelled with every method its pattern
 // matched, in the order they were logged across the pods. A fallback line the bridge caused
 // itself, reading an actor in ownIDs, is not evidence (dropOwnReads).
 //
-// A ResumeActor that resumed nothing is not evidence either. atenet-router calls ResumeActor on
+// A ResumeActor that resumed nothing is not a primary line. atenet-router calls ResumeActor on
 // every routed request to make sure the actor runs, and ate-api answers at once, with resumed
 // unset, when it already does (substrate 96dffb2, cmd/ateapi/internal/controlapi/
 // workflow_resume.go). ate-api logs the response with the call, so the daemon's resume of a
-// suspended or new actor is the line that says "resumed":true.
-func (s *server) podMatch(ctx context.Context, pods []string, ns, sinceArg string, w window, primary, fallback *regexp.Regexp, ownIDs []string, id *regexp.Regexp) podHits {
+// suspended or new actor is the line that says "resumed":true. With keepNoop (a Resume, which
+// routes no turn) a no-op ResumeActor is the daemon's own and counts as a fallback line, labelled
+// noopResumeMethod; otherwise it is the router's and is dropped.
+func (s *server) podMatch(ctx context.Context, pods []string, ns, sinceArg string, w window, primary, fallback *regexp.Regexp, ownIDs []string, id *regexp.Regexp, keepNoop bool) podHits {
 	if len(pods) == 0 {
 		return podHits{evidence: nodeEvidence{State: "unknown", Detail: "no pod found in " + ns}}
 	}
@@ -476,7 +498,7 @@ func (s *server) podMatch(ctx context.Context, pods []string, ns, sinceArg strin
 		at                time.Time
 		line, src, method string
 	}
-	var first, second []hit
+	var first, second, noop []hit
 	for _, pod := range pods {
 		src := fmt.Sprintf("kubectl -n %s logs %s --all-containers %s", ns, pod, sinceArg)
 		out, err := s.kube.run(ctx, false, "logs", "-n", ns, pod, "--all-containers", "--timestamps", sinceArg)
@@ -491,8 +513,11 @@ func (s *server) podMatch(ctx context.Context, pods []string, ns, sinceArg strin
 				continue
 			}
 			if m := primary.FindStringSubmatch(line); m != nil {
-				if m[1] != "ResumeActor" || resumedTrue.MatchString(line) {
+				switch {
+				case m[1] != "ResumeActor" || resumedTrue.MatchString(line):
 					first = append(first, hit{ts, line, src, m[1]})
+				case keepNoop:
+					noop = append(noop, hit{ts, line, src, noopResumeMethod})
 				}
 				continue
 			}
@@ -530,10 +555,12 @@ func (s *server) podMatch(ctx context.Context, pods []string, ns, sinceArg strin
 	case len(first) > 0:
 		m := methods(first)
 		return podHits{evidence: nodeEvidence{State: "observed", Detail: summarize(first[0].line), Method: m, Source: first[0].src}}
-	case len(second) > 0:
-		m := methods(second)
-		d := "only " + m + " for this session during the call: the actor was attached as it was; " + summarize(second[0].line)
-		return podHits{evidence: nodeEvidence{State: "observed", Detail: d, Method: m, Source: second[0].src}, fallbackOnly: true}
+	case len(second) > 0 || len(noop) > 0:
+		// The bridge's reads are paired with GetActor lines only, so the no-op resumes join after.
+		all := append(second, noop...)
+		m := methods(all)
+		d := "only " + m + " for this session during the call; " + summarize(all[0].line)
+		return podHits{evidence: nodeEvidence{State: "observed", Detail: d, Method: m, Source: all[0].src}, fallbackOnly: true, noopResume: len(noop) > 0}
 	}
 	return podHits{evidence: nodeEvidence{State: "missing", Detail: "no line for this session during the call", Source: "kubectl -n " + ns + " logs <pod> " + sinceArg}}
 }

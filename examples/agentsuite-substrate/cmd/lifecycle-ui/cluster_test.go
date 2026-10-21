@@ -204,8 +204,97 @@ func TestTraceExecAttachIsNotARestore(t *testing.T) {
 	if got := tr.Nodes["ateapi"].Method; got != "GetActor" {
 		t.Errorf("ate-api method %q, want GetActor", got)
 	}
+	if d := tr.Nodes["ateapi"].Detail; !strings.Contains(d, "attached as it was") || strings.Contains(d, "already RUNNING") {
+		t.Errorf("ate-api detail %q", d)
+	}
 	if tr.Nodes["worker"].Method != "" || !strings.Contains(tr.Nodes["worker"].Detail, "only GetActor") {
 		t.Errorf("worker: %+v", tr.Nodes["worker"])
+	}
+}
+
+// Resume on a session whose actor is already RUNNING: the daemon's ResumeActor gets resumed=false
+// back and restores nothing. That line is the call's own (no turn is routed during a Resume), so
+// ate-api is observed with the no-op labelled, and the worker is skipped, not missing.
+func TestTraceResumeOfARunningActor(t *testing.T) {
+	for _, c := range []struct {
+		name, lane, daemon, apiLog, method string
+		reads                              []actorRead
+	}{
+		{
+			// The page's refresh read the actor just before the call: its own GetActor is stamped
+			// before the call's window, and the daemon's GetActor lands inside the read's span, so
+			// the read is paired with the daemon's line and that line is left out. The no-op
+			// ResumeActor alone still identifies the call.
+			name: "resume only", lane: "volumes", daemon: "agentsessionsd-volumes",
+			reads: []actorRead{{uid: "sess-abc", from: t0.Add(-300 * time.Millisecond), to: t0.Add(-200 * time.Millisecond)}},
+			apiLog: at(-290*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc","t":"bridge"}
+` + at(10*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc","t":"daemon"}
+` + at(20*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"}}}`,
+			method: noopResumeMethod,
+		},
+		{
+			// Every lane reads the actor before resuming it (runtime/substrate requireRestoreSnapshot).
+			name: "read then resume", lane: "stateless", daemon: "agentsessionsd",
+			apiLog: at(10*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc"}
+` + at(20*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"}}}`,
+			method: "GetActor + " + noopResumeMethod,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := attachCluster(c.apiLog)
+			f.out["logs -n agentsuite-demo deploy/"+c.daemon] = at(60*time.Millisecond) + `msg="operation finished" component=session operation=resume session_uid=sess-abc phase=finish outcome=success`
+			s := traceServer(f)
+			s.lanes = []*lane{{Name: c.lane, Daemon: c.daemon}}
+			s.kube.reads = c.reads
+			tr := s.trace(context.Background(), &activity{ID: 4, Op: "resume", Lane: c.lane, Session: "sess-abc", OK: true, Started: t0, DurationMS: 60})
+			for n, st := range map[string]string{"daemon": "observed", "ateapi": "observed", "worker": "skipped", "actor": "observed", "router": "skipped"} {
+				if tr.Nodes[n].State != st {
+					t.Errorf("%s: %s (%s), want %s", n, tr.Nodes[n].State, tr.Nodes[n].Detail, st)
+				}
+			}
+			ev := tr.Nodes["ateapi"]
+			if ev.Method != c.method || !strings.Contains(ev.Detail, "already RUNNING") || strings.Contains(ev.Detail, "attached") {
+				t.Errorf("ate-api: %+v, want %q", ev, c.method)
+			}
+			if w := tr.Nodes["worker"]; !strings.Contains(w.Detail, "no workload restored") || strings.Contains(w.Detail, "atunnel") {
+				t.Errorf("worker: %+v", w)
+			}
+		})
+	}
+}
+
+// A Resume of a suspended actor reports the ResumeActor that resumed it, not the daemon's read
+// before it (runtime/substrate requireRestoreSnapshot) nor a no-op next to it.
+func TestTraceResumeOfASuspendedActor(t *testing.T) {
+	f := attachCluster(at(5*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc"}
+` + at(10*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"},"resumed":true}}
+` + at(30*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"}}}`)
+	f.out["logs -n agentsuite-demo deploy/agentsessionsd"] = at(60*time.Millisecond) + `msg="operation finished" component=session operation=resume session_uid=sess-abc phase=finish outcome=success`
+	f.out["logs -n agentsuite-demo agentsuite-demo-microvm-0"] = at(20*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateom.Ateom/RestoreWorkload","actor_name":"sess-abc"}`
+	s := traceServer(f)
+	s.lanes = []*lane{{Name: "stateless", Daemon: "agentsessionsd"}}
+	tr := s.trace(context.Background(), &activity{ID: 5, Op: "resume", Lane: "stateless", Session: "sess-abc", OK: true, Started: t0, DurationMS: 60})
+	if ev := tr.Nodes["ateapi"]; ev.State != "observed" || ev.Method != "ResumeActor" || strings.Contains(ev.Detail, "already RUNNING") {
+		t.Errorf("ate-api: %+v", ev)
+	}
+	if w := tr.Nodes["worker"]; w.State != "observed" || w.Method != "RestoreWorkload" {
+		t.Errorf("worker: %+v", w)
+	}
+}
+
+// A suspend that ate-api saw only a GetActor for does not say the actor was attached: that is a
+// turn's wording.
+func TestTraceFallbackWordingIsPerOp(t *testing.T) {
+	f := attachCluster(at(10*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc"}`)
+	f.out["logs -n agentsuite-demo deploy/agentsessionsd"] = at(60*time.Millisecond) + `msg="operation finished" component=session operation=suspend session_uid=sess-abc phase=finish outcome=success`
+	s := traceServer(f)
+	s.lanes = []*lane{{Name: "stateless", Daemon: "agentsessionsd"}}
+	tr := s.trace(context.Background(), &activity{ID: 6, Op: "suspend", Lane: "stateless", Session: "sess-abc", OK: true, Started: t0, DurationMS: 60})
+	if ev := tr.Nodes["ateapi"]; ev.Method != "GetActor" || strings.Contains(ev.Detail, "attached") || strings.Contains(ev.Detail, "already RUNNING") {
+		t.Errorf("ate-api: %+v", ev)
+	}
+	if w := tr.Nodes["worker"]; w.State != "skipped" || strings.Contains(w.Detail, "atunnel") {
+		t.Errorf("worker: %+v", w)
 	}
 }
 

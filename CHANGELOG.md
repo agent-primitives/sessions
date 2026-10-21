@@ -172,8 +172,13 @@ not provide.
   `options.uid` (and `any_state: true` if the router woke it) to release it. Journal, wire and the
   Sessions API are unchanged: the check reads the `SUSPEND` refs the journal already holds. A crash
   and resume onto a worker of the same runtime between the check and the suspend is still not
-  caught; a precondition on substrate's `SuspendActor` would close it. Stateless sessions are
-  unaffected.
+  caught; a precondition on substrate's `SuspendActor` would close it, and v0.5.0 has none on
+  `SuspendActor` or `ResumeActor`. A router resume alone is fine. Any suspend by another caller
+  ends a memory-tier session the same way, including suspend and resume cycles during a Suspend and
+  a later idle suspend, so a gateway that suspends idle actors (as
+  `agent-substrate/always-on-agent`'s does for its own) must not suspend one sessions manages; see
+  [outside suspends](docs/substrate-conformance.md#substrate-v050-outside-suspends-and-router-auto-resume).
+  Stateless sessions are unaffected.
   The adapter reports these through the new `ActorInfo.MemoryNotRestored`,
   `ActorInfo.CaptureLineage` and `ActorInfo.NoCapture`, and the Placer passes the recorded
   checkpoint through the new `api.SessionSpec.RecordedCheckpoint` and

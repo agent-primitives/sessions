@@ -1454,7 +1454,11 @@ The reference host takes it as `placement.Backend` in
   remains: a crash, revert and resume onto a worker of the same runtime between the check and the
   suspend keeps the lineage and the newest snapshot, so the capture lacks the turns since the last
   checkpoint. Only a precondition on `SuspendActor` that substrate enforces (the worker assignment,
-  generation or UID checked) closes it.
+  generation or UID checked) closes it; v0.5.0 has none on `SuspendActor` or `ResumeActor`. A
+  router resume alone keeps the recorded checkpoint, but a suspend by any other caller, such as a
+  gateway's idle suspend, leaves a capture no `SUSPEND` names, so the host must be the only caller
+  that suspends a `REQUIRES_MEMORY_SNAPSHOT` harness's actor. One outside suspend inside the window
+  with no resume after it is the capture `Snapshot` would have taken, and is recorded.
   `Snapshot` and `Restore` do not create missing actors. When no actor exists (for example a fresh
   session before any `Create` reached `CreateActor`, and not a fork child, or an actor deleted
   outside the host) both fail with the control API's `NOT_FOUND` (substrate module pinned in

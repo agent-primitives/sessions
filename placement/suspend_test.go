@@ -922,3 +922,171 @@ func TestRefusedCaptureStaysRefusedOnEveryPath(t *testing.T) {
 		})
 	}
 }
+
+// outsideSuspend is a suspend by a caller other than sessions, such as a gateway that suspends idle
+// actors (agent-substrate/always-on-agent): a running actor is captured and left holding that
+// capture, which no SUSPEND names; a suspended one is left as it is.
+func (c *suspendControl) outsideSuspend(ref substrate.ActorRef) {
+	a := c.actors[ref]
+	if a.status == substrate.StatusSuspended {
+		return
+	}
+	a.captures++
+	a.snapshot = substrate.SnapshotID{Atespace: ref.Atespace, Name: fmt.Sprintf("snap-%s-%d", ref.Name, len(c.snapshots)+1)}
+	c.snapshots[a.snapshot] = suspendSnapshot{turns: a.turns, template: a.template}
+	a.status, a.worker = substrate.StatusSuspended, false
+}
+
+// outsideResume is the router resuming the actor for a request addressed to it, from the snapshot
+// it holds, on a worker of the same sandbox runtime: its memory comes back.
+func (c *suspendControl) outsideResume(ref substrate.ActorRef) {
+	a := c.actors[ref]
+	if a.status == substrate.StatusRunning {
+		return
+	}
+	if snapshot, ok := c.snapshots[a.snapshot]; ok {
+		a.turns = snapshot.turns
+	}
+	a.status, a.worker = substrate.StatusRunning, true
+}
+
+// Where the router resumes suspended actors on demand and a gateway suspends idle ones, another
+// caller's suspend and resume are the normal path. A router resume of the recorded checkpoint is
+// harmless: the next turn attaches and the session carries on. Any capture sessions did not take
+// ends a memory-tier session: repeated suspend and resume cycles between Suspend's check and its
+// SuspendActor, a router resume of a suspended session in that window, or a later idle suspend by
+// someone else. Exec, Resume, Suspend and Fork each refuse with api.ErrMemoryStateLost, with no
+// control call and nothing journaled, and keep refusing round after round of the router waking the
+// actor and the gateway suspending it again. The memory survived every resume here: the refusal is
+// the cost of failing closed. A stateless session carries on.
+func TestOutsideSuspendsEndAMemorySession(t *testing.T) {
+	ref := substrate.ActorRef{Atespace: "space", Name: "session"}
+	cycles := func(ctl *suspendControl, n int) {
+		for range n {
+			ctl.outsideSuspend(ref)
+			ctl.outsideResume(ref)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		// window runs in Suspend's window, between its check and its SuspendActor; later runs with no
+		// sessions operation in flight. The session was suspended and resumed once before either,
+		// unless firstSuspend, and is left suspended if suspended.
+		window, later           func(ctl *suspendControl)
+		firstSuspend, suspended bool
+		refused                 bool
+	}{
+		{name: "router resumes only", suspended: true, later: func(ctl *suspendControl) { ctl.outsideResume(ref) }},
+		{name: "one outside suspend in the window", window: func(ctl *suspendControl) { ctl.outsideSuspend(ref) }},
+		{name: "suspend and resume cycles in the window", refused: true, window: func(ctl *suspendControl) { cycles(ctl, 3) }},
+		{name: "cycles in the window, first suspend", firstSuspend: true, refused: true, window: func(ctl *suspendControl) { cycles(ctl, 3) }},
+		{name: "suspended session woken by the router in the window", suspended: true, refused: true, window: func(ctl *suspendControl) { ctl.outsideResume(ref) }},
+		{name: "idle suspend by someone else later", refused: true, later: func(ctl *suspendControl) { ctl.outsideSuspend(ref) }},
+	} {
+		for _, memory := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/memory=%v", tc.name, memory), func(t *testing.T) {
+				ctx := t.Context()
+				ctl := newSuspendControl()
+				p, _ := newSuspendPlacer(t, ctl, memory)
+				store := newSuspendStore(t)
+				log := store.Session("session")
+				execSuspendTurn(t, p, log, "session", "first")
+				if !tc.firstSuspend {
+					if _, err := p.Suspend(ctx, log, "session"); err != nil {
+						t.Fatalf("suspend: %v", err)
+					}
+					if !tc.suspended {
+						if err := p.Resume(ctx, log, "session"); err != nil {
+							t.Fatalf("resume: %v", err)
+						}
+						execSuspendTurn(t, p, log, "session", "second")
+					}
+				}
+				if tc.window != nil {
+					ctl.beforeSuspend = func() { tc.window(ctl) }
+					_, err := p.Suspend(ctx, log, "session")
+					if memory && tc.refused {
+						if !errors.Is(err, api.ErrMemoryStateLost) {
+							t.Fatalf("suspend: %v, want api.ErrMemoryStateLost", err)
+						}
+					} else if err != nil {
+						t.Fatalf("suspend: %v", err)
+					}
+				}
+				if tc.later != nil {
+					tc.later(ctl)
+				}
+				if !memory || !tc.refused {
+					// The session carries on: its next turn, a Suspend and Resume, and a Fork.
+					execSuspendTurn(t, p, log, "session", "next")
+					if _, err := p.Suspend(ctx, log, "session"); err != nil {
+						t.Fatalf("suspend after: %v", err)
+					}
+					if err := p.Resume(ctx, log, "session"); err != nil {
+						t.Fatalf("resume after: %v", err)
+					}
+					head, err := log.Head()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := p.Fork(ctx, log, "session", []placement.ForkChild{{UID: "child", Log: store.Session("child")}}, head); err != nil {
+						t.Fatalf("fork after: %v", err)
+					}
+					if memory {
+						// The RAM counter shows the turns ran on the session's state, not on a fresh harness.
+						outputs := []string{"echo:first:1"}
+						if !tc.firstSuspend && !tc.suspended {
+							outputs = append(outputs, "echo:second:2")
+						}
+						outputs = append(outputs, fmt.Sprintf("echo:next:%d", len(outputs)+1))
+						assertSuspendOutputs(t, log, outputs)
+					}
+					return
+				}
+				head, err := log.Head()
+				if err != nil {
+					t.Fatal(err)
+				}
+				child := store.Session("child")
+				paths := []struct {
+					name string
+					run  func() error
+				}{
+					{"exec", func() error {
+						_, err := p.Exec(ctx, log, "session", []api.Message{*api.TextMessage("user", "next")}, head)
+						return err
+					}},
+					{"resume", func() error { return p.Resume(ctx, log, "session") }},
+					{"suspend", func() error { _, err := p.Suspend(ctx, log, "session"); return err }},
+					{"fork", func() error {
+						return p.Fork(ctx, log, "session", []placement.ForkChild{{UID: "child", Log: child}}, head)
+					}},
+				}
+				for round := range 3 {
+					for _, woken := range []bool{false, true} {
+						if woken {
+							ctl.outsideResume(ref) // a message for the actor reaches the router
+						} else if round > 0 {
+							ctl.outsideSuspend(ref) // the gateway suspends it once idle
+						}
+						for _, path := range paths {
+							ctl.calls = nil
+							if err := path.run(); !errors.Is(err, api.ErrMemoryStateLost) {
+								t.Fatalf("round %d woken=%v %s: %v, want api.ErrMemoryStateLost", round, woken, path.name, err)
+							}
+							if len(ctl.calls) != 0 {
+								t.Fatalf("round %d woken=%v %s: calls=%v, want no resume, suspend or tag", round, woken, path.name, ctl.calls)
+							}
+							if got, err := log.Head(); err != nil || got != head {
+								t.Fatalf("round %d woken=%v %s: head %d (err %v), want %d: nothing may be journaled", round, woken, path.name, got, err, head)
+							}
+							if _, exists := ctl.actors[substrate.ActorRef{Atespace: "space", Name: "child"}]; exists {
+								t.Fatalf("round %d woken=%v %s created a fork child", round, woken, path.name)
+							}
+						}
+					}
+				}
+			})
+		}
+	}
+}

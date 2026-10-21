@@ -414,3 +414,148 @@ func TestRefusedCaptureStaysRefusedOverTheAdapter(t *testing.T) {
 		})
 	}
 }
+
+// outsideSuspend is a suspend by a caller other than sessions, such as a gateway that suspends idle
+// actors (agent-substrate/always-on-agent), as SuspendActor does it: a running actor gets a new
+// COMPLETED generation stamped with its worker's runtime and loses its worker; a suspended one is
+// left as it is. l.mu must be held.
+func (l *lifecycleControl) outsideSuspend(a *atepb.Actor) {
+	if a.Status.State != atepb.ActorState_ACTOR_STATE_RUNNING {
+		return
+	}
+	name := a.GetMetadata().GetName()
+	gen := a.Status.LastAssignedGeneration + 1
+	uri := fmt.Sprintf("gs://b/atespaces/space/actors/%s/snapshots/s%d", name, gen)
+	snap := durableSnapshot(gen, uri, atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+	snap.SandboxRuntime = a.Status.GetWorkerAssignment().GetSandboxRuntime()
+	a.Status.Snapshots = append(a.Status.Snapshots, snap)
+	a.Status.LastAssignedGeneration = gen
+	l.completed[name] = uri
+	a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
+	a.Status.WorkerAssignment = nil
+}
+
+// outsideResume is the router resuming a suspended actor for a request addressed to it, onto a
+// worker of the runtime ResumeActor binds (l.runtime), so its memory comes back. l.mu must be held.
+func (l *lifecycleControl) outsideResume(a *atepb.Actor) {
+	if a.Status.State != atepb.ActorState_ACTOR_STATE_SUSPENDED {
+		return
+	}
+	a.Status.State = atepb.ActorState_ACTOR_STATE_RUNNING
+	a.Status.WorkerAssignment = &atepb.WorkerAssignment{WorkerPod: "worker-router", SandboxRuntime: l.runtime}
+}
+
+// outside runs op on the named actor with l.mu held, as another caller's request would.
+func (l *lifecycleControl) outside(name string, op func(*atepb.Actor)) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	op(l.actors[name])
+}
+
+// The always-on pattern over the real adapter: the router resumes suspended actors on demand and a
+// gateway suspends idle ones, every resume on a worker of the same runtime. A router resume of the
+// recorded checkpoint, and one outside suspend in Snapshot's window with no resume after it (the
+// capture Snapshot would have taken), leave the session working. Suspend and resume cycles in that
+// window, a router resume of a suspended session in it, and an idle suspend by someone else later
+// each leave a capture no SUSPEND names, and every later attach, Restore and Snapshot refuses it
+// with api.ErrMemoryStateLost before any control call that changes the actor, round after round.
+func TestOutsideSuspendsOverTheAdapter(t *testing.T) {
+	rt := sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h1")
+	cycles := func(l *lifecycleControl, a *atepb.Actor, n int) {
+		for range n {
+			l.outsideSuspend(a)
+			l.outsideResume(a)
+		}
+	}
+	for _, tc := range []struct {
+		name          string
+		suspended     bool // leave the session suspended on its recorded checkpoint
+		window, later func(l *lifecycleControl, a *atepb.Actor)
+		refused       bool
+	}{
+		{name: "router resumes only", suspended: true, later: func(l *lifecycleControl, a *atepb.Actor) { l.outsideResume(a) }},
+		{name: "one outside suspend in the window", window: func(l *lifecycleControl, a *atepb.Actor) { l.outsideSuspend(a) }},
+		{name: "suspend and resume cycles in the window", refused: true, window: func(l *lifecycleControl, a *atepb.Actor) { cycles(l, a, 3) }},
+		{name: "suspended session woken by the router in the window", suspended: true, refused: true, window: func(l *lifecycleControl, a *atepb.Actor) { l.outsideResume(a) }},
+		{name: "idle suspend by someone else later", refused: true, later: func(l *lifecycleControl, a *atepb.Actor) { l.outsideSuspend(a) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			ctl := newLifecycleControl()
+			ctl.runtime = rt
+			b := memoryBackend(ctl)
+			parent, err := b.Create(ctx, &api.SessionSpec{SessionUID: "parent"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorded, err := b.Snapshot(ctx, parent, api.SnapshotExternal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.suspended {
+				if _, err := b.Restore(ctx, recorded); err != nil {
+					t.Fatal(err)
+				}
+			}
+			parent.RecordedCheckpoint = recorded
+			if tc.window != nil {
+				ctl.beforeSuspend = func(a *atepb.Actor) { tc.window(ctl, a) }
+				ref, err := b.Snapshot(ctx, parent, api.SnapshotExternal)
+				if tc.refused {
+					if !errors.Is(err, api.ErrMemoryStateLost) || ref != (api.SnapshotRef{}) {
+						t.Fatalf("snapshot: ref=%+v err=%v, want api.ErrMemoryStateLost", ref, err)
+					}
+				} else {
+					if err != nil || ref.ExternalURI == "" || ref == recorded {
+						t.Fatalf("snapshot: ref=%+v err=%v, want the outside capture recorded", ref, err)
+					}
+					recorded = ref
+				}
+			}
+			if tc.later != nil {
+				ctl.outside("parent", func(a *atepb.Actor) { tc.later(ctl, a) })
+			}
+			paths := []struct {
+				name string
+				run  func() error
+			}{
+				{"next turn", func() error {
+					_, err := b.Create(ctx, &api.SessionSpec{SessionUID: "parent", StartedTurns: func() (int, error) { return 2, nil },
+						RecordedCheckpoint: func() (api.SnapshotRef, error) { return recorded, nil }})
+					return err
+				}},
+				{"resume", func() error { _, err := b.Restore(ctx, recorded); return err }},
+				{"suspend or fork capture", func() error {
+					_, err := b.Snapshot(ctx, api.Incarnation{ID: "parent", ComputeInstance: parent.ComputeInstance, RecordedCheckpoint: recorded}, api.SnapshotExternal)
+					return err
+				}},
+			}
+			if !tc.refused {
+				for _, path := range paths {
+					if err := path.run(); err != nil {
+						t.Fatalf("%s: %v, want success", path.name, err)
+					}
+				}
+				return
+			}
+			for round := range 3 {
+				for _, woken := range []bool{false, true} {
+					if woken {
+						ctl.outside("parent", ctl.outsideResume)
+					} else if round > 0 {
+						ctl.outside("parent", ctl.outsideSuspend)
+					}
+					for _, path := range paths {
+						ctl.calls = nil
+						if err := path.run(); !errors.Is(err, api.ErrMemoryStateLost) || strings.Contains(err.Error(), "gs://") {
+							t.Fatalf("round %d woken=%v %s: %v, want api.ErrMemoryStateLost naming no snapshot URI", round, woken, path.name, err)
+						}
+						if len(ctl.calls) != 0 {
+							t.Fatalf("round %d woken=%v %s: calls=%v, want no resume or suspend", round, woken, path.name, ctl.calls)
+						}
+					}
+				}
+			}
+		})
+	}
+}

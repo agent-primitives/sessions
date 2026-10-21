@@ -526,8 +526,46 @@ One window remains. A crash, revert and resume onto a worker of the same runtime
 and the suspend keeps both the lineage and the newest snapshot, so `Snapshot` records a capture of
 RAM rebuilt from the last checkpoint, without the turns since. The fix is in substrate, not here: a
 precondition on `SuspendActor` (the worker assignment, generation or UID the caller checked) that
-substrate enforces under the actor's lease would make the check and the capture one operation, and
-no foreign capture would be taken in the first place.
+substrate enforces under the actor's lease would make the check and the capture one operation, so
+sessions would never capture state it did not check.
+
+### Substrate v0.5.0: outside suspends and router auto-resume
+
+Where the router resumes suspended actors on demand and a gateway suspends idle ones, another
+caller's suspend and resume are the normal path, not a narrow window. For a
+`REQUIRES_MEMORY_SNAPSHOT` harness the rules above give:
+
+- A router resume alone is harmless. It restores the snapshot the actor holds; when that is the
+  checkpoint the latest `SUSPEND` names, the next turn attaches and Suspend, Resume and Fork work.
+  A resume onto a worker of another sandbox runtime is refused as
+  [runtime fallback](#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback) says.
+- Any suspend by another caller leaves the actor holding a capture no `SUSPEND` names, and the
+  session is refused for good. That covers any number of suspend and resume cycles between
+  `Snapshot`'s `GetActor` and its `SuspendActor`, a router resume of a suspended session in that
+  window (the suspend then takes a new capture), and an idle suspend at any later time. Every later
+  turn, Resume, Suspend and Fork returns `api.ErrMemoryStateLost`, whether the router wakes the actor
+  again or not, even when its memory survived.
+- One outside suspend inside that window with no resume after it is the capture `Snapshot` would
+  have taken: the suspend that follows is a no-op that reports the same lineage, and that capture is
+  recorded.
+
+`agent-substrate/always-on-agent` (checked at `c380889`) is that pattern. Its gateway's idle
+suspender (`extensions/substrate/idle-suspender.ts`) calls `SuspendActor` only for the actors it
+routes turns to, named `conv-` plus 12 hex digits of the SHA-256 of the conversation's session key
+(`extensions/substrate/actor-router.ts`) and tracked in its own process; it does not list the
+atespace. So it does not suspend an actor sessions created. Pointed at one, as any idle suspender
+can be, the refusal fires routinely: the first idle suspend after a turn ends the memory-tier
+session. This release does not support another caller suspending a memory-tier session's actor;
+only sessions (`Suspend`) may. Stateless sessions are not affected.
+
+v0.5.0 has nothing to fence this with: `SuspendActorRequest` and `ResumeActorRequest` carry only
+the actor's `ObjectRef` (`pkg/proto/ateapipb/ateapi.proto`). The server's `SuspendActor` takes the
+actor's lease and turns its own store version conflicts into `ABORTED`, but checks nothing the
+caller sends (`RPCService.SuspendActor` in `cmd/ateapi/internal/controlapi/actor.go`,
+`ActorWorkflow.SuspendActor` in `workflow_suspend.go`). Only `UpdateActor` (UID and version) and
+`DeleteActor` (`options.uid`, `options.version`) take preconditions, and neither fences a suspend.
+A `SuspendActor` precondition would remove the window above, but an idle suspend outside it would
+still leave a capture the journal did not record.
 
 **Known limit — effective resume source can differ from durable evidence:** the adapter maps
 a paused actor to suspended but reports only durable checkpoint evidence. At the

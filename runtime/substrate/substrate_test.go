@@ -2488,3 +2488,187 @@ func TestMemoryActorMustHoldTheRecordedCheckpoint(t *testing.T) {
 		})
 	}
 }
+
+// outsideSuspend is a suspend by a caller other than sessions, such as a gateway that suspends idle
+// actors (agent-substrate/always-on-agent): a running actor is captured on its worker and left
+// holding that capture; a suspended one is left as it is.
+func (m *mockControl) outsideSuspend(name string) {
+	if m.statusOf(name) == substrate.StatusRunning {
+		m.capture(name)
+		m.holds(name, m.captureURI(name))
+	}
+	m.exists(name, substrate.StatusSuspended)
+}
+
+// outsideResume is the router resuming the actor for a request addressed to it, from the snapshot it
+// holds, on a worker of the same sandbox runtime, so its memory comes back.
+func (m *mockControl) outsideResume(name string) { m.exists(name, substrate.StatusRunning) }
+
+// With the router resuming suspended actors on demand and a gateway suspending idle ones, a suspend
+// or resume by another caller is routine, not a narrow window. Router resumes alone are harmless:
+// the actor still holds the checkpoint the journal recorded. Any capture sessions did not take is
+// refused for good: repeated outside suspend and resume cycles between Snapshot's GetActor and its
+// SuspendActor, a router resume of a suspended actor in that window, and an idle suspend by someone
+// else at any later time each leave the actor holding a snapshot no SUSPEND names. Every later
+// memory-tier attach (Create), Restore and Snapshot (Suspend, and a stateful fork's capture of the
+// parent) then refuses with api.ErrMemoryStateLost before resuming or suspending it, round after
+// round of the router waking it and the gateway suspending it again. That holds even when the
+// memory survived, as it does here (every resume is on the same runtime): the check fails closed.
+// One outside suspend in the window with no resume after it is the capture sessions would have
+// taken, and is recorded. A stateless harness is not checked.
+func TestOutsideSuspendsAreRefusedForGood(t *testing.T) {
+	cycles := func(m *mockControl, n int) {
+		for range n {
+			m.outsideSuspend("sess-x")
+			m.outsideResume("sess-x")
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		// suspended leaves the actor suspended on the recorded checkpoint instead of resuming it.
+		suspended, firstSuspend bool
+		// window runs between Snapshot's GetActor and its SuspendActor; later runs with no sessions
+		// operation in flight. Without a window there is no second Snapshot.
+		window, later func(m *mockControl)
+		refused       bool
+	}{
+		{name: "router resumes only", suspended: true, later: func(m *mockControl) { m.outsideResume("sess-x") }},
+		{name: "one outside suspend in the window", window: func(m *mockControl) { m.outsideSuspend("sess-x") }},
+		{name: "suspend and resume cycles in the window", refused: true, window: func(m *mockControl) { cycles(m, 3) }},
+		{name: "cycles in the window, first suspend", firstSuspend: true, refused: true, window: func(m *mockControl) { cycles(m, 3) }},
+		{name: "cycles in the window, then an idle suspend", refused: true, window: func(m *mockControl) {
+			cycles(m, 3)
+			m.outsideSuspend("sess-x")
+		}},
+		{name: "suspended session woken by the router in the window", suspended: true, refused: true, window: func(m *mockControl) { m.outsideResume("sess-x") }},
+		{name: "idle suspend by someone else later", refused: true, later: func(m *mockControl) { m.outsideSuspend("sess-x") }},
+		{name: "router resume, then an idle suspend later", suspended: true, refused: true, later: func(m *mockControl) {
+			m.outsideResume("sess-x")
+			m.outsideSuspend("sess-x")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, memory := range []bool{true, false} {
+				ctx := t.Context()
+				var output bytes.Buffer
+				logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelWarn}))
+				m := &mockControl{info: running("worker-a")}
+				m.exists("sess-x", substrate.StatusRunning)
+				resumability := api.ResumabilityStatelessReplay
+				if memory {
+					resumability = api.ResumabilityRequiresMemorySnapshot
+				}
+				b := substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
+					api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: resumability}},
+					substrate.WithLogger(logger))
+				instance := ""
+				if memory {
+					instance = m.uid("sess-x")
+				}
+				// recorded is the checkpoint the journal last recorded, as the Placer passes it.
+				var recorded api.SnapshotRef
+				if !tc.firstSuspend {
+					ref, err := b.Snapshot(ctx, api.Incarnation{ID: "sess-x", ComputeInstance: instance}, api.SnapshotExternal)
+					if err != nil {
+						t.Fatalf("memory=%v: first suspend: %v", memory, err)
+					}
+					recorded = ref
+					if !tc.suspended {
+						if _, err := b.Restore(ctx, recorded); err != nil {
+							t.Fatalf("memory=%v: resume: %v", memory, err)
+						}
+					}
+				}
+				if tc.window != nil {
+					m.afterGet = func(string) {
+						m.afterGet = nil
+						tc.window(m)
+					}
+					if !memory {
+						m.afterGet = nil // a stateless Snapshot does not look first
+						tc.window(m)
+					}
+					ref, err := b.Snapshot(ctx, api.Incarnation{ID: "sess-x", ComputeInstance: instance, RecordedCheckpoint: recorded}, api.SnapshotExternal)
+					switch {
+					case !memory || !tc.refused:
+						if err != nil || ref.ExternalURI == "" {
+							t.Fatalf("memory=%v: snapshot: ref=%+v err=%v, want a checkpoint", memory, ref, err)
+						}
+						recorded = ref
+					case !errors.Is(err, api.ErrMemoryStateLost) || ref != (api.SnapshotRef{}):
+						t.Fatalf("snapshot: ref=%+v err=%v, want api.ErrMemoryStateLost", ref, err)
+					}
+				}
+				if tc.later != nil {
+					tc.later(m)
+				}
+				paths := []struct {
+					name string
+					run  func() error
+				}{
+					{"next turn", func() error {
+						_, err := b.Create(ctx, &api.SessionSpec{SessionUID: "sess-x", StartedTurns: func() (int, error) { return 2, nil },
+							RecordedCheckpoint: func() (api.SnapshotRef, error) { return recorded, nil }})
+						return err
+					}},
+					{"resume", func() error {
+						ref := recorded
+						if ref.Local == "" {
+							ref.Local = "sess-x" // Placer.Resume's ref when the journal records no SUSPEND
+						}
+						_, err := b.Restore(ctx, ref)
+						return err
+					}},
+					{"suspend or fork capture", func() error {
+						_, err := b.Snapshot(ctx, api.Incarnation{ID: "sess-x", ComputeInstance: instance, RecordedCheckpoint: recorded}, api.SnapshotExternal)
+						return err
+					}},
+				}
+				if !memory || !tc.refused {
+					// Each path still works: attach or resume, then suspend, which the Placer records.
+					for _, path := range paths {
+						if err := path.run(); err != nil {
+							if !memory && path.name == "resume" && errors.Is(err, api.ErrInvalidCheckpoint) && !errors.Is(err, api.ErrMemoryStateLost) {
+								continue // a stateless Restore refuses a held ref the actor no longer holds (#195)
+							}
+							t.Fatalf("memory=%v %s: %v, want success", memory, path.name, err)
+						}
+						if path.name == "suspend or fork capture" {
+							recorded = api.SnapshotRef{Local: "sess-x", ExternalURI: m.snapshots["sess-x"], Memory: true}
+						}
+					}
+					if memory && output.Len() != 0 {
+						t.Fatalf("logged %s", output.String())
+					}
+					continue
+				}
+				// Round after round, the router wakes the actor for a message and the gateway suspends
+				// it again once idle; every path is refused in both states, touching nothing.
+				for round := range 3 {
+					for _, woken := range []bool{false, true} {
+						if woken {
+							m.outsideResume("sess-x")
+						} else if round > 0 {
+							m.outsideSuspend("sess-x")
+						}
+						for _, path := range paths {
+							m.calls = nil
+							err := path.run()
+							if !errors.Is(err, api.ErrMemoryStateLost) || strings.Contains(err.Error(), "gs://") {
+								t.Fatalf("round %d woken=%v %s: %v, want api.ErrMemoryStateLost naming no snapshot URI", round, woken, path.name, err)
+							}
+							if slices.ContainsFunc(m.calls, func(c string) bool {
+								return strings.HasPrefix(c, "resume:") || strings.HasPrefix(c, "suspend:") || strings.HasPrefix(c, "create:")
+							}) {
+								t.Fatalf("round %d woken=%v %s: calls=%v, want no create, resume or suspend", round, woken, path.name, m.calls)
+							}
+						}
+					}
+				}
+				if !strings.Contains(output.String(), `"error_kind":"memory_state_lost"`) {
+					t.Fatalf("refusals were not logged for operators: %s", output.String())
+				}
+			}
+		})
+	}
+}

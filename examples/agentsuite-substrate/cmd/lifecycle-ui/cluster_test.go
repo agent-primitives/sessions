@@ -18,11 +18,17 @@ import (
 type fakeCluster struct {
 	calls [][]string
 	out   map[string]string // joined args prefix -> output
+	errs  map[string]string // joined args prefix -> the error kubectl reports, checked first
 }
 
 func (f *fakeCluster) exec(_ context.Context, bin string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, append([]string{bin}, args...))
 	key := strings.Join(args, " ")
+	for prefix, msg := range f.errs {
+		if strings.HasPrefix(key, prefix) {
+			return nil, errors.New(msg)
+		}
+	}
 	best := ""
 	for prefix := range f.out {
 		if strings.HasPrefix(key, prefix) && len(prefix) > len(best) {
@@ -210,6 +216,68 @@ func TestTraceExecAttachIsNotARestore(t *testing.T) {
 	if tr.Nodes["worker"].Method != "" || !strings.Contains(tr.Nodes["worker"].Detail, "only GetActor") {
 		t.Errorf("worker: %+v", tr.Nodes["worker"])
 	}
+}
+
+// A pod whose logs could not be read is not evidence that nothing happened there: a later turn
+// whose worker logs are unreadable is not drawn as "nothing restored", and an ate-api that showed
+// only GetActor while another replica went unread does not say the actor was attached as it was.
+// A line found in a pod that was read still counts.
+func TestTraceUnreadLogsAreUnknown(t *testing.T) {
+	const denied = `Error from server (Forbidden): pods "x" is forbidden: User "u" cannot get resource "pods/log"`
+	getOnly := at(15*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc"}`
+	exec := func(f *fakeCluster) traceView {
+		s := traceServer(f)
+		s.lanes = []*lane{{Name: "stateless", Daemon: "agentsessionsd"}}
+		return s.trace(context.Background(), &activity{ID: 3, Op: "exec", Lane: "stateless", Session: "sess-abc", OK: true, Started: t0, DurationMS: 400})
+	}
+
+	t.Run("worker logs unreadable", func(t *testing.T) {
+		f := attachCluster(getOnly)
+		f.errs = map[string]string{"logs -n agentsuite-demo agentsuite-demo-microvm-0": denied}
+		tr := exec(f)
+		if w := tr.Nodes["worker"]; w.State != "unknown" || !strings.Contains(w.Detail, "agentsuite-demo-microvm-0") ||
+			!strings.Contains(w.Detail, "Forbidden") || strings.Contains(w.Detail, "no workload restored") {
+			t.Errorf("worker: %+v", w)
+		}
+		if a := tr.Nodes["ateapi"]; a.State != "observed" || a.Method != "GetActor" {
+			t.Errorf("ate-api: %+v", a)
+		}
+	})
+
+	t.Run("one ate-api replica unreadable", func(t *testing.T) {
+		f := attachCluster(getOnly)
+		f.out["get pods -n ate-system"] = "pod/ate-api-server-0\npod/ate-api-server-1\npod/atenet-router-1\n"
+		f.errs = map[string]string{"logs -n ate-system ate-api-server-1": "context deadline exceeded"}
+		tr := exec(f)
+		a := tr.Nodes["ateapi"]
+		if a.State != "unknown" || !strings.Contains(a.Detail, "ate-api-server-1: context deadline exceeded") ||
+			strings.Contains(a.Detail, "attached as it was") {
+			t.Errorf("ate-api: %+v", a)
+		}
+		// Only the turn-1 restore before the call: not found, and not turned into "skipped".
+		if w := tr.Nodes["worker"]; w.State != "missing" {
+			t.Errorf("worker: %+v", w)
+		}
+	})
+
+	t.Run("a line in a pod that was read", func(t *testing.T) {
+		f := attachCluster(at(20*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/CreateActor","req":"sess-abc"}`)
+		f.out["get pods -n ate-system"] = "pod/ate-api-server-0\npod/ate-api-server-1\npod/atenet-router-1\n"
+		f.errs = map[string]string{"logs -n ate-system ate-api-server-1": "context deadline exceeded"}
+		tr := exec(f)
+		if a := tr.Nodes["ateapi"]; a.State != "observed" || a.Method != "CreateActor" {
+			t.Errorf("ate-api: %+v", a)
+		}
+	})
+
+	t.Run("router logs unreadable", func(t *testing.T) {
+		f := attachCluster(getOnly)
+		f.errs = map[string]string{"logs -n ate-system atenet-router-1": denied}
+		tr := exec(f)
+		if r := tr.Nodes["router"]; r.State != "unknown" || !strings.Contains(r.Detail, "Forbidden") {
+			t.Errorf("router: %+v", r)
+		}
+	})
 }
 
 // Resume on a session whose actor is already RUNNING: the daemon's ResumeActor gets resumed=false

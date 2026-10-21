@@ -116,6 +116,8 @@ suspend, resume and fork, only the worker's restore or checkpoint line lights th
 actor: the actor's state shows what it is now, not that this call changed it.
 
 A hop with no matching line is drawn dashed: no line was found, not proof that the step did not run.
+A hop with a pod whose logs could not be read (a permission denial, a timeout) is unknown, with the
+error, unless a pod that was read has the call's own line; it is never drawn as not seen or skipped.
 Select a box to see its line and the command that fetched it. Lines are matched by their `kubectl
 logs --timestamps` time against the bridge's clock, from 250 ms before the call to 2 s after it.
 That holds for kind on this machine; against a cluster whose clock is further off, hops show as not

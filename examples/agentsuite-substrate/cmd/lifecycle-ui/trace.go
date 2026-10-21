@@ -587,7 +587,9 @@ const noopResumeMethod = "ResumeActor (already RUNNING)"
 // podMatch searches the pods' logs since the call for lines with the id and primary, else with the
 // id and fallback. The evidence is the earliest line, labelled with every method its pattern
 // matched, in the order they were logged across the pods. A fallback line the bridge caused
-// itself, reading an actor in ownIDs, is not evidence (dropOwnReads).
+// itself, reading an actor in ownIDs, is not evidence (dropOwnReads). When a pod's logs could not
+// be read (a permission denial, a timeout), only a primary line found elsewhere is evidence; any
+// other result is unknown, never missing or fallback-only.
 //
 // A ResumeActor that resumed nothing is not a primary line. atenet-router calls ResumeActor on
 // every routed request to make sure the actor runs, and ate-api answers at once, with resumed
@@ -605,11 +607,17 @@ func (s *server) podMatch(ctx context.Context, pods []string, ns, sinceArg strin
 		line, src, method string
 	}
 	var first, second, noop []hit
+	var unread []string
+	unreadSrc := ""
 	for _, pod := range pods {
 		podArgs := []string{"logs", "-n", ns, pod, "--all-containers", "--timestamps", sinceArg}
 		src := s.kube.command(false, podArgs...)
 		out, err := s.kube.run(ctx, false, podArgs...)
 		if err != nil {
+			unread = append(unread, pod+": "+err.Error())
+			if unreadSrc == "" {
+				unreadSrc = src
+			}
 			continue
 		}
 		sc := bufio.NewScanner(bytes.NewReader(out))
@@ -662,6 +670,14 @@ func (s *server) podMatch(ctx context.Context, pods []string, ns, sinceArg strin
 	case len(first) > 0:
 		m := methods(first)
 		return podHits{evidence: nodeEvidence{State: "observed", Detail: summarize(first[0].line), Method: m, Source: first[0].src}}
+	case len(unread) > 0:
+		// The call's line may be in a log that was not read, so neither its absence nor a
+		// fallback-only result (which the caller would turn into "nothing restored") is known.
+		d := "logs not read, so this hop is not known: " + strings.Join(unread, "; ")
+		if all := append(second, noop...); len(all) > 0 {
+			d += "; the logs read showed only " + methods(all) + " for this session"
+		}
+		return podHits{evidence: nodeEvidence{State: "unknown", Detail: d, Source: unreadSrc}}
 	case len(second) > 0 || len(noop) > 0:
 		// The bridge's reads are paired with GetActor lines only, so the no-op resumes join after.
 		all := append(second, noop...)

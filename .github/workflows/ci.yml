@@ -325,6 +325,11 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
+      - name: lifecycle-ui page tests
+        # The page's diagram rules (examples/session-lifecycle-ui); the runner image ships Node.
+        working-directory: examples/agentsuite-substrate/cmd/lifecycle-ui/web
+        run: node --test
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:

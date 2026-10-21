@@ -405,7 +405,16 @@ release it: Delete never contacts the runtime or calls Stop (see the
 logs the first refusal for each actor UID at `WARN` (`error_kind=memory_state_lost`, with
 `atespace`, `actor`, `actor_uid` and `worker`). Nothing in sessions brings the lost memory back, so
 operators should delete or abandon the session and then delete the substrate actor named in the
-warning (`atespace`/`actor`) with substrate's `DeleteActor` to release the worker.
+warning to release the worker. That actor is still `RUNNING`, and pinned substrate v0.5.0 deletes
+only `SUSPENDED` or `CRASHED` actors unless the request sets `any_state`: a plain `DeleteActor`
+fails with `FAILED_PRECONDITION` and the worker stays held. Send `DeleteActorRequest` with `actor`
+set to the warning's `atespace`/`actor`, `any_state: true` and `options.uid` set to the warning's
+`actor_uid`. Substrate then refuses with `ABORTED` if that name now belongs to another actor, for
+example one created later for the same session, instead of deleting it. `kubectl ate` has no UID
+option: first check that `metadata.uid` in `kubectl ate get actor <actor> -a <atespace> -o yaml`
+still equals `actor_uid`, then run `kubectl ate delete actor <actor> -a <atespace> --any-state`.
+That check and the delete are separate calls, so prefer the API request when the actor can be
+recreated meanwhile.
 
 **Known limit — effective resume source can differ from durable evidence:** the adapter maps
 a paused actor to suspended but reports only durable checkpoint evidence. At the

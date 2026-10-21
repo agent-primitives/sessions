@@ -127,8 +127,12 @@ not provide.
   (`api.ErrMemoryStateLost`) on Exec, Resume, Suspend and Fork rather than run its turns without
   the session's RAM, and stays refused while that actor runs. Suspend refuses it whether or not
   the journal recorded a compute instance. The first refusal per actor is logged at `WARN`. The
-  actor keeps its worker until it is deleted, and `DeleteSession` does not stop it (#88): delete
-  the substrate actor named in the warning with substrate's `DeleteActor` to release the worker.
+  actor keeps its worker until it is deleted, and `DeleteSession` does not stop it (#88). To
+  release the worker, delete the substrate actor named in the warning with `DeleteActor` and
+  `any_state: true` (`kubectl ate delete actor <actor> -a <atespace> --any-state`): the actor is
+  still `RUNNING`, and v0.5.0 refuses a plain delete of it with `FAILED_PRECONDITION`. Set
+  `options.uid` to the warning's `actor_uid`, or with `kubectl ate` check the actor's current UID
+  first, so a later actor created under the same name is not deleted.
   Stateless sessions are unaffected, and clusters whose workers share one runtime do not hit it.
   The adapter reports it through the new `ActorInfo.MemoryNotRestored`; another
   `runtime/substrate.ControlClient` implementation that leaves it false keeps the old behavior. See

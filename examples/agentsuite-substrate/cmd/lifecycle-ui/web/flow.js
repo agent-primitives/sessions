@@ -166,9 +166,9 @@
   }
 
   // edgeStates: an edge on the path is "done" when its witness (its target, unless witness says
-  // otherwise) was observed (or refused or failed: the request reached it), "missing" when the
-  // witness has no evidence, "pending" with no trace, and "off" when not on the path or not taken
-  // (skipped).
+  // otherwise) was observed (or refused, declined or failed: the request reached it), "missing"
+  // when the witness has no evidence, "pending" with no trace, and "off" when not on the path or
+  // not taken (skipped).
   function edgeStates(op, trace) {
     const ns = traceStates(op, trace);
     const on = new Set(pathFor(op));
@@ -179,7 +179,7 @@
         continue;
       }
       const s = ns[(witness[op] && witness[op][e.id]) || e.to];
-      if (s === "observed" || s === "refused" || s === "failed") out[e.id] = "done";
+      if (s === "observed" || s === "refused" || s === "declined" || s === "failed") out[e.id] = "done";
       else if (s === "pending") out[e.id] = "pending";
       else if (s === "skipped") out[e.id] = "off";
       else out[e.id] = "missing";

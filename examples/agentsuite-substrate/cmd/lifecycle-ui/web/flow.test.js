@@ -340,3 +340,10 @@ test("a call the bridge declined reads Declined, not its Unknown gRPC code", () 
   assert.equal(Flow.outcome({ ok: false, code: "FailedPrecondition" }), "FailedPrecondition");
   assert.equal(Flow.outcome({ ok: false }), "failed");
 });
+
+test("a declined call marks the bridge declined and the edge into it done", () => {
+  const trace = { nodes: { browser: { state: "observed" }, bridge: { state: "declined" }, daemon: { state: "skipped" } } };
+  assert.equal(Flow.nodeStates("replay", trace).bridge, "declined");
+  assert.equal(Flow.edgeStates("replay", trace).http, "done");
+  assert.equal(Flow.edgeStates("replay", trace).grpc, "off");
+});

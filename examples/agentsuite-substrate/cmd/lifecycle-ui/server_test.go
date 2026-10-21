@@ -340,8 +340,8 @@ func TestReplayIsRefusedWhereItCannotRun(t *testing.T) {
 	}
 	// The trace names no call the bridge did not make, and no hop past it as reached.
 	tr := s.trace(context.Background(), &a)
-	if b := tr.Nodes["bridge"]; b.State != "failed" || strings.Contains(b.Detail, "then controller.Replay") ||
-		!strings.Contains(b.Detail, "declined before Sessions.Replay") || !strings.Contains(b.Detail, "only the stateless tier") {
+	if b := tr.Nodes["bridge"]; b.State != "declined" || strings.Contains(b.Detail, "then controller.Replay") ||
+		!strings.Contains(b.Detail, "Sessions.Replay not called: ") || !strings.Contains(b.Detail, "only the stateless tier") {
 		t.Errorf("bridge: %+v", b)
 	}
 	for _, n := range []string{"daemon", "ateapi", "worker", "actor", "router", "model"} {
@@ -409,7 +409,7 @@ func TestReplayOfASessionThatIsNotLiveIsDeclined(t *testing.T) {
 		t.Fatalf("session compute %s after a declined replay", got.GetComputeState())
 	}
 	tr := s.trace(context.Background(), &a)
-	if b := tr.Nodes["bridge"]; b.State != "failed" || !strings.Contains(b.Detail, "declined before Sessions.Replay") ||
+	if b := tr.Nodes["bridge"]; b.State != "declined" || !strings.Contains(b.Detail, "Sessions.Replay not called: ") ||
 		!strings.Contains(b.Detail, "COMPUTE_COLD") {
 		t.Errorf("bridge: %+v", b)
 	}
@@ -533,7 +533,7 @@ func TestReplayBridgeDetail(t *testing.T) {
 	}{
 		{"held", activity{OK: true, Replay: &replayResult{ControllerCalls: 0}}, ran},
 		{"controller failed", activity{FailedAt: "bridge", Replay: &replayResult{ControllerCalls: 0}}, ran},
-		{"declined", activity{FailedAt: "bridge", Declined: true}, "declined before Sessions.Replay"},
+		{"declined", activity{FailedAt: "bridge", Declined: true}, "Sessions.Replay not called"},
 		{"Replay RPC failed", activity{Code: "Unavailable"}, "Sessions.Replay (journal) failed; controller.Replay did not run"},
 		{"nothing to re-run", activity{FailedAt: "bridge"},
 			"Sessions.Replay (journal); nothing to re-run or the chain did not verify, so controller.Replay did not run"},

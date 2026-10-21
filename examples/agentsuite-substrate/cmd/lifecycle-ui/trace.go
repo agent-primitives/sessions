@@ -240,7 +240,8 @@ func parseActor(b []byte) (*actorView, error) {
 type nodeEvidence struct {
 	// State is observed (a log line or state read shows the hop), missing (none found in the
 	// window), refused (the daemon returned the call's error), failed (the call stopped in the
-	// bridge with no Sessions call failing), skipped (the hop is not on this call's path, was not
+	// bridge with no Sessions call failing), declined (the bridge refused the call before any
+	// Sessions lifecycle call), skipped (the hop is not on this call's path, was not
 	// reached, or was asked and not taken, such as replay's model) or unknown (the cluster could
 	// not be read).
 	State  string `json:"state"`
@@ -326,10 +327,15 @@ func (s *server) trace(ctx context.Context, a *activity) traceView {
 	case a.OK:
 	case a.FailedAt == "bridge":
 		// The call stopped in the bridge: no Sessions call failed (a replay after its journal
-		// read, or one the bridge declined).
+		// read, or one the bridge declined). A declined call reads Declined, as the timeline does.
 		b := t.Nodes["bridge"]
-		b.State = "failed"
-		b.Detail += "; stopped here: " + a.Message
+		if a.Declined {
+			b.State = "declined"
+			b.Detail += ": " + a.Message
+		} else {
+			b.State = "failed"
+			b.Detail += "; stopped here: " + a.Message
+		}
 		t.Nodes["bridge"] = b
 	default:
 		// The bridge saw the failure from the daemon; a refusal is the daemon's (its substrate
@@ -399,7 +405,7 @@ func replayBridgeDetail(a *activity) string {
 	r := a.Replay
 	switch {
 	case a.Declined:
-		return "declined before Sessions.Replay"
+		return "Sessions.Replay not called"
 	case r != nil && r.ControllerCalls >= 0:
 		return "Sessions.Replay (journal), then controller.Replay through atenet-router"
 	case a.FailedAt != "bridge":

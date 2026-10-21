@@ -425,6 +425,10 @@ no flattened lifecycle enum.
   gated.
 - The chain is unkeyed. `CHAIN-12` catches storage corruption and edits that do not recompute the
   hashes. A journal writer that rewrites an event and recomputes every later hash is not detected.
+- `agentctl verify --session UID` reads the reference host's session head and records through the
+  Sessions API and verifies that prefix locally, preserving protobuf field presence. It refuses
+  sequence gaps, hash/link mismatches, and a prefix shorter than the reported head; it does not run
+  a harness or call a model. This is not an independent external head anchor.
 - Verification proves internal consistency only. Removing records from the end of a log, or
   replacing the whole log, is not detectable from the log alone; detecting it requires an external
   anchor (for example a recorded head hash), which this draft does not define.

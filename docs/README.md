@@ -43,6 +43,7 @@ Start here. Each document is small and problem-scoped; this page is the index.
 | Plug in my agent | [harness-authoring.md](harness-authoring.md) |
 | Understand the internals | [architecture.md](architecture.md) |
 | Run it on agent-substrate | [substrate-conformance.md](substrate-conformance.md) |
+| Deploy a durable kind example | [substrate-kind.md](substrate-kind.md) |
 | Operate and debug it | [observability.md](observability.md) |
 | Configure daemon tool execution | [tool-executors.md](tool-executors.md) |
 | Gate a model's tool call on a human decision | [approval-gated-tool.md](approval-gated-tool.md) |

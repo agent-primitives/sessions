@@ -404,6 +404,23 @@ jobs:
           E2E_IDLE_GAP: 6m30s
         run: hack/run-e2e-job.sh 'TestHarnessStreamIdlePastRouteTimeout' "${E2E_IMAGE}" 1200
 
+      - name: Durable Substrate kind example
+        if: needs.changes.outputs.decision != 'skip'
+        timeout-minutes: 20
+        run: |
+          (cd examples/substrate-kind && go test -race ./...)
+          export SUBSTRATE_KIND_WORK="$RUNNER_TEMP/substrate-kind"
+          export SUBSTRATE_KIND_KUBECONFIG="$HOME/.kube/config"
+          export CLUSTER=kind PROJECT=smoke MODEL_SOURCE=stub SANDBOX_CLASS=microvm
+          mkdir -p "$SUBSTRATE_KIND_WORK/$CLUSTER"
+          (cd _substrate && go build -o "$SUBSTRATE_KIND_WORK/$CLUSTER/kubectl-ate" ./cmd/kubectl-ate)
+          DAEMON_IMAGE="$(cd integrations/substrate && ko build ./cmd/agentsessionsd)"
+          MODELSTUB_IMAGE="$(cd examples/substrate-kind && ko build ./cmd/modelstub)"
+          export DAEMON_IMAGE MODELSTUB_IMAGE
+          export WORKER_IMAGE="$ATEOM_MV_IMG"
+          bash examples/substrate-kind/deploy.sh
+          bash examples/substrate-kind/smoke.sh
+
       - name: Apply the counter micro-VM WorkerPool
         if: needs.changes.outputs.decision != 'skip'
         run: |

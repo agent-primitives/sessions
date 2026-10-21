@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -47,13 +48,29 @@ func (quietHarness) Describe(context.Context) (api.Descriptor, error) {
 }
 func (quietHarness) Run(context.Context, *api.Start, api.EventSink) error { return nil }
 
+// parkingHarness makes one approval-gated call, which the host parks.
+type parkingHarness struct{}
+
+func (parkingHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "parking"}, nil
+}
+func (parkingHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	_, err := sink.ToolCall(ctx, api.ToolCall{ID: "c", Tool: "t", IdempotencyKey: "k", Mediation: api.MediationRequiresApproval})
+	return err
+}
+
+var parkRef = api.ApprovalRef{ExecutionID: "e-1", ToolCallID: "c", RequestSeq: 1}
+
 type discardSink struct{}
 
 func (discardSink) Model(context.Context, api.ModelRequest) (api.ModelResponse, error) {
 	return api.ModelResponse{}, nil
 }
 func (discardSink) Output(context.Context, string) error { return nil }
-func (discardSink) ToolCall(context.Context, api.ToolCall) (api.ToolResult, error) {
+func (discardSink) ToolCall(_ context.Context, tc api.ToolCall) (api.ToolResult, error) {
+	if tc.Mediation == api.MediationRequiresApproval {
+		return api.ToolResult{}, &api.ApprovalParkedError{Ref: parkRef}
+	}
 	return api.ToolResult{}, nil
 }
 func (discardSink) Report(context.Context, api.ToolResult) error { return nil }
@@ -62,7 +79,24 @@ func (discardSink) Usage(context.Context, api.Usage) error       { return nil }
 // TestConnectSpanExportedBeforeTurnEnds checks the ordering the host relies on to suspend a harness
 // right after a turn: by the time Run returns, the harness's Connect span, the root of its side of
 // the turn, has been handed to the exporter. The exporter blocks, and Run must still be waiting.
+// A parked turn ends the same way: the host waits for the harness to close the stream.
 func TestConnectSpanExportedBeforeTurnEnds(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		harness api.Harness
+		wantErr func(error) bool
+	}{
+		{name: "end", harness: quietHarness{}, wantErr: func(err error) bool { return err == nil }},
+		{name: "parked", harness: parkingHarness{}, wantErr: func(err error) bool {
+			var parked *api.ApprovalParkedError
+			return errors.As(err, &parked) && parked.Ref == parkRef
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testConnectSpanExported(t, tc.harness, tc.wantErr) })
+	}
+}
+
+func testConnectSpanExported(t *testing.T, h api.Harness, wantErr func(error) bool) {
 	exp := &blockingExporter{batches: make(chan []string, 16), release: make(chan struct{})}
 	// A long batch timeout, so only an explicit flush exports anything.
 	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exp, sdktrace.WithBatchTimeout(time.Hour)))
@@ -77,7 +111,7 @@ func TestConnectSpanExportedBeforeTurnEnds(t *testing.T) {
 	})
 
 	lis := bufconn.Listen(1 << 20)
-	srv := newServer(quietHarness{})
+	srv := newServer(h)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 	conn, err := grpc.NewClient("passthrough:///harness",
@@ -91,7 +125,9 @@ func TestConnectSpanExportedBeforeTurnEnds(t *testing.T) {
 	client := harnesswire.NewClientHarness(v1.NewHarnessClient(conn))
 
 	done := make(chan error, 1)
-	go func() { done <- client.Run(context.Background(), &api.Start{ExecutionID: "e-1"}, discardSink{}) }()
+	go func() {
+		done <- client.Run(context.Background(), &api.Start{ExecutionID: "e-1", SessionUID: "s"}, discardSink{})
+	}()
 
 	var batch []string
 	select {
@@ -107,7 +143,7 @@ func TestConnectSpanExportedBeforeTurnEnds(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 	exp.release <- struct{}{}
-	if err := <-done; err != nil {
+	if err := <-done; !wantErr(err) {
 		t.Fatalf("Run: %v", err)
 	}
 

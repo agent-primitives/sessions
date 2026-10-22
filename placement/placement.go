@@ -1659,13 +1659,12 @@ func (p *Placer) ranHere(recorded string) bool {
 	return !ok || q == p
 }
 
-// recordedCheckpoint is api.SessionSpec.RecordedCheckpoint: the session's own latest SUSPEND ref,
-// or the zero SnapshotRef when it records none, which includes lastSuspendRef's fallback.
+// recordedCheckpoint is api.SessionSpec.RecordedCheckpoint: the ref of the session's own latest
+// SUSPEND as recorded, including one with no ExternalURI (runtime/local's), or the zero SnapshotRef
+// when it records none. It never returns lastSuspendRef's fallback, which no SUSPEND recorded.
 func recordedCheckpoint(recs []eventlog.Record, sessionUID string) api.SnapshotRef {
-	if ref := lastSuspendRef(recs, sessionUID); ref.ExternalURI != "" {
-		return ref
-	}
-	return api.SnapshotRef{}
+	ref, _ := ownSuspendRef(recs, sessionUID)
+	return ref
 }
 
 // lastSuspendRef returns the SnapshotRef from the most recent SUSPEND event THIS session wrote, or —
@@ -1678,14 +1677,24 @@ func recordedCheckpoint(recs []eventlog.Record, sessionUID string) api.SnapshotR
 // session — two sessions bound to one actor. Every backend records its own session UID in Local, so
 // a ref that names another session is history, not this session's checkpoint.
 func lastSuspendRef(recs []eventlog.Record, sessionUID string) api.SnapshotRef {
+	if ref, ok := ownSuspendRef(recs, sessionUID); ok {
+		return ref
+	}
+	return api.SnapshotRef{Local: sessionUID}
+}
+
+// ownSuspendRef returns the SnapshotRef of the most recent SUSPEND event THIS session wrote and
+// true, or the zero SnapshotRef and false when it wrote none (see lastSuspendRef for why a ref
+// naming another session is skipped).
+func ownSuspendRef(recs []eventlog.Record, sessionUID string) (api.SnapshotRef, bool) {
 	for i := len(recs) - 1; i >= 0; i-- {
 		ev := recs[i].Event
 		if ev.Kind == api.EventLifecycle && ev.Lifecycle != nil && ev.Lifecycle.Kind == api.LifecycleSuspend && ev.Lifecycle.Snapshot != nil {
 			if ev.Lifecycle.Snapshot.Local != sessionUID {
 				continue // inherited from a forked-from parent, not this session's checkpoint
 			}
-			return *ev.Lifecycle.Snapshot
+			return *ev.Lifecycle.Snapshot, true
 		}
 	}
-	return api.SnapshotRef{Local: sessionUID}
+	return api.SnapshotRef{}, false
 }

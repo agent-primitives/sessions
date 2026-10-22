@@ -5,7 +5,7 @@ Release notes are generated from commits and published on the
 reader needs to know beyond a commit list: what a release means for compatibility, and what it does
 not provide.
 
-## v0.3.0 - YYYY-MM-DD
+## v0.3.0 - 2026-10-22
 
 ### Compatibility
 

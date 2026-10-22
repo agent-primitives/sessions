@@ -99,6 +99,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The current tag is the pushed one, and the previous tag the root-module release before it,
+      # so an integrations/substrate/vX.Y.Z tag can never become the version, the image tag or the
+      # start of the changelog range. See hack/release-tags.sh.
+      - name: pin goreleaser to root-module tags
+        # Captured first: the default run shell has no pipefail, so a pipe would hide a failure.
+        run: |
+          tags="$(hack/release-tags.sh "${GITHUB_REF_NAME}")"
+          echo "${tags}" | tee -a "$GITHUB_ENV"
+
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"

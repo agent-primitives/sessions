@@ -442,8 +442,8 @@ a fork clone's borrowed snapshot counts. For a `REQUIRES_MEMORY_SNAPSHOT` harnes
 refuses that actor with `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) on Restore, on Create's
 attach or resume, and for a stateful fork's clone, which it tears down. The refusal names the
 session, the actor and its UID. A refused fork leaves the parent unaffected, and a retried `Fork`
-clones a new child. Any other refused actor is left running and every later turn is refused the
-same way. `Snapshot` of a memory-tier session refuses it before suspending, whether or not the journal
+clones a new child. Any other refused actor is left running; every later turn is refused the same
+way. `Snapshot` of a memory-tier session refuses it before suspending, whether or not the journal
 recorded a compute instance (a journal written before `compute_instance`, or a session with no turn
 yet), so the lost state is never recorded as the session's checkpoint. A suspend outside sessions
 writes a snapshot on the new runtime and clears the evidence, but the actor then holds a snapshot
@@ -546,20 +546,27 @@ before any mutating control call, since it still holds that capture. Recovery is
 every refusal here, below. The check sees only what the response reports; it is not a precondition
 on the resume, which v0.5.0's `ResumeActorRequest` (the actor's `ObjectRef` only) cannot carry.
 
-A stateful `Fork` checks the clone a successful `ResumeActor` reports the same way, against the
-child's checkpoint, which is none: the clone must hold no capture of its own, only the tag snapshot
-`CreateActor{source_tag}` gave it. The clone is `SUSPENDED` between that create and the resume, so
-another caller (the router on a request addressed to the child's name, then any suspend or pause)
-can resume and capture it in between, and the resume then restores that capture with the clone's
-UID and `MemoryNotRestored` false. A mismatch is `api.ErrMemoryStateLost`, logged at `WARN` like
-the refusals above. No journal names the clone and the fork never handed it out, so `Fork` tears
-it down as it does a clone that did not restore the parent's memory: `SuspendActor`, `DeleteActor`
-and `DeleteTag` of `fork-<child-uid>`, by name, best effort on a context detached from the
+A stateful `Fork` checks the clone a successful `ResumeActor` reports against the child's
+checkpoint, which is none: the clone must hold no capture of its own (`ActorInfo.NoCapture`), only
+the tag snapshot `CreateActor{source_tag}` gave it. The clone is `SUSPENDED` between that create
+and the resume, so another caller (the router on a request addressed to the child's name, then any
+suspend or pause) can resume and capture it in between, and the resume then restores that capture
+with the clone's UID and `MemoryNotRestored` false. Unlike the refusals above, this one is
+`substrate.ErrActorBusy` (`ABORTED`), as for a clone replaced before its resume: the session at
+stake is a child that does not exist yet, and the parent is untouched. `Fork` logs it at `WARN`
+(`refused a fork clone that holds a capture of its own`, with the clone's `actor` and `actor_uid`
+and `error_kind` `actor_busy`). No journal names the clone and the fork never handed it out, so
+`Fork` tears it down as it does a clone that did not restore the parent's memory: `SuspendActor`,
+`DeleteActor` and `DeleteTag` of `fork-<child-uid>`, by name, on a context detached from the
 caller's. The Placer writes no child journal and tears down the children it already cloned. The
-parent keeps its `SUSPEND` and snapshot, so a retry at the parent's new head clones a new child,
-and no cleanup is needed.
+parent keeps its `SUSPEND` and snapshot, so a retry at the parent's new head clones a new child.
+The teardown is best effort: when its `SuspendActor` fails, for example because the caller that
+captured the clone holds its lease, the clone and its tag stay, and the refusal and a second `WARN`
+(`failed to tear down a refused fork clone`) name the clone's UID and the tag. Delete that actor
+with `options.uid` and `any_state: true`, and the tag, to release them. A control client that
+cannot report `NoCapture` makes every stateful `Fork` fail this way, which a retry does not fix.
 
-For the other refusals here, nothing in sessions recovers the session's memory. Delete or abandon the
+For other refusals here, nothing in sessions recovers the session's memory. Delete or abandon the
 session, and delete the substrate actor named in the warning to release its snapshot, or its worker
 if the router woke it or a refused resume left it running. A `SUSPENDED` actor takes a plain
 `DeleteActor` with `options.uid` set to the warning's `actor_uid`; a `RUNNING` one also needs
@@ -718,7 +725,8 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   too), and touches nothing when the read fails. `Stop` suspends and deletes by name, so an actor
   created between that read and the delete is not protected.
 - A clone the resume reports holding a capture of its own, from another caller that resumed and
-  captured it while it was `SUSPENDED`, is `api.ErrMemoryStateLost` and torn down the same way
+  captured it while it was `SUSPENDED`, is `substrate.ErrActorBusy` (`ABORTED`) too, logged at
+  `WARN` and torn down the same way; a retry clones a new child
   ([a refused capture stays refused](#substrate-v050-a-refused-capture-stays-refused)).
 - A control client without the Tag APIs does not satisfy the optional `SnapshotCloner` interface; a
   stateful fork there fails loudly rather than degrading to a lossy replay-fork.

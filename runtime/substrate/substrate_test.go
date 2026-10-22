@@ -2979,22 +2979,30 @@ func TestResumeThatRestoresAnUnrecordedCaptureIsRefused(t *testing.T) {
 // caller can resume it and capture it (suspend or pause) in that window. Fork's resume then
 // restores that capture: the response reports the clone's UID and no MemoryNotRestored, but the
 // clone holds RAM that is not the parent's at the fork point, and the child's journal, which
-// records no checkpoint, could never accept it. Fork compares the response with that empty
-// checkpoint and refuses it with api.ErrMemoryStateLost: it returns no incarnation, logs the
-// refusal, and tears the clone down (suspend, delete, untag), as for a clone that lost the
-// parent's RAM. A client that cannot show the clone holds no capture is refused the same way.
+// records no checkpoint, could never accept it. Fork refuses it with ErrActorBusy (ABORTED), as
+// for a clone replaced before its resume: it returns no incarnation, logs a Warn naming the clone
+// and its UID, and tears the clone down (suspend, delete, untag). The parent is untouched, so a
+// retry clones a new child. A client that cannot show the clone holds no capture is refused the
+// same way. When the teardown's suspend is refused (another caller holds the clone's lease), the
+// refusal and a second Warn say the clone and its tag were left in place.
 func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
+	captured := func(m *mockCloner, name string) {
+		m.capture(name)
+		m.holds(name, m.captureURI(name))
+	}
 	for _, tc := range []struct {
 		name       string
 		afterClone func(m *mockCloner, name string)
 		refused    bool
+		stuck      bool // the teardown's suspend is refused, so the clone is left in place
 	}{
 		{name: "nothing in between"},
-		{name: "resumed and captured by another caller", refused: true, afterClone: func(m *mockCloner, name string) {
-			m.capture(name)
-			m.holds(name, m.captureURI(name))
-		}},
+		{name: "resumed and captured by another caller", refused: true, afterClone: captured},
 		{name: "the client cannot tell", refused: true, afterClone: func(m *mockCloner, _ string) { m.captureUnknown = true }},
+		{name: "captured, and the teardown is refused busy", refused: true, stuck: true, afterClone: func(m *mockCloner, name string) {
+			captured(m, name)
+			m.suspendErr = fmt.Errorf("lease held: %w", substrate.ErrActorBusy)
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var output bytes.Buffer
@@ -3020,15 +3028,18 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 				if !reflect.DeepEqual(m.calls, head) {
 					t.Fatalf("calls=%v want %v", m.calls, head)
 				}
+				if output.Len() != 0 {
+					t.Fatalf("an accepted clone was logged: %s", output.String())
+				}
 				return
 			}
-			if !errors.Is(err, api.ErrMemoryStateLost) || !reflect.DeepEqual(inc, api.Incarnation{}) {
-				t.Fatalf("fork: inc=%+v err=%v, want api.ErrMemoryStateLost and no incarnation", inc, err)
+			if !errors.Is(err, substrate.ErrActorBusy) || !errors.Is(err, api.ErrComputeBusy) || !reflect.DeepEqual(inc, api.Incarnation{}) {
+				t.Fatalf("fork: inc=%+v err=%v, want substrate.ErrActorBusy and no incarnation", inc, err)
 			}
-			if errors.Is(err, api.ErrComputeBusy) {
-				t.Fatalf("fork: %v is retryable busy; the clone the resume reported is this fork's", err)
+			if errors.Is(err, api.ErrMemoryStateLost) {
+				t.Fatalf("fork: %v is api.ErrMemoryStateLost; the parent is intact and a retry clones a new child", err)
 			}
-			for _, part := range []string{"space/child", cloneUID, "tears the clone down"} {
+			for _, part := range []string{"space/child", cloneUID, "capture of its own", "tears the clone down", "a retry clones a new child"} {
 				if !strings.Contains(err.Error(), part) {
 					t.Fatalf("refusal %q does not say %q", err, part)
 				}
@@ -3036,17 +3047,43 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 			if strings.Contains(err.Error(), "gs://") {
 				t.Fatalf("refusal %q names a snapshot URI", err)
 			}
+			if st := m.statusOf("parent"); st != substrate.StatusSuspended || m.snapshots["parent"] != "snap-parent-1" {
+				t.Fatalf("parent is %v holding %q, want it untouched", st, m.snapshots["parent"])
+			}
+			logs := output.String()
+			for _, part := range []string{`"msg":"refused a fork clone that holds a capture of its own"`, `"atespace":"space"`,
+				`"actor":"child"`, `"actor_uid":"` + cloneUID + `"`, `"error_kind":"actor_busy"`} {
+				if !strings.Contains(logs, part) {
+					t.Fatalf("refusal was not logged for operators with %s: %s", part, logs)
+				}
+			}
+			if strings.Contains(logs, "gs://") {
+				t.Fatalf("the log names a snapshot URI: %s", logs)
+			}
+			if tc.stuck {
+				if want := append(slices.Clone(head), "suspend:child"); !reflect.DeepEqual(m.calls, want) {
+					t.Fatalf("calls=%v want %v", m.calls, want)
+				}
+				if _, ok := m.actors["child"]; !ok {
+					t.Fatal("the clone is gone although its teardown's suspend was refused")
+				}
+				if !strings.Contains(err.Error(), "tearing the clone down failed") || !strings.Contains(err.Error(), `"fork-child"`) ||
+					!strings.Contains(err.Error(), "lease held") {
+					t.Fatalf("refusal %q does not say the clone and its tag fork-child were left in place, and why", err)
+				}
+				if !strings.Contains(logs, `"msg":"failed to tear down a refused fork clone"`) || !strings.Contains(logs, `"tag":"fork-child"`) {
+					t.Fatalf("the failed teardown was not logged for operators: %s", logs)
+				}
+				return
+			}
+			if strings.Contains(err.Error(), "tearing the clone down failed") {
+				t.Fatalf("refusal %q reports a failed teardown", err)
+			}
 			if want := append(slices.Clone(head), "suspend:child", "delete:child", "untag:fork-child"); !reflect.DeepEqual(m.calls, want) {
 				t.Fatalf("calls=%v want the clone torn down %v", m.calls, want)
 			}
 			if _, ok := m.actors["child"]; ok {
 				t.Fatal("the refused clone still exists")
-			}
-			if st := m.statusOf("parent"); st != substrate.StatusSuspended || m.snapshots["parent"] != "snap-parent-1" {
-				t.Fatalf("parent is %v holding %q, want it untouched", st, m.snapshots["parent"])
-			}
-			if !strings.Contains(output.String(), `"error_kind":"memory_state_lost"`) || !strings.Contains(output.String(), `"actor":"child"`) {
-				t.Fatalf("refusal was not logged for operators: %s", output.String())
 			}
 		})
 	}

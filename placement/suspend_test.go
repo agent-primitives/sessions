@@ -1211,9 +1211,9 @@ func TestRefusedResumeLeavesTheActorRunningAndJournalsNothing(t *testing.T) {
 // a request addressed to the child's name, then an idle suspend) resumes the SUSPENDED clone and
 // captures it. Fork's resume restores that capture with the clone's UID and its memory, but the
 // child's journal would record no checkpoint, so every turn of the child would refuse it. The
-// fork is refused with api.ErrMemoryStateLost: no FORK marker or prefix is written to the child's
-// log, the clone and its tag are torn down, and the parent keeps the SUSPEND it took. The parent's
-// snapshot is intact, so a retry at the new head clones a new child.
+// fork is refused with api.ErrComputeBusy (ABORTED at the service): no FORK marker or prefix is
+// written to the child's log, the clone and its tag are torn down, and the parent keeps the SUSPEND
+// it took. The parent's snapshot is intact, so a retry at the new head clones a new child.
 func TestForkRefusesACloneCapturedBeforeItsResumeAndJournalsNoChild(t *testing.T) {
 	ctx := t.Context()
 	ctl := newSuspendControl()
@@ -1234,8 +1234,8 @@ func TestForkRefusesACloneCapturedBeforeItsResumeAndJournalsNoChild(t *testing.T
 	}
 	ctl.calls = nil
 	err = p.Fork(ctx, parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, head)
-	if !errors.Is(err, api.ErrMemoryStateLost) {
-		t.Fatalf("fork: %v, want api.ErrMemoryStateLost", err)
+	if !errors.Is(err, api.ErrComputeBusy) || errors.Is(err, api.ErrMemoryStateLost) {
+		t.Fatalf("fork: %v, want api.ErrComputeBusy, not api.ErrMemoryStateLost", err)
 	}
 	if cloneUID == "" || !strings.Contains(err.Error(), cloneUID) {
 		t.Fatalf("refusal %q does not name the clone %q", err, cloneUID)

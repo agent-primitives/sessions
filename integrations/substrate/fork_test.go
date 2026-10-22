@@ -653,8 +653,8 @@ func TestResumeOfAnUnrecordedCaptureIsRefusedOverTheAdapter(t *testing.T) {
 // sandbox runtime, so the clone's newest snapshot is its own generation 2, not the tag's. The
 // resume restores that capture and the response reports the clone's UID and no
 // MemoryNotRestored, but NoCapture false. The child's journal records no checkpoint, so Fork
-// refuses it with api.ErrMemoryStateLost and tears the clone and its tag down; the parent keeps
-// its snapshot.
+// refuses it with substrate.ErrActorBusy (ABORTED) and tears the clone and its tag down; the parent
+// keeps its snapshot.
 func TestForkOfACloneThatHoldsItsOwnCaptureIsRefusedOverTheAdapter(t *testing.T) {
 	ctx := t.Context()
 	rt := sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h1")
@@ -682,8 +682,8 @@ func TestForkOfACloneThatHoldsItsOwnCaptureIsRefusedOverTheAdapter(t *testing.T)
 	}
 	ctl.calls = nil
 	inc, err := b.Fork(ctx, snap, api.ForkOpts{ChildSessionUID: "child"})
-	if !errors.Is(err, api.ErrMemoryStateLost) || inc.ID != "" || inc.ComputeInstance != "" {
-		t.Fatalf("fork: inc=%+v err=%v, want api.ErrMemoryStateLost and no incarnation", inc, err)
+	if !errors.Is(err, substrate.ErrActorBusy) || errors.Is(err, api.ErrMemoryStateLost) || inc.ID != "" || inc.ComputeInstance != "" {
+		t.Fatalf("fork: inc=%+v err=%v, want substrate.ErrActorBusy and no incarnation", inc, err)
 	}
 	if cloneUID == "" || !strings.Contains(err.Error(), cloneUID) || !strings.Contains(err.Error(), "tears the clone down") ||
 		strings.Contains(err.Error(), "gs://") {

@@ -191,18 +191,20 @@ not provide.
   and its append, Suspend is refused this way; retry once it is recorded. Exec and Resume check the
   actor a successful `ResumeActor` reports the same way, so a capture left on the actor between the
   check and the resume is refused too; the actor is then left `RUNNING` and not used. A stateful
-  Fork checks its clone that way against the child's empty checkpoint: a clone another caller
-  resumed and captured before Fork's resume is refused and torn down, with no child; the parent is
-  unaffected, a retried Fork clones a new child, and no cleanup is needed. For the other refusals
-  here, nothing in sessions recovers the session: delete or abandon it, and delete the actor named
-  in the warning with `options.uid` (and `any_state: true` if it is running) to release it.
-  Journal, wire and the Sessions API are unchanged: the check reads the `SUSPEND` refs the journal
-  already holds. A crash and resume onto a worker of the same runtime between the check and the
-  suspend is still not caught; a precondition on substrate's `SuspendActor` would close it, and
-  v0.5.0 has none on `SuspendActor` or `ResumeActor`. A router resume alone is fine. Any suspend by another caller
-  ends a memory-tier session the same way, including suspend and resume cycles during a Suspend and
-  a later idle suspend, so a gateway that suspends idle actors (as
-  `agent-substrate/always-on-agent`'s does for its own) must not suspend one sessions manages; see
+  Fork checks its clone against the child's empty checkpoint: a clone another caller resumed and
+  captured before Fork's resume is refused with `ABORTED`, logged at `WARN` and torn down, with no
+  child; the parent is unaffected and a retried Fork clones a new child. The teardown is best
+  effort: if another caller holds the clone's lease, the refusal names the clone and its tag left
+  in place. For the other refusals here, nothing in sessions recovers the session: delete or
+  abandon it, and delete the actor named in the warning with `options.uid` (and `any_state: true`
+  if it is running) to release it. Journal, wire and the Sessions API are unchanged: the check
+  reads the `SUSPEND` refs the journal already holds. A crash and resume onto a worker of the same
+  runtime between the check and the suspend is still not caught; a precondition on substrate's
+  `SuspendActor` would close it, and v0.5.0 has none on `SuspendActor` or `ResumeActor`. A router
+  resume alone is fine. Any suspend by another caller ends a memory-tier session the same way,
+  including suspend and resume cycles during a Suspend and a later idle suspend, so a gateway that
+  suspends idle actors (as `agent-substrate/always-on-agent`'s does for its own) must not suspend
+  one sessions manages; see
   [outside suspends](docs/substrate-conformance.md#substrate-v050-outside-suspends-and-router-auto-resume).
   Stateless sessions are unaffected.
   The adapter reports these through the new `ActorInfo.MemoryNotRestored`,
@@ -214,7 +216,8 @@ not provide.
   memory-tier session, and one that leaves `NoCapture` false refuses every memory-tier session with
   no `SUSPEND` recorded once its actor exists. `ResumeActor` must now report `Snapshot` and
   `NoCapture` as `GetActor` does: one that does not refuses every memory-tier `Restore`, every
-  `Create` that resumes a suspended memory-tier actor, and every stateful `Fork`. See
+  `Create` that resumes a suspended memory-tier actor, and every stateful `Fork` (`ABORTED`, which
+  a retry does not fix). See
   [runtime fallback](docs/substrate-conformance.md#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback).
 - SQLite schema v6 adds model-admission flags for new sessions; genuine pre-policy sessions,
   including empty sessions, remain legacy. Fork inherits admission metadata atomically. Existing

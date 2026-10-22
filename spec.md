@@ -1315,9 +1315,11 @@ The reference host takes it as `placement.Backend` in
   `REQUIRES_MEMORY_SNAPSHOT` harness (§13.4). A backend MAY also refuse that way, from `Create` or
   `Restore`, compute its resume reports holding another one; that compute is left running and not
   handed out, and the host records nothing. From a stateful `Fork` it MAY refuse a clone its
-  resume reports holding a capture of its own, since the child records none; it tears the clone
-  down, and the host writes no child journal. This reads only fields the journal already has; a
-  backend that does not need it ignores it.
+  resume reports holding a capture of its own, since the child records none; that refusal is
+  `api.ErrComputeBusy` (`ABORTED`), not `api.ErrMemoryStateLost`, since the parent keeps its
+  snapshot and a retry clones a new child. The backend tears the clone down, and the host writes
+  no child journal. This reads only fields the journal already has; a backend that does not need
+  it ignores it.
 - `RT-4f`: `Describe` returns the harness descriptor the host admits on. It MUST NOT provision
   compute: the host calls it before `Create`, `Restore`, and the fork source step (`RT-1`), in the
   memory-tier override check (`OPS-7`), and when the registry reports a harness's observed
@@ -1467,8 +1469,9 @@ The reference host takes it as `placement.Backend` in
   `ResumeActor` reports the same way (attach reads the recorded checkpoint again), since a capture
   can land between the check and the resume; a refused actor is left running and not handed out.
   A stateful `Fork` checks the clone its `ResumeActor` reports against the child's empty
-  checkpoint, so a clone another caller resumed and captured before that resume is refused and
-  torn down, and no child is recorded.
+  checkpoint, so a clone another caller resumed and captured before that resume is refused with
+  `substrate.ErrActorBusy` (`ABORTED`), logged at `WARN` and torn down, and no child is recorded;
+  a retry clones a new child.
   This sees only what the response reports; it is no precondition on the resume. It fails closed: a
   capture whose `SUSPEND` append failed, another host's capture before its append, or a suspend or
   pause outside sessions is refused too, and nothing in sessions recovers the session after it. One

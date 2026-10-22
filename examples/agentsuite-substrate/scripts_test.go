@@ -568,8 +568,9 @@ func TestUpClusterPhase(t *testing.T) {
 
 // ui.sh drives the cluster up.sh brought up and reads it as up.sh does, so before it builds or
 // changes anything it refuses one up.sh installed from another substrate commit, and one up.sh
-// created whose setup record is missing, names another node or stops short of the install. It goes
-// on with one installed from this commit, and with one up.sh did not create, which it does not check.
+// created whose setup record is missing, names another node or stops short of the install. It
+// goes on with one installed from this commit, and with one up.sh did not create, which it does
+// not check.
 func TestUISubstrateCommit(t *testing.T) {
 	const notInstalled = "does not record that it installed it"
 	for _, tc := range []struct {

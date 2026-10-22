@@ -1317,8 +1317,9 @@ func (b *Backend) tearDownForkClone(ctx context.Context, cloner SnapshotCloner, 
 }
 
 // forkCloneCaptured refuses a stateful Fork's clone whose ResumeActor reports no evidence that it
-// holds no capture of its own (ActorInfo.NoCapture false) under the clone's UID. The child's journal
-// records no checkpoint, so it could never accept a capture. The refusal tells two cases apart:
+// holds no capture of its own (ActorInfo.NoCapture false) under the clone's UID. The child's
+// journal records no checkpoint, so it could never accept a capture. The refusal tells two cases
+// apart:
 //
 //   - The clone's Snapshot is no longer the one CreateActorFromTag reported (or its newest is not
 //     ready): another caller resumed and captured it while it was SUSPENDED between its create and

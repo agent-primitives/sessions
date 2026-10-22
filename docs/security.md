@@ -231,7 +231,7 @@ whether active or retired, even with the operator listener off. Static inspectio
 retirement do not require `-model`. This reference daemon does not serve substrate placements. Registry
 responses print proto-JSON, including `spec_digest` and lifecycle state.
 
-The checked-in [Kubernetes manifest](../deploy/kubernetes/agentsessionsd.yaml) pins v0.2.0, which
+The checked-in [Kubernetes manifest](../deploy/kubernetes/agentsessionsd.yaml) pins v0.3.0, which
 supports `-registry-addr` but leaves it off: add `-registry-addr 127.0.0.1:8081` to its args first.
 The manifest does not expose the operator port through a Service. With the listener enabled, an
 operator with **pods/portforward RBAC** may open a local tunnel, then use the CLI against its local

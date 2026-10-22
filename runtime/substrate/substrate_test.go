@@ -2239,6 +2239,10 @@ func TestForkRefusesACloneThatLostTheParentRAM(t *testing.T) {
 	if !errors.Is(err, api.ErrMemoryStateLost) {
 		t.Fatalf("fork: err=%v, want api.ErrMemoryStateLost", err)
 	}
+	// Fork tears the clone down, so the refusal must say so, not that the actor was left running.
+	if msg := err.Error(); !strings.Contains(msg, "tears the clone down") || strings.Contains(msg, "left running") {
+		t.Fatalf("refusal %q must say the fork tears the clone down", err)
+	}
 	if _, ok := m.actors["child"]; ok || !slices.Contains(m.calls, "untag:fork-child") {
 		t.Fatalf("refused clone was not torn down: calls=%v", m.calls)
 	}

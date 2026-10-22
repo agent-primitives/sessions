@@ -426,7 +426,7 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 		return api.Incarnation{}, fmt.Errorf("substrate: resume actor: %w", err)
 	}
 	resumeFinished(nil, "actor_status", info.Status)
-	inc, err = b.incarnation(ctx, sessionUID, info)
+	inc, err = b.incarnation(ctx, sessionUID, info, actorLeftRunning)
 	return inc, err
 }
 
@@ -489,7 +489,7 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api
 	default:
 		return api.Incarnation{}, true, fmt.Errorf("substrate: actor %q is in state %v, not placeable", ref.Name, info.Status)
 	}
-	inc, err = b.incarnation(ctx, ref.Name, info)
+	inc, err = b.incarnation(ctx, ref.Name, info, actorLeftRunning)
 	if err != nil {
 		return api.Incarnation{}, true, err
 	}
@@ -503,6 +503,14 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api
 
 // attachNotDone is what a refusal before attach resumes or hands out the actor left undone.
 const attachNotDone = "the actor was not attached to or resumed"
+
+// actorLeftRunning is what incarnation's refusal leaves outside a fork: the resumed actor keeps
+// running and is not handed out.
+const actorLeftRunning = "the actor was left running"
+
+// forkCloneTornDown is what a refusal of a stateful Fork's resumed clone leaves: Fork suspends and
+// deletes the clone and releases its tag (destroyChild), and no child exists.
+const forkCloneTornDown = "the fork tears the clone down and creates no child"
 
 // resumedNotHandedOut is what a refusal after a successful ResumeActor (Restore, Create's attach)
 // leaves: the actor already runs the refused capture's RAM, so it is left running, not handed out,
@@ -964,7 +972,7 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 		return api.Incarnation{}, fmt.Errorf("substrate: resume (restore) actor: %w", err)
 	}
 	resumeFinished(nil, "actor_status", info.Status)
-	inc, err = b.incarnation(ctx, name, info)
+	inc, err = b.incarnation(ctx, name, info, actorLeftRunning)
 	if err != nil {
 		return api.Incarnation{}, err
 	}
@@ -1250,14 +1258,14 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 		return api.Incarnation{}, fmt.Errorf("%w: fork child %s/%s was replaced between its create and resume (clone %q, now %q); its cloned RAM is gone, no child was created, and the replacement may have been woken by this fork's resume and is left running, not suspended or deleted",
 			ErrActorBusy, childRef.Atespace, childRef.Name, created.UID, info.UID)
 	}
-	inc, err = b.incarnation(ctx, child, info)
+	inc, err = b.incarnation(ctx, child, info, forkCloneTornDown)
 	if err == nil {
 		// The child's journal records no checkpoint (a zero RecordedCheckpoint), so the clone must
 		// still hold no capture of its own: only the tag's snapshot. ResumeActor restores whatever
 		// the clone holds by then, so another caller that resumed and captured it in the window
 		// leaves it with the same UID and no MemoryNotRestored, holding RAM that need not be the
 		// parent's at the fork point. Every later turn of the child would refuse it.
-		err = b.requireRecordedCheckpoint(ctx, child, info, api.SnapshotRef{}, "the fork tears the clone down and creates no child")
+		err = b.requireRecordedCheckpoint(ctx, child, info, api.SnapshotRef{}, forkCloneTornDown)
 	}
 	if err != nil {
 		// The clone was created and resumed but is not reported RUNNING, came back without the
@@ -1463,7 +1471,9 @@ const TargetActorHeader = "ate-target-actor"
 // stateful Fork's clone) comes through here, so a REQUIRES_MEMORY_SNAPSHOT actor that reports
 // MemoryNotRestored is refused with api.ErrMemoryStateLost on each of them, on this turn and on
 // every later one while it keeps running on that worker. A stateless harness is not checked.
-func (b *Backend) incarnation(ctx context.Context, uid string, info ActorInfo) (api.Incarnation, error) {
+// outcome says what the caller does with a refused actor: actorLeftRunning, or forkCloneTornDown
+// for a stateful Fork's clone.
+func (b *Backend) incarnation(ctx context.Context, uid string, info ActorInfo, outcome string) (api.Incarnation, error) {
 	if info.Status != StatusRunning {
 		return api.Incarnation{}, fmt.Errorf("substrate: actor %q is %v after resume, want running", uid, info.Status)
 	}
@@ -1475,7 +1485,7 @@ func (b *Backend) incarnation(ctx context.Context, uid string, info ActorInfo) (
 		}
 		instance = info.UID
 		if info.MemoryNotRestored {
-			return api.Incarnation{}, b.memoryNotRestored(ctx, uid, info, "the actor was left running")
+			return api.Incarnation{}, b.memoryNotRestored(ctx, uid, info, outcome)
 		}
 	}
 	return api.Incarnation{

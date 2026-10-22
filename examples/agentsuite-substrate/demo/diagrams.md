@@ -36,7 +36,7 @@ Run half (run.mmd, start of chapter 4), each also a row of the traced turn:
   substrate cmd/ateapi/internal/controlapi/workflow_resume.go:765, which sends RestoreWorkload to
   the worker pod's ateom (cmd/atelet/main.go:1319, the client from cmd/atelet/main.go:1616).
 - agentsessionsd -> atenet-router, harnesswire stream: the actor is named in the ate-target-actor
-  header (runtime/substrate/substrate.go:1450,1485).
+  header (runtime/substrate/substrate.go:1458,1495).
 - atenet-router -> worker :443: substrate cmd/atenet/internal/router/ingress/ingress.go:140-142
   ("Route ok", targetAddr workerIP:443).
 - worker -> harness, "starts it": ateom-microvm's RestoreWorkload (substrate

@@ -177,37 +177,36 @@ not provide.
   Because v0.5.0's `SuspendActor` takes no precondition, a memory-tier Suspend or Fork also refuses
   with `api.ErrMemoryStateLost`, logged at `WARN`, when the actor was captured or paused and then
   resumed, resumed on another runtime, or replaced, between its check and the suspend; the actor is
-  left suspended and no checkpoint is recorded. This fails closed even when the memory survived.
-  The refusal sticks: the capture stays on the suspended actor, so for a memory-tier session Exec
+  left suspended and no checkpoint is recorded. This fails closed even when the memory survived. The
+  refusal sticks: the capture stays on the suspended actor, so for a memory-tier session Exec
   (Create's attach), Resume, Suspend and a stateful Fork's capture of the parent now refuse with
   `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`), logged at `WARN`, before resuming or suspending
   an actor (suspended, or woken by the router) whose newest snapshot is not the one the session's
   latest `SUSPEND` names, or that holds a capture of its own when no `SUSPEND` is recorded. This
-  fails closed too, and the session stays refused: an actor holding a capture whose `SUSPEND`
-  append failed, a pause or suspend made outside sessions, or a completed upload that a Suspend
-  reported as pending (`UNAVAILABLE`, which v0.5.0's synchronous suspend does not leave) is refused
-  the same way, and Suspend again no longer records it. Suspend of a `SUSPENDING` or `RESUMING`
-  actor, such as one another host's Suspend is still capturing, is `ABORTED`. Between that capture
-  and its append, Suspend is refused this way; retry once it is recorded. Exec and Resume check the
-  actor a successful `ResumeActor` reports the same way, so a capture left on the actor between the
-  check and the resume is refused too; the actor is then left `RUNNING` and not used. That includes
-  the actor a memory-tier Exec just created for the session, whose resume must report no capture
-  unless a `SUSPEND` for it is recorded by then (`FAILED_PRECONDITION`, not torn down: other hosts
-  can be using an actor under the session's name). A stateful Fork checks its clone against the
-  child's empty checkpoint: a clone another caller resumed and captured before Fork's resume is
-  refused with `ABORTED`, logged at `WARN` and torn down, with no child; the parent is unaffected
-  and a retried Fork clones a new child. The teardown is best effort: if another caller holds the
-  clone's lease, the refusal names the clone and its tag left in place. For the other refusals
-  here, nothing in sessions recovers the session: delete or abandon it, and delete the actor named
-  in the warning with `options.uid` (and `any_state: true` if it is running) to release it.
-  Journal, wire and the Sessions API are unchanged: the check reads the `SUSPEND` refs the journal
-  already holds. A crash and resume onto a worker of the same runtime between the check and the
-  suspend is still not caught; a precondition on substrate's `SuspendActor` would close it, and
-  v0.5.0 has none on `SuspendActor` or `ResumeActor`. A router
-  resume alone is fine. Any suspend by another caller ends a memory-tier session the same way,
-  including suspend and resume cycles during a Suspend and a later idle suspend, so a gateway that
-  suspends idle actors (as `agent-substrate/always-on-agent`'s does for its own) must not suspend
-  one sessions manages; see
+  fails closed too, and the session stays refused: an actor holding a capture whose `SUSPEND` append
+  failed, a pause or suspend made outside sessions, or a completed upload that a Suspend reported as
+  pending (`UNAVAILABLE`, which v0.5.0's synchronous suspend does not leave) is refused the same
+  way, and Suspend again no longer records it. Suspend of a `SUSPENDING` or `RESUMING` actor, such
+  as one another host's Suspend is still capturing, is `ABORTED`. Between that capture and its
+  append, Suspend is refused this way; retry once it is recorded. Exec and Resume check the actor a
+  successful `ResumeActor` reports the same way, so a capture left on the actor between the check
+  and the resume is refused too; the actor is then left `RUNNING` and not used. That includes the
+  actor Create just made for the session (on a memory-tier Exec or Resume), whose resume must report
+  no capture unless a `SUSPEND` for it is recorded by then (`FAILED_PRECONDITION`, not torn down:
+  other hosts can be using an actor under the session's name). A stateful Fork checks its clone
+  against the child's empty checkpoint: a clone another caller resumed and captured before Fork's
+  resume is refused with `ABORTED`, logged at `WARN` and torn down, with no child; the parent is
+  unaffected and a retried Fork clones a new child. The teardown is best effort: if another caller
+  holds the clone's lease, the refusal names the clone and its tag left in place. For the other
+  refusals here, nothing in sessions recovers the session: delete or abandon it, and delete the
+  actor named in the warning with `options.uid` (and `any_state: true` if it is running) to release
+  it. Journal, wire and the Sessions API are unchanged: the check reads the `SUSPEND` refs the
+  journal already holds. A crash and resume onto a worker of the same runtime between the check and
+  the suspend is still not caught; a precondition on substrate's `SuspendActor` would close it, and
+  v0.5.0 has none on `SuspendActor` or `ResumeActor`. A router resume alone is fine. Any suspend by
+  another caller ends a memory-tier session the same way, including suspend and resume cycles during
+  a Suspend and a later idle suspend, so a gateway that suspends idle actors (as
+  `agent-substrate/always-on-agent`'s does for its own) must not suspend one sessions manages; see
   [outside suspends](docs/substrate-conformance.md#substrate-v050-outside-suspends-and-router-auto-resume).
   Stateless sessions are unaffected.
   The adapter reports these through the new `ActorInfo.MemoryNotRestored`,

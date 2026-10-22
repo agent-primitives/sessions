@@ -1310,16 +1310,17 @@ The reference host takes it as `placement.Backend` in
   `SessionSpec.RecordedCheckpoint`, `Snapshot` gets it in `Incarnation.RecordedCheckpoint` (from
   `Suspend` and a stateful fork's capture of the parent), and `Restore` gets it as its ref. A
   backend whose compute can hold a snapshot the journal never recorded MAY refuse, with
-  `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) and before it resumes, attaches to or
-  suspends anything, compute that holds another one; `runtime/substrate` does for a
+  `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) and before it resumes, attaches to or suspends
+  anything, compute that holds another one; `runtime/substrate` does for a
   `REQUIRES_MEMORY_SNAPSHOT` harness (§13.4). A backend MAY also refuse that way, from `Create` or
   `Restore`, compute its resume reports holding another one; that compute is left running and not
-  handed out, and the host records nothing. From a stateful `Fork` it MAY refuse a clone its
-  resume reports holding a capture of its own, since the child records none; that refusal is
+  handed out, and the host records nothing. From a stateful `Fork` it MAY refuse a clone its resume
+  reports holding a capture of its own, since the child records none; that refusal is
   `api.ErrComputeBusy` (`ABORTED`), not `api.ErrMemoryStateLost`, since the parent keeps its
-  snapshot and a retry clones a new child. The backend tears the clone down, and the host writes
-  no child journal. This reads only fields the journal already has; a backend that does not need
-  it ignores it.
+  snapshot and a retry clones a new child. The backend tears the clone down best effort (a clone it
+  cannot, such as one whose lease another caller holds, is logged at `WARN` naming the clone and its
+  tag for an operator to delete), and the host writes no child journal. This reads only fields the
+  journal already has; a backend that does not need it ignores it.
 - `RT-4f`: `Describe` returns the harness descriptor the host admits on. It MUST NOT provision
   compute: the host calls it before `Create`, `Restore`, and the fork source step (`RT-1`), in the
   memory-tier override check (`OPS-7`), and when the registry reports a harness's observed
@@ -1421,21 +1422,21 @@ The reference host takes it as `placement.Backend` in
   Capture never uses this exemption. The adapter selects the highest generation before durable
   completion (later ties win). A newest pending/local-only entry exposes no URI/fidelity and sets
   `ActorInfo.SnapshotNotReady`, plus `ActorInfo.SnapshotPending` only for an explicit `PENDING`
-  upload. Snapshot returns zero ref; Restore of a suspended actor and suspended attachment refuse
-  with `substrate.ErrSnapshotNotReady` (wrapping ErrSnapshotNotRestorable), not permanent memory
-  loss unless the actor is proven replaced. A pending upload also wraps `api.ErrCheckpointPending`
-  (`UNAVAILABLE`): compute may already be released without a SUSPEND record, so once it completes,
-  Suspend again to record the new ref before Resume; the older ref is stale. A memory tier refuses
-  that completed upload as a capture the journal did not record (below); at v0.5.0 `SuspendActor`
-  returns only once its upload completed, so it does not leave one pending. Local-only state wraps
-  `api.ErrInvalidCheckpoint` (`FAILED_PRECONDITION`): it may
-  never upload, so inspect and explicitly establish a durable checkpoint instead of waiting. This
-  conservatively refuses out-of-band paused/local-only default attachment. For a
-  `REQUIRES_MEMORY_SNAPSHOT` harness, whose journal never records a checkpoint that is not ready,
-  Restore, Create's attach and `Snapshot` (before suspending) refuse a suspended actor as not ready
-  only while its upload is pending, and any other as an unrecorded capture with
-  `api.ErrMemoryStateLost` (below). Readiness is not
-  effective restore-source evidence.
+  upload; Snapshot returns zero ref for it. For a `REQUIRES_MEMORY_SNAPSHOT` harness, whose journal
+  never records a checkpoint that is not ready, such an entry is a capture the journal did not
+  record: Restore, Create's attach and `Snapshot` (before suspending) refuse a suspended actor that
+  holds one with `api.ErrMemoryStateLost` (below), and as not ready only while its upload is
+  pending; once that upload completes it is refused the same way, so neither waiting nor an explicit
+  Suspend recovers the session. For a stateless or VOLUMES-only actor, Restore of a suspended actor
+  and suspended attachment refuse with `substrate.ErrSnapshotNotReady` (wrapping
+  ErrSnapshotNotRestorable), not permanent memory loss unless the actor is proven replaced. There, a
+  pending upload also wraps `api.ErrCheckpointPending` (`UNAVAILABLE`): compute may already be
+  released without a SUSPEND record, so once it completes, Suspend again to record the new ref
+  before Resume; the older ref is stale. Local-only state wraps `api.ErrInvalidCheckpoint`
+  (`FAILED_PRECONDITION`): it may never upload, so inspect and explicitly establish a durable
+  checkpoint instead of waiting. At v0.5.0 `SuspendActor` returns only once its upload completed, so
+  it does not leave one pending. This conservatively refuses out-of-band paused/local-only default
+  attachment. Readiness is not effective restore-source evidence.
   These client checks can race lifecycle operations or router ingress; only Substrate can atomically
   bind expected snapshot/state to resume. Known limit: the effective resume source can differ from
   the durable checkpoint the adapter validated. Actors paused outside sessions may hold an
@@ -1471,8 +1472,9 @@ The reference host takes it as `placement.Backend` in
   resume; a refused actor is left running and not handed out.
   A stateful `Fork` checks the clone its `ResumeActor` reports against the child's empty
   checkpoint, so a clone another caller resumed and captured before that resume is refused with
-  `substrate.ErrActorBusy` (`ABORTED`), logged at `WARN` and torn down, and no child is recorded;
-  a retry clones a new child.
+  `substrate.ErrActorBusy` (`ABORTED`) and logged at `WARN`; the clone is torn down best effort
+  (a failed teardown is logged at `WARN` naming what it leaves), no child is recorded, and a retry
+  clones a new child.
   This sees only what the response reports; it is no precondition on the resume. It fails closed: a
   capture whose `SUSPEND` append failed, another host's capture before its append, or a suspend or
   pause outside sessions is refused too, and nothing in sessions recovers the session after it. One

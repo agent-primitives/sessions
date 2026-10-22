@@ -61,7 +61,7 @@ caught.
 `up.sh` deploys two daemons. `ui.sh` adds a third, `agentsessionsd-volumes`, which serves the
 memory-tier harness (`REQUIRES_MEMORY_SNAPSHOT`) from a template that prefers VOLUMES snapshots.
 `lifecycle-ui inject` derives that template from the memory tier `up.sh` rendered, with three
-changes: `preferredFidelity: VOLUMES`, one `durableDir` volume (at substrate 96dffb2, ateom-microvm
+changes: `preferredFidelity: VOLUMES`, one `durableDir` volume (at substrate v0.5.0, ateom-microvm
 refuses a VOLUMES checkpoint without one and the actor crashes), and a `-vol` name. A first turn
 passes, because the template's golden snapshot is MEMORY. The session's first suspend then completes
 a VOLUMES snapshot, and the daemon refuses it:
@@ -79,10 +79,10 @@ micro-VM only. With `AGENTSUITE_DEMO_SANDBOX=gvisor`, `ui.sh` skips it and says 
 
 The diagram is the path the example deploys.
 [`demo/diagrams.md`](../agentsuite-substrate/demo/diagrams.md) cites the code for each arrow of a
-turn. For suspend, the adapter calls `SuspendActor` (`integrations/substrate/adapter.go:99`), and
+turn. For suspend, the adapter calls `SuspendActor` (`integrations/substrate/adapter.go:112`), and
 ate-api's suspend workflow calls the node's atelet (substrate
-`cmd/ateapi/internal/controlapi/workflow_suspend.go:245`). The atelet then sends
-`CheckpointWorkload` to the worker pod's ateom (`cmd/atelet/main.go:720`).
+`cmd/ateapi/internal/controlapi/workflow_suspend.go:252`). The atelet then sends
+`CheckpointWorkload` to the worker pod's ateom (`cmd/atelet/main.go:748`).
 
 While a call runs, the page animates the path it expects. Once the call returns, the bridge asks the
 components what they saw during the call:

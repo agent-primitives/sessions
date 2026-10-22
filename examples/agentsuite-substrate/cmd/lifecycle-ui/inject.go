@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/agent-primitives/sessions/examples/agentsuite-substrate/render"
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/protobuf/encoding/protojson"
 )
@@ -20,9 +21,11 @@ import (
 // by design, so the template is derived from the memory tier's rendered one with three changes:
 //
 //   - snapshotConfig.preferredFidelity is VOLUMES, so a suspend completes a VOLUMES snapshot;
-//   - one durableDir volume is mounted in the container: at substrate 96dffb28 ateom-microvm
-//     refuses a VOLUMES checkpoint with no durable-dir or CSI volume, and ate-api then marks the
-//     actor CRASHED, which would show a substrate crash rather than the sessions refusal;
+//   - one durableDir volume is mounted in the container: at substrate v0.5.0 ateom-microvm
+//     refuses a VOLUMES checkpoint with no durable-dir or CSI volume (cmd/ateom-microvm/
+//     checkpoint.go), and ate-api then marks the actor CRASHED (cmd/ateapi/internal/controlapi/
+//     crash.go, handleAteletError), which would show a substrate crash rather than the sessions
+//     refusal;
 //   - the name (and the storage location under it) gets volumesSuffix, so it never collides with
 //     the memory tier's template.
 //
@@ -103,8 +106,8 @@ func volumesTemplate(memoryTemplate []byte, memoryFlag string) (*derived, error)
 	if got := t.GetSnapshotConfig().GetPreferredFidelity(); got != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
 		return nil, fmt.Errorf("memory-tier template prefers %s, want SNAPSHOT_FIDELITY_MEMORY", got)
 	}
-	if got := t.GetSandboxConfig().GetSandboxClass(); got != atepb.SandboxClass_SANDBOX_CLASS_MICROVM {
-		return nil, fmt.Errorf("memory-tier template runs %s; the volumes lane is derived for micro-VMs only", got)
+	if got := t.GetSandboxConfig().GetSandboxClass(); got != render.SandboxClassMicroVM {
+		return nil, fmt.Errorf("memory-tier template runs sandbox class %q; the volumes lane is derived for micro-VMs only", got)
 	}
 	if len(t.GetContainers()) != 1 {
 		return nil, fmt.Errorf("memory-tier template has %d containers, want 1", len(t.GetContainers()))

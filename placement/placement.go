@@ -408,8 +408,16 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	// turns this Placer ran count: a turn ExecRequest.harness sent to another harness left no state in
 	// this one's compute. The backend counts when it has seen the compute is missing, not here, so a
 	// turn another host journals in between is not missed (see api.SessionSpec.StartedTurns).
+	// It also reads the checkpoint the journal last recorded, after it has read the compute, so a
+	// memory-tier backend can refuse compute holding a snapshot the journal never recorded.
 	spec := &api.SessionSpec{SessionUID: sessionUID, StartedTurns: func() (int, error) {
 		return p.startedTurns(log)
+	}, RecordedCheckpoint: func() (api.SnapshotRef, error) {
+		recs, err := log.Read(1)
+		if err != nil {
+			return api.SnapshotRef{}, fmt.Errorf("placement: read session journal: %w", err)
+		}
+		return recordedCheckpoint(recs, sessionUID), nil
 	}}
 	createFinished := observability.StartDebug(ctx, p.logger, "placement", "create_compute",
 		"session_uid", sessionUID)
@@ -997,8 +1005,10 @@ func (p *Placer) suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	if err != nil {
 		return api.SnapshotRef{}, fmt.Errorf("placement: read session journal: %w", err)
 	}
+	// Pass the checkpoint the journal last recorded too, so the backend refuses compute holding a
+	// snapshot the journal never recorded (one an earlier Snapshot refused) instead of capturing it.
 	instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
-	inc := api.Incarnation{ID: sessionUID, ComputeInstance: instance}
+	inc := api.Incarnation{ID: sessionUID, ComputeInstance: instance, RecordedCheckpoint: recordedCheckpoint(recs, sessionUID)}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
 	if err != nil {
 		return api.SnapshotRef{}, err
@@ -1526,8 +1536,11 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if err != nil {
 		return api.SnapshotRef{}, nil, fmt.Errorf("placement: read parent journal: %w", err)
 	}
+	// The parent's recorded checkpoint goes along, as in suspend, so a capture an earlier Snapshot
+	// refused is not captured again and handed to the children.
 	instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
-	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID, ComputeInstance: instance}, api.SnapshotExternal)
+	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID, ComputeInstance: instance,
+		RecordedCheckpoint: recordedCheckpoint(recs, parentUID)}, api.SnapshotExternal)
 	if err != nil {
 		if errors.Is(err, api.ErrInvalidCheckpoint) {
 			return api.SnapshotRef{}, nil, fmt.Errorf("%w: %w", ErrUnplaceable, err)
@@ -1646,6 +1659,14 @@ func (p *Placer) ranHere(recorded string) bool {
 	return !ok || q == p
 }
 
+// recordedCheckpoint is api.SessionSpec.RecordedCheckpoint: the ref of the session's own latest
+// SUSPEND as recorded, including one with no ExternalURI (runtime/local's), or the zero SnapshotRef
+// when it records none. It never returns lastSuspendRef's fallback, which no SUSPEND recorded.
+func recordedCheckpoint(recs []eventlog.Record, sessionUID string) api.SnapshotRef {
+	ref, _ := ownSuspendRef(recs, sessionUID)
+	return ref
+}
+
 // lastSuspendRef returns the SnapshotRef from the most recent SUSPEND event THIS session wrote, or —
 // when there is none (a crash mid-turn, not a clean suspend) — a trivial ref naming the session so a
 // filesystem-only backend re-provisions and replays the journal.
@@ -1656,14 +1677,24 @@ func (p *Placer) ranHere(recorded string) bool {
 // session — two sessions bound to one actor. Every backend records its own session UID in Local, so
 // a ref that names another session is history, not this session's checkpoint.
 func lastSuspendRef(recs []eventlog.Record, sessionUID string) api.SnapshotRef {
+	if ref, ok := ownSuspendRef(recs, sessionUID); ok {
+		return ref
+	}
+	return api.SnapshotRef{Local: sessionUID}
+}
+
+// ownSuspendRef returns the SnapshotRef of the most recent SUSPEND event THIS session wrote and
+// true, or the zero SnapshotRef and false when it wrote none (see lastSuspendRef for why a ref
+// naming another session is skipped).
+func ownSuspendRef(recs []eventlog.Record, sessionUID string) (api.SnapshotRef, bool) {
 	for i := len(recs) - 1; i >= 0; i-- {
 		ev := recs[i].Event
 		if ev.Kind == api.EventLifecycle && ev.Lifecycle != nil && ev.Lifecycle.Kind == api.LifecycleSuspend && ev.Lifecycle.Snapshot != nil {
 			if ev.Lifecycle.Snapshot.Local != sessionUID {
 				continue // inherited from a forked-from parent, not this session's checkpoint
 			}
-			return *ev.Lifecycle.Snapshot
+			return *ev.Lifecycle.Snapshot, true
 		}
 	}
-	return api.SnapshotRef{Local: sessionUID}
+	return api.SnapshotRef{}, false
 }

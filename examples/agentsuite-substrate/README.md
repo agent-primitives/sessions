@@ -82,10 +82,10 @@ platform, so kaimahi's suite on arm64, or an agent the suite lacks, is refused w
 | `containers[0].wakeupProbe` | `GET /readyz` on 8081 |
 | `containers[0].securityContext` | `capabilities: {}`, adding none |
 | `containers[0].resources` | Unset: the sandbox bounds the container (see `resources`). |
-| `sandboxConfig` | `binding.sandbox`: `SANDBOX_CLASS_MICROVM`, `microvm` (or `SANDBOX_CLASS_GVISOR`, `gvisor-default`) |
-| `snapshotConfig` | `preferredFidelity` from `binding.snapshot.fidelity`, which must be `MEMORY` (or unset) for `-tier memory`: that tier keeps the conversation in RAM. At substrate `96dffb2` a suspend snapshot takes the template's `preferredFidelity`, and `agentsessionsd-memory` refuses to suspend, fork, resume or run a turn on a session whose completed snapshot is not `MEMORY` with a durable URI (`FAILED_PRECONDITION`; no `SUSPEND` or child is journaled). The stateless tier accepts any fidelity substrate admits: `ROOTFS` only with `sandbox.class` `microvm`, the one class substrate `96dffb2` takes a `ROOTFS` template on, so `emit render` refuses `ROOTFS` on `gvisor`. `storageLocation` is `binding.snapshot.storageLocation` + `<name>/`. |
+| `sandboxConfig` | `binding.sandbox`: class `microvm`, config `microvm` (or `gvisor`, `gvisor-default`) |
+| `snapshotConfig` | `preferredFidelity` from `binding.snapshot.fidelity`, which must be `MEMORY` (or unset) for `-tier memory`: that tier keeps the conversation in RAM. At substrate `v0.5.0` a suspend snapshot takes the template's `preferredFidelity`, and `agentsessionsd-memory` refuses to suspend, fork, resume or run a turn on a session whose completed snapshot is not `MEMORY` with a durable URI (`FAILED_PRECONDITION`; no `SUSPEND` or child is journaled). The stateless tier accepts any fidelity substrate admits: `ROOTFS` only with `sandbox.class` `microvm`, the one class substrate `v0.5.0` takes a `ROOTFS` template on, so `emit render` refuses `ROOTFS` on `gvisor`. `storageLocation` is `binding.snapshot.storageLocation` + `<name>/`. |
 | `workerSelector` | `binding.workerSelector` |
-| `resources` | `binding.resources`. Substrate sizes the sandbox and books the worker from these. A micro-VM gets the CPU rounded up to whole vCPUs and the memory less the VMM reserve (128MiB at substrate `96dffb2`), so `512Mi` boots a 384MiB guest; ateom-microvm refuses a container limit above the guest, which is why the container declares none. gVisor applies these limits to the container. |
+| `resources` | `binding.resources`. Substrate sizes the sandbox and books the worker from these. A micro-VM gets the CPU rounded up to whole vCPUs and the memory less the VMM reserve (128MiB at substrate `v0.5.0`), so `512Mi` boots a 384MiB guest; ateom-microvm refuses a container limit above the guest, which is why the container declares none. gVisor applies these limits to the container. |
 
 The harness registration is a `HarnessRegistration` with `spec.substrate {atespace, template}`,
 `STATELESS_REPLAY` and `descriptor_id: triage`. `agentsessionsd` does not serve the registry, so
@@ -132,6 +132,13 @@ is named `triage-memory`, is `REQUIRES_MEMORY_SNAPSHOT`, and is applied as
   not create. A cluster it created whose setup record is missing or unreadable is refused rather
   than recreated, since recreating an installed cluster would delete the daemon's session journal:
   run `./down.sh`, then `up.sh` again.
+- `up.sh` records the substrate commit it installed (`SUBSTRATE_REF`) and refuses to reuse a cluster
+  it installed from another commit, or before it recorded one, before it switches the shared
+  substrate checkout. `ui.sh` reads the records the same way: it refuses that cluster too, and one
+  `up.sh` created whose setup record is missing, names another node or stops short of the install.
+  Substrate has no in-place upgrade between releases before 1.0, and v0.5.0 reads an ActorTemplate
+  an older install stored with no sandbox class, so its actors cannot resume. Run `./down.sh`, which
+  deletes the cluster and its sessions, then `up.sh` again.
 - `up.sh` also reuses an ActorTemplate that already has the rendered name. The name covers the
   image, the binding, the model and the tier, not what `emit render` writes from them, so after
   updating this example on a cluster that already has its templates (for example to the render
@@ -240,7 +247,7 @@ header has not been run against a live deployment.
   - router authentication: run the router with `--ingress-auth-mode=static-mtls`, which closes the
     plaintext listeners and requires a client certificate with an allowed SPIFFE ID, and give
     `agentsessionsd` (and `cmd/replay`) a TLS client certificate for the router connection, which
-    neither supports today. At substrate 96dffb28, `ate-setup` has no option for this mode: the
+    neither supports today. At substrate v0.5.0, `ate-setup` has no option for this mode: the
     `ate-setup --ingress-auth-mode` flag and `components/router-static-mtls` that substrate's
     AGENTS.md names are not in the tree, so it means editing the router Deployment's args;
   - host authentication on the harness: a per-session credential the host presents and the harness

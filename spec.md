@@ -1235,14 +1235,16 @@ The reference host takes it as `placement.Backend` in
   `Status`, `Capabilities`. The host identifies an incarnation only by the session uid and keeps no
   runtime handle between calls.
 - `RT-4a`: A runtime MUST key each incarnation by its session uid. `Create` receives it as
-  `SessionSpec.SessionUID`. The only other field the reference host sets is
+  `SessionSpec.SessionUID`. The only other fields the reference host sets are
   `SessionSpec.StartedTurns`, a function that counts the turns the journal records as started on the
-  harness being placed (`RT-4e`); `Image`, `Harness`, and `Identity` are empty. `Fork` receives the
-  child's uid as `ForkOpts.ChildSessionUID`, and a later `Restore` of the child arrives as
-  `{local: child uid}` until the child writes its own `SUSPEND` (`RT-4c`).
+  harness being placed (`RT-4e`), and `SessionSpec.RecordedCheckpoint`, a function that reads the
+  session's recorded checkpoint (`RT-4i`); `Image`, `Harness`, and `Identity` are empty. `Fork`
+  receives the child's uid as `ForkOpts.ChildSessionUID`, and a later `Restore` of the child arrives
+  as `{local: child uid}` until the child writes its own `SUSPEND` (`RT-4c`).
 - `RT-4b`: `Snapshot` and `Stop` receive an `Incarnation` carrying `ID` (the session uid). `Suspend`
   and the memory-tier fork source step also pass the latest recorded `ComputeInstance` to `Snapshot`
-  (`RT-4h`), empty when none is recorded; nothing else is set. The runtime MUST resolve everything
+  (`RT-4h`), empty when none is recorded, and the recorded checkpoint in `RecordedCheckpoint`
+  (`RT-4i`), zero when none is; nothing else is set. The runtime MUST resolve everything
   it needs from those. The host does not check that the uid has an incarnation: `Suspend` (`OPS-17`)
   and the memory-tier fork source step (`OPS-25`) call `Snapshot` for a uid the backend may hold
   nothing for, for example a `Suspend` before any `Exec`. Whether one exists is the backend's state,
@@ -1263,12 +1265,13 @@ The reference host takes it as `placement.Backend` in
   instance differs from the recorded one, and again after a failed restore, to see turns journaled
   meanwhile; `runtime/substrate` refuses without resuming when the first read fails. A
   `REQUIRES_MEMORY_SNAPSHOT` backend reports `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) from
-  `Restore` only when it finds the compute that held the session's memory gone or replaced, since a
-  retry cannot help then, or, with no compute instance recorded to compare (`RT-4h`), finds compute
-  it cannot tell from a replacement; otherwise it returns the restore error, since compute that is
-  still there can fail a restore for another reason. With no recorded instance, `runtime/substrate`
-  reports lost after a `NOT_FOUND` resume whenever the actor does not hold the session's snapshot,
-  if a lifecycle change races the held-ref preflight (§13.4).
+  `Restore` only when it finds the compute that held the session's memory gone or replaced, or back
+  without that memory (`runtime/substrate`: resumed on a worker that restored only its volumes,
+  §13.4), since a retry cannot help then, or, with no compute instance recorded to compare
+  (`RT-4h`), finds compute it cannot tell from a replacement; otherwise it returns the restore
+  error, since compute that is still there can fail a restore for another reason. With no recorded
+  instance, `runtime/substrate` reports lost after a `NOT_FOUND` resume whenever the actor does not
+  hold the session's snapshot, if a lifecycle change races the held-ref preflight (§13.4).
 - The returned `Incarnation.ID` is used by the reference host only for diagnostics; every in-repo
   backend sets it to the session uid.
 - `RT-4d`: The `Incarnation` returned by `Create` and `Restore` MUST carry an `Address` at which
@@ -1282,7 +1285,8 @@ The reference host takes it as `placement.Backend` in
   forked child's from `Fork`, or a suspended one, since `Exec` on a cold session goes through
   `Create`, not `Restore`. `Create` MUST NOT fail because the incarnation exists. For a
   `REQUIRES_MEMORY_SNAPSHOT` harness it MUST attach to a live incarnation and bring back a
-  suspended one's captured memory rather than start a fresh one; `runtime/substrate` does both.
+  suspended one's captured memory rather than start a fresh one; `runtime/substrate` does both,
+  and fails with `api.ErrMemoryStateLost` when the actor comes back without that memory (§13.4).
   When no incarnation exists for such a harness and `StartedTurns` reports any, `Create` MUST fail
   with `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) instead of starting fresh compute: the
   journal cannot rebuild the lost memory. A `STATELESS_REPLAY` backend MAY start fresh, since the
@@ -1300,6 +1304,23 @@ The reference host takes it as `placement.Backend` in
   `ComputeInstance` MUST refuse a `Snapshot` given one (`RT-4b`) with `api.ErrMemoryStateLost` when
   another instance, or none, is there, before it returns a ref. An empty instance records nothing
   and is not compared, so records written before the field existed are not compared.
+- `RT-4i`: The host hands the backend the checkpoint the session's journal last recorded: the
+  `SnapshotRef` of the session's latest own `LIFECYCLE_SUSPEND` (one whose `local` names the
+  session, as `RT-5` reads it), or none. `Create` gets a reader for it in
+  `SessionSpec.RecordedCheckpoint`, `Snapshot` gets it in `Incarnation.RecordedCheckpoint` (from
+  `Suspend` and a stateful fork's capture of the parent), and `Restore` gets it as its ref. A
+  backend whose compute can hold a snapshot the journal never recorded MAY refuse, with
+  `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) and before it resumes, attaches to or suspends
+  anything, compute that holds another one; `runtime/substrate` does for a
+  `REQUIRES_MEMORY_SNAPSHOT` harness (§13.4). A backend MAY also refuse that way, from `Create` or
+  `Restore`, compute its resume reports holding another one; that compute is left running and not
+  handed out, and the host records nothing. From a stateful `Fork` it MAY refuse a clone its resume
+  reports holding a capture of its own, since the child records none; that refusal is
+  `api.ErrComputeBusy` (`ABORTED`), not `api.ErrMemoryStateLost`, since the parent keeps its
+  snapshot and a retry clones a new child. The backend tears the clone down best effort (a clone it
+  cannot, such as one whose lease another caller holds, is logged at `WARN` naming the clone and its
+  tag for an operator to delete), and the host writes no child journal. This reads only fields the
+  journal already has; a backend that does not need it ignores it.
 - `RT-4f`: `Describe` returns the harness descriptor the host admits on. It MUST NOT provision
   compute: the host calls it before `Create`, `Restore`, and the fork source step (`RT-1`), in the
   memory-tier override check (`OPS-7`), and when the registry reports a harness's observed
@@ -1379,17 +1400,18 @@ The reference host takes it as `placement.Backend` in
   backend descriptor, not from a legacy `SnapshotRef.Memory` bit, because journals written before
   this change recorded `Memory: true` on every Substrate suspend, including stateless actors.
   A RESUMING or SUSPENDING actor is `api.ErrComputeBusy` (`ABORTED`) before other checks. A
-  RUNNING actor keeps the no-op resume whatever snapshot it holds, so a repeated Resume, a Resume
-  retried after a failed dial and interrupted-turn recovery after an earlier Suspend succeed; for
-  memory tier, a nonempty observed UID that differs from the nonempty recorded one is
-  `api.ErrMemoryStateLost` before the resume. Held URI refs are checked only against a SUSPENDED
-  actor, which must hold exactly that durable checkpoint: a stale ref wraps
+  RUNNING actor keeps the no-op resume, so a repeated Resume, a Resume retried after a failed dial
+  and interrupted-turn recovery after an earlier Suspend succeed; for memory tier, a nonempty
+  observed UID that differs from the nonempty recorded one is `api.ErrMemoryStateLost` before the
+  resume. For a stateless or VOLUMES-only backend, held URI refs are checked only against a
+  SUSPENDED actor, which must hold exactly that durable checkpoint: a stale ref wraps
   `substrate.ErrSnapshotNotRestorable` and `api.ErrInvalidCheckpoint` (`FAILED_PRECONDITION`), so
   inspect and explicitly Suspend again rather than retry it. Control-read refusals are `INTERNAL`.
   Default stateless empty-URI recovery ignores the legacy Memory bit; memory-descriptor no-held
-  recovery (`Memory:false`) remains available, including interrupted turns and fork children.
-  VOLUMES-only requires a held URI. Suspended fidelity admission still applies to every recovery
-  path. Create/Exec check fidelity/readiness, not a journal-held URI.
+  recovery (`Memory:false`) remains available, including interrupted turns and fork children, for
+  an actor that holds no capture of its own. VOLUMES-only requires a held URI. Suspended fidelity
+  admission still applies to every recovery path. Create/Exec check fidelity/readiness; for a
+  memory tier they also compare the journal's recorded checkpoint (`RT-4i`, below).
   Memory-required non-MEMORY evidence also wraps `api.ErrMemoryStateLost`. GetActor must report
   that evidence too. An identified SUSPENDED actor with authoritative generation-zero/empty-list
   evidence can report `ActorInfo.NoSnapshotHistory` for first placement between CreateActor and its
@@ -1400,15 +1422,21 @@ The reference host takes it as `placement.Backend` in
   Capture never uses this exemption. The adapter selects the highest generation before durable
   completion (later ties win). A newest pending/local-only entry exposes no URI/fidelity and sets
   `ActorInfo.SnapshotNotReady`, plus `ActorInfo.SnapshotPending` only for an explicit `PENDING`
-  upload. Snapshot returns zero ref; Restore of a suspended actor and suspended attachment refuse
-  with `substrate.ErrSnapshotNotReady` (wrapping ErrSnapshotNotRestorable), not permanent memory
-  loss unless the actor is proven replaced. A pending upload also wraps `api.ErrCheckpointPending`
-  (`UNAVAILABLE`): compute may already be released without a SUSPEND record, so once it completes,
-  Suspend again to record the new ref before Resume; the older ref is stale. Local-only state wraps
-  `api.ErrInvalidCheckpoint` (`FAILED_PRECONDITION`): it may
-  never upload, so inspect and explicitly establish a durable checkpoint instead of waiting. This
-  conservatively refuses out-of-band PAUSED/local-only default attachment. Readiness is not
-  effective restore-source evidence.
+  upload; Snapshot returns zero ref for it. For a `REQUIRES_MEMORY_SNAPSHOT` harness, whose journal
+  never records a checkpoint that is not ready, such an entry is a capture the journal did not
+  record: Restore, Create's attach and `Snapshot` (before suspending) refuse a suspended actor that
+  holds one with `api.ErrMemoryStateLost` (below), and as not ready only while its upload is
+  pending; once that upload completes it is refused the same way, so neither waiting nor an explicit
+  Suspend recovers the session. For a stateless or VOLUMES-only actor, Restore of a suspended actor
+  and suspended attachment refuse with `substrate.ErrSnapshotNotReady` (wrapping
+  ErrSnapshotNotRestorable), not permanent memory loss unless the actor is proven replaced. There, a
+  pending upload also wraps `api.ErrCheckpointPending` (`UNAVAILABLE`): compute may already be
+  released without a SUSPEND record, so once it completes, Suspend again to record the new ref
+  before Resume; the older ref is stale. Local-only state wraps `api.ErrInvalidCheckpoint`
+  (`FAILED_PRECONDITION`): it may never upload, so inspect and explicitly establish a durable
+  checkpoint instead of waiting. At v0.5.0 `SuspendActor` returns only once its upload completed, so
+  it does not leave one pending. This conservatively refuses out-of-band paused/local-only default
+  attachment. Readiness is not effective restore-source evidence.
   These client checks can race lifecycle operations or router ingress; only Substrate can atomically
   bind expected snapshot/state to resume. Known limit: the effective resume source can differ from
   the durable checkpoint the adapter validated. Actors paused outside sessions may hold an
@@ -1422,7 +1450,43 @@ The reference host takes it as `placement.Backend` in
   restores at VOLUMES scope: a memory-tier session can pass durable MEMORY validation yet still
   cold-boot and lose RAM. Both cases remain open in
   [issue #192](https://github.com/agent-primitives/sessions/issues/192); held-URI/readiness checks
-  do not solve effective-source validation. Sessions does not call `PauseActor`.
+  do not solve effective-source validation. Sessions does not call `PauseActor`. A resume that
+  Substrate v0.5.0 binds to a worker whose sandbox runtime cannot restore the recorded runtime of
+  the MEMORY snapshot it restores from restores its volumes only; the adapter reports it as
+  `ActorInfo.MemoryNotRestored`, and for a `REQUIRES_MEMORY_SNAPSHOT` harness the backend refuses
+  that actor with `api.ErrMemoryStateLost` wherever it would hand it out (Create, Restore, a
+  stateful Fork's clone) and before `Snapshot` suspends it, recorded compute instance or not.
+  `Snapshot` refuses a RESUMING or SUSPENDING actor with `api.ErrComputeBusy` (`ABORTED`) before its
+  other checks, as Restore does, since the operation moving it may still record its capture.
+  `SuspendActor` takes no precondition, so `Snapshot` also refuses, with `api.ErrMemoryStateLost`, a
+  suspend whose `ActorInfo.UID` or `ActorInfo.CaptureLineage` differs from the actor it checked (a
+  replacement, a capture or pause followed by a resume, or a resume onto another runtime, in
+  between); the refused capture stays on the suspended actor. The refusal sticks through the journal
+  (`RT-4i`): for a `REQUIRES_MEMORY_SNAPSHOT` harness, Create's attach, Restore and `Snapshot`
+  (Suspend, and a stateful fork's capture of the parent) refuse with `api.ErrMemoryStateLost`,
+  before `ResumeActor` or `SuspendActor`, an actor, SUSPENDED or RUNNING, whose newest snapshot is
+  not the one the latest recorded `SUSPEND` names or, with none recorded, that holds a capture of
+  its own (`ActorInfo.NoCapture` false). Restore and Create, on an attach or on the actor it just
+  created, check the actor a successful `ResumeActor` reports the same way (Create reads the
+  recorded checkpoint again), since a capture can land between the check, or the create, and the
+  resume; a refused actor is left running and not handed out.
+  A stateful `Fork` checks the clone its `ResumeActor` reports against the child's empty
+  checkpoint, so a clone another caller resumed and captured before that resume is refused with
+  `substrate.ErrActorBusy` (`ABORTED`) and logged at `WARN`; the clone is torn down best effort
+  (a failed teardown is logged at `WARN` naming what it leaves), no child is recorded, and a retry
+  clones a new child.
+  This sees only what the response reports; it is no precondition on the resume. It fails closed: a
+  capture whose `SUSPEND` append failed, another host's capture before its append, or a suspend or
+  pause outside sessions is refused too, and nothing in sessions recovers the session after it. One
+  window remains: a crash, revert and resume onto a worker of the same runtime between the check and
+  the suspend keeps the lineage and the newest snapshot, so the capture lacks the turns since the
+  last checkpoint. Only a precondition on `SuspendActor` that substrate enforces (the worker
+  assignment, generation or UID checked) closes it; v0.5.0 has none on `SuspendActor` or
+  `ResumeActor`. A router resume alone keeps the recorded checkpoint, but a suspend by any other
+  caller, such as a gateway's idle suspend, leaves a capture no `SUSPEND` names, so the host must be
+  the only caller that suspends a `REQUIRES_MEMORY_SNAPSHOT` harness's actor. One outside suspend
+  inside the window with no resume after it is the capture `Snapshot` would have taken, and is
+  recorded.
   `Snapshot` and `Restore` do not create missing actors. When no actor exists (for example a fresh
   session before any `Create` reached `CreateActor`, and not a fork child, or an actor deleted
   outside the host) both fail with the control API's `NOT_FOUND` (substrate module pinned in

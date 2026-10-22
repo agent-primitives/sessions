@@ -6,7 +6,9 @@
 # The suite reaches each harness the way a production host does: harnesswire over h2c to the
 # atenet-router Service, with the ate-target-actor metadata naming the actor. Control is reached over
 # the ate-api-server Service with a projected ServiceAccount token. Running in-cluster keeps both on
-# their Service DNS names; no NetworkPolicy exception is needed, because nothing dials a worker.
+# their Service DNS names. Nothing dials a worker, so the router needs no NetworkPolicy exception;
+# ate-api-server admits the Job because namespace.yaml labels ate-agentsessions
+# ate.dev/api-access=true, which substrate v0.5.0 requires.
 apiVersion: batch/v1
 kind: Job
 metadata:

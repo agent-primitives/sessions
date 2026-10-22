@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/agent-primitives/sessions/api"
@@ -127,6 +128,34 @@ type ActorInfo struct {
 	// checkpoint. It permits initial attachment between CreateActor and the first ResumeActor;
 	// captures and actors seeded from a fork tag do not receive this exemption.
 	NoSnapshotHistory bool
+	// MemoryNotRestored is positive control-plane evidence that the actor holds a worker that did
+	// not restore the process memory of the MEMORY snapshot its resume restored from, when that
+	// snapshot carries session state (its own capture, or a fork tag's), so its RAM is not that
+	// snapshot's. Substrate since v0.5.0 does this when no worker matching the snapshot's recorded
+	// sandbox runtime has room: it restores the snapshot's volumes only on another worker. A
+	// template's golden snapshot holds no session state and never sets it. It stays set while the
+	// actor runs on that worker. False is not proof that memory was restored (see the
+	// effective-source limits in sessions issue #192).
+	MemoryNotRestored bool
+	// CaptureLineage identifies the in-RAM state a suspend of the actor captures. For an actor on a
+	// worker it is the snapshot generation the next capture will be assigned and the sandbox runtime
+	// that capture will be stamped with; for one mid-capture or without a worker it is the newest
+	// snapshot's generation and stamp, which a suspend completes or leaves as it is. So a suspend
+	// that captures the state an earlier read saw reports the value that read did. A capture or
+	// pause by another caller in between followed by a resume changes it (the next capture gets a
+	// newer generation), as does a resume onto a worker of another sandbox runtime. A single capture
+	// or pause with no resume after it is the capture that read predicted and leaves it as it was,
+	// as does a crash and resume onto a worker of the same runtime. The value is opaque: compare it
+	// only for equality. "" means the client cannot tell, and a memory-tier Snapshot refuses it (see
+	// Backend.Snapshot).
+	CaptureLineage string
+	// NoCapture is positive control-plane evidence that the actor holds no snapshot captured from it:
+	// it has no snapshot, or its newest is the one it was created with, borrowed from a tag (the
+	// template's golden snapshot or a fork's source tag), and no later generation was assigned. A
+	// suspend or pause of the actor, by any caller, ends it. False means a capture exists or the
+	// client cannot tell. A memory-tier session whose journal records no checkpoint is attached to
+	// or captured only with it set (see Backend.Create).
+	NoCapture bool
 	// UID is the actor's server-assigned identity (substrate ResourceMetadata.uid). It is fixed for the
 	// actor's lifetime, suspends and resumes included, and differs for an actor created later under the
 	// same name, which is how the backend tells a replacement apart. A REQUIRES_MEMORY_SNAPSHOT harness
@@ -144,13 +173,17 @@ type ControlClient interface {
 	CreateActor(ctx context.Context, actor ActorRef, template ObjectRef) error
 	// ResumeActor schedules the actor onto a worker from its own snapshot, or cold-boots the
 	// template spec if it has none. It does not look up the template's golden tag at resume time.
-	// There is no per-call boot flag.
+	// There is no per-call boot flag. It returns the actor as the resume left it, with every field
+	// GetActor reports: a memory-tier Restore, Create (an attach, or the actor it created) and
+	// stateful Fork compare its Snapshot (or NoCapture) with the checkpoint the session's journal
+	// recorded, none for a fork child, before handing the actor out.
 	ResumeActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 	// SuspendActor snapshots the actor to durable storage and frees the worker, returning the actor
 	// as the suspend left it: ActorInfo.Snapshot is the external snapshot it now holds, paired with
 	// its observed SnapshotFidelity, and ActorInfo.UID tells which actor under the name was suspended.
 	// UID must be set: a memory-tier Snapshot refuses a suspend that reports none, since it cannot
-	// tell which actor it captured.
+	// tell which actor it captured. So must CaptureLineage, which a memory-tier Snapshot compares
+	// with the one GetActor reported when it checked the actor.
 	// An actor that does not exist must be reported as (or wrap) ErrActorNotFound.
 	SuspendActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 	DeleteActor(ctx context.Context, actor ActorRef) error
@@ -223,6 +256,8 @@ type Backend struct {
 	router      string         // host:port of the atenet-router ingress the harness is reached through
 	logger      *slog.Logger
 	volumesOnly bool
+	// memoryLostWarned maps an actor name to the UID memoryNotRestored last warned about.
+	memoryLostWarned sync.Map
 }
 
 var _ api.Runtime = (*Backend)(nil)
@@ -308,6 +343,23 @@ func (b *Backend) ref(name string) ActorRef { return ActorRef{Atespace: b.atespa
 // and the count above cannot see that turn. A fork child's FORK marker records the UID of the clone
 // Fork returns, so an actor created under the child's name before its first turn is refused too.
 //
+// For a REQUIRES_MEMORY_SNAPSHOT harness, an existing actor, RUNNING or SUSPENDED, must hold the
+// checkpoint SessionSpec.RecordedCheckpoint reads, read after GetActor answers: the snapshot the
+// session's latest SUSPEND names or, with none recorded, no capture of its own. Otherwise it holds
+// a capture the journal never accepted (one a Snapshot refused stays on the actor) and Create
+// refuses with api.ErrMemoryStateLost before resuming or handing it out. A SUSPENDED actor is
+// checked again on what its resume reports (see attach).
+//
+// So is the actor Create itself creates. Between CreateActor and ResumeActor it is SUSPENDED under
+// the session's name, where another host's attach or the router can resume it and any caller can
+// then capture it, and ResumeActor restores whatever it holds by then. Create checks the actor the
+// resume reports against SessionSpec.RecordedCheckpoint read after the resume (normally none, so it
+// must hold no capture of its own) and refuses a mismatch with api.ErrMemoryStateLost, leaving the
+// actor running and not handed out (resumedNotHandedOut), as attach refuses the same actor. Unlike
+// a refused fork clone, whose name no other host knows, it is not torn down and the refusal is not
+// ErrActorBusy: the session's name is shared, so the capture can be another host's whose SUSPEND
+// is not appended yet, and Stop deletes by name with no UID precondition.
+//
 // The distinction matters most for a REQUIRES_MEMORY_SNAPSHOT harness: recreating an actor that
 // already holds live state would silently discard exactly the state fork and suspend exist to carry,
 // and the harness never rebuilds it from Start.History (I4).
@@ -332,7 +384,7 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	}
 
 	ref := b.ref(sessionUID)
-	if inc, found, err := b.attach(ctx, ref); found || err != nil {
+	if inc, found, err := b.attach(ctx, ref, s.RecordedCheckpoint); found || err != nil {
 		return inc, err
 	}
 
@@ -363,7 +415,7 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 			// Another host created the actor after this call looked. Use it as that host does; the
 			// host's compute-instance check still refuses it if it replaced a lost actor.
 			createFinished(nil, "actor_exists", true)
-			inc, found, aerr := b.attach(ctx, ref)
+			inc, found, aerr := b.attach(ctx, ref, s.RecordedCheckpoint)
 			if !found && aerr == nil {
 				// Deleted again since. A retry looks afresh, and refuses a lost memory-tier session.
 				aerr = fmt.Errorf("%w: actor %s/%s already existed at create and is now gone: %w", ErrActorBusy, ref.Atespace, ref.Name, err)
@@ -379,39 +431,75 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 		"actor", ref.Name,
 		"atespace", ref.Atespace,
 	)
-	info, err := b.ctl.ResumeActor(ctx, ref) // a brand-new actor has no session state to lose
+	info, err := b.ctl.ResumeActor(ctx, ref)
 	if err != nil {
 		resumeFinished(err, "error_kind", "resume_actor_failed")
 		return api.Incarnation{}, fmt.Errorf("substrate: resume actor: %w", err)
 	}
 	resumeFinished(nil, "actor_status", info.Status)
-	inc, err = b.incarnation(sessionUID, info)
-	return inc, err
+	if inc, err = b.incarnation(ctx, sessionUID, info, actorLeftRunning); err != nil {
+		return api.Incarnation{}, err
+	}
+	// The new actor was SUSPENDED and addressable until this resume (see the doc comment above).
+	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+	if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, s.RecordedCheckpoint, resumedNotHandedOut); err != nil {
+		return api.Incarnation{}, err
+	}
+	return inc, nil
 }
 
 // attach returns the incarnation of the session's existing actor: a RUNNING actor as it is, a
-// SUSPENDED one after resuming it, which restores its own snapshot. found is false, with no error,
-// when the actor does not exist, including when it is deleted between the look and the resume (see
-// resumeFailed). An actor mid-transition is ErrActorBusy, as is a resume substrate refuses because
-// another operation holds the actor (the ControlClient wraps it), so a host that lost a race for a
-// session's first turn gets a retryable error, not a permanent one.
-func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation, found bool, err error) {
+// SUSPENDED one after resuming it, which restores its own snapshot. For a REQUIRES_MEMORY_SNAPSHOT
+// harness either must hold the checkpoint the session's journal last recorded (read through
+// recorded, nil for none) before it is handed out or resumed (see requireRecordedCheckpoint), so a
+// capture a memory-tier Snapshot refused is never resumed as the session's. found is false, with
+// no error, when the actor does not exist, including when it is deleted between the look and the
+// resume (see resumeFailed). An actor mid-transition is ErrActorBusy, as is a resume substrate
+// refuses because another operation holds the actor (the ControlClient wraps it), so a host that
+// lost a race for a session's first turn gets a retryable error, not a permanent one.
+//
+// A resume is checked again on the actor ResumeActor reports, against the checkpoint recorded
+// reads anew: another operation can leave a capture the journal never accepted (one a Snapshot
+// refused) between the look and the resume, and ResumeActor restores whatever the actor holds by
+// then. A mismatch is api.ErrMemoryStateLost, and the actor is left running and not handed out
+// (see resumedNotHandedOut). A SUSPEND another host recorded in that window is read and accepted.
+func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api.SnapshotRef, error)) (inc api.Incarnation, found bool, err error) {
 	info, err := b.ctl.GetActor(ctx, ref)
+	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+	resumed := false
 	switch {
 	case errors.Is(err, ErrActorNotFound):
 		return api.Incarnation{}, false, nil
 	case err != nil:
 		return api.Incarnation{}, false, fmt.Errorf("substrate: get actor: %w", err)
 	case info.Status == StatusRunning:
+		if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, recorded, attachNotDone); err != nil {
+			return api.Incarnation{}, true, err
+		}
 	case info.Status == StatusSuspended:
-		memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+		// A memory-tier actor whose newest snapshot cannot become ready by waiting (an outside
+		// pause's local-only generation) is checked against the recorded checkpoint first, as
+		// Snapshot does, so a capture the journal did not record is ErrMemoryStateLost, not "not
+		// ready". A pending upload is still refused as not ready first.
+		recordedFirst := memory && stuckNotReady(info)
+		if recordedFirst {
+			if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, recorded, attachNotDone); err != nil {
+				return api.Incarnation{}, true, err
+			}
+		}
 		if err := b.requireResumeCheckpoint(ref.Name, info, memory, true); err != nil {
 			return api.Incarnation{}, true, err
+		}
+		if !recordedFirst {
+			if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, recorded, attachNotDone); err != nil {
+				return api.Incarnation{}, true, err
+			}
 		}
 		seen := info
 		if info, err = b.ctl.ResumeActor(ctx, ref); err != nil {
 			return b.resumeFailed(ctx, ref, seen, err)
 		}
+		resumed = true
 	case info.Status == StatusTransitioning:
 		// Usually another host's Create is resuming the actor it just made. Retrying finds it
 		// RUNNING (or SUSPENDED); placing onto it now would race that operation.
@@ -419,8 +507,55 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation
 	default:
 		return api.Incarnation{}, true, fmt.Errorf("substrate: actor %q is in state %v, not placeable", ref.Name, info.Status)
 	}
-	inc, err = b.incarnation(ref.Name, info)
-	return inc, true, err
+	inc, err = b.incarnation(ctx, ref.Name, info, actorLeftRunning)
+	if err != nil {
+		return api.Incarnation{}, true, err
+	}
+	if resumed {
+		if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, recorded, resumedNotHandedOut); err != nil {
+			return api.Incarnation{}, true, err
+		}
+	}
+	return inc, true, nil
+}
+
+// attachNotDone is what a refusal before attach resumes or hands out the actor left undone.
+const attachNotDone = "the actor was not attached to or resumed"
+
+// actorLeftRunning is what incarnation's refusal leaves outside a fork: the resumed actor keeps
+// running and is not handed out.
+const actorLeftRunning = "the actor was left running"
+
+// forkCloneTornDown is what a refusal of a stateful Fork's resumed clone leaves: Fork suspends and
+// deletes the clone and releases its tag (destroyChild), and no child exists.
+const forkCloneTornDown = "the fork tears the clone down and creates no child"
+
+// resumedNotHandedOut is what a refusal after a successful ResumeActor (Restore, Create's attach,
+// Create's resume of the actor it created) leaves: the actor already runs the refused capture's
+// RAM, so it is left running, not handed out, suspended or deleted, and nothing is recorded for the
+// session. Every later attach, Restore and Snapshot refuses it again before resuming or suspending
+// it, since it still holds that capture. Recovery is the one for every memory-tier actor refused as
+// lost: delete the actor.
+const resumedNotHandedOut = "the resume had already run, so the actor was left running and " +
+	"was not handed out; as for any memory-tier actor refused this way, delete it to release " +
+	"its worker"
+
+// requireAttachCheckpoint reads the session's recorded checkpoint, after GetActor or ResumeActor
+// answered, and checks the actor against it (requireRecordedCheckpoint); it does nothing for a
+// stateless harness. A nil recorded is no recorded checkpoint. A failed read refuses as a plain
+// error. done says what the refusal left undone.
+func (b *Backend) requireAttachCheckpoint(ctx context.Context, name string, info ActorInfo, memory bool, recorded func() (api.SnapshotRef, error), done string) error {
+	if !memory {
+		return nil
+	}
+	var checkpoint api.SnapshotRef
+	if recorded != nil {
+		var err error
+		if checkpoint, err = recorded(); err != nil {
+			return fmt.Errorf("substrate: read the session's recorded checkpoint: %w", err)
+		}
+	}
+	return b.requireRecordedCheckpoint(ctx, name, info, checkpoint, done)
 }
 
 // resumeFailed classifies a failed resume of the SUSPENDED actor attach found (seen). A resume that
@@ -451,17 +586,46 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 // Unknown fidelity remains accepted as Memory:false for default stateless replay. Only the
 // external (cold/suspend) kind is supported; substrate has no node-local warm checkpoint API today.
 //
+// Whenever the checkpoint must hold memory (a recorded compute instance or a
+// REQUIRES_MEMORY_SNAPSHOT descriptor), Snapshot reads the actor before suspending, and its first
+// check refuses a resuming or suspending actor (StatusTransitioning) with ErrActorBusy, as Restore
+// and Create's attach refuse it: the operation moving it, such as another host's Suspend, may still
+// record the capture it takes. The checks below apply once the actor has settled.
+//
 // When in.ComputeInstance is set (Placer.Suspend and a stateful fork pass the UID the journal last
 // recorded), the actor under the name must be that one. Snapshot checks it before suspending, so a
-// replacement is refused with api.ErrMemoryStateLost untouched, and again on the actor the suspend
-// reports, since the actor can be replaced between the look and the suspend; substrate's
+// settled replacement is refused with api.ErrMemoryStateLost untouched, and again on the actor the
+// suspend reports, since the actor can be replaced between the look and the suspend; substrate's
 // SuspendActor has no UID precondition to close that window. In the second case the replacement is
 // left suspended, which costs nothing: it holds none of the session's state and the host refuses it
 // on every later turn. An actor that is gone is refused with api.ErrMemoryStateLost as well, since
 // the state it held went with it. An actor that reports no UID is refused with a plain error: it
 // cannot be compared, and that is a ControlClient fault, not evidence of a replacement. A
 // REQUIRES_MEMORY_SNAPSHOT backend refuses a suspend that reports no UID even when no instance is
-// recorded (a fork child whose FORK marker records no clone, before its first turn).
+// recorded (a fork child whose FORK marker records no clone, before its first turn). Whenever the
+// checkpoint must hold memory, recorded instance or not, an actor that reports MemoryNotRestored
+// is refused with api.ErrMemoryStateLost before suspending, so its RAM-less state is never
+// recorded as the session's checkpoint.
+//
+// That check and the suspend are separate calls, and substrate v0.5.0's SuspendActor takes no
+// precondition (no UID, generation or worker), so another caller can suspend the checked actor
+// and resume it on a worker that cannot restore its memory before this suspend captures it. The
+// capture then holds RAM that is not the session's, and the evidence is gone: a suspended actor
+// holds no worker to compare. So whenever the checkpoint must hold memory, Snapshot also requires
+// the suspend to report the UID and CaptureLineage the check saw, and refuses any other with
+// api.ErrMemoryStateLost and no ref; the actor is left suspended. That fails closed: a capture or
+// pause by another caller followed by a resume in the window is refused even when the memory
+// survived. A single capture or pause with no resume after it is the capture this suspend would
+// have taken: the suspend reports the lineage checked and it is recorded. A lineage missing from
+// either read is a plain error, before suspending when the check reports none. A crash and resume
+// onto a worker of the same runtime keeps the lineage, so that window remains; only a precondition
+// on SuspendActor itself would close it.
+//
+// The refused capture stays on the suspended actor, and nothing on the actor marks it. The journal
+// does: Snapshot also refuses, before suspending, an actor that does not hold in.RecordedCheckpoint
+// (requireRecordedCheckpoint), as Create's attach and Restore do, so that capture is never resumed
+// or recorded as the session's, whether the actor is still suspended on it or the router woke it.
+// A suspended actor whose newest upload is pending is refused as not ready before that check.
 func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (snapshot api.SnapshotRef, err error) {
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "snapshot_compute",
 		"actor", in.ID,
@@ -486,17 +650,61 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 		"atespace", b.atespace,
 		"reason", "snapshot",
 	)
-	if in.ComputeInstance != "" {
+	var checked ActorInfo
+	if memoryRequired {
+		// Look before suspending whenever the checkpoint must hold memory, with or without a
+		// recorded instance: a journal without one (written before EXECUTION_START recorded
+		// compute_instance, or before the session's first turn) is the same session after a
+		// refused cross-runtime Restore.
 		info, err := b.ctl.GetActor(ctx, b.ref(in.ID))
 		if err != nil {
 			err = b.instanceGone(in, "get actor before snapshot", err)
 			suspendFinished(err, "error_kind", snapshotErrorKind(err, "get_actor_failed"))
 			return api.SnapshotRef{}, err
 		}
+		// A resuming or suspending actor is busy before any other check, as Restore and Create's
+		// attach report it: another operation (another host's Suspend among them) is moving it, and
+		// the checks below would read the snapshot that operation is replacing and refuse a capture
+		// it may yet record as lost. A retry looks again once it settles.
+		if info.Status == StatusTransitioning {
+			err := fmt.Errorf("%w: actor %s/%s is %s; nothing was snapshotted for the session",
+				ErrActorBusy, b.atespace, in.ID, info.Status)
+			suspendFinished(err, "error_kind", "actor_busy")
+			return api.SnapshotRef{}, err
+		}
 		if err := b.requireInstance(in, info.UID); err != nil {
 			suspendFinished(err, "error_kind", snapshotErrorKind(err, "actor_uid_missing"))
 			return api.SnapshotRef{}, err
 		}
+		// Suspending an actor that came back without its memory would record a MEMORY checkpoint
+		// of a harness that lost the session's state, stamped with the new worker's runtime, and a
+		// later Restore would accept it.
+		if info.MemoryNotRestored {
+			err := b.memoryNotRestored(ctx, in.ID, info, "nothing was snapshotted for the session")
+			suspendFinished(err, "error_kind", "memory_state_lost")
+			return api.SnapshotRef{}, err
+		}
+		// A suspended actor whose newest upload is still pending is UNAVAILABLE, as a suspend that
+		// left it so reports, rather than lost: no recorded checkpoint is ever pending. Once it
+		// completes, the check below refuses it like any capture the journal did not record.
+		if info.Status == StatusSuspended && info.SnapshotPending {
+			err := b.checkpointNotReady(in.ID, info)
+			suspendFinished(err, "error_kind", "snapshot_not_ready")
+			return api.SnapshotRef{}, err
+		}
+		// A capture an earlier Snapshot refused stays on the actor; suspending it again (a no-op on
+		// a suspended actor) or after something resumed it would record it as the session's.
+		if err := b.requireRecordedCheckpoint(ctx, in.ID, info, in.RecordedCheckpoint, "nothing was snapshotted for the session"); err != nil {
+			suspendFinished(err, "error_kind", "memory_state_lost")
+			return api.SnapshotRef{}, err
+		}
+		if info.CaptureLineage == "" {
+			err := fmt.Errorf("substrate: actor %s/%s reported no capture lineage, so a snapshot could not be "+
+				"tied to the state checked; nothing was snapshotted for the session", b.atespace, in.ID)
+			suspendFinished(err, "error_kind", "capture_lineage_missing")
+			return api.SnapshotRef{}, err
+		}
+		checked = info
 	}
 	info, err := b.ctl.SuspendActor(ctx, b.ref(in.ID))
 	if err != nil {
@@ -507,6 +715,12 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 	if err := b.requireInstance(in, info.UID); err != nil {
 		suspendFinished(err, "error_kind", snapshotErrorKind(err, "actor_uid_missing"))
 		return api.SnapshotRef{}, err
+	}
+	if memoryRequired {
+		if err := b.requireCheckedCapture(ctx, in.ID, checked, info); err != nil {
+			suspendFinished(err, "error_kind", snapshotErrorKind(err, "capture_lineage_missing"))
+			return api.SnapshotRef{}, err
+		}
 	}
 	if info.SnapshotNotReady {
 		err := b.checkpointNotReady(in.ID, info)
@@ -526,6 +740,84 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 	// uses the handle to check that the actor still holds this exact snapshot when it is tagged.
 	snapshot = api.SnapshotRef{Local: in.ID, ExternalURI: uri, Memory: info.SnapshotFidelity == SnapshotFidelityMemory}
 	return snapshot, nil
+}
+
+// requireCheckedCapture refuses a memory-tier suspend whose capture is not of the state Snapshot
+// checked: the actor the suspend reports (after) must be the one GetActor reported (checked), same
+// UID, and its CaptureLineage must be the one checked. Equal lineage alone does not prove the same
+// actor: with no recorded instance requireInstance accepts any UID, and an actor deleted and created
+// again under the name from the same template can predict the same lineage. A mismatch wraps
+// api.ErrMemoryStateLost and is logged at Warn, since the actor is left suspended holding that
+// capture and the session's next turn would resume it. A suspend that reports no lineage is a plain
+// error: the ControlClient broke its contract, which is not evidence of lost state.
+func (b *Backend) requireCheckedCapture(ctx context.Context, name string, checked, after ActorInfo) error {
+	if checked.UID != after.UID {
+		observability.Logger(ctx, b.logger).WarnContext(ctx, "refused a memory-tier snapshot whose capture is not of the state checked before the suspend",
+			"component", "runtime.substrate", "atespace", b.atespace, "actor", name, "actor_uid", after.UID,
+			"checked_actor_uid", checked.UID, "error_kind", "memory_state_lost")
+		return fmt.Errorf("%w: actor %s/%s (UID %q) is not the actor checked before this suspend (UID %q): it was "+
+			"replaced in between, so the snapshot does not hold the session's in-RAM state; no checkpoint was "+
+			"recorded for the session; actor remains suspended",
+			api.ErrMemoryStateLost, b.atespace, name, after.UID, checked.UID)
+	}
+	if after.CaptureLineage == "" {
+		return fmt.Errorf("substrate: suspend of actor %s/%s reported no capture lineage, so the snapshot "+
+			"could not be tied to the state checked; no checkpoint was recorded for the session; "+
+			"actor remains suspended", b.atespace, name)
+	}
+	if after.CaptureLineage == checked.CaptureLineage {
+		return nil
+	}
+	observability.Logger(ctx, b.logger).WarnContext(ctx, "refused a memory-tier snapshot whose capture is not of the state checked before the suspend",
+		"component", "runtime.substrate", "atespace", b.atespace, "actor", name, "actor_uid", after.UID,
+		"error_kind", "memory_state_lost")
+	return fmt.Errorf("%w: actor %s/%s (UID %q) was captured or paused by another operation and "+
+		"resumed, or resumed on a worker of another sandbox runtime, between the memory check and "+
+		"this suspend, so the snapshot cannot be shown to hold the session's in-RAM state; no "+
+		"checkpoint was recorded for the session; "+
+		"actor remains suspended",
+		api.ErrMemoryStateLost, b.atespace, name, after.UID)
+}
+
+// requireRecordedCheckpoint refuses a memory-tier actor that holds a snapshot other than the
+// checkpoint the session's journal last recorded (recorded), before the backend attaches to,
+// resumes or captures it, and again on the actor a resume reports before it is handed out. Every
+// capture Sessions accepts is recorded as a SUSPEND, and a capture Snapshot refuses
+// (requireCheckedCapture) stays on the suspended actor with nothing on the actor to mark it, so the
+// journal is the record of which capture is the session's. An actor whose newest snapshot is not
+// recorded.ExternalURI, or, with none recorded, that holds any capture (ActorInfo.NoCapture false),
+// holds state the journal never accepted, whether the actor is suspended on it or something (the
+// router, another caller) already resumed it. The error wraps api.ErrMemoryStateLost, names no
+// snapshot URI, and is logged at Warn so an operator can delete the actor (see
+// docs/substrate-conformance.md). It fails closed: a capture the journal missed for another reason,
+// such as a SUSPEND append that failed after its suspend, another host's SUSPEND not appended yet,
+// or an operator's suspend or pause, is refused as well. done says what the refusal left undone.
+func (b *Backend) requireRecordedCheckpoint(ctx context.Context, name string, info ActorInfo, recorded api.SnapshotRef, done string) error {
+	held := "a snapshot other than the checkpoint the session's journal last recorded"
+	if recorded.ExternalURI == "" {
+		if info.NoCapture {
+			return nil
+		}
+		held = "a capture, or cannot show it holds none, but the session's journal records no checkpoint"
+	} else if info.Snapshot == recorded.ExternalURI {
+		return nil
+	}
+	observability.Logger(ctx, b.logger).WarnContext(ctx, "refused a memory-tier actor that holds a snapshot the session's journal did not record",
+		"component", "runtime.substrate", "atespace", b.atespace, "actor", name, "actor_uid", info.UID,
+		"actor_status", info.Status.String(), "error_kind", "memory_state_lost")
+	return fmt.Errorf("%w: actor %s/%s (UID %q, %s) holds %s (a capture a suspend refused, or one Sessions "+
+		"did not take), so its in-RAM state cannot be shown to be the session's; %s",
+		api.ErrMemoryStateLost, b.atespace, name, info.UID, info.Status, held, done)
+}
+
+// stuckNotReady reports a newest snapshot with no completed durable copy and no upload in progress
+// (local-only, failed or unknown durable evidence), which waiting will not make ready. Sessions
+// never records such a snapshot (Snapshot refuses it), so on a memory-tier actor it is a capture
+// the journal did not record, typically a pause outside Sessions: attach and Restore compare it
+// with the recorded checkpoint before refusing it as not ready, and so report it as
+// api.ErrMemoryStateLost. A pending upload can complete by waiting and stays "not ready".
+func stuckNotReady(info ActorInfo) bool {
+	return info.SnapshotNotReady && !info.SnapshotPending
 }
 
 // requireResumeCheckpoint permits a proven snapshot-less initial placement, not a refused capture.
@@ -633,7 +925,11 @@ var ErrSnapshotNotRestorable = errors.New("substrate: snapshot is not restorable
 // ErrSnapshotNotReady is returned by Snapshot, Restore or Create's suspended-actor attachment when
 // the newest snapshot has no completed durable copy. It wraps ErrSnapshotNotRestorable. Snapshot
 // returns no ref and Restore does not resume. Pending uploads may complete; local-only checkpoints
-// require inspection and an explicit durable checkpoint, not merely waiting.
+// require inspection and an explicit durable checkpoint, not merely waiting. For a
+// REQUIRES_MEMORY_SNAPSHOT harness, Restore, Create's attach and Snapshot's check before suspending
+// return it for a suspended actor only while its upload is pending: any other snapshot that is not
+// ready was never recorded, so they return api.ErrMemoryStateLost (see stuckNotReady). A Snapshot
+// whose own suspend leaves the capture not ready still returns it.
 var ErrSnapshotNotReady = fmt.Errorf("%w: newest snapshot has no completed durable copy", ErrSnapshotNotRestorable)
 
 // checkpointNotReady separates an upload that may finish from evidence requiring a new capture.
@@ -655,6 +951,16 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (api.Incarna
 // RestoreInstance is Restore with a reader for the UID of the actor the session's journal last
 // recorded (api.InstanceRestorer); nil reads none. After a failed resume, that UID is what tells the
 // session's actor, still there, from a replacement (see memoryActorGone).
+//
+// For a REQUIRES_MEMORY_SNAPSHOT harness the actor ResumeActor reports must still hold ref, the
+// checkpoint the journal last recorded (requireRecordedCheckpoint), as it had to before the resume:
+// another operation can leave a capture the journal never accepted (one a Snapshot refused) between
+// the look and the resume, and ResumeActor restores whatever the actor holds by then, on the
+// runtime that capture is stamped with, so MemoryNotRestored does not catch it. A mismatch is
+// api.ErrMemoryStateLost wrapped in ErrSnapshotNotRestorable, and the actor is left running and not
+// handed out (see resumedNotHandedOut). This sees only what the response reports. It is not a
+// precondition on the resume itself, which v0.5.0's ResumeActorRequest (the actor reference only)
+// cannot carry.
 func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, recorded func() (string, error)) (inc api.Incarnation, err error) {
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "restore_compute",
 		"actor", ref.Local,
@@ -684,8 +990,16 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 		return api.Incarnation{}, fmt.Errorf("substrate: resume (restore) actor: %w", err)
 	}
 	resumeFinished(nil, "actor_status", info.Status)
-	inc, err = b.incarnation(name, info)
-	return inc, err
+	inc, err = b.incarnation(ctx, name, info, actorLeftRunning)
+	if err != nil {
+		return api.Incarnation{}, err
+	}
+	if b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
+		if err := b.requireRecordedCheckpoint(ctx, name, info, ref, resumedNotHandedOut); err != nil {
+			return api.Incarnation{}, fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
+		}
+	}
+	return inc, nil
 }
 
 // requireRestoreSnapshot checks the held checkpoint before ResumeActor, which otherwise selects
@@ -718,12 +1032,31 @@ func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRe
 		}
 	}
 	if info.Status == StatusRunning {
-		return nil // ResumeActor is a no-op: interrupted turns and dial retries keep the live actor.
+		// ResumeActor is a no-op: interrupted turns and dial retries keep the live actor, unless a
+		// memory-tier actor was resumed from a snapshot the journal did not record.
+		if memory {
+			if err := b.requireRecordedCheckpoint(ctx, ref.Local, info, ref, "nothing was resumed"); err != nil {
+				return fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
+			}
+		}
+		return nil
 	}
 	// Admission follows the descriptor, not the legacy SnapshotRef.Memory capture bit.
 	if info.Status == StatusSuspended {
+		// As in attach, a memory-tier actor whose newest snapshot cannot become ready by waiting is
+		// compared with the recorded checkpoint first, so an outside pause is ErrMemoryStateLost.
+		if memory && stuckNotReady(info) {
+			if err := b.requireRecordedCheckpoint(ctx, ref.Local, info, ref, "nothing was resumed"); err != nil {
+				return fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
+			}
+		}
 		// Preserve fidelity admission even for no-held interrupted-turn recovery.
 		err = b.requireResumeCheckpoint(ref.Local, info, memory, ref.ExternalURI == "" && !memory)
+		if err == nil && memory {
+			if err := b.requireRecordedCheckpoint(ctx, ref.Local, info, ref, "nothing was resumed"); err != nil {
+				return fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
+			}
+		}
 	}
 	if err == nil {
 		switch {
@@ -753,8 +1086,8 @@ func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRe
 //     for an actor that still exists (a template volume it cannot find).
 //   - Otherwise, an actor whose UID is not the one the journal last recorded, read through recorded
 //     after GetActor answers, is a replacement. The recorded actor keeps the resume error, whatever
-//     snapshot it holds: one newer than snap is still the session's own RAM, left by a suspend whose
-//     SUSPEND append failed after the snapshot was taken, or by another host suspending it again.
+//     snapshot it holds now. (requireRestoreSnapshot already refused it, before the resume, if it
+//     held a snapshot the journal did not record; one it holds now arrived since.)
 //   - With no UID to compare with (a nil recorded, or a journal that records none), an actor that
 //     does not hold snap.ExternalURI after a NOT_FOUND resume is reported gone, since a replacement
 //     holds no snapshot of the session's; this cannot tell the session's own actor holding a newer
@@ -836,7 +1169,10 @@ var ErrMemoryStateLost = fmt.Errorf("substrate: refusing to cold-create an actor
 //     snapshot would only add a restore for no gain.
 //   - REQUIRES_MEMORY_SNAPSHOT — a snapshot clone: the parent's in-RAM state is NOT in the journal,
 //     so the child is created from the parent's external snapshot (tag the suspended parent,
-//     CreateActor from the tag, then ResumeActor to restore the cloned RAM).
+//     CreateActor from the tag, then ResumeActor to restore the cloned RAM). The clone the resume
+//     reports must hold no capture of its own, as the child's journal records no checkpoint; one
+//     that does, or that the client cannot show holds none, is ErrActorBusy (forkCloneCaptured)
+//     and is torn down. A retry clones anew, though not past a client that cannot tell.
 //
 // Cloning is NOT copy-on-write: each tag copies the snapshot in object storage and each child
 // restores into a private per-actor directory, so an N-way fan-out costs N copies and N restores.
@@ -868,7 +1204,7 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 			// Create's usual caller owns the session UID and can retry with it; a fork child's UID is
 			// minted per request and dropped on error, so a half-created actor here would be
 			// unreachable. Tear it down while its name is still known.
-			b.destroyChild(ctx, child)
+			_ = b.destroyChild(ctx, child)
 		}
 		return inc, err
 	}
@@ -922,7 +1258,7 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 		// The host records the clone's UID on the child's FORK marker and refuses any other actor
 		// under the child's name, so a clone it cannot identify is never handed out. The create
 		// just succeeded, so the actor under the name is this call's.
-		b.destroyChild(ctx, child)
+		_ = b.destroyChild(ctx, child)
 		return api.Incarnation{}, fmt.Errorf("substrate: create actor from tag %q reported no actor UID; a %s clone must report one",
 			tag.Name, api.ResumabilityRequiresMemorySnapshot)
 	}
@@ -941,14 +1277,97 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 		return api.Incarnation{}, fmt.Errorf("%w: fork child %s/%s was replaced between its create and resume (clone %q, now %q); its cloned RAM is gone, no child was created, and the replacement may have been woken by this fork's resume and is left running, not suspended or deleted",
 			ErrActorBusy, childRef.Atespace, childRef.Name, created.UID, info.UID)
 	}
-	inc, err = b.incarnation(child, info)
+	// The clone was created and resumed but is not reported RUNNING, came back without the parent's
+	// RAM, or may hold a capture of its own. Fork returns no handle, so without a teardown the actor
+	// could hold a worker forever under a name nobody upstream still has. Tear it down first, so the
+	// refusal says what the teardown left.
+	if info.Status != StatusRunning || info.MemoryNotRestored || !info.NoCapture {
+		outcome := b.tearDownForkClone(ctx, cloner, childRef, info.UID)
+		err = b.refuseForkClone(ctx, childRef, created, info, outcome)
+		b.memoryLostWarned.Delete(child)
+		return api.Incarnation{}, err
+	}
+	inc, err = b.incarnation(ctx, child, info, forkCloneTornDown)
 	if err != nil {
-		// The clone was created and resumed but is not reported RUNNING. Fork returns no handle, so
-		// without this the actor could hold a worker forever under a name nobody upstream still has.
-		b.destroyChild(ctx, child)
+		// Not reached: the clone runs, restored its memory and reports its UID (checked above), which
+		// is all incarnation checks. Tear it down all the same, so a check added there cannot leak it.
+		_ = b.destroyChild(ctx, child)
+		b.memoryLostWarned.Delete(child)
 		return api.Incarnation{}, err
 	}
 	return inc, nil
+}
+
+// refuseForkClone is the refusal of a stateful Fork's resumed clone (created by CreateActorFromTag,
+// info from ResumeActor, same UID) that is not RUNNING, did not restore its memory snapshot
+// (incarnation's api.ErrMemoryStateLost), or may hold a capture of its own (forkCloneCaptured), in
+// that order. outcome is what tearDownForkClone left.
+func (b *Backend) refuseForkClone(ctx context.Context, ref ActorRef, created, info ActorInfo, outcome string) error {
+	switch {
+	case info.Status != StatusRunning:
+		return fmt.Errorf("substrate: fork clone %s/%s (UID %q) is %v after resume, want running; %s",
+			ref.Atespace, ref.Name, info.UID, info.Status, outcome)
+	case info.MemoryNotRestored:
+		return b.memoryNotRestored(ctx, ref.Name, info, outcome)
+	default:
+		return b.forkCloneCaptured(ctx, ref, created, info, outcome)
+	}
+}
+
+// tearDownForkClone tears a refused clone down (destroyChild) and returns what that left, for the
+// refusal's text: forkCloneTornDown, or, when Stop failed (another caller holds the clone's lease,
+// ErrActorBusy, or the call failed), that the clone and its tag may be left in place, which is also
+// logged at Warn naming them. A clone another caller already deleted (ErrActorNotFound) is torn
+// down: Stop returned before releasing the tag, so it is released here.
+func (b *Backend) tearDownForkClone(ctx context.Context, cloner SnapshotCloner, ref ActorRef, uid string) string {
+	err := b.destroyChild(ctx, ref.Name)
+	if err == nil {
+		return forkCloneTornDown
+	}
+	if errors.Is(err, ErrActorNotFound) {
+		b.releaseForkTag(ctx, cloner, ref.Name)
+		return forkCloneTornDown
+	}
+	observability.Logger(ctx, b.logger).WarnContext(ctx, "failed to tear down a refused fork clone",
+		"component", "runtime.substrate", "atespace", ref.Atespace, "actor", ref.Name,
+		"actor_uid", uid, "tag", forkTag(ref.Name), "error", err)
+	return fmt.Sprintf("the fork creates no child, but tearing the clone down failed, so actor %s/%s (UID %q) and its tag %q may be left in place: %v",
+		ref.Atespace, ref.Name, uid, forkTag(ref.Name), err)
+}
+
+// forkCloneCaptured refuses a stateful Fork's clone whose ResumeActor reports no evidence that it
+// holds no capture of its own (ActorInfo.NoCapture false) under the clone's UID. The child's
+// journal records no checkpoint, so it could never accept a capture. The refusal tells two cases
+// apart:
+//
+//   - The clone's Snapshot is no longer the one CreateActorFromTag reported (or its newest is not
+//     ready): another caller resumed and captured it while it was SUSPENDED between its create and
+//     Fork's resume, and its RAM need not be the parent's at the fork point.
+//   - The clone still holds the snapshot it was created with (or the create reported none to
+//     compare): the client cannot tell whether a capture exists, as one that does not read the
+//     actor's snapshot ownership (an ActorStatus field newer than it knows). A retry is refused
+//     the same way while the client cannot report NoCapture.
+//
+// Fork never handed the clone out and the parent still holds its snapshot, so, as for a clone
+// replaced before its resume, both are ErrActorBusy (ABORTED). It is logged at Warn naming the
+// clone, with capture "held" or "unknown". The error names no snapshot URI; outcome is what
+// tearDownForkClone left.
+func (b *Backend) forkCloneCaptured(ctx context.Context, ref ActorRef, created, info ActorInfo, outcome string) error {
+	capture, held := "unknown", "cannot show it holds no capture of its own (the client reports no ActorInfo.NoCapture for it"
+	if created.Snapshot != "" {
+		held += " although it still holds the snapshot it was created with"
+	}
+	held += "), so whether its RAM is the parent's at the fork point cannot be told; a retry is refused the same way " +
+		"while the client cannot report it"
+	if created.Snapshot != "" && (info.Snapshot != created.Snapshot || info.SnapshotNotReady) {
+		capture, held = "held", "holds a capture of its own (another caller resumed and captured it between its "+
+			"create and this fork's resume), so its RAM need not be the parent's at the fork point; the parent is "+
+			"unaffected and a retry clones a new child"
+	}
+	observability.Logger(ctx, b.logger).WarnContext(ctx, "refused a fork clone that holds a capture of its own",
+		"component", "runtime.substrate", "atespace", ref.Atespace, "actor", ref.Name, "actor_uid", info.UID,
+		"actor_status", info.Status.String(), "capture", capture, "error_kind", "actor_busy")
+	return fmt.Errorf("%w: fork child %s/%s (clone %q) %s; %s", ErrActorBusy, ref.Atespace, ref.Name, info.UID, held, outcome)
 }
 
 // requireSnapshot fails with ErrSnapshotSuperseded unless the actor is SUSPENDED holding exactly
@@ -982,11 +1401,13 @@ func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 
 // destroyChild best-effort undoes everything a failed Fork provisioned for one child. Stop suspends
 // before deleting (substrate rejects deleting a RUNNING actor) and then deletes the fork tag, so it
-// covers a child that failed at any point after CreateActor.
-func (b *Backend) destroyChild(ctx context.Context, child string) {
+// covers a child that failed at any point after CreateActor. It returns Stop's error: a suspend
+// refused (another caller holds the actor's lease, ErrActorBusy) or failed returns before the
+// delete, leaving the actor and its tag in place.
+func (b *Backend) destroyChild(ctx context.Context, child string) error {
 	ctx, cancel := cleanupContext(ctx)
 	defer cancel()
-	_ = b.Stop(ctx, api.Incarnation{ID: child})
+	return b.Stop(ctx, api.Incarnation{ID: child})
 }
 
 // discardClone cleans up after a fork whose clone (created with uid) failed to resume, and returns
@@ -1004,7 +1425,7 @@ func (b *Backend) discardClone(ctx context.Context, cloner SnapshotCloner, ref A
 	cancel()
 	switch {
 	case err == nil && now.UID == uid:
-		b.destroyChild(ctx, ref.Name)
+		_ = b.destroyChild(ctx, ref.Name)
 	case err == nil:
 		b.releaseForkTag(ctx, cloner, ref.Name)
 		return fmt.Errorf("%w: fork child %s/%s was replaced between its create and resume (clone %q, now %q); the replacement was left in place: %w",
@@ -1069,6 +1490,7 @@ func (b *Backend) Stop(ctx context.Context, in api.Incarnation) (err error) {
 		return fmt.Errorf("substrate: delete actor: %w", err)
 	}
 	deleteFinished(nil)
+	b.memoryLostWarned.Delete(in.ID)
 	if cloner, ok := b.ctl.(SnapshotCloner); ok {
 		_ = cloner.DeleteTag(ctx, SnapshotID{Atespace: b.atespace, Name: forkTag(in.ID)})
 	}
@@ -1138,7 +1560,14 @@ const TargetActorHeader = "ate-target-actor"
 // which the host records and compares per turn; an actor that reports no UID is refused, since the
 // host could not tell it from a replacement. A stateless harness's state is in the journal, so a
 // replaced actor is fine and no instance is set.
-func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, error) {
+//
+// Every path that hands out an actor (Create's new, attached or resumed actor, Restore and a
+// stateful Fork's clone) comes through here, so a REQUIRES_MEMORY_SNAPSHOT actor that reports
+// MemoryNotRestored is refused with api.ErrMemoryStateLost on each of them, on this turn and on
+// every later one while it keeps running on that worker. A stateless harness is not checked.
+// outcome says what the caller does with a refused actor: actorLeftRunning, or forkCloneTornDown
+// for a stateful Fork's clone.
+func (b *Backend) incarnation(ctx context.Context, uid string, info ActorInfo, outcome string) (api.Incarnation, error) {
 	if info.Status != StatusRunning {
 		return api.Incarnation{}, fmt.Errorf("substrate: actor %q is %v after resume, want running", uid, info.Status)
 	}
@@ -1149,6 +1578,9 @@ func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, erro
 				"from the actor that holds the session's in-RAM state", b.atespace, uid)
 		}
 		instance = info.UID
+		if info.MemoryNotRestored {
+			return api.Incarnation{}, b.memoryNotRestored(ctx, uid, info, outcome)
+		}
 	}
 	return api.Incarnation{
 		ID:           uid,
@@ -1160,6 +1592,28 @@ func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, erro
 		// when the backend looked, not which one the router reaches later.
 		ComputeInstance: instance,
 	}, nil
+}
+
+// memoryNotRestored is the api.ErrMemoryStateLost refusal for a REQUIRES_MEMORY_SNAPSHOT
+// session whose actor reports ActorInfo.MemoryNotRestored: the actor is the session's (same UID),
+// but its RAM is not the snapshot's, and the journal cannot rebuild it (I4). It names the session
+// and the actor; outcome says what was left behind.
+//
+// Outside a fork's clone, which Fork tears down, the actor keeps its worker and every later turn
+// is refused until the actor itself is deleted (DeleteSession does not stop it; an operator must
+// delete the substrate actor), so the first refusal for each actor UID is also logged at Warn for
+// operators; repeats are not. Stop forgets the session's entry when it deletes the actor, and
+// Fork when it tears the clone down.
+func (b *Backend) memoryNotRestored(ctx context.Context, name string, info ActorInfo, outcome string) error {
+	if prev, loaded := b.memoryLostWarned.Swap(name, info.UID); !loaded || prev != info.UID {
+		observability.Logger(ctx, b.logger).WarnContext(ctx, "refused a memory-tier actor that did not restore its memory snapshot",
+			"component", "runtime.substrate", "atespace", b.atespace, "actor", name, "actor_uid", info.UID,
+			"worker", info.Worker, "error_kind", "memory_state_lost")
+	}
+	return fmt.Errorf("%w: actor %s/%s (UID %q) of session %q on harness %q runs on a worker that "+
+		"did not restore its memory snapshot (substrate restored its volumes only), so the session's "+
+		"in-RAM state is gone; %s",
+		api.ErrMemoryStateLost, b.atespace, name, info.UID, name, b.descriptor.ID, outcome)
 }
 
 func substrateErrorKind(err error) string {

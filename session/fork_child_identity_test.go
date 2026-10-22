@@ -251,7 +251,13 @@ func TestForkWhoseCloneIsReplacedDuringTheForkIsAborted(t *testing.T) {
 	if msg := status.Convert(err).Message(); !strings.Contains(msg, child) || !strings.Contains(msg, clone) || !strings.Contains(msg, replacement) {
 		t.Errorf("error %q does not name the child, its clone and the replacement", msg)
 	}
-	recs, _ := store.Session(child).Read(1)
+	if head, err := store.Session(child).Head(); err != nil || head != 0 {
+		t.Errorf("child %q journal head = %d, %v; an aborted fork writes no child journal", child, head, err)
+	}
+	recs, err := store.Session(child).Read(1)
+	if err != nil {
+		t.Fatalf("read child %q journal: %v", child, err)
+	}
 	for _, r := range recs {
 		if lc := r.Event.Lifecycle; lc != nil && lc.Kind == api.LifecycleFork {
 			t.Errorf("child %q has a FORK marker recording %q; an aborted fork records none", child, lc.ComputeInstance)
@@ -262,6 +268,85 @@ func TestForkWhoseCloneIsReplacedDuringTheForkIsAborted(t *testing.T) {
 	ctl.mu.Unlock()
 	if left != replacement || exists == substrate.StatusUnknown {
 		t.Errorf("actor under %q has UID %q (status %v), want the replacement %q left in place", child, left, exists, replacement)
+	}
+
+	resp, err := c.Fork(ctx, &v1.ForkRequest{Session: parent, Count: 1})
+	if err != nil {
+		t.Fatalf("retried fork: %v", err)
+	}
+	retried := resp.GetChildren()[0].GetMetadata().GetUid()
+	ctl.mu.Lock()
+	retriedClone := ctl.uids[retried]
+	ctl.mu.Unlock()
+	if got := forkMarkerInstance(t, store, retried); got != retriedClone {
+		t.Errorf("retried child's FORK marker records %q, want its clone's UID %q", got, retriedClone)
+	}
+	if err := execHi(c, retried); err != nil {
+		t.Fatalf("first turn of the retried child: %v", err)
+	}
+}
+
+// Between Runtime.Fork's CreateActorFromTag and its ResumeActor, another caller resumes the
+// SUSPENDED clone and captures it, so Fork's resume reports the clone's UID holding a capture of
+// its own, which the child's journal, recording no checkpoint, could never accept. The fork is
+// ABORTED, no FORK marker is written for the child, and the clone is torn down. The parent still
+// holds its snapshot, so the retry succeeds and its child runs a turn.
+func TestForkWhoseCloneIsCapturedDuringTheForkIsAborted(t *testing.T) {
+	ctx := context.Background()
+	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	c := newMemoryHost(t, ctl, store, echoagent.Harness{})
+	parent := mustCreate(t, c)
+	if err := execHi(c, parent); err != nil {
+		t.Fatalf("parent turn: %v", err)
+	}
+	var child, clone string
+	ctl.onResume = func(actor string) {
+		if actor == parent || child != "" {
+			return
+		}
+		child = actor
+		ctl.mu.Lock()
+		clone = ctl.uids[actor]
+		ctl.status[actor] = substrate.StatusRunning
+		ctl.mu.Unlock()
+		if _, err := ctl.SuspendActor(ctx, substrate.ActorRef{Atespace: "space", Name: actor}); err != nil {
+			t.Error(err)
+		}
+	}
+
+	_, err = c.Fork(ctx, &v1.ForkRequest{Session: parent, Count: 1})
+	if child == "" || clone == "" {
+		t.Fatalf("the clone was not captured before its resume (child %q, clone %q)", child, clone)
+	}
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("fork whose clone was captured before its resume: want Aborted, got %v", err)
+	}
+	if msg := status.Convert(err).Message(); !strings.Contains(msg, child) || !strings.Contains(msg, clone) ||
+		!strings.Contains(msg, "a retry clones a new child") {
+		t.Errorf("error %q does not name the child and its clone or say a retry clones a new child", msg)
+	}
+	if head, err := store.Session(child).Head(); err != nil || head != 0 {
+		t.Errorf("child %q journal head = %d, %v; an aborted fork writes no child journal", child, head, err)
+	}
+	recs, err := store.Session(child).Read(1)
+	if err != nil {
+		t.Fatalf("read child %q journal: %v", child, err)
+	}
+	for _, r := range recs {
+		if lc := r.Event.Lifecycle; lc != nil && lc.Kind == api.LifecycleFork {
+			t.Errorf("child %q has a FORK marker recording %q; an aborted fork records none", child, lc.ComputeInstance)
+		}
+	}
+	ctl.mu.Lock()
+	_, exists := ctl.status[child]
+	ctl.mu.Unlock()
+	if exists {
+		t.Errorf("the refused clone %q under %q still exists", clone, child)
 	}
 
 	resp, err := c.Fork(ctx, &v1.ForkRequest{Session: parent, Count: 1})

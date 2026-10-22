@@ -22,7 +22,7 @@ import (
 const (
 	modeReadFailure int32 = iota + 1
 	modePending           // newest durable copy still uploading
-	modeLocalOnly         // newest checkpoint has no durable copy (a PAUSED actor's local checkpoint)
+	modeLocalOnly         // newest checkpoint has no durable copy (a paused actor's local checkpoint)
 	modeTransitioning
 	modeTerminatedPending // a crashed actor retains an upload that will never complete
 	modeOmitUID           // GetActor omits the actor UID; ResumeActor still reports it
@@ -215,7 +215,10 @@ func TestResumeOfRunningActorAfterSuspend(t *testing.T) {
 
 // Refusals of a held ref happen before ResumeActor, dial or journal effects, with the class the
 // condition calls for: busy is ABORTED, a pending upload is UNAVAILABLE, a stale or local-only
-// checkpoint is FAILED_PRECONDITION, and a failed control read remains INTERNAL.
+// checkpoint is FAILED_PRECONDITION, and a failed control read remains INTERNAL. A memory-tier
+// actor holding a snapshot the journal did not record (wrong URI) is refused on every path, a new
+// Suspend included, so that snapshot is never recorded as the session's; a stateless session
+// recovers with an explicit Suspend.
 func TestHeldRestoreRefusalsDoNotJournal(t *testing.T) {
 	for _, tc := range []struct {
 		reason string
@@ -224,10 +227,12 @@ func TestHeldRestoreRefusalsDoNotJournal(t *testing.T) {
 		// exec, suspend and memory-tier fork also hit the refusal through Create's attachment and
 		// capture (a stateful fork captures the parent).
 		exec, suspend, fork bool
+		// sticky: a memory-tier session is refused on Exec, Suspend and Fork too, and stays refused.
+		sticky bool
 	}{
 		{reason: "transitioning", mode: modeTransitioning, want: codes.Aborted, exec: true},
 		{reason: "terminated pending", mode: modeTerminatedPending, want: codes.FailedPrecondition},
-		{reason: "wrong URI", want: codes.FailedPrecondition},
+		{reason: "wrong URI", want: codes.FailedPrecondition, sticky: true},
 		{reason: "read failure", mode: modeReadFailure, want: codes.Internal, exec: true},
 		{reason: "pending", mode: modePending, want: codes.Unavailable, exec: true, suspend: true, fork: true},
 		{reason: "local-only", mode: modeLocalOnly, want: codes.FailedPrecondition, exec: true, suspend: true, fork: true},
@@ -257,17 +262,18 @@ func TestHeldRestoreRefusalsDoNotJournal(t *testing.T) {
 				if _, err := c.Resume(t.Context(), &v1.ResumeRequest{Session: sess}); status.Code(err) != tc.want {
 					t.Fatalf("resume: %v, want %s", err, tc.want)
 				}
-				if tc.exec {
+				sticky := tc.sticky && tier == "memory"
+				if tc.exec || sticky {
 					if err := execHi(c, sess); status.Code(err) != tc.want {
 						t.Fatalf("exec: %v, want %s", err, tc.want)
 					}
 				}
-				if tc.suspend {
+				if tc.suspend || sticky {
 					if _, err := c.Suspend(t.Context(), &v1.SuspendRequest{Session: sess}); status.Code(err) != tc.want {
 						t.Fatalf("suspend: %v, want %s", err, tc.want)
 					}
 				}
-				if tc.fork && tier == "memory" {
+				if (tc.fork || sticky) && tier == "memory" {
 					if err := forkParent(c, sess); status.Code(err) != tc.want {
 						t.Fatalf("fork: %v, want %s", err, tc.want)
 					}
@@ -282,6 +288,9 @@ func TestHeldRestoreRefusalsDoNotJournal(t *testing.T) {
 					t.Fatal(err)
 				}
 				ctl.mode.Store(0)
+				if sticky {
+					return // nothing above recorded the unrecorded snapshot, so nothing can resume it
+				}
 				// Capture the current state explicitly, rather than retrying the stale held ref.
 				if _, err := c.Suspend(t.Context(), &v1.SuspendRequest{Session: sess}); err != nil {
 					t.Fatal(err)

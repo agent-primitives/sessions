@@ -22,16 +22,16 @@ anyone can implement and target, plus a reference implementation that proves the
 ## Quickstart
 
 ```bash
-go install github.com/agent-primitives/sessions/cmd/agentctl@v0.2.0
-go install github.com/agent-primitives/sessions/cmd/agentsessionsd@v0.2.0
+go install github.com/agent-primitives/sessions/cmd/agentctl@v0.3.0
+go install github.com/agent-primitives/sessions/cmd/agentsessionsd@v0.3.0
 ```
 
 Signed archives for linux/darwin on amd64/arm64, with checksums and SBOMs, are on the
 [latest release](https://github.com/agent-primitives/sessions/releases/latest). Container images:
 
 ```
-ghcr.io/agent-primitives/sessions/agentsessionsd:v0.2.0
-ghcr.io/agent-primitives/sessions/harnessnode:v0.2.0
+ghcr.io/agent-primitives/sessions/agentsessionsd:v0.3.0
+ghcr.io/agent-primitives/sessions/harnessnode:v0.3.0
 ```
 
 Then follow [`docs/quickstart.md`](docs/quickstart.md): exec a turn, replay it with zero model

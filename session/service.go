@@ -1011,12 +1011,13 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 // at a historical seq, which no memory snapshot can reproduce — which is a caller-visible
 // precondition, not a host fault. So is api.ErrMemoryStateLost: a parent whose compute was replaced
 // and no longer holds its in-RAM state, or a stateful fork's clone that did not restore the
-// parent's RAM, which the backend tears down, leaving the parent unaffected. A concurrent writer
-// that invalidated the fork point, a parent that no longer holds the snapshot the fork took
-// (api.ErrSnapshotSuperseded), compute busy with another operation (api.ErrComputeBusy, which
-// includes a stateful fork's clone another caller replaced or captured before its resume), or
-// another stateful fork that is checkpointing the parent is Aborted, so the caller knows a retry
-// is meaningful. parent is the forked session's UID.
+// parent's RAM or that the runtime client cannot show holds no capture of its own, which the
+// backend tears down, leaving the parent unaffected. A concurrent writer that invalidated the fork
+// point, a parent that no longer holds the snapshot the fork took (api.ErrSnapshotSuperseded),
+// compute busy with another operation (api.ErrComputeBusy, which includes a stateful fork's clone
+// another caller replaced or captured before its resume), or another stateful fork that is
+// checkpointing the parent is Aborted, so the caller knows a retry is meaningful. parent is the
+// forked session's UID.
 func forkError(parent string, err error) error {
 	switch {
 	case errors.Is(err, eventlog.ErrDeleted):

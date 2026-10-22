@@ -441,8 +441,9 @@ substrate never relaxes that one. A mismatch on a MEMORY snapshot is reported as
 a fork clone's borrowed snapshot counts. For a `REQUIRES_MEMORY_SNAPSHOT` harness the backend
 refuses that actor with `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) on Restore, on Create's
 attach or resume, and for a stateful fork's clone, which it tears down. The refusal names the
-session, the actor and its UID. The actor is left running and every later turn is refused the same
-way. `Snapshot` of a memory-tier session refuses it before suspending, whether or not the journal
+session, the actor and its UID. A refused fork leaves the parent unaffected, and a retried `Fork`
+clones a new child. Any other refused actor is left running and every later turn is refused the
+same way. `Snapshot` of a memory-tier session refuses it before suspending, whether or not the journal
 recorded a compute instance (a journal written before `compute_instance`, or a session with no turn
 yet), so the lost state is never recorded as the session's checkpoint. A suspend outside sessions
 writes a snapshot on the new runtime and clears the evidence, but the actor then holds a snapshot
@@ -555,9 +556,10 @@ the refusals above. No journal names the clone and the fork never handed it out,
 it down as it does a clone that did not restore the parent's memory: `SuspendActor`, `DeleteActor`
 and `DeleteTag` of `fork-<child-uid>`, by name, best effort on a context detached from the
 caller's. The Placer writes no child journal and tears down the children it already cloned. The
-parent keeps its `SUSPEND` and snapshot, so a retry at the parent's new head clones a new child.
+parent keeps its `SUSPEND` and snapshot, so a retry at the parent's new head clones a new child,
+and no cleanup is needed.
 
-Nothing in sessions recovers the session's memory after such a refusal. Delete or abandon the
+For the other refusals here, nothing in sessions recovers the session's memory. Delete or abandon the
 session, and delete the substrate actor named in the warning to release its snapshot, or its worker
 if the router woke it or a refused resume left it running. A `SUSPENDED` actor takes a plain
 `DeleteActor` with `options.uid` set to the warning's `actor_uid`; a `RUNNING` one also needs

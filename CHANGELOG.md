@@ -192,13 +192,14 @@ not provide.
   actor a successful `ResumeActor` reports the same way, so a capture left on the actor between the
   check and the resume is refused too; the actor is then left `RUNNING` and not used. A stateful
   Fork checks its clone that way against the child's empty checkpoint: a clone another caller
-  resumed and captured before Fork's resume is refused and torn down, with no child. Nothing in
-  sessions recovers such a session: delete or abandon it, and delete the actor named in the warning
-  with `options.uid` (and `any_state: true` if it is running) to release it. Journal, wire and the
-  Sessions API are unchanged: the check reads the `SUSPEND` refs the journal already holds. A crash
-  and resume onto a worker of the same runtime between the check and the suspend is still not
-  caught; a precondition on substrate's `SuspendActor` would close it, and v0.5.0 has none on
-  `SuspendActor` or `ResumeActor`. A router resume alone is fine. Any suspend by another caller
+  resumed and captured before Fork's resume is refused and torn down, with no child; the parent is
+  unaffected, a retried Fork clones a new child, and no cleanup is needed. For the other refusals
+  here, nothing in sessions recovers the session: delete or abandon it, and delete the actor named
+  in the warning with `options.uid` (and `any_state: true` if it is running) to release it.
+  Journal, wire and the Sessions API are unchanged: the check reads the `SUSPEND` refs the journal
+  already holds. A crash and resume onto a worker of the same runtime between the check and the
+  suspend is still not caught; a precondition on substrate's `SuspendActor` would close it, and
+  v0.5.0 has none on `SuspendActor` or `ResumeActor`. A router resume alone is fine. Any suspend by another caller
   ends a memory-tier session the same way, including suspend and resume cycles during a Suspend and
   a later idle suspend, so a gateway that suspends idle actors (as
   `agent-substrate/always-on-agent`'s does for its own) must not suspend one sessions manages; see

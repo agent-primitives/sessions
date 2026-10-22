@@ -1009,8 +1009,10 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 // forkError surfaces a refused fork as FailedPrecondition rather than Internal. A fork is refused
 // when the harness's capabilities cannot realize it — e.g. a REQUIRES_MEMORY_SNAPSHOT session forked
 // at a historical seq, which no memory snapshot can reproduce — which is a caller-visible
-// precondition, not a host fault, and so is a parent whose compute was replaced and no longer holds
-// its in-RAM state (api.ErrMemoryStateLost). A concurrent writer that invalidated the fork point, a
+// precondition, not a host fault. So is api.ErrMemoryStateLost: a parent whose compute was replaced
+// and no longer holds its in-RAM state, or a stateful fork's clone that did not restore the
+// parent's RAM or holds a capture of its own. The backend tears such a clone down and the parent is
+// unaffected, so a retried fork clones a new child. A concurrent writer that invalidated the fork point, a
 // parent that no longer holds the snapshot the fork took (api.ErrSnapshotSuperseded), compute busy
 // with another operation (api.ErrComputeBusy), or another stateful fork that is checkpointing the
 // parent is Aborted, so the caller knows a retry is meaningful. parent is the forked session's UID.

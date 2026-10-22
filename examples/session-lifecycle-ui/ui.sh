@@ -37,9 +37,17 @@ if [[ -z "${1:-}" ]]; then
 	done
 fi
 
-# A cluster up.sh installed from another substrate commit cannot serve this checkout's daemons and
-# templates; up.sh refuses it too.
-refuse_stale_install "$(node_id)"
+# Read the cluster as up.sh does (cluster_stage). A cluster up.sh installed from another substrate
+# commit cannot serve this checkout's daemons and templates, and one whose setup up.sh did not
+# finish, or whose setup record is missing or names another node, may have no daemons at all; up.sh
+# refuses both. A cluster up.sh did not create is not checked, as up.sh does not install into it.
+stage="$(cluster_stage)" || exit
+case "${stage}" in
+installed | foreign) ;;
+absent) fail "kind cluster ${CLUSTER} does not exist; run up.sh first; nothing was changed" ;;
+orphaned) fail "kind does not list cluster ${CLUSTER}, but container ${CLUSTER}-control-plane exists; nothing was changed" ;;
+*) fail "up.sh created kind cluster ${CLUSTER}, but ${SETUP} does not record that it installed it (${stage}); rerun up.sh, or run down.sh and then up.sh; nothing was changed" ;;
+esac
 
 (cd "${EXAMPLE}" && go build -o "${BIN}" ./cmd/lifecycle-ui)
 

@@ -53,6 +53,30 @@ refuse_stale_install() {
 		exit 1
 	fi
 }
+# cluster_stage prints where the demo's cluster stands, as up.sh and ui.sh read it: absent; orphaned
+# (kind does not list it, but its control-plane container exists); foreign (up.sh did not create the
+# node that runs now); or, for the node up.sh created, the stage SETUP records for it (creating,
+# created or installed), or unrecorded when SETUP records none for that node. It exits when the kind
+# listing fails (cluster_listed) and refuses an install from another substrate commit
+# (refuse_stale_install), so call it as stage="$(cluster_stage)" || exit. It reads only kind, Docker
+# and the records, and changes nothing.
+cluster_stage() {
+	local id stage
+	if ! cluster_listed; then
+		if [[ -n "$(node_id)" ]]; then echo orphaned; else echo absent; fi
+		return
+	fi
+	id="$(node_id)"
+	if [[ -z "${id}" || "$(owned_id)" != "${id}" ]]; then
+		echo foreign
+		return
+	fi
+	stage="$(setup_stage "${id}")"
+	if [[ "${stage}" == installed ]]; then
+		refuse_stale_install "${id}"
+	fi
+	echo "${stage:-unrecorded}"
+}
 # cluster_listed reports whether kind lists the demo's cluster. A failed listing exits the script: it
 # does not show that the cluster is absent, and treating it as absent would let up.sh run substrate's
 # create-kind-cluster.sh, which deletes any cluster of that name, or let down.sh drop the records.

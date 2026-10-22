@@ -551,6 +551,11 @@ func TestUpClusterPhase(t *testing.T) {
 					t.Errorf("calls contain %q:\n%s", c, calls)
 				}
 			}
+			// The substrate checkout is shared by every cluster, so a refused cluster leaves it as it
+			// was; the git stub reports no HEAD, so a run past the cluster check fetches.
+			if fetched := strings.Contains(calls, " fetch -q ") || strings.Contains(calls, " checkout -q "); fetched != (tc.wantCode != 1) {
+				t.Errorf("substrate checkout switched = %t, want %t\ncalls:\n%s", fetched, tc.wantCode != 1, calls)
+			}
 			if got := s.read(t, "created-cluster"); got != tc.wantOwned {
 				t.Errorf("created-cluster record = %q, want %q", got, tc.wantOwned)
 			}
@@ -561,33 +566,54 @@ func TestUpClusterPhase(t *testing.T) {
 	}
 }
 
-// ui.sh drives the cluster up.sh brought up, so it refuses one up.sh installed from another
-// substrate commit before it builds or changes anything, and goes on with one from this commit.
+// ui.sh drives the cluster up.sh brought up and reads it as up.sh does, so before it builds or
+// changes anything it refuses one up.sh installed from another substrate commit, and one up.sh
+// created whose setup record is missing, names another node or stops short of the install. It goes
+// on with one installed from this commit, and with one up.sh did not create, which it does not check.
 func TestUISubstrateCommit(t *testing.T) {
+	const notInstalled = "does not record that it installed it"
 	for _, tc := range []struct {
-		name, setup string
-		wantCode    int
-		wantOut     string
+		name, owned, setup string
+		listed             bool
+		wantCode           int
+		wantOut            string
 	}{
-		{name: "another commit", setup: "node-1 installed " + staleRef, wantCode: 1, wantOut: "up.sh installed agent-substrate " + staleRef + " in it"},
-		{name: "no commit recorded", setup: "node-1 installed", wantCode: 1, wantOut: "from a commit it did not record"},
+		{name: "another commit", owned: "node-1", setup: "node-1 installed " + staleRef, listed: true, wantCode: 1, wantOut: "up.sh installed agent-substrate " + staleRef + " in it"},
+		{name: "no commit recorded", owned: "node-1", setup: "node-1 installed", listed: true, wantCode: 1, wantOut: "from a commit it did not record"},
+		{name: "no setup record", owned: "node-1", listed: true, wantCode: 1, wantOut: notInstalled + " (unrecorded)"},
+		{name: "a setup record for another node", owned: "node-1", setup: "node-0 installed " + staleRef, listed: true, wantCode: 1, wantOut: notInstalled + " (unrecorded)"},
+		{name: "an install that did not finish", owned: "node-1", setup: "node-1 created", listed: true, wantCode: 1, wantOut: notInstalled + " (created)"},
+		{name: "no cluster", wantCode: 1, wantOut: "does not exist; run up.sh first"},
 		// The go stub stops the run at the build, past the check.
-		{name: "this commit", setup: installed(t, "node-1"), wantCode: pastClusterPhase},
+		{name: "this commit", owned: "node-1", setup: installed(t, "node-1"), listed: true, wantCode: pastClusterPhase},
+		{name: "a cluster up.sh did not create", owned: "node-0", setup: "node-0 installed " + staleRef, listed: true, wantCode: pastClusterPhase},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newStubs(t)
-			s.node(t, "node-1")
-			s.record(t, "created-cluster", "node-1")
-			s.record(t, "setup-cluster", tc.setup)
-			code, out, calls := s.runArgs(t, "../session-lifecycle-ui/ui.sh", []string{"check"}, "STUB_CLUSTERS="+cluster)
+			env := []string{}
+			if tc.listed {
+				s.node(t, "node-1")
+				env = append(env, "STUB_CLUSTERS="+cluster)
+			}
+			if tc.owned != "" {
+				s.record(t, "created-cluster", tc.owned)
+			}
+			if tc.setup != "" {
+				s.record(t, "setup-cluster", tc.setup)
+			}
+			code, out, calls := s.runArgs(t, "../session-lifecycle-ui/ui.sh", []string{"check"}, env...)
 			if code != tc.wantCode || !strings.Contains(out, tc.wantOut) {
 				t.Fatalf("ui.sh check exit %d, want %d with %q\noutput:\n%s\ncalls:\n%s", code, tc.wantCode, tc.wantOut, out, calls)
 			}
 			if built := strings.Contains(calls, "go build -o"); built != (tc.wantCode == pastClusterPhase) {
 				t.Errorf("lifecycle-ui built = %t\ncalls:\n%s", built, calls)
 			}
-			if got := s.read(t, "setup-cluster"); got != tc.setup {
-				t.Errorf("setup-cluster record = %q, want %q", got, tc.setup)
+			want := tc.setup
+			if want == "" {
+				want = "<absent>"
+			}
+			if got := s.read(t, "setup-cluster"); got != want {
+				t.Errorf("setup-cluster record = %q, want %q", got, want)
 			}
 		})
 	}

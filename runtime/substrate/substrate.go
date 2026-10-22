@@ -1341,21 +1341,24 @@ func (b *Backend) tearDownForkClone(ctx context.Context, cloner SnapshotCloner, 
 // journal records no checkpoint, so it could never accept a capture. The refusal tells two cases
 // apart:
 //
-//   - The clone's Snapshot is no longer the one CreateActorFromTag reported (or its newest is not
-//     ready): another caller resumed and captured it while it was SUSPENDED between its create and
-//     Fork's resume, and its RAM need not be the parent's at the fork point. Fork never handed the
-//     clone out and the parent still holds its snapshot, so, as for a clone replaced before its
-//     resume, this is ErrActorBusy (ABORTED): a retry clones a new child.
-//   - The clone still holds the snapshot it was created with (or the create reported none to
-//     compare): the client cannot tell whether a capture exists, as one that does not read the
-//     actor's snapshot ownership (an ActorStatus field newer than it knows). A retry is refused
-//     the same way while the client cannot report NoCapture, so this is api.ErrMemoryStateLost
-//     (FAILED_PRECONDITION), not busy.
+//   - The clone reports a Snapshot other than the one CreateActorFromTag reported, or its newest
+//     is not ready: another caller resumed and captured it while it was SUSPENDED between its
+//     create and Fork's resume, and its RAM need not be the parent's at the fork point. Fork never
+//     handed the clone out and the parent still holds its snapshot, so, as for a clone replaced
+//     before its resume, this is ErrActorBusy (ABORTED): a retry clones a new child.
+//   - The clone still holds the snapshot it was created with, or either call reported none to
+//     compare (a client whose ResumeActor omits Snapshot as well as NoCapture): the client cannot
+//     tell whether a capture exists, as one that does not read the actor's snapshot ownership (an
+//     ActorStatus field newer than it knows). A retry is refused the same way while the client
+//     cannot report NoCapture, so this is api.ErrMemoryStateLost (FAILED_PRECONDITION), not busy.
+//     An empty Snapshot is no evidence of a capture: a clone holds the tag's snapshot until its
+//     own capture replaces it, and a capture with no completed durable copy reports
+//     SnapshotNotReady.
 //
 // It is logged at Warn naming the clone, with capture "held" or "unknown" and the matching
 // error_kind. The error names no snapshot URI; outcome is what tearDownForkClone left.
 func (b *Backend) forkCloneCaptured(ctx context.Context, ref ActorRef, created, info ActorInfo, outcome string) error {
-	if created.Snapshot != "" && (info.Snapshot != created.Snapshot || info.SnapshotNotReady) {
+	if created.Snapshot != "" && (info.SnapshotNotReady || info.Snapshot != "" && info.Snapshot != created.Snapshot) {
 		b.logForkCloneCaptured(ctx, ref, info, "held", "actor_busy")
 		return fmt.Errorf("%w: fork child %s/%s (clone %q) holds a capture of its own (another caller resumed and "+
 			"captured it between its create and this fork's resume), so its RAM need not be the parent's at the fork "+
@@ -1363,8 +1366,11 @@ func (b *Backend) forkCloneCaptured(ctx context.Context, ref ActorRef, created, 
 			ErrActorBusy, ref.Atespace, ref.Name, info.UID, outcome)
 	}
 	held := "cannot show it holds no capture of its own (the client reports no ActorInfo.NoCapture for it"
-	if created.Snapshot != "" {
+	switch {
+	case created.Snapshot != "" && info.Snapshot != "":
 		held += " although it still holds the snapshot it was created with"
+	case created.Snapshot != "":
+		held += ", nor the snapshot it holds to compare with the one it was created with"
 	}
 	b.logForkCloneCaptured(ctx, ref, info, "unknown", "memory_state_lost")
 	return fmt.Errorf("%w: fork child %s/%s (clone %q) %s), so whether its RAM is the parent's at the fork point "+

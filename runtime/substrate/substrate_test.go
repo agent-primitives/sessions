@@ -59,8 +59,10 @@ type mockControl struct {
 	getNoLineage     bool
 	suspendNoLineage bool
 	// captureUnknown makes NoCapture false whatever the actor holds, as a ControlClient that cannot
-	// tell whether a snapshot was captured from the actor reports it.
-	captureUnknown bool
+	// tell whether a snapshot was captured from the actor reports it. resumeNoSnapshot makes
+	// ResumeActor report no Snapshot, as a ControlClient whose ResumeActor omits it does.
+	captureUnknown   bool
+	resumeNoSnapshot bool
 }
 
 // workerRuntime is the sandbox runtime of the worker a running actor holds.
@@ -142,7 +144,7 @@ func (m *mockControl) ResumeActor(ctx context.Context, a substrate.ActorRef) (su
 	}
 	// The actor as the resume left it, as GetActor would report it: the snapshot it restored from
 	// stays its newest until its next capture.
-	if info.Snapshot == "" {
+	if info.Snapshot == "" && !m.resumeNoSnapshot {
 		info.Snapshot = m.snapshots[a.Name]
 	}
 	info.CaptureLineage = m.lineage(a.Name, substrate.StatusRunning)
@@ -2991,9 +2993,10 @@ func TestResumeThatRestoresAnUnrecordedCaptureIsRefused(t *testing.T) {
 // for a clone replaced before its resume: it returns no incarnation, logs a Warn naming the clone
 // and its UID, and tears the clone down (suspend, delete, untag). The parent is untouched, so a
 // retry clones a new child. A client that cannot show the clone holds no capture, while the clone
-// still holds the snapshot it was created with, is torn down the same way, but a retry fails alike,
-// so it is api.ErrMemoryStateLost (FAILED_PRECONDITION), not busy, and the refusal and the Warn say
-// the client cannot tell rather than that the clone was captured. When the teardown's suspend is
+// still holds the snapshot it was created with or reports none to compare (its ResumeActor omits
+// Snapshot too), is torn down the same way, but a retry fails alike, so it is
+// api.ErrMemoryStateLost (FAILED_PRECONDITION), not busy, and the refusal and the Warn say the
+// client cannot tell rather than that the clone was captured. When the teardown's suspend is
 // refused (another caller holds the clone's lease), the refusal and a second Warn say the clone and
 // its tag were left in place; when the clone is already gone (another caller deleted it), it counts
 // as torn down and its tag is released.
@@ -3012,14 +3015,21 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 		refused    string // the refusal's account of the capture, "" when the clone is handed out
 		stuck      bool   // the teardown's suspend is refused, so the clone is left in place
 		gone       bool   // another caller deleted the clone before the teardown's suspend
+		noSnapshot bool   // ResumeActor reports no Snapshot to compare with the created one
 	}{
 		{name: "nothing in between"},
 		{name: "resumed and captured by another caller", refused: heldText, afterClone: captured},
 		{name: "captured with no completed durable copy", refused: heldText, afterClone: func(m *mockCloner, name string) {
+			// As the adapter reports it: the newest snapshot is not ready, so none is exposed.
 			m.capture(name)
 			m.holds(name, "")
+			m.info.SnapshotNotReady = true
 		}},
 		{name: "the client cannot tell", refused: unknownText, afterClone: func(m *mockCloner, _ string) { m.captureUnknown = true }},
+		{name: "the client reports neither NoCapture nor the resumed Snapshot", refused: unknownText, noSnapshot: true, afterClone: func(m *mockCloner, _ string) {
+			m.captureUnknown = true
+			m.resumeNoSnapshot = true
+		}},
 		{name: "captured, and the teardown is refused busy", refused: heldText, stuck: true, afterClone: func(m *mockCloner, name string) {
 			captured(m, name)
 			m.suspendErr = fmt.Errorf("lease held: %w", substrate.ErrActorBusy)
@@ -3076,6 +3086,11 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 				}
 				kind = "memory_state_lost"
 				parts = append(parts, "the parent is unaffected, but a retry is refused the same way while the client cannot report it")
+				if tc.noSnapshot {
+					parts = append(parts, "nor the snapshot it holds to compare with the one it was created with")
+				} else {
+					parts = append(parts, "although it still holds the snapshot it was created with")
+				}
 			}
 			if !tc.stuck {
 				parts = append(parts, "the fork tears the clone down and creates no child")

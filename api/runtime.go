@@ -28,13 +28,14 @@ var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was supers
 // recorded returns it from Create, Restore and Snapshot when the compute holds one other than the
 // checkpoint the journal last recorded (SessionSpec.RecordedCheckpoint,
 // Incarnation.RecordedCheckpoint, Restore's ref), before it resumes the compute or, from Create
-// and Restore, after, on what the resume reports. The journal cannot rebuild the state (I4), so
-// fresh compute would continue the journal with a harness that has forgotten it. Retrying does not
-// fix it, except when the missing record is still being written or was written after the caller
-// read it: another host's Snapshot between its capture and its SUSPEND append is refused until
-// that append lands, and Restore's check after the resume refuses a SUSPEND another host recorded
-// after Restore's ref was read, which a retry reads. The session service reports it as
-// FAILED_PRECONDITION.
+// and Restore, after, on what the resume reports. From a stateful Fork it returns it for a clone
+// its client cannot show holds no capture of its own, since a retry is refused alike (a clone shown
+// to hold one is ErrComputeBusy). The journal cannot rebuild the state (I4), so fresh compute would
+// continue the journal with a harness that has forgotten it. Retrying does not fix it, except when
+// the missing record is still being written or was written after the caller read it: another host's
+// Snapshot between its capture and its SUSPEND append is refused until that append lands, and
+// Restore's check after the resume refuses a SUSPEND another host recorded after Restore's ref was
+// read, which a retry reads. The session service reports it as FAILED_PRECONDITION.
 var ErrMemoryStateLost = errors.New("runtime: session's in-memory harness state is lost")
 
 // ErrInvalidCheckpoint reports that a runtime cannot produce or resume a checkpoint with the

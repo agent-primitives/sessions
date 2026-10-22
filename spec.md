@@ -1317,7 +1317,9 @@ The reference host takes it as `placement.Backend` in
   handed out, and the host records nothing. From a stateful `Fork` it MAY refuse a clone its resume
   reports holding a capture of its own, since the child records none; that refusal is
   `api.ErrComputeBusy` (`ABORTED`), not `api.ErrMemoryStateLost`, since the parent keeps its
-  snapshot and a retry clones a new child. The backend tears the clone down best effort (a clone it
+  snapshot and a retry clones a new child. A clone the backend cannot show holds none (its client
+  does not report it) is refused with `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) instead,
+  since a retry is refused alike. The backend tears the clone down best effort (a clone it
   cannot, such as one whose lease another caller holds, is logged at `WARN` naming the clone and its
   tag for an operator to delete), and the host writes no child journal. This reads only fields the
   journal already has; a backend that does not need it ignores it.

@@ -5,7 +5,7 @@ go 1.27.0
 toolchain go1.27.3
 
 require (
-	github.com/agent-primitives/sessions v0.0.0
+	github.com/agent-primitives/sessions v0.3.0
 	github.com/agent-substrate/substrate v0.5.0
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12

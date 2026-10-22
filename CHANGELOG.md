@@ -195,7 +195,11 @@ Release archives and images carry the neutral `agentsessionsd`, as in v0.2.0. Th
     [captures Sessions did not record](#v030-unrecorded-capture)).
   - A newest snapshot still uploading is `UNAVAILABLE` (new `api.ErrCheckpointPending`) for `Exec`,
     `Suspend`, `Resume` and `Fork`; once it completes, Suspend again to record it before Resume.
-    A `Suspend` refused this way records nothing, though the compute may already be released.
+    A `Suspend` refused this way records nothing, though the compute may already be released. A
+    memory-tier session cannot recover this way: the completed upload is a capture the journal did
+    not record and is refused as `api.ErrMemoryStateLost`. v0.5.0's `SuspendActor` returns only
+    once the upload completed, so a memory-tier session reaches this only through a client or
+    substrate that suspends asynchronously.
   - A newest local-only or unrecognized checkpoint, including an out-of-band paused actor, is
     `FAILED_PRECONDITION`; it may never upload, so establish a durable checkpoint rather than wait.
     For a memory-tier session it is `api.ErrMemoryStateLost`, which does not clear.
@@ -367,9 +371,9 @@ Release archives and images carry the neutral `agentsessionsd`, as in v0.2.0. Th
 - A stateful `Fork` checks its clone the same way against the child's empty checkpoint: a clone
   another caller resumed and captured before Fork's resume is refused with `ABORTED`
   (`substrate.ErrActorBusy`), logged at `WARN`, and torn down, with no child written. The parent is
-  unaffected and a retried Fork clones a new child. The teardown is best effort: if another caller
-  holds the clone's lease, the refusal names the clone and its tag, left in place; delete that
-  actor with `options.uid` and `any_state: true`, and the tag.
+  unaffected and a retried Fork clones a new child. The teardown is best effort: if the teardown
+  fails (for example, another caller holds the clone's lease), the refusal names the clone and its
+  tag, left in place; delete that actor with `options.uid` and `any_state: true`, and the tag.
 - The cost of failing closed: any capture the journal missed ends a memory-tier session for good,
   even when its memory survived. That covers a `SUSPEND` append that failed after the snapshot, a
   suspend or pause by an operator or another client (a gateway's idle suspend included), and suspend
@@ -460,10 +464,13 @@ Release archives and images carry the neutral `agentsessionsd`, as in v0.2.0. Th
 ### Fixed
 
 - On substrate, `Resume` now refuses a suspended actor whose reported durable checkpoint URI
-  differs from the one the session recorded; an `Exec` after `Suspend` checks the checkpoint's
-  readiness and fidelity only. `Exec`, `Suspend`, `Resume` and `Fork` no longer treat an older
-  completed snapshot as current while the newest one is pending or local-only. These are
-  client-side checks before the call, subject to the race and restore-source limits in
+  differs from the one the session recorded. For a stateless session, an `Exec` after `Suspend`
+  checks the checkpoint's readiness and fidelity only; a memory-tier `Exec` also compares the
+  actor with the session's recorded `SUSPEND` checkpoint (see
+  [captures Sessions did not record](#v030-unrecorded-capture)). `Exec`, `Suspend`, `Resume` and
+  `Fork` no longer treat an older completed snapshot as current while the newest one is pending or
+  local-only. These are client-side checks before the call, subject to the race and
+  restore-source limits in
   [Substrate backend changes](#v030-held-checkpoint-restore) and
   [issue #192](https://github.com/agent-primitives/sessions/issues/192).
 - Cancelling `Resume` while an approved `REQUIRES_APPROVAL` call is in flight no longer records a

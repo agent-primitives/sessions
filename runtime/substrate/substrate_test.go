@@ -2970,3 +2970,80 @@ func TestResumeThatRestoresAnUnrecordedCaptureIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// A clone is SUSPENDED on the tag's snapshot between CreateActorFromTag and ResumeActor, so another
+// caller can resume it and capture it (suspend or pause) in that window. Fork's resume then
+// restores that capture: the response reports the clone's UID and no MemoryNotRestored, but the
+// clone holds RAM that is not the parent's at the fork point, and the child's journal, which
+// records no checkpoint, could never accept it. Fork compares the response with that empty
+// checkpoint and refuses it with api.ErrMemoryStateLost: it returns no incarnation, logs the
+// refusal, and tears the clone down (suspend, delete, untag), as for a clone that lost the
+// parent's RAM. A client that cannot show the clone holds no capture is refused the same way.
+func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		afterClone func(m *mockCloner, name string)
+		refused    bool
+	}{
+		{name: "nothing in between"},
+		{name: "resumed and captured by another caller", refused: true, afterClone: func(m *mockCloner, name string) {
+			m.capture(name)
+			m.holds(name, m.captureURI(name))
+		}},
+		{name: "the client cannot tell", refused: true, afterClone: func(m *mockCloner, _ string) { m.captureUnknown = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			m := newClonerWithSuspendedParent()
+			var cloneUID string
+			m.afterClone = func(name string) {
+				cloneUID = m.uids[name]
+				if tc.afterClone != nil {
+					tc.afterClone(m, name)
+				}
+			}
+			b := substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
+				api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}},
+				substrate.WithLogger(logger))
+			inc, err := b.Fork(t.Context(), api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
+				api.ForkOpts{ChildSessionUID: "child"})
+			head := []string{"get:parent", "tag:parent->fork-child", "get:parent", "clone:child:from=fork-child", "resume:child"}
+			if !tc.refused {
+				if err != nil || inc.ComputeInstance != cloneUID {
+					t.Fatalf("fork: inc=%+v err=%v, want the clone %q handed out", inc, err, cloneUID)
+				}
+				if !reflect.DeepEqual(m.calls, head) {
+					t.Fatalf("calls=%v want %v", m.calls, head)
+				}
+				return
+			}
+			if !errors.Is(err, api.ErrMemoryStateLost) || !reflect.DeepEqual(inc, api.Incarnation{}) {
+				t.Fatalf("fork: inc=%+v err=%v, want api.ErrMemoryStateLost and no incarnation", inc, err)
+			}
+			if errors.Is(err, api.ErrComputeBusy) {
+				t.Fatalf("fork: %v is retryable busy; the clone the resume reported is this fork's", err)
+			}
+			for _, part := range []string{"space/child", cloneUID, "tears the clone down"} {
+				if !strings.Contains(err.Error(), part) {
+					t.Fatalf("refusal %q does not say %q", err, part)
+				}
+			}
+			if strings.Contains(err.Error(), "gs://") {
+				t.Fatalf("refusal %q names a snapshot URI", err)
+			}
+			if want := append(slices.Clone(head), "suspend:child", "delete:child", "untag:fork-child"); !reflect.DeepEqual(m.calls, want) {
+				t.Fatalf("calls=%v want the clone torn down %v", m.calls, want)
+			}
+			if _, ok := m.actors["child"]; ok {
+				t.Fatal("the refused clone still exists")
+			}
+			if st := m.statusOf("parent"); st != substrate.StatusSuspended || m.snapshots["parent"] != "snap-parent-1" {
+				t.Fatalf("parent is %v holding %q, want it untouched", st, m.snapshots["parent"])
+			}
+			if !strings.Contains(output.String(), `"error_kind":"memory_state_lost"`) || !strings.Contains(output.String(), `"actor":"child"`) {
+				t.Fatalf("refusal was not logged for operators: %s", output.String())
+			}
+		})
+	}
+}

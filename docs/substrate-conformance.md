@@ -545,6 +545,18 @@ before any mutating control call, since it still holds that capture. Recovery is
 every refusal here, below. The check sees only what the response reports; it is not a precondition
 on the resume, which v0.5.0's `ResumeActorRequest` (the actor's `ObjectRef` only) cannot carry.
 
+A stateful `Fork` checks the clone a successful `ResumeActor` reports the same way, against the
+child's checkpoint, which is none: the clone must hold no capture of its own, only the tag snapshot
+`CreateActor{source_tag}` gave it. The clone is `SUSPENDED` between that create and the resume, so
+another caller (the router on a request addressed to the child's name, then any suspend or pause)
+can resume and capture it in between, and the resume then restores that capture with the clone's
+UID and `MemoryNotRestored` false. A mismatch is `api.ErrMemoryStateLost`, logged at `WARN` like
+the refusals above. No journal names the clone and the fork never handed it out, so `Fork` tears
+it down as it does a clone that did not restore the parent's memory: `SuspendActor`, `DeleteActor`
+and `DeleteTag` of `fork-<child-uid>`, by name, best effort on a context detached from the
+caller's. The Placer writes no child journal and tears down the children it already cloned. The
+parent keeps its `SUSPEND` and snapshot, so a retry at the parent's new head clones a new child.
+
 Nothing in sessions recovers the session's memory after such a refusal. Delete or abandon the
 session, and delete the substrate actor named in the warning to release its snapshot, or its worker
 if the router woke it or a refused resume left it running. A `SUSPENDED` actor takes a plain
@@ -703,6 +715,9 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   error stands), releases just the tag when the name is gone or holds another actor (`ABORTED`
   too), and touches nothing when the read fails. `Stop` suspends and deletes by name, so an actor
   created between that read and the delete is not protected.
+- A clone the resume reports holding a capture of its own, from another caller that resumed and
+  captured it while it was `SUSPENDED`, is `api.ErrMemoryStateLost` and torn down the same way
+  ([a refused capture stays refused](#substrate-v050-a-refused-capture-stays-refused)).
 - A control client without the Tag APIs does not satisfy the optional `SnapshotCloner` interface; a
   stateful fork there fails loudly rather than degrading to a lossy replay-fork.
 - The child fan-out is all-or-nothing. If a child fails to provision, the ones already created are

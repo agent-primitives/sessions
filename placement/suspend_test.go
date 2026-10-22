@@ -1206,3 +1206,67 @@ func TestRefusedResumeLeavesTheActorRunningAndJournalsNothing(t *testing.T) {
 		}
 	}
 }
+
+// Between a stateful fork's CreateActorFromTag and its ResumeActor, another caller (the router on
+// a request addressed to the child's name, then an idle suspend) resumes the SUSPENDED clone and
+// captures it. Fork's resume restores that capture with the clone's UID and its memory, but the
+// child's journal would record no checkpoint, so every turn of the child would refuse it. The
+// fork is refused with api.ErrMemoryStateLost: no FORK marker or prefix is written to the child's
+// log, the clone and its tag are torn down, and the parent keeps the SUSPEND it took. The parent's
+// snapshot is intact, so a retry at the new head clones a new child.
+func TestForkRefusesACloneCapturedBeforeItsResumeAndJournalsNoChild(t *testing.T) {
+	ctx := t.Context()
+	ctl := newSuspendControl()
+	p, _ := newSuspendPlacer(t, ctl, true)
+	store := newSuspendStore(t)
+	parent, child := store.Session("parent"), store.Session("child")
+	execSuspendTurn(t, p, parent, "parent", "parent")
+	head, err := parent.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clone := substrate.ActorRef{Atespace: "space", Name: "child"}
+	var cloneUID string
+	ctl.beforeResume = func() {
+		cloneUID = ctl.actors[clone].uid
+		ctl.outsideResume(clone)
+		ctl.outsideSuspend(clone)
+	}
+	ctl.calls = nil
+	err = p.Fork(ctx, parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, head)
+	if !errors.Is(err, api.ErrMemoryStateLost) {
+		t.Fatalf("fork: %v, want api.ErrMemoryStateLost", err)
+	}
+	if cloneUID == "" || !strings.Contains(err.Error(), cloneUID) {
+		t.Fatalf("refusal %q does not name the clone %q", err, cloneUID)
+	}
+	want := []string{"suspend:parent", "tag:parent->fork-child", "clone:child:from=fork-child", "resume:child",
+		"suspend:child", "delete:child", "untag:fork-child"}
+	if !reflect.DeepEqual(ctl.calls, want) {
+		t.Fatalf("calls=%v want %v", ctl.calls, want)
+	}
+	if got, err := child.Head(); err != nil || got != 0 {
+		t.Fatalf("child head %d (err %v), want 0: no child journal may be written", got, err)
+	}
+	if _, ok := ctl.actors[clone]; ok {
+		t.Fatal("the refused clone still exists")
+	}
+	if _, ok := ctl.tags[substrate.SnapshotID{Atespace: "space", Name: "fork-child"}]; ok {
+		t.Fatal("the refused clone's tag still exists")
+	}
+	recs := suspendRecords(t, parent)
+	if last := recs[len(recs)-1].Event; last.Lifecycle == nil || last.Lifecycle.Kind != api.LifecycleSuspend {
+		t.Fatalf("parent's last record is %+v, want the fork's SUSPEND", last)
+	}
+
+	head, err = parent.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry := store.Session("retry")
+	if err := p.Fork(ctx, parent, "parent", []placement.ForkChild{{UID: "retry", Log: retry}}, head); err != nil {
+		t.Fatalf("retry at the new head: %v", err)
+	}
+	execSuspendTurn(t, p, retry, "retry", "retry")
+	assertSuspendOutputs(t, retry, []string{"echo:parent:1", "echo:retry:2"})
+}

@@ -190,7 +190,9 @@ not provide.
   actor, such as one another host's Suspend is still capturing, is `ABORTED`. Between that capture
   and its append, Suspend is refused this way; retry once it is recorded. Exec and Resume check the
   actor a successful `ResumeActor` reports the same way, so a capture left on the actor between the
-  check and the resume is refused too; the actor is then left `RUNNING` and not used. Nothing in
+  check and the resume is refused too; the actor is then left `RUNNING` and not used. A stateful
+  Fork checks its clone that way against the child's empty checkpoint: a clone another caller
+  resumed and captured before Fork's resume is refused and torn down, with no child. Nothing in
   sessions recovers such a session: delete or abandon it, and delete the actor named in the warning
   with `options.uid` (and `any_state: true` if it is running) to release it. Journal, wire and the
   Sessions API are unchanged: the check reads the `SUSPEND` refs the journal already holds. A crash
@@ -210,8 +212,8 @@ not provide.
   old behavior, but one that leaves `CaptureLineage` empty can no longer suspend or fork a
   memory-tier session, and one that leaves `NoCapture` false refuses every memory-tier session with
   no `SUSPEND` recorded once its actor exists. `ResumeActor` must now report `Snapshot` and
-  `NoCapture` as `GetActor` does: one that does not refuses every memory-tier `Restore`, and every
-  `Create` that resumes a suspended memory-tier actor. See
+  `NoCapture` as `GetActor` does: one that does not refuses every memory-tier `Restore`, every
+  `Create` that resumes a suspended memory-tier actor, and every stateful `Fork`. See
   [runtime fallback](docs/substrate-conformance.md#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback).
 - SQLite schema v6 adds model-admission flags for new sessions; genuine pre-policy sessions,
   including empty sessions, remain legacy. Fork inherits admission metadata atomically. Existing

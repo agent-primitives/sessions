@@ -217,8 +217,8 @@ not provide.
   no `SUSPEND` recorded once its actor exists. `ResumeActor` must now report `Snapshot` and
   `NoCapture` as `GetActor` does: one that does not refuses every memory-tier `Restore`, every
   `Create` that resumes a suspended memory-tier actor, and every stateful `Fork` (`ABORTED`, which
-  a retry does not fix). See
-  [runtime fallback](docs/substrate-conformance.md#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback).
+  a retry does not fix; the refusal says the client cannot tell, not that the clone was captured).
+  See [runtime fallback](docs/substrate-conformance.md#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback).
 - SQLite schema v6 adds model-admission flags for new sessions; genuine pre-policy sessions,
   including empty sessions, remain legacy. Fork inherits admission metadata atomically. Existing
   journal bytes, hashes and `ModelCall` format are unchanged. Before upgrading, stop every older

@@ -271,13 +271,16 @@ func (m *mockCloner) CreateActorFromTag(ctx context.Context, a substrate.ActorRe
 		return substrate.ActorInfo{}, fmt.Errorf("%w: %q", substrate.ErrActorExists, a.Name)
 	}
 	m.exists(a.Name, substrate.StatusSuspended)
+	// The clone borrows the tag's snapshot until its own first capture, as substrate's does.
+	snap := "gs://snap/tags/" + tag.Name
+	m.holds(a.Name, snap)
 	if m.afterClone != nil {
 		defer m.afterClone(a.Name)
 	}
 	if m.cloneNoUID {
-		return substrate.ActorInfo{Status: substrate.StatusSuspended}, nil
+		return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: snap}, nil
 	}
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, UID: m.uid(a.Name)}, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: snap, UID: m.uid(a.Name)}, nil
 }
 
 func (m *mockCloner) DeleteTag(ctx context.Context, tag substrate.SnapshotID) error {
@@ -2982,26 +2985,42 @@ func TestResumeThatRestoresAnUnrecordedCaptureIsRefused(t *testing.T) {
 // records no checkpoint, could never accept it. Fork refuses it with ErrActorBusy (ABORTED), as
 // for a clone replaced before its resume: it returns no incarnation, logs a Warn naming the clone
 // and its UID, and tears the clone down (suspend, delete, untag). The parent is untouched, so a
-// retry clones a new child. A client that cannot show the clone holds no capture is refused the
-// same way. When the teardown's suspend is refused (another caller holds the clone's lease), the
-// refusal and a second Warn say the clone and its tag were left in place.
+// retry clones a new child. A client that cannot show the clone holds no capture, while the clone
+// still holds the snapshot it was created with, is refused the same way, but the refusal and the
+// Warn say the client cannot tell, and that a retry fails alike, rather than that the clone was
+// captured. When the teardown's suspend is refused (another caller holds the clone's lease), the
+// refusal and a second Warn say the clone and its tag were left in place; when the clone is
+// already gone (another caller deleted it), it counts as torn down and its tag is released.
 func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 	captured := func(m *mockCloner, name string) {
 		m.capture(name)
 		m.holds(name, m.captureURI(name))
 	}
+	const (
+		heldText    = "holds a capture of its own"
+		unknownText = "cannot show it holds no capture of its own"
+	)
 	for _, tc := range []struct {
 		name       string
 		afterClone func(m *mockCloner, name string)
-		refused    bool
-		stuck      bool // the teardown's suspend is refused, so the clone is left in place
+		refused    string // the refusal's account of the capture, "" when the clone is handed out
+		stuck      bool   // the teardown's suspend is refused, so the clone is left in place
+		gone       bool   // another caller deleted the clone before the teardown's suspend
 	}{
 		{name: "nothing in between"},
-		{name: "resumed and captured by another caller", refused: true, afterClone: captured},
-		{name: "the client cannot tell", refused: true, afterClone: func(m *mockCloner, _ string) { m.captureUnknown = true }},
-		{name: "captured, and the teardown is refused busy", refused: true, stuck: true, afterClone: func(m *mockCloner, name string) {
+		{name: "resumed and captured by another caller", refused: heldText, afterClone: captured},
+		{name: "captured with no completed durable copy", refused: heldText, afterClone: func(m *mockCloner, name string) {
+			m.capture(name)
+			m.holds(name, "")
+		}},
+		{name: "the client cannot tell", refused: unknownText, afterClone: func(m *mockCloner, _ string) { m.captureUnknown = true }},
+		{name: "captured, and the teardown is refused busy", refused: heldText, stuck: true, afterClone: func(m *mockCloner, name string) {
 			captured(m, name)
 			m.suspendErr = fmt.Errorf("lease held: %w", substrate.ErrActorBusy)
+		}},
+		{name: "captured, and the clone is deleted before the teardown", refused: heldText, gone: true, afterClone: func(m *mockCloner, name string) {
+			captured(m, name)
+			m.suspendErr = fmt.Errorf("deleted: %w", substrate.ErrActorNotFound)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3021,7 +3040,7 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 			inc, err := b.Fork(t.Context(), api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
 				api.ForkOpts{ChildSessionUID: "child"})
 			head := []string{"get:parent", "tag:parent->fork-child", "get:parent", "clone:child:from=fork-child", "resume:child"}
-			if !tc.refused {
+			if tc.refused == "" {
 				if err != nil || inc.ComputeInstance != cloneUID {
 					t.Fatalf("fork: inc=%+v err=%v, want the clone %q handed out", inc, err, cloneUID)
 				}
@@ -3039,9 +3058,23 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 			if errors.Is(err, api.ErrMemoryStateLost) {
 				t.Fatalf("fork: %v is api.ErrMemoryStateLost; the parent is intact and a retry clones a new child", err)
 			}
-			for _, part := range []string{"space/child", cloneUID, "capture of its own", "tears the clone down", "a retry clones a new child"} {
+			parts := []string{"space/child", cloneUID, tc.refused}
+			if tc.refused == heldText {
+				parts = append(parts, "the parent is unaffected and a retry clones a new child")
+			} else {
+				parts = append(parts, "a retry is refused the same way while the client cannot report it")
+			}
+			if !tc.stuck {
+				parts = append(parts, "the fork tears the clone down and creates no child")
+			}
+			for _, part := range parts {
 				if !strings.Contains(err.Error(), part) {
 					t.Fatalf("refusal %q does not say %q", err, part)
+				}
+			}
+			for _, other := range []string{heldText, unknownText} {
+				if other != tc.refused && strings.Contains(err.Error(), other) {
+					t.Fatalf("refusal %q says %q", err, other)
 				}
 			}
 			if strings.Contains(err.Error(), "gs://") {
@@ -3052,7 +3085,7 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 			}
 			logs := output.String()
 			for _, part := range []string{`"msg":"refused a fork clone that holds a capture of its own"`, `"atespace":"space"`,
-				`"actor":"child"`, `"actor_uid":"` + cloneUID + `"`, `"error_kind":"actor_busy"`} {
+				`"actor":"child"`, `"actor_uid":"` + cloneUID + `"`, `"error_kind":"actor_busy"`, `"capture":"` + map[string]string{heldText: "held", unknownText: "unknown"}[tc.refused] + `"`} {
 				if !strings.Contains(logs, part) {
 					t.Fatalf("refusal was not logged for operators with %s: %s", part, logs)
 				}
@@ -3067,19 +3100,24 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 				if _, ok := m.actors["child"]; !ok {
 					t.Fatal("the clone is gone although its teardown's suspend was refused")
 				}
-				if !strings.Contains(err.Error(), "tearing the clone down failed") || !strings.Contains(err.Error(), `"fork-child"`) ||
-					!strings.Contains(err.Error(), "lease held") {
-					t.Fatalf("refusal %q does not say the clone and its tag fork-child were left in place, and why", err)
+				if !strings.Contains(err.Error(), "the fork creates no child, but tearing the clone down failed") || !strings.Contains(err.Error(), `"fork-child"`) ||
+					!strings.Contains(err.Error(), "lease held") || strings.Contains(err.Error(), "tears the clone down") {
+					t.Fatalf("refusal %q does not say, and only say, that the clone and its tag fork-child were left in place, and why", err)
 				}
 				if !strings.Contains(logs, `"msg":"failed to tear down a refused fork clone"`) || !strings.Contains(logs, `"tag":"fork-child"`) {
 					t.Fatalf("the failed teardown was not logged for operators: %s", logs)
 				}
 				return
 			}
-			if strings.Contains(err.Error(), "tearing the clone down failed") {
-				t.Fatalf("refusal %q reports a failed teardown", err)
+			if strings.Contains(err.Error(), "tearing the clone down failed") || strings.Contains(logs, "failed to tear down") {
+				t.Fatalf("refusal %q reports a failed teardown: %s", err, logs)
 			}
-			if want := append(slices.Clone(head), "suspend:child", "delete:child", "untag:fork-child"); !reflect.DeepEqual(m.calls, want) {
+			want := append(slices.Clone(head), "suspend:child", "delete:child", "untag:fork-child")
+			if tc.gone {
+				m.delete("child") // what the other caller did; the mock reports NotFound from suspendErr only
+				want = append(slices.Clone(head), "suspend:child", "untag:fork-child")
+			}
+			if !reflect.DeepEqual(m.calls, want) {
 				t.Fatalf("calls=%v want the clone torn down %v", m.calls, want)
 			}
 			if _, ok := m.actors["child"]; ok {

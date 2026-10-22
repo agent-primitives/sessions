@@ -654,52 +654,72 @@ func TestResumeOfAnUnrecordedCaptureIsRefusedOverTheAdapter(t *testing.T) {
 // resume restores that capture and the response reports the clone's UID and no
 // MemoryNotRestored, but NoCapture false. The child's journal records no checkpoint, so Fork
 // refuses it with substrate.ErrActorBusy (ABORTED) and tears the clone and its tag down; the parent
-// keeps its snapshot.
+// keeps its snapshot. A clone whose status carries a field this adapter does not read (a newer
+// substrate's) also reports NoCapture false while it still holds the tag's snapshot: that refusal
+// says the client cannot tell, not that the clone was captured.
 func TestForkOfACloneThatHoldsItsOwnCaptureIsRefusedOverTheAdapter(t *testing.T) {
-	ctx := t.Context()
 	rt := sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h1")
-	ctl := newLifecycleControl()
-	ctl.runtime = rt
-	b := memoryBackend(ctl)
-	parent, err := b.Create(ctx, &api.SessionSpec{SessionUID: "parent"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	snap, err := b.Snapshot(ctx, parent, api.SnapshotExternal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cloneUID string
-	ctl.beforeResume = func(a *atepb.Actor) {
-		cloneUID = a.GetMetadata().GetUid()
-		gen := a.Status.LastAssignedGeneration + 1
-		uri := fmt.Sprintf("gs://b/atespaces/space/actors/child/snapshots/s%d", gen)
-		capture := durableSnapshot(gen, uri, atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
-		capture.SandboxRuntime = rt
-		a.Status.Snapshots = append(a.Status.Snapshots, capture)
-		a.Status.LastAssignedGeneration = gen
-		ctl.completed["child"] = uri
-	}
-	ctl.calls = nil
-	inc, err := b.Fork(ctx, snap, api.ForkOpts{ChildSessionUID: "child"})
-	if !errors.Is(err, substrate.ErrActorBusy) || errors.Is(err, api.ErrMemoryStateLost) || inc.ID != "" || inc.ComputeInstance != "" {
-		t.Fatalf("fork: inc=%+v err=%v, want substrate.ErrActorBusy and no incarnation", inc, err)
-	}
-	if cloneUID == "" || !strings.Contains(err.Error(), cloneUID) || !strings.Contains(err.Error(), "tears the clone down") ||
-		strings.Contains(err.Error(), "gs://") {
-		t.Fatalf("refusal %q must name the clone %q, say it is torn down, and name no snapshot URI", err, cloneUID)
-	}
-	want := []string{"tag:parent->fork-child", "create:child", "resume:child", "suspend:child", "delete:child", "untag:fork-child"}
-	if !reflect.DeepEqual(ctl.calls, want) {
-		t.Fatalf("calls=%v\nwant %v", ctl.calls, want)
-	}
-	if _, ok := ctl.actors["child"]; ok {
-		t.Fatal("the refused clone still exists")
-	}
-	if _, ok := ctl.tags["fork-child"]; ok {
-		t.Fatal("the refused clone's tag still exists")
-	}
-	if got := ctl.actors["parent"].GetStatus().GetState(); got != atepb.ActorState_ACTOR_STATE_SUSPENDED || ctl.completed["parent"] != snap.ExternalURI {
-		t.Fatalf("parent is %v holding %q, want it suspended on %q", got, ctl.completed["parent"], snap.ExternalURI)
+	for _, tc := range []struct {
+		name         string
+		beforeResume func(ctl *lifecycleControl, a *atepb.Actor)
+		says, not    string
+	}{
+		{name: "captured by another caller", says: "holds a capture of its own", not: "cannot show", beforeResume: func(ctl *lifecycleControl, a *atepb.Actor) {
+			gen := a.Status.LastAssignedGeneration + 1
+			uri := fmt.Sprintf("gs://b/atespaces/space/actors/child/snapshots/s%d", gen)
+			capture := durableSnapshot(gen, uri, atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+			capture.SandboxRuntime = rt
+			a.Status.Snapshots = append(a.Status.Snapshots, capture)
+			a.Status.LastAssignedGeneration = gen
+			ctl.completed["child"] = uri
+		}},
+		{name: "a status field the adapter does not read", says: "cannot show it holds no capture of its own", not: "holds a capture of its own",
+			beforeResume: func(_ *lifecycleControl, a *atepb.Actor) {
+				// Field 127, varint 1: unknown to this adapter's ActorStatus.
+				a.Status.ProtoReflect().SetUnknown([]byte{0xf8, 0x07, 0x01})
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			ctl := newLifecycleControl()
+			ctl.runtime = rt
+			b := memoryBackend(ctl)
+			parent, err := b.Create(ctx, &api.SessionSpec{SessionUID: "parent"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snap, err := b.Snapshot(ctx, parent, api.SnapshotExternal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cloneUID string
+			ctl.beforeResume = func(a *atepb.Actor) {
+				cloneUID = a.GetMetadata().GetUid()
+				tc.beforeResume(ctl, a)
+			}
+			ctl.calls = nil
+			inc, err := b.Fork(ctx, snap, api.ForkOpts{ChildSessionUID: "child"})
+			if !errors.Is(err, substrate.ErrActorBusy) || errors.Is(err, api.ErrMemoryStateLost) || inc.ID != "" || inc.ComputeInstance != "" {
+				t.Fatalf("fork: inc=%+v err=%v, want substrate.ErrActorBusy and no incarnation", inc, err)
+			}
+			if cloneUID == "" || !strings.Contains(err.Error(), cloneUID) || !strings.Contains(err.Error(), "tears the clone down") ||
+				!strings.Contains(err.Error(), tc.says) || strings.Contains(err.Error(), tc.not) || strings.Contains(err.Error(), "gs://") {
+				t.Fatalf("refusal %q must name the clone %q, say %q and not %q, say it is torn down, and name no snapshot URI",
+					err, cloneUID, tc.says, tc.not)
+			}
+			want := []string{"tag:parent->fork-child", "create:child", "resume:child", "suspend:child", "delete:child", "untag:fork-child"}
+			if !reflect.DeepEqual(ctl.calls, want) {
+				t.Fatalf("calls=%v\nwant %v", ctl.calls, want)
+			}
+			if _, ok := ctl.actors["child"]; ok {
+				t.Fatal("the refused clone still exists")
+			}
+			if _, ok := ctl.tags["fork-child"]; ok {
+				t.Fatal("the refused clone's tag still exists")
+			}
+			if got := ctl.actors["parent"].GetStatus().GetState(); got != atepb.ActorState_ACTOR_STATE_SUSPENDED || ctl.completed["parent"] != snap.ExternalURI {
+				t.Fatalf("parent is %v holding %q, want it suspended on %q", got, ctl.completed["parent"], snap.ExternalURI)
+			}
+		})
 	}
 }

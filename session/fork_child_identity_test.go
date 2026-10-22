@@ -251,7 +251,13 @@ func TestForkWhoseCloneIsReplacedDuringTheForkIsAborted(t *testing.T) {
 	if msg := status.Convert(err).Message(); !strings.Contains(msg, child) || !strings.Contains(msg, clone) || !strings.Contains(msg, replacement) {
 		t.Errorf("error %q does not name the child, its clone and the replacement", msg)
 	}
-	recs, _ := store.Session(child).Read(1)
+	if head, err := store.Session(child).Head(); err != nil || head != 0 {
+		t.Errorf("child %q journal head = %d, %v; an aborted fork writes no child journal", child, head, err)
+	}
+	recs, err := store.Session(child).Read(1)
+	if err != nil {
+		t.Fatalf("read child %q journal: %v", child, err)
+	}
 	for _, r := range recs {
 		if lc := r.Event.Lifecycle; lc != nil && lc.Kind == api.LifecycleFork {
 			t.Errorf("child %q has a FORK marker recording %q; an aborted fork records none", child, lc.ComputeInstance)
@@ -324,7 +330,13 @@ func TestForkWhoseCloneIsCapturedDuringTheForkIsAborted(t *testing.T) {
 		!strings.Contains(msg, "a retry clones a new child") {
 		t.Errorf("error %q does not name the child and its clone or say a retry clones a new child", msg)
 	}
-	recs, _ := store.Session(child).Read(1)
+	if head, err := store.Session(child).Head(); err != nil || head != 0 {
+		t.Errorf("child %q journal head = %d, %v; an aborted fork writes no child journal", child, head, err)
+	}
+	recs, err := store.Session(child).Read(1)
+	if err != nil {
+		t.Fatalf("read child %q journal: %v", child, err)
+	}
 	for _, r := range recs {
 		if lc := r.Event.Lifecycle; lc != nil && lc.Kind == api.LifecycleFork {
 			t.Errorf("child %q has a FORK marker recording %q; an aborted fork records none", child, lc.ComputeInstance)

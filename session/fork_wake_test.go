@@ -165,12 +165,15 @@ func (c *actorControl) TagActor(_ context.Context, a substrate.ActorRef, _ subst
 	return c.tagErr
 }
 
-func (c *actorControl) CreateActorFromTag(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, _ substrate.SnapshotID) (substrate.ActorInfo, error) {
+func (c *actorControl) CreateActorFromTag(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.status[a.Name] = substrate.StatusSuspended
 	c.newUID(a.Name)
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, UID: c.uids[a.Name]}, nil
+	// The clone borrows the tag's snapshot until its own first capture, as substrate's does.
+	snap := "snap-" + tag.Name
+	c.snapshots[a.Name] = snap
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: snap, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: c.uids[a.Name]}, nil
 }
 
 func (c *actorControl) DeleteTag(context.Context, substrate.SnapshotID) error { return nil }

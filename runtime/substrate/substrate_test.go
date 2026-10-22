@@ -32,8 +32,10 @@ type mockControl struct {
 	// snapshots is each actor's current external snapshot handle, as GetActor reports it.
 	snapshots map[string]string
 	// afterGet, when set, runs after GetActor answers, so a test can move an actor's state in the
-	// window between a check and the call it guards.
-	afterGet func(name string)
+	// window between a check and the call it guards. afterCreate runs after CreateActor creates an
+	// actor, in the window before the backend resumes it.
+	afterGet    func(name string)
+	afterCreate func(name string)
 	// resumeErr, when set, fails ResumeActor; getErr fails GetActor.
 	resumeErr error
 	getErr    error
@@ -123,6 +125,9 @@ func (m *mockControl) CreateActor(ctx context.Context, a substrate.ActorRef, _ s
 		return fmt.Errorf("%w: %q", substrate.ErrActorExists, a.Name)
 	}
 	m.exists(a.Name, substrate.StatusRunning)
+	if m.afterCreate != nil {
+		m.afterCreate(a.Name)
+	}
 	return nil
 }
 func (m *mockControl) ResumeActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -3122,6 +3127,104 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 			}
 			if _, ok := m.actors["child"]; ok {
 				t.Fatal("the refused clone still exists")
+			}
+		})
+	}
+}
+
+// Between CreateActor and its ResumeActor, the actor Create just made is SUSPENDED under the
+// session's name, so another host's attach or the router can resume it and any caller can then
+// capture it; ResumeActor restores that capture with the new actor's UID. For a memory-tier session
+// Create checks the actor the resume reports against the recorded checkpoint, read after the
+// resume, as attach does: with none recorded the capture is refused with api.ErrMemoryStateLost
+// (not ErrActorBusy), the actor is left running and is neither suspended nor deleted, the refusal
+// is logged for operators, and the next turn's attach refuses it the same way before any resume.
+// A SUSPEND another host recorded for that capture in the window is accepted. A client that cannot
+// show the new actor holds no capture is refused too. A stateless session is not checked.
+func TestCreateRefusesANewActorCapturedBeforeItsResume(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// captured: another caller resumed and captured the new actor before Create's resume.
+		captured bool
+		// recordedMeanwhile: that capture is another host's, and its SUSPEND is in the journal by
+		// the time Create reads the recorded checkpoint.
+		recordedMeanwhile bool
+		// captureUnknown: the client cannot tell whether the actor holds a capture.
+		captureUnknown bool
+		memory         bool
+		refused        bool
+	}{
+		{name: "memory/not captured", memory: true},
+		{name: "memory/captured", captured: true, memory: true, refused: true},
+		{name: "memory/captured and recorded by another host", captured: true, recordedMeanwhile: true, memory: true},
+		{name: "memory/client cannot tell", captureUnknown: true, memory: true, refused: true},
+		{name: "stateless/captured", captured: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			var output bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			m := &mockControl{info: running("worker-a"), captureUnknown: tc.captureUnknown}
+			m.info.SnapshotFidelity = substrate.SnapshotFidelityMemory
+			var other api.SnapshotRef
+			if tc.captured {
+				m.afterCreate = func(name string) {
+					m.afterCreate = nil
+					// The other caller: woke the new actor, captured it and left it SUSPENDED on it.
+					m.capture(name)
+					m.holds(name, m.captureURI(name))
+					m.exists(name, substrate.StatusSuspended)
+					other = api.SnapshotRef{Local: name, ExternalURI: m.captureURI(name), Memory: true}
+				}
+			}
+			resumability := api.ResumabilityStatelessReplay
+			if tc.memory {
+				resumability = api.ResumabilityRequiresMemorySnapshot
+			}
+			b := substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
+				api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: resumability}},
+				substrate.WithLogger(logger))
+			spec := &api.SessionSpec{SessionUID: "sess-x", StartedTurns: func() (int, error) { return 0, nil },
+				RecordedCheckpoint: func() (api.SnapshotRef, error) {
+					if tc.recordedMeanwhile {
+						return other, nil
+					}
+					return api.SnapshotRef{}, nil
+				}}
+			inc, err := b.Create(ctx, spec)
+			if want := []string{"get:sess-x", "create:sess-x", "resume:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+				t.Fatalf("calls=%v want %v", m.calls, want)
+			}
+			if !tc.refused {
+				if err != nil || inc.ID != "sess-x" {
+					t.Fatalf("create: inc=%+v err=%v, want the actor handed out", inc, err)
+				}
+				return
+			}
+			if !errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, substrate.ErrActorBusy) || !reflect.DeepEqual(inc, api.Incarnation{}) {
+				t.Fatalf("create: inc=%+v err=%v, want api.ErrMemoryStateLost, not ErrActorBusy, and no incarnation", inc, err)
+			}
+			if st := m.statusOf("sess-x"); st != substrate.StatusRunning {
+				t.Fatalf("actor is %v, want it left running", st)
+			}
+			for _, part := range []string{"space/sess-x", m.uid("sess-x"), "left running", "delete it"} {
+				if !strings.Contains(err.Error(), part) {
+					t.Fatalf("refusal %q does not say %q", err, part)
+				}
+			}
+			if strings.Contains(err.Error(), "gs://") {
+				t.Fatalf("refusal %q names a snapshot URI", err)
+			}
+			if !strings.Contains(output.String(), `"error_kind":"memory_state_lost"`) || !strings.Contains(output.String(), `"actor_status":"running"`) {
+				t.Fatalf("refusal was not logged for operators: %s", output.String())
+			}
+			// The next turn's attach refuses it the same way, before any resume.
+			m.calls = nil
+			if _, err := b.Create(ctx, spec); !errors.Is(err, api.ErrMemoryStateLost) {
+				t.Fatalf("next turn: %v, want api.ErrMemoryStateLost", err)
+			}
+			if want := []string{"get:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+				t.Fatalf("next turn: calls=%v want %v", m.calls, want)
 			}
 		})
 	}

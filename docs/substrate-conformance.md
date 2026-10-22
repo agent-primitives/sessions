@@ -265,7 +265,7 @@ attached to as if it held the cloned RAM. The child now records the clone's UID 
 
 | `api.Runtime` | substrate Control |
 |---|---|
-| `Create` | `CreateActor` + `ResumeActor` (starts from the template's golden snapshot, or cold-boots); refused for a memory-tier session with started turns and no actor |
+| `Create` | `CreateActor` + `ResumeActor` (starts from the template's golden snapshot, or cold-boots); refused for a memory-tier session with started turns and no actor, or whose new actor's resume reports a capture the journal did not record |
 | `Snapshot(EXTERNAL)` | `SuspendActor` (synchronous: snapshot to storage, worker freed, actor SUSPENDED; held only when the newest generation is `COMPLETED`; fidelity reported from that snapshot) |
 | `Restore` | `GetActor` (busy if mid-transition; a suspended actor's held URI and readiness are checked), then `ResumeActor` |
 | `Fork` (stateless) | `CreateActor` + `ResumeActor` — a replay-fork; the journal reconstructs the child |
@@ -322,8 +322,9 @@ Only the adapter derives this flag; fork children and refused captures do not qu
 pinned Substrate, `CreateActor` without a source tag freezes the template's current golden tag as
 snapshot generation 1, so this exemption applies only when golden snapshots are disabled (or no
 golden exists yet). Capture itself never uses the exemption. A backend's own successful CreateActor
-→ ResumeActor path remains unchanged. These client-side checks are not atomic and do not fence
-traffic directly to the router.
+→ ResumeActor path does not use it either; for a memory-tier harness it checks the actor the resume
+reports ([a refused capture stays refused](#substrate-v050-a-refused-capture-stays-refused)).
+These client-side checks are not atomic and do not fence traffic directly to the router.
 
 ### Held checkpoint restore and readiness
 
@@ -545,6 +546,17 @@ Placer dials no harness and journals nothing. Every later turn, Resume, Suspend 
 before any mutating control call, since it still holds that capture. Recovery is the same as for
 every refusal here, below. The check sees only what the response reports; it is not a precondition
 on the resume, which v0.5.0's `ResumeActorRequest` (the actor's `ObjectRef` only) cannot carry.
+
+Create checks the actor it creates the same way. Between its `CreateActor` and its `ResumeActor`
+the new actor is `SUSPENDED` under the session's name, so another host's attach or the router can
+resume it and any caller can then capture it, and the resume restores that capture with the new
+actor's UID. Create reads `RecordedCheckpoint` after the resume, normally none, so the actor must
+hold no capture of its own (`ActorInfo.NoCapture`); a `SUSPEND` another host appended for that
+capture is accepted. A mismatch is `api.ErrMemoryStateLost`, logged at `WARN`, and the actor is
+left running and not handed out; the next turn's attach refuses it the same way. Unlike a fork
+clone below, it is not torn down and the refusal is not `ABORTED`: any host can name the session's
+actor, so the capture can be another host's whose `SUSPEND` is not appended yet, and a teardown
+(suspend and delete by name, with no UID precondition) could delete the actor that host is using.
 
 A stateful `Fork` checks the clone a successful `ResumeActor` reports against the child's
 checkpoint, which is none: the clone must hold no capture of its own (`ActorInfo.NoCapture`), only

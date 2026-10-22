@@ -723,3 +723,80 @@ func TestForkOfACloneThatHoldsItsOwnCaptureIsRefusedOverTheAdapter(t *testing.T)
 		})
 	}
 }
+
+// The check on the actor Create itself created, over the real adapter. Between Create's CreateActor
+// and its ResumeActor the new actor is SUSPENDED under the session's name, and another caller
+// resumes and captures it: a new actor-owned generation on the worker's runtime, so ResumeActor
+// restores it with the new actor's UID and no MemoryNotRestored. The session's journal records no
+// checkpoint, so Create refuses with api.ErrMemoryStateLost: the actor is left RUNNING, nothing is
+// suspended or deleted, and the next turn's attach refuses it before any resume. A SUSPEND another
+// host recorded for that capture is accepted, and a fresh actor no one captured is handed out.
+func TestCreateOfANewActorCapturedBeforeItsResumeIsRefusedOverTheAdapter(t *testing.T) {
+	rt := sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h1")
+	for _, tc := range []struct {
+		name                        string
+		captured, recordedMeanwhile bool
+	}{
+		{name: "not captured"},
+		{name: "captured", captured: true},
+		{name: "captured and recorded by another host", captured: true, recordedMeanwhile: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			ctl := newLifecycleControl()
+			ctl.runtime = rt
+			b := memoryBackend(ctl)
+			var other api.SnapshotRef
+			if tc.captured {
+				ctl.beforeResume = func(a *atepb.Actor) {
+					gen := a.Status.LastAssignedGeneration + 1
+					uri := fmt.Sprintf("gs://b/atespaces/space/actors/sess/snapshots/s%d", gen)
+					capture := durableSnapshot(gen, uri, atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+					capture.SandboxRuntime = rt
+					a.Status.Snapshots = append(a.Status.Snapshots, capture)
+					a.Status.LastAssignedGeneration = gen
+					ctl.completed["sess"] = uri
+					other = api.SnapshotRef{Local: "sess", ExternalURI: uri, Memory: true}
+				}
+			}
+			spec := &api.SessionSpec{SessionUID: "sess", StartedTurns: func() (int, error) { return 0, nil },
+				RecordedCheckpoint: func() (api.SnapshotRef, error) {
+					if tc.recordedMeanwhile {
+						return other, nil
+					}
+					return api.SnapshotRef{}, nil
+				}}
+			inc, err := b.Create(ctx, spec)
+			if want := []string{"create:sess", "resume:sess"}; !reflect.DeepEqual(ctl.calls, want) {
+				t.Fatalf("calls=%v want %v: no suspend or delete after the resume", ctl.calls, want)
+			}
+			uid := ctl.actors["sess"].GetMetadata().GetUid()
+			if !tc.captured || tc.recordedMeanwhile {
+				if err != nil || inc.ID != "sess" || inc.ComputeInstance != uid {
+					t.Fatalf("create: inc=%+v err=%v, want the new actor %q handed out", inc, err, uid)
+				}
+				return
+			}
+			if !errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, substrate.ErrActorBusy) || inc.ID != "" || inc.ComputeInstance != "" {
+				t.Fatalf("create: inc=%+v err=%v, want api.ErrMemoryStateLost, not ErrActorBusy, and no incarnation", inc, err)
+			}
+			if strings.Contains(err.Error(), "gs://") || !strings.Contains(err.Error(), "left running") || !strings.Contains(err.Error(), uid) {
+				t.Fatalf("refusal %q must name the actor's UID %q, say it was left running and name no snapshot URI", err, uid)
+			}
+			now, err := FromClient(ctl).GetActor(ctx, substrate.ActorRef{Atespace: "space", Name: "sess"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if now.Status != substrate.StatusRunning || now.UID != uid || now.MemoryNotRestored || now.NoCapture {
+				t.Fatalf("actor after the refusal: %+v, want the new actor RUNNING on its capture", now)
+			}
+			ctl.calls = nil
+			if _, err := b.Create(ctx, spec); !errors.Is(err, api.ErrMemoryStateLost) {
+				t.Fatalf("next turn: %v, want api.ErrMemoryStateLost", err)
+			}
+			if len(ctl.calls) != 0 {
+				t.Fatalf("next turn: calls=%v, want no create, resume or suspend", ctl.calls)
+			}
+		})
+	}
+}

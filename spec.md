@@ -1465,9 +1465,10 @@ The reference host takes it as `placement.Backend` in
   (Suspend, and a stateful fork's capture of the parent) refuse with `api.ErrMemoryStateLost`,
   before `ResumeActor` or `SuspendActor`, an actor, SUSPENDED or RUNNING, whose newest snapshot is
   not the one the latest recorded `SUSPEND` names or, with none recorded, that holds a capture of
-  its own (`ActorInfo.NoCapture` false). Restore and Create's attach check the actor a successful
-  `ResumeActor` reports the same way (attach reads the recorded checkpoint again), since a capture
-  can land between the check and the resume; a refused actor is left running and not handed out.
+  its own (`ActorInfo.NoCapture` false). Restore and Create, on an attach or on the actor it just
+  created, check the actor a successful `ResumeActor` reports the same way (Create reads the
+  recorded checkpoint again), since a capture can land between the check, or the create, and the
+  resume; a refused actor is left running and not handed out.
   A stateful `Fork` checks the clone its `ResumeActor` reports against the child's empty
   checkpoint, so a clone another caller resumed and captured before that resume is refused with
   `substrate.ErrActorBusy` (`ABORTED`), logged at `WARN` and torn down, and no child is recorded;

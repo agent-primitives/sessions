@@ -174,8 +174,9 @@ type ControlClient interface {
 	// ResumeActor schedules the actor onto a worker from its own snapshot, or cold-boots the
 	// template spec if it has none. It does not look up the template's golden tag at resume time.
 	// There is no per-call boot flag. It returns the actor as the resume left it, with every field
-	// GetActor reports: a memory-tier Restore and Create's attach compare its Snapshot (or
-	// NoCapture) with the checkpoint the session's journal recorded before handing the actor out.
+	// GetActor reports: a memory-tier Restore, Create (an attach, or the actor it created) and
+	// stateful Fork compare its Snapshot (or NoCapture) with the checkpoint the session's journal
+	// recorded, none for a fork child, before handing the actor out.
 	ResumeActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 	// SuspendActor snapshots the actor to durable storage and frees the worker, returning the actor
 	// as the suspend left it: ActorInfo.Snapshot is the external snapshot it now holds, paired with
@@ -349,6 +350,16 @@ func (b *Backend) ref(name string) ActorRef { return ActorRef{Atespace: b.atespa
 // refuses with api.ErrMemoryStateLost before resuming or handing it out. A SUSPENDED actor is
 // checked again on what its resume reports (see attach).
 //
+// So is the actor Create itself creates. Between CreateActor and ResumeActor it is SUSPENDED under
+// the session's name, where another host's attach or the router can resume it and any caller can
+// then capture it, and ResumeActor restores whatever it holds by then. Create checks the actor the
+// resume reports against SessionSpec.RecordedCheckpoint read after the resume (normally none, so it
+// must hold no capture of its own) and refuses a mismatch with api.ErrMemoryStateLost, leaving the
+// actor running and not handed out (resumedNotHandedOut), as attach refuses the same actor. Unlike
+// a refused fork clone, whose name no other host knows, it is not torn down and the refusal is not
+// ErrActorBusy: the session's name is shared, so the capture can be another host's whose SUSPEND
+// is not appended yet, and Stop deletes by name with no UID precondition.
+//
 // The distinction matters most for a REQUIRES_MEMORY_SNAPSHOT harness: recreating an actor that
 // already holds live state would silently discard exactly the state fork and suspend exist to carry,
 // and the harness never rebuilds it from Start.History (I4).
@@ -420,14 +431,21 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 		"actor", ref.Name,
 		"atespace", ref.Atespace,
 	)
-	info, err := b.ctl.ResumeActor(ctx, ref) // a brand-new actor has no session state to lose
+	info, err := b.ctl.ResumeActor(ctx, ref)
 	if err != nil {
 		resumeFinished(err, "error_kind", "resume_actor_failed")
 		return api.Incarnation{}, fmt.Errorf("substrate: resume actor: %w", err)
 	}
 	resumeFinished(nil, "actor_status", info.Status)
-	inc, err = b.incarnation(ctx, sessionUID, info, actorLeftRunning)
-	return inc, err
+	if inc, err = b.incarnation(ctx, sessionUID, info, actorLeftRunning); err != nil {
+		return api.Incarnation{}, err
+	}
+	// The new actor was SUSPENDED and addressable until this resume (see the doc comment above).
+	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+	if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, s.RecordedCheckpoint, resumedNotHandedOut); err != nil {
+		return api.Incarnation{}, err
+	}
+	return inc, nil
 }
 
 // attach returns the incarnation of the session's existing actor: a RUNNING actor as it is, a
@@ -512,11 +530,12 @@ const actorLeftRunning = "the actor was left running"
 // deletes the clone and releases its tag (destroyChild), and no child exists.
 const forkCloneTornDown = "the fork tears the clone down and creates no child"
 
-// resumedNotHandedOut is what a refusal after a successful ResumeActor (Restore, Create's attach)
-// leaves: the actor already runs the refused capture's RAM, so it is left running, not handed out,
-// suspended or deleted, and nothing is recorded for the session. Every later attach, Restore and
-// Snapshot refuses it again before resuming or suspending it, since it still holds that capture.
-// Recovery is the one for every memory-tier actor refused as lost: delete the actor.
+// resumedNotHandedOut is what a refusal after a successful ResumeActor (Restore, Create's attach,
+// Create's resume of the actor it created) leaves: the actor already runs the refused capture's
+// RAM, so it is left running, not handed out, suspended or deleted, and nothing is recorded for the
+// session. Every later attach, Restore and Snapshot refuses it again before resuming or suspending
+// it, since it still holds that capture. Recovery is the one for every memory-tier actor refused as
+// lost: delete the actor.
 const resumedNotHandedOut = "the resume had already run, so the actor was left running and " +
 	"was not handed out; as for any memory-tier actor refused this way, delete it to release " +
 	"its worker"

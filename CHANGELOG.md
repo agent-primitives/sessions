@@ -190,17 +190,20 @@ not provide.
   actor, such as one another host's Suspend is still capturing, is `ABORTED`. Between that capture
   and its append, Suspend is refused this way; retry once it is recorded. Exec and Resume check the
   actor a successful `ResumeActor` reports the same way, so a capture left on the actor between the
-  check and the resume is refused too; the actor is then left `RUNNING` and not used. A stateful
-  Fork checks its clone against the child's empty checkpoint: a clone another caller resumed and
-  captured before Fork's resume is refused with `ABORTED`, logged at `WARN` and torn down, with no
-  child; the parent is unaffected and a retried Fork clones a new child. The teardown is best
-  effort: if another caller holds the clone's lease, the refusal names the clone and its tag left
-  in place. For the other refusals here, nothing in sessions recovers the session: delete or
-  abandon it, and delete the actor named in the warning with `options.uid` (and `any_state: true`
-  if it is running) to release it. Journal, wire and the Sessions API are unchanged: the check
-  reads the `SUSPEND` refs the journal already holds. A crash and resume onto a worker of the same
-  runtime between the check and the suspend is still not caught; a precondition on substrate's
-  `SuspendActor` would close it, and v0.5.0 has none on `SuspendActor` or `ResumeActor`. A router
+  check and the resume is refused too; the actor is then left `RUNNING` and not used. That includes
+  the actor a memory-tier Exec just created for the session, whose resume must report no capture
+  unless a `SUSPEND` for it is recorded by then (`FAILED_PRECONDITION`, not torn down: other hosts
+  can be using an actor under the session's name). A stateful Fork checks its clone against the
+  child's empty checkpoint: a clone another caller resumed and captured before Fork's resume is
+  refused with `ABORTED`, logged at `WARN` and torn down, with no child; the parent is unaffected
+  and a retried Fork clones a new child. The teardown is best effort: if another caller holds the
+  clone's lease, the refusal names the clone and its tag left in place. For the other refusals
+  here, nothing in sessions recovers the session: delete or abandon it, and delete the actor named
+  in the warning with `options.uid` (and `any_state: true` if it is running) to release it.
+  Journal, wire and the Sessions API are unchanged: the check reads the `SUSPEND` refs the journal
+  already holds. A crash and resume onto a worker of the same runtime between the check and the
+  suspend is still not caught; a precondition on substrate's `SuspendActor` would close it, and
+  v0.5.0 has none on `SuspendActor` or `ResumeActor`. A router
   resume alone is fine. Any suspend by another caller ends a memory-tier session the same way,
   including suspend and resume cycles during a Suspend and a later idle suspend, so a gateway that
   suspends idle actors (as `agent-substrate/always-on-agent`'s does for its own) must not suspend
@@ -215,9 +218,9 @@ not provide.
   old behavior, but one that leaves `CaptureLineage` empty can no longer suspend or fork a
   memory-tier session, and one that leaves `NoCapture` false refuses every memory-tier session with
   no `SUSPEND` recorded once its actor exists. `ResumeActor` must now report `Snapshot` and
-  `NoCapture` as `GetActor` does: one that does not refuses every memory-tier `Restore`, every
-  `Create` that resumes a suspended memory-tier actor, and every stateful `Fork` (`ABORTED`, which
-  a retry does not fix; the refusal says the client cannot tell, not that the clone was captured).
+  `NoCapture` as `GetActor` does: one that does not refuses every memory-tier `Restore` and
+  `Create`, and every stateful `Fork` (`ABORTED`, which a retry does not fix; the refusal says the
+  client cannot tell, not that the clone was captured).
   See [runtime fallback](docs/substrate-conformance.md#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback).
 - SQLite schema v6 adds model-admission flags for new sessions; genuine pre-policy sessions,
   including empty sessions, remain legacy. Fork inherits admission metadata atomically. Existing

@@ -2991,11 +2991,12 @@ func TestResumeThatRestoresAnUnrecordedCaptureIsRefused(t *testing.T) {
 // for a clone replaced before its resume: it returns no incarnation, logs a Warn naming the clone
 // and its UID, and tears the clone down (suspend, delete, untag). The parent is untouched, so a
 // retry clones a new child. A client that cannot show the clone holds no capture, while the clone
-// still holds the snapshot it was created with, is refused the same way, but the refusal and the
-// Warn say the client cannot tell, and that a retry fails alike, rather than that the clone was
-// captured. When the teardown's suspend is refused (another caller holds the clone's lease), the
-// refusal and a second Warn say the clone and its tag were left in place; when the clone is
-// already gone (another caller deleted it), it counts as torn down and its tag is released.
+// still holds the snapshot it was created with, is torn down the same way, but a retry fails alike,
+// so it is api.ErrMemoryStateLost (FAILED_PRECONDITION), not busy, and the refusal and the Warn say
+// the client cannot tell rather than that the clone was captured. When the teardown's suspend is
+// refused (another caller holds the clone's lease), the refusal and a second Warn say the clone and
+// its tag were left in place; when the clone is already gone (another caller deleted it), it counts
+// as torn down and its tag is released.
 func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 	captured := func(m *mockCloner, name string) {
 		m.capture(name)
@@ -3057,17 +3058,24 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 				}
 				return
 			}
-			if !errors.Is(err, substrate.ErrActorBusy) || !errors.Is(err, api.ErrComputeBusy) || !reflect.DeepEqual(inc, api.Incarnation{}) {
-				t.Fatalf("fork: inc=%+v err=%v, want substrate.ErrActorBusy and no incarnation", inc, err)
-			}
-			if errors.Is(err, api.ErrMemoryStateLost) {
-				t.Fatalf("fork: %v is api.ErrMemoryStateLost; the parent is intact and a retry clones a new child", err)
+			if !reflect.DeepEqual(inc, api.Incarnation{}) {
+				t.Fatalf("fork: inc=%+v err=%v, want no incarnation", inc, err)
 			}
 			parts := []string{"space/child", cloneUID, tc.refused}
+			kind := "actor_busy"
 			if tc.refused == heldText {
+				// A retry clones a new child: busy (ABORTED), not a lost session.
+				if !errors.Is(err, substrate.ErrActorBusy) || !errors.Is(err, api.ErrComputeBusy) || errors.Is(err, api.ErrMemoryStateLost) {
+					t.Fatalf("fork: %v, want substrate.ErrActorBusy and not api.ErrMemoryStateLost", err)
+				}
 				parts = append(parts, "the parent is unaffected and a retry clones a new child")
 			} else {
-				parts = append(parts, "a retry is refused the same way while the client cannot report it")
+				// A retry is refused alike, so it must not be busy (ABORTED invites a retry).
+				if !errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, api.ErrComputeBusy) {
+					t.Fatalf("fork: %v, want api.ErrMemoryStateLost and not api.ErrComputeBusy", err)
+				}
+				kind = "memory_state_lost"
+				parts = append(parts, "the parent is unaffected, but a retry is refused the same way while the client cannot report it")
 			}
 			if !tc.stuck {
 				parts = append(parts, "the fork tears the clone down and creates no child")
@@ -3090,7 +3098,7 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 			}
 			logs := output.String()
 			for _, part := range []string{`"msg":"refused a fork clone that holds a capture of its own"`, `"atespace":"space"`,
-				`"actor":"child"`, `"actor_uid":"` + cloneUID + `"`, `"error_kind":"actor_busy"`, `"capture":"` + map[string]string{heldText: "held", unknownText: "unknown"}[tc.refused] + `"`} {
+				`"actor":"child"`, `"actor_uid":"` + cloneUID + `"`, `"error_kind":"` + kind + `"`, `"capture":"` + map[string]string{heldText: "held", unknownText: "unknown"}[tc.refused] + `"`} {
 				if !strings.Contains(logs, part) {
 					t.Fatalf("refusal was not logged for operators with %s: %s", part, logs)
 				}

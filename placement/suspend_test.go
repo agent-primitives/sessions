@@ -240,7 +240,9 @@ func (c *suspendControl) CreateActorFromTag(_ context.Context, ref substrate.Act
 		status: substrate.StatusSuspended, snapshot: source, sourceTag: tag, template: template, uid: c.newUID(),
 	}
 	c.actors[ref] = a
-	return substrate.ActorInfo{Status: a.status, UID: a.uid}, nil
+	// The real adapter reports the created actor as GetActor does, including the tag's snapshot,
+	// which Fork compares with the clone its resume reports.
+	return c.info(ref, a), nil
 }
 
 func (c *suspendControl) DeleteTag(_ context.Context, tag substrate.SnapshotID) error {

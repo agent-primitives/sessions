@@ -655,14 +655,16 @@ func TestResumeOfAnUnrecordedCaptureIsRefusedOverTheAdapter(t *testing.T) {
 // MemoryNotRestored, but NoCapture false. The child's journal records no checkpoint, so Fork
 // refuses it with substrate.ErrActorBusy (ABORTED) and tears the clone and its tag down; the parent
 // keeps its snapshot. A clone whose status carries a field this adapter does not read (a newer
-// substrate's) also reports NoCapture false while it still holds the tag's snapshot: that refusal
-// says the client cannot tell, not that the clone was captured.
+// substrate's) also reports NoCapture false while it still holds the tag's snapshot: it is torn
+// down the same way, but a retry fails alike, so that refusal is api.ErrMemoryStateLost
+// (FAILED_PRECONDITION), not busy, and says the client cannot tell, not that the clone was captured.
 func TestForkOfACloneThatHoldsItsOwnCaptureIsRefusedOverTheAdapter(t *testing.T) {
 	rt := sandboxRuntime("microvm", "architecture", "amd64", "sandbox_runtime_hash", "h1")
 	for _, tc := range []struct {
 		name         string
 		beforeResume func(ctl *lifecycleControl, a *atepb.Actor)
 		says, not    string
+		lost         bool // api.ErrMemoryStateLost, not substrate.ErrActorBusy
 	}{
 		{name: "captured by another caller", says: "holds a capture of its own", not: "cannot show", beforeResume: func(ctl *lifecycleControl, a *atepb.Actor) {
 			gen := a.Status.LastAssignedGeneration + 1
@@ -674,7 +676,7 @@ func TestForkOfACloneThatHoldsItsOwnCaptureIsRefusedOverTheAdapter(t *testing.T)
 			ctl.completed["child"] = uri
 		}},
 		{name: "a status field the adapter does not read", says: "cannot show it holds no capture of its own", not: "holds a capture of its own",
-			beforeResume: func(_ *lifecycleControl, a *atepb.Actor) {
+			lost: true, beforeResume: func(_ *lifecycleControl, a *atepb.Actor) {
 				// Field 127, varint 1: unknown to this adapter's ActorStatus.
 				a.Status.ProtoReflect().SetUnknown([]byte{0xf8, 0x07, 0x01})
 			}},
@@ -699,8 +701,8 @@ func TestForkOfACloneThatHoldsItsOwnCaptureIsRefusedOverTheAdapter(t *testing.T)
 			}
 			ctl.calls = nil
 			inc, err := b.Fork(ctx, snap, api.ForkOpts{ChildSessionUID: "child"})
-			if !errors.Is(err, substrate.ErrActorBusy) || errors.Is(err, api.ErrMemoryStateLost) || inc.ID != "" || inc.ComputeInstance != "" {
-				t.Fatalf("fork: inc=%+v err=%v, want substrate.ErrActorBusy and no incarnation", inc, err)
+			if errors.Is(err, substrate.ErrActorBusy) == tc.lost || errors.Is(err, api.ErrMemoryStateLost) != tc.lost || inc.ID != "" || inc.ComputeInstance != "" {
+				t.Fatalf("fork: inc=%+v err=%v, want no incarnation and api.ErrMemoryStateLost=%v (else substrate.ErrActorBusy)", inc, err, tc.lost)
 			}
 			if cloneUID == "" || !strings.Contains(err.Error(), cloneUID) || !strings.Contains(err.Error(), "tears the clone down") ||
 				!strings.Contains(err.Error(), tc.says) || strings.Contains(err.Error(), tc.not) || strings.Contains(err.Error(), "gs://") {

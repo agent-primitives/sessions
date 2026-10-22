@@ -581,17 +581,18 @@ refused fork clone`) name the clone's UID and the tag. Delete that actor with `o
 
 `NoCapture` false also covers a client that cannot tell, such as this adapter reading an
 `ActorStatus` with a field it does not know (a newer substrate's). The refusal tells the two apart
-by the clone's `Snapshot`: when the resume reports one other than the one `CreateActorFromTag`
-reported, or `SnapshotNotReady` (a capture with no completed durable copy, which the adapter reports
-with no `Snapshot`), the clone `holds a capture of its own` (`capture` `held`), the refusal is
-`ABORTED` as above and a retry clones a new child. When it still reports the one the clone was
-created with, or reports none and not `SnapshotNotReady` (a client whose `ResumeActor` omits
-`Snapshot` too), the clone `cannot show it holds no capture of its own` (`capture` `unknown`,
-`error_kind` `memory_state_lost`): an empty `Snapshot` is no evidence of a capture. A client that
-cannot report `NoCapture` makes every stateful `Fork` fail that way, which a retry does not fix, so
-that refusal is `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`), not `ABORTED`. The clone is torn
-down the same way and the parent is unaffected; recovery is a client that reads the actor's snapshot
-ownership.
+by the clone's `Snapshot`, and only when `CreateActorFromTag` reported a non-empty one to compare
+with: when the resume then reports a different, non-empty `Snapshot`, or `SnapshotNotReady` (a
+capture with no completed durable copy, which the adapter reports with no `Snapshot`), the clone
+`holds a capture of its own` (`capture` `held`), the refusal is `ABORTED` as above and a retry
+clones a new child. When the resume still reports the one the clone was created with, or reports
+none and not `SnapshotNotReady` (a client whose `ResumeActor` omits `Snapshot` too), or
+`CreateActorFromTag` reported none, the clone `cannot show it holds no capture of its own`
+(`capture` `unknown`, `error_kind` `memory_state_lost`): an empty `Snapshot` is no evidence of a
+capture. A client that cannot report `NoCapture` makes every stateful `Fork` fail that way, which a
+retry does not fix, so that refusal is `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`), not
+`ABORTED`. The clone is torn down the same way and the parent is unaffected; recovery is a client
+that reads the actor's snapshot ownership.
 
 For the refusals here other than a fork clone's, nothing in sessions recovers the session's memory.
 Delete or abandon the session, and delete the substrate actor named in the warning to release its

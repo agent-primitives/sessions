@@ -49,7 +49,7 @@ func migrateCleanupInventory(tx *sql.Tx) error {
 		  operation TEXT NOT NULL, resource_id TEXT NOT NULL DEFAULT '',
 		  confirmed INTEGER NOT NULL DEFAULT 0, released INTEGER NOT NULL DEFAULT 0
 		);
-		CREATE INDEX allocations_session ON allocations(session, released);
+		CREATE INDEX allocations_session ON allocations(session, released, id);
 		CREATE TABLE fork_batches (
 		  id TEXT PRIMARY KEY, parent TEXT NOT NULL, status TEXT NOT NULL
 		);

@@ -1346,14 +1346,14 @@ func (b *Backend) tearDownForkClone(ctx context.Context, cloner SnapshotCloner, 
 //     create and Fork's resume, and its RAM need not be the parent's at the fork point. Fork never
 //     handed the clone out and the parent still holds its snapshot, so, as for a clone replaced
 //     before its resume, this is ErrActorBusy (ABORTED): a retry clones a new child.
-//   - The clone still holds the snapshot it was created with, or either call reported none to
-//     compare (a client whose ResumeActor omits Snapshot as well as NoCapture): the client cannot
-//     tell whether a capture exists, as one that does not read the actor's snapshot ownership (an
-//     ActorStatus field newer than it knows). A retry is refused the same way while the client
-//     cannot report NoCapture, so this is api.ErrMemoryStateLost (FAILED_PRECONDITION), not busy.
-//     An empty Snapshot is no evidence of a capture: a clone holds the tag's snapshot until its
-//     own capture replaces it, and a capture with no completed durable copy reports
-//     SnapshotNotReady.
+//   - The clone still holds the snapshot it was created with, or CreateActorFromTag reported none,
+//     or the resume reported neither a Snapshot nor SnapshotNotReady (a client whose ResumeActor
+//     omits Snapshot as well as NoCapture): the client cannot tell whether a capture exists, as one
+//     that does not read the actor's snapshot ownership (an ActorStatus field newer than it knows).
+//     A retry is refused the same way while the client cannot report NoCapture, so this is
+//     api.ErrMemoryStateLost (FAILED_PRECONDITION), not busy. An empty Snapshot is no evidence of a
+//     capture: a clone holds the tag's snapshot until its own capture replaces it, and a capture
+//     with no completed durable copy reports SnapshotNotReady.
 //
 // It is logged at Warn naming the clone, with capture "held" or "unknown" and the matching
 // error_kind. The error names no snapshot URI; outcome is what tearDownForkClone left.

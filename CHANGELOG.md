@@ -16,8 +16,9 @@ not provide.
   `error_kind` `memory_state_lost`). A clone holds a capture of its own, and stays `ABORTED`
   (`capture` `held`, `error_kind` `actor_busy`) with a retried Fork cloning a new child, only when
   `CreateActorFromTag` reported a `Snapshot` and the resume reports `SnapshotNotReady` or another,
-  non-empty `Snapshot`. A resume that reports no `Snapshot`, which v0.3.0 counted as held, is
-  `unknown`. Either way the clone is torn down and the parent is unaffected. See
+  non-empty `Snapshot`. A resume that reports neither a `Snapshot` nor `SnapshotNotReady`, which
+  v0.3.0 counted as held, is `unknown`. Either way the clone is torn down and the parent is
+  unaffected. See
   [a refused capture stays refused](docs/substrate-conformance.md#substrate-v050-a-refused-capture-stays-refused).
 
 ## v0.3.0 - 2026-10-22

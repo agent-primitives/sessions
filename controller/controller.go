@@ -222,6 +222,7 @@ type Controller struct {
 // WithFence is supplied (the placement layer minted the fence and stamped it on the incarnation), New
 // uses that token instead — the log remains the single authority either way. A tool executor
 // without a nonempty WithSessionUID returns ErrMissingSessionUID before advancing the fence.
+// A nil model permits replay and streaming-only use; live model calls without either return an error.
 func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, error) {
 	c := &Controller{log: log, model: model, logger: slog.New(slog.DiscardHandler)}
 	for _, o := range opts {
@@ -583,6 +584,9 @@ func (c *Controller) emitDelta(executionID string, partIndex int32, chunk string
 // are a view of the call in progress, not the record of it.
 func (c *Controller) invokeModel(ctx context.Context, executionID string, req api.ModelRequest) (api.ModelResponse, error) {
 	if c.stream == nil {
+		if c.model == nil {
+			return api.ModelResponse{}, errors.New("controller: model callback is not configured")
+		}
 		return c.model(ctx, req)
 	}
 	var index int32

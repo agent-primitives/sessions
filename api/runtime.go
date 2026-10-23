@@ -67,7 +67,7 @@ var ErrComputeBusy = errors.New("runtime: compute is busy with another operation
 // Sessions API) run on "substrate underneath" (or pod, Kata, ...) with no API change.
 type Runtime interface {
 	// Create starts a cold incarnation (sandbox) for a session and returns a handle
-	// including the address where the harness server listens.
+	// with a nonempty ID and the address where the harness server listens.
 	Create(ctx context.Context, s *SessionSpec) (Incarnation, error)
 
 	// Snapshot captures the incarnation's state. SnapshotLocal (warm/pause) keeps it
@@ -86,9 +86,9 @@ type Runtime interface {
 	// compute that holds another one (see Incarnation.RecordedCheckpoint).
 	Snapshot(ctx context.Context, in Incarnation, kind SnapshotKind) (SnapshotRef, error)
 
-	// Restore brings an incarnation back from a snapshot. Sub-second on memory-capable
-	// backends; a filesystem-only backend restores the workspace and relies on the host
-	// replaying the event log.
+	// Restore brings an incarnation back from a snapshot and returns a nonempty ID.
+	// Sub-second on memory-capable backends; a filesystem-only backend restores the workspace
+	// and relies on the host replaying the event log.
 	Restore(ctx context.Context, ref SnapshotRef) (Incarnation, error)
 
 	// Fork creates a child incarnation. A backend with MemorySnapshot clones ref's captured state so

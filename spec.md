@@ -1272,10 +1272,11 @@ The reference host takes it as `placement.Backend` in
   error, since compute that is still there can fail a restore for another reason. With no recorded
   instance, `runtime/substrate` reports lost after a `NOT_FOUND` resume whenever the actor does not
   hold the session's snapshot, if a lifecycle change races the held-ref preflight (§13.4).
-- SQLite-tracked `Create` and `Restore` MUST return a nonempty `Incarnation.ID`. Placement records
-  that handle before dialing; an empty ID fails with `sqlitelog.ErrAllocationConflict` after the
-  runtime call, leaving the allocation attempt unresolved. Logs without allocation recording retain
-  the diagnostic-only use of ID. Every in-repo backend sets it to the session uid; it is not the
+- `Create` and `Restore` MUST return a nonempty `Incarnation.ID`, regardless of the host's log
+  implementation. SQLite-tracked placement enforces this before dialing: an empty ID fails with
+  `sqlitelog.ErrAllocationConflict` after the runtime call, leaving the allocation attempt unresolved.
+  Logs without allocation recording do not enforce this requirement and retain the diagnostic-only
+  use of ID. Every in-repo backend sets it to the session uid; it is not the
   immutable compute-instance identity used to detect replacement (`RT-4h`).
 - `RT-4d`: The `Incarnation` returned by `Create` and `Restore` MUST carry an `Address` at which
   the harness is reachable (the reference dialer takes `unix://<path>` or `host:port`). The host
@@ -1379,8 +1380,13 @@ The reference host takes it as `placement.Backend` in
 ### 13.4 Reference backends (informative)
 
 The SQLite placement path durably records allocation intent before Create/Restore and confirms
-only the immutable returned resource ID. Failed or lost responses retain unresolved attempts;
-addresses and call credentials are not inventory. Optional `api.CleanupRuntime` keys identify exact
+only the immutable returned resource ID. Confirmation gets a bounded context independent of client
+cancellation once the runtime returns. A successful confirmation atomically replaces prior confirmed,
+unreleased attempts for the same (session, backend key, resource ID), retaining the attempt being
+confirmed, not the one with the greatest random ID. Unresolved attempts and released history are
+preserved, so repeated unknown outcomes can still grow the ledger. Confirming or releasing a compacted
+attempt returns `sqlitelog.ErrAllocationNotFound`; cleanup must reread the live inventory if a late
+confirmation retires a paged attempt. Addresses and call credentials are not inventory. Optional `api.CleanupRuntime` keys identify exact
 non-destructive release configurations, not harness aliases or a generic Stop fallback. Fork keeps
 its legacy allocation/rollback path at this stage. The cleanup schema reserves internal publication
 and cleanup state, but enables no reclamation. Every newly created inventory remains incomplete,

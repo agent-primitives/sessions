@@ -232,9 +232,9 @@ func (b *Backend) Stop(ctx context.Context, in api.Incarnation) error {
 func (b *Backend) CleanupKey() string { return "local" }
 
 // ReleaseSession safely releases even an unconfirmed allocation without stopping the shared
-// server. Local Stop is a no-op; Close remains the owner of the backend's process lifetime.
+// server. Close remains the owner of the backend's process lifetime.
 func (b *Backend) ReleaseSession(ctx context.Context, sessionUID string) error {
-	return b.Stop(ctx, api.Incarnation{ID: sessionUID})
+	return nil
 }
 
 var _ api.CleanupRuntime = (*Backend)(nil)

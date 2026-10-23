@@ -3,6 +3,7 @@ package placement
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/eventlog"
@@ -34,7 +35,11 @@ func (p *Placer) allocate(ctx context.Context, log eventlog.Store, operation str
 	if err != nil {
 		return in, err
 	}
-	if err := recorder.ConfirmAllocation(ctx, attempt, in); err != nil {
+	// The runtime has returned a known handle. Persist it even if the caller stopped
+	// waiting, but bound the write independently so cancellation cannot strand this call.
+	confirmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := recorder.ConfirmAllocation(confirmCtx, attempt, in); err != nil {
 		return in, fmt.Errorf("placement: confirm %s allocation: %w", operation, err)
 	}
 	return in, nil

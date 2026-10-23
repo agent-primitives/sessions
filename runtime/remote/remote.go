@@ -270,7 +270,7 @@ func (b *Backend) CleanupKey() string {
 // ReleaseSession only detaches. It must not close the shared Describe connection or stop a server
 // owned by somebody else, even if the allocation response was never confirmed.
 func (b *Backend) ReleaseSession(ctx context.Context, sessionUID string) error {
-	return b.Stop(ctx, api.Incarnation{ID: sessionUID})
+	return nil
 }
 
 var _ api.CleanupRuntime = (*Backend)(nil)

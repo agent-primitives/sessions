@@ -21,8 +21,8 @@ var ErrCleanupPending = errors.New("sqlitelog: cleanup pending")
 // never an empty allocation ledger, can certify an untracked session's inventory.
 var ErrInventoryIncomplete = fmt.Errorf("%w: inventory incomplete", ErrCleanupPending)
 
-// ErrAllocationNotFound includes attempts belonging to a different session; callers must not
-// confirm or release another session's resources.
+// ErrAllocationNotFound includes compacted attempts and attempts belonging to a different session;
+// callers must not confirm or release another session's resources.
 var ErrAllocationNotFound = errors.New("sqlitelog: allocation attempt not found")
 
 // ErrAllocationConflict means confirmation lacks an immutable resource ID or would change one.
@@ -37,6 +37,7 @@ type Allocation struct {
 
 // migrateCleanupInventory adds the allocation ledger and reserves internal publication and
 // cleanup metadata. Existing inventory is not evidence of complete allocation coverage.
+// The explicit default-value UPDATE provides a deterministic trigger hook for rollback tests.
 func migrateCleanupInventory(tx *sql.Tx) error {
 	_, err := tx.Exec(`
 		ALTER TABLE sessions ADD COLUMN inventory_complete INTEGER NOT NULL DEFAULT 0;
@@ -100,7 +101,9 @@ func (l *Log) BeginAllocation(ctx context.Context, backend, operation string) (s
 }
 
 // ConfirmAllocation may acknowledge a late response after DELETE, but cannot reassign an attempt
-// or replace the resource ID. Repeating an identical confirmation is harmless.
+// or replace the resource ID. It retains this attempt and compacts other confirmed, unreleased
+// attempts for the same (session, backend, resource ID), regardless of operation. Identical retries
+// succeed while the attempt is retained; compacted IDs return ErrAllocationNotFound.
 func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Incarnation) error {
 	if in.ID == "" {
 		return ErrAllocationConflict
@@ -110,9 +113,9 @@ func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Inca
 		return err
 	}
 	defer tx.Rollback()
-	var id string
+	var id, backend string
 	var confirmed, released bool
-	err = tx.QueryRowContext(ctx, `SELECT resource_id,confirmed,released FROM allocations WHERE id=? AND session=?`, attempt, l.session).Scan(&id, &confirmed, &released)
+	err = tx.QueryRowContext(ctx, `SELECT resource_id,backend,confirmed,released FROM allocations WHERE id=? AND session=?`, attempt, l.session).Scan(&id, &backend, &confirmed, &released)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrAllocationNotFound
 	}
@@ -129,6 +132,10 @@ func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Inca
 		return ErrAllocationConflict
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE allocations SET resource_id=?,confirmed=1 WHERE id=? AND session=?`, in.ID, attempt, l.session); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM allocations
+		WHERE session=? AND backend=? AND resource_id=? AND confirmed=1 AND released=0 AND id<>?`, l.session, backend, in.ID, attempt); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -169,7 +176,8 @@ func (s *Store) allocations(ctx context.Context, uid, after string, limit int) (
 }
 
 // ReleaseAllocation acknowledges a successful safe backend release, even for an unconfirmed
-// attempt when the backend can prove that safe. The attempt remains as durable evidence.
+// attempt when the backend can prove that safe. Released history remains as durable evidence;
+// a late confirmation can retire an earlier unreleased attempt before it is released.
 func (s *Store) ReleaseAllocation(ctx context.Context, uid, attempt string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE allocations SET released=1 WHERE id=? AND session=?`, attempt, uid)
 	if err != nil {

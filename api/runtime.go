@@ -128,7 +128,7 @@ type InstanceRestorer interface {
 }
 
 // CleanupRuntime optionally opts a Runtime into durable session release. This contract is
-// only safe for backends with NO dedicated per-session resources (currently local and remote).
+// only safe for backends with NO dedicated per-session resources.
 // Identity-bearing resource cleanup requires a separate, stronger ownership contract; it must
 // never be retrofitted by calling a destructive name-only Stop.
 //

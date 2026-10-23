@@ -158,8 +158,11 @@ func (s *Store) AllocationPage(ctx context.Context, uid, after string, limit int
 	return s.allocations(ctx, uid, after, limit)
 }
 
+const allocationQuery = `SELECT id,session,backend,operation,resource_id,confirmed FROM allocations
+	WHERE session=? AND released=0 AND id>? ORDER BY id LIMIT ?`
+
 func (s *Store) allocations(ctx context.Context, uid, after string, limit int) ([]Allocation, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,session,backend,operation,resource_id,confirmed FROM allocations WHERE session=? AND released=0 AND id>? ORDER BY id LIMIT ?`, uid, after, limit)
+	rows, err := s.db.QueryContext(ctx, allocationQuery, uid, after, limit)
 	if err != nil {
 		return nil, err
 	}

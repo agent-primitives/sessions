@@ -44,6 +44,7 @@ Start here. Each document is small and problem-scoped; this page is the index.
 | Understand the internals | [architecture.md](architecture.md) |
 | Run it on agent-substrate | [substrate-conformance.md](substrate-conformance.md) |
 | Operate and debug it | [observability.md](observability.md) |
+| Track allocation ownership and reconcile inventory | [allocation-ownership.md](allocation-ownership.md) |
 | Configure daemon tool execution | [tool-executors.md](tool-executors.md) |
 | Gate a model's tool call on a human decision | [approval-gated-tool.md](approval-gated-tool.md) |
 | Know what is safe to expose | [security.md](security.md) |

@@ -261,8 +261,8 @@ func (b *Backend) Stop(ctx context.Context, in api.Incarnation) error {
 	return nil
 }
 
-// CleanupKey identifies the configured endpoint across host restarts, independently of harness
-// aliases. Hashing keeps endpoint details out of the durable ledger; this is not authentication.
+// CleanupKey is a stable fingerprint of the configured endpoint across host restarts,
+// independently of harness aliases. It provides neither authentication nor confidentiality.
 func (b *Backend) CleanupKey() string {
 	return fmt.Sprintf("remote:%x", sha256.Sum256([]byte(b.addr)))
 }

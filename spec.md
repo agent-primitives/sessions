@@ -1386,13 +1386,14 @@ unreleased attempts for the same (session, backend key, resource ID), retaining 
 confirmed, not the one with the greatest random ID. Unresolved attempts and released history are
 preserved, so repeated unknown outcomes can still grow the ledger. Confirming or releasing a compacted
 attempt returns `sqlitelog.ErrAllocationNotFound`; cleanup must reread the live inventory if a late
-confirmation retires a paged attempt. Addresses and call credentials are not inventory. Optional `api.CleanupRuntime` keys identify exact
-non-destructive release configurations, not harness aliases or a generic Stop fallback. Fork keeps
-its legacy allocation/rollback path at this stage. The cleanup schema reserves internal publication
-and cleanup state, but enables no reclamation. Every newly created inventory remains incomplete,
-as does every migrated row; tracking a later restore does not certify a previous untracked fork.
-Only explicit operator reconciliation via `Store.CertifyInventory` can establish coverage. Stop all
-old writers before migration and never downgrade the migrated journal to v0.3.0 or older.
+confirmation retires a paged attempt. Addresses and call credentials are not inventory. Optional
+`api.CleanupRuntime` keys identify exact non-destructive release configurations, not harness aliases
+or a generic Stop fallback. Fork keeps its legacy allocation/rollback path at this stage. Version 7
+adds allocation inventory and reserves internal publication and cleanup state, but enables no
+reclamation. Every newly created inventory remains incomplete, as does every migrated row; tracking
+a later restore does not certify a previous untracked fork. A host embedding `sqlitelog` can establish
+coverage by calling `Store.CertifyInventory` only after explicit reconciliation. Stop all old writers
+before migration and never downgrade the migrated journal to v0.3.0 or older.
 
 - `runtime/local`: serves the harness in the host process over a unix socket shared by all
   sessions. `Describe` asks that in-process harness. All capabilities false.
@@ -1766,7 +1767,7 @@ The reference implementation protects the integrity of the record, not access to
     an already-open older writer does not check the marker. The marker is checked only at Open,
     including by this build: changing the mode requires stopping every writer (including embedded
     CLI processes), then restarting all hosts with binaries that support the new mode.
-    Version 6 adds explicit model-policy eligibility. The cleanup migration adds allocation
+    Version 6 adds explicit model-policy eligibility. Version 7 adds allocation
     inventory and reserves internal publication state without changing journal bytes. Stop all
     older writers before that migration; no downgrade to v0.3.0 or older is supported. All
     inventories remain incomplete until explicit operator reconciliation (§13.4).

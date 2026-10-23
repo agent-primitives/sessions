@@ -18,9 +18,7 @@ func TestAllocationPageSeeksCursor(t *testing.T) {
 	}
 	// Explain AllocationPage's query against a populated store so a missing cursor index cannot
 	// hide behind a small functional fixture. Avoid timing thresholds that depend on host load.
-	rows, err := s.db.Query(`EXPLAIN QUERY PLAN
-		SELECT id,session,backend,operation,resource_id,confirmed FROM allocations
-		WHERE session=? AND released=0 AND id>? ORDER BY id LIMIT ?`, "target", "00004000", 10)
+	rows, err := s.db.Query("EXPLAIN QUERY PLAN "+allocationQuery, "target", "00004000", 10)
 	if err != nil {
 		t.Fatal(err)
 	}

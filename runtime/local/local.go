@@ -228,6 +228,17 @@ func (b *Backend) Stop(ctx context.Context, in api.Incarnation) error {
 	return nil
 }
 
+// CleanupKey is shared across local harnesses: none owns per-session compute or storage.
+func (b *Backend) CleanupKey() string { return "local" }
+
+// ReleaseSession safely releases even an unconfirmed allocation without stopping the shared
+// server. Close remains the owner of the backend's process lifetime.
+func (b *Backend) ReleaseSession(ctx context.Context, sessionUID string) error {
+	return nil
+}
+
+var _ api.CleanupRuntime = (*Backend)(nil)
+
 // Status reports the compute-lifecycle state. The in-process backend keeps no separate compute state
 // machine — the log and placement layer are the lifecycle authority — so a known incarnation is LIVE.
 func (b *Backend) Status(ctx context.Context, in api.Incarnation) (api.ComputeState, error) {

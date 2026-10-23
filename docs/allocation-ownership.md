@@ -1,9 +1,12 @@
 # Durable allocation ownership
 
 Placement records Create/Restore intent in SQLite before runtime I/O, then acknowledges the
-returned immutable resource ID. An unresolved attempt survives failure and restart, including a runtime refusal before allocation:
-the recorder cannot prove whether an error left resources behind. Only resource
-identity is retained, not addresses, tokens or worker metadata. Standalone logs without the optional
+returned immutable resource ID. An unresolved attempt survives failure and restart, including a
+runtime refusal before allocation: the recorder cannot prove whether an error left resources behind.
+Only the returned handle is retained, not addresses, tokens or worker metadata. SQLite-tracked
+Create/Restore require a nonempty `Incarnation.ID`; an empty ID fails confirmation with
+`sqlitelog.ErrAllocationConflict` before dialing and leaves the attempt unresolved. The handle is
+not the compute-instance identity used to detect replacement. Standalone logs without the optional
 recorder retain their existing behavior.
 
 `api.CleanupRuntime` is an optional, non-destructive release contract. Local and remote backends

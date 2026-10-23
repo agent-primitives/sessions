@@ -20,6 +20,9 @@ not provide.
   v0.3.0 or older; an already-open old writer is not fenced by the schema stamp. Every inventory,
   including fresh rows, stays incomplete until explicit operator reconciliation. See
   [allocation ownership](docs/allocation-ownership.md).
+- Custom runtimes must return a nonempty `Incarnation.ID` from SQLite-tracked Create/Restore.
+  An empty ID now refuses placement after the runtime call and before dialing, retaining an
+  unresolved attempt. This handle is not compute-instance identity; non-recording logs are unchanged.
 
 - A stateful substrate `Fork` now refuses a clone whose `ResumeActor` leaves `NoCapture` false but
   shows no capture of its own with `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`), where v0.3.0

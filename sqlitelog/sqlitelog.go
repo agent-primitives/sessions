@@ -86,8 +86,8 @@ CREATE INDEX IF NOT EXISTS sessions_project_created
 // build can identify a database without inspecting its columns. Version 1 is what v0.1.0 through
 // v0.1.2 shipped. Version 2 adds the harness registry; version 3 adds approval reporting;
 // version 4 adds permanent deletion intent; version 5 adds caller ownership and an authorization marker;
-// version 6 records explicit session model-policy eligibility; version 7 adds inventory
-// and preprovisions internal fork publication state.
+// version 6 records explicit session model-policy eligibility; version 7 adds the allocation
+// ledger and inventory completeness/evidence columns.
 const SchemaVersion = 7
 
 // migrations[i] moves a database from version i+1 to i+2, inside the migration transaction. The

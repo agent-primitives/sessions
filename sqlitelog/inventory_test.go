@@ -59,6 +59,47 @@ func TestInventoryRequiresExplicitReconciliation(t *testing.T) {
 	}
 }
 
+// Version 7 must not freeze fork/reaper shapes before the PRs that consume them.
+func TestAllocationSchemaDoesNotReserveFutureCleanupState(t *testing.T) {
+	for _, migrated := range []bool{false, true} {
+		name := "fresh"
+		if migrated {
+			name = "migrated"
+		}
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "inventory.db")
+			if migrated {
+				openV4Fixture(t, path)
+			}
+			s := deletionStore(t, path)
+			for _, column := range []string{"inventory_complete", "inventory_evidence", "deletion_completed_at"} {
+				var count int
+				if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('sessions') WHERE name=?`, column).Scan(&count); err != nil || count != 1 {
+					t.Errorf("required session column %s: count=%d, err=%v", column, count, err)
+				}
+			}
+			for _, column := range []string{"cleanup_error", "fork_batch"} {
+				var count int
+				if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('sessions') WHERE name=?`, column).Scan(&count); err != nil || count != 0 {
+					t.Errorf("future session column %s: count=%d, err=%v", column, count, err)
+				}
+			}
+			for _, object := range []string{"allocations", "allocations_session"} {
+				var count int
+				if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name=?`, object).Scan(&count); err != nil || count != 1 {
+					t.Errorf("required ledger object %s: count=%d, err=%v", object, count, err)
+				}
+			}
+			for _, object := range []string{"fork_batches", "fork_batches_parent", "sessions_fork_batch", "sessions_deletion"} {
+				var count int
+				if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name=?`, object).Scan(&count); err != nil || count != 0 {
+					t.Errorf("future cleanup object %s: count=%d, err=%v", object, count, err)
+				}
+			}
+		})
+	}
+}
+
 func TestAllocationIntentRollbackDoesNotLeaveImplicitMetadata(t *testing.T) {
 	s := deletionStore(t, ":memory:")
 	approvalExec(t, s.db, "CREATE TRIGGER fail_attempt BEFORE INSERT ON allocations BEGIN SELECT RAISE(ABORT,'intent failed'); END")

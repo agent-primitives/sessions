@@ -84,8 +84,9 @@ fenced by this local guard.
 ## Does deleting a session stop its actor or erase its history?
 
 No. `DeleteSession` permanently tombstones the UID and returns `PENDING`: durable intent only, not
-resource release. Until #88 defines ownership and cleanup, actors, snapshots and fork-child pins
-remain retained indefinitely. Delete does not call Stop or report cleanup completion. Get and raw
+resource release. The SQLite allocation-attempt ledger is incomplete, not authoritative cleanup
+inventory. Until #88 supplies authoritative cleanup inventory and reclamation, actors, snapshots and
+fork-child pins remain retained indefinitely. Delete does not call Stop or report cleanup completion. Get and raw
 Replay still expose the UID, metadata and journal, retained forever; List hides it. There is no
 cascade, erasure or UID reuse. Existing children and grandchildren remain usable and can fork
 themselves.

@@ -13,8 +13,8 @@ import (
 	"github.com/agent-primitives/sessions/api"
 )
 
-// ErrCleanupPending means cleanup cannot yet complete: the session is active, an allocation
-// remains unreleased, inventory is incomplete, or an owned fork batch is unfinished.
+// ErrCleanupPending classifies incomplete inventory that prevents cleanup. The allocation
+// recorder does not itself run cleanup or report its completion.
 var ErrCleanupPending = errors.New("sqlitelog: cleanup pending")
 
 // ErrInventoryIncomplete also satisfies ErrCleanupPending. Only explicit operator evidence,
@@ -25,38 +25,31 @@ var ErrInventoryIncomplete = fmt.Errorf("%w: inventory incomplete", ErrCleanupPe
 // callers must not confirm or release another session's resources.
 var ErrAllocationNotFound = errors.New("sqlitelog: allocation attempt not found")
 
-// ErrAllocationConflict means confirmation lacks an immutable resource ID or would change one.
+// ErrAllocationConflict means confirmation lacks a session-scoped handle or would change
+// the handle already recorded for this attempt.
 var ErrAllocationConflict = errors.New("sqlitelog: allocation confirmation conflict")
 
-// Allocation is a write-ahead resource attempt. Only the opaque resource ID is retained from an
-// incarnation, not its address, worker credentials or routing metadata.
+// Allocation is a write-ahead resource attempt. ResourceID retains the incarnation's
+// session-scoped handle, not its compute-instance identity, address, credentials or routing metadata.
 type Allocation struct {
 	ID, SessionUID, Backend, Operation, ResourceID string
 	Confirmed                                      bool
 }
 
-// migrateCleanupInventory adds the allocation ledger and reserves internal publication and
-// cleanup metadata. Existing inventory is not evidence of complete allocation coverage.
+// migrateCleanupInventory adds the allocation ledger and inventory completeness/evidence columns.
+// Existing inventory is not evidence of complete allocation coverage.
 // The explicit default-value UPDATE provides a deterministic trigger hook for rollback tests.
 func migrateCleanupInventory(tx *sql.Tx) error {
 	_, err := tx.Exec(`
 		ALTER TABLE sessions ADD COLUMN inventory_complete INTEGER NOT NULL DEFAULT 0;
 		UPDATE sessions SET inventory_complete = 0;
 		ALTER TABLE sessions ADD COLUMN inventory_evidence TEXT NOT NULL DEFAULT '';
-		ALTER TABLE sessions ADD COLUMN cleanup_error TEXT NOT NULL DEFAULT '';
-		ALTER TABLE sessions ADD COLUMN fork_batch TEXT NOT NULL DEFAULT '';
 		CREATE TABLE allocations (
 		  id TEXT PRIMARY KEY, session TEXT NOT NULL, backend TEXT NOT NULL,
 		  operation TEXT NOT NULL, resource_id TEXT NOT NULL DEFAULT '',
 		  confirmed INTEGER NOT NULL DEFAULT 0, released INTEGER NOT NULL DEFAULT 0
 		);
-		CREATE INDEX allocations_session ON allocations(session, released, id);
-		CREATE TABLE fork_batches (
-		  id TEXT PRIMARY KEY, parent TEXT NOT NULL, status TEXT NOT NULL
-		);
-		CREATE INDEX fork_batches_parent ON fork_batches(parent, status);
-		CREATE INDEX sessions_fork_batch ON sessions(fork_batch);
-		CREATE INDEX sessions_deletion ON sessions(deletion_state, session);`)
+		CREATE INDEX allocations_session ON allocations(session, released, id);`)
 	return err
 }
 
@@ -101,8 +94,8 @@ func (l *Log) BeginAllocation(ctx context.Context, backend, operation string) (s
 }
 
 // ConfirmAllocation may acknowledge a late response after DELETE, but cannot reassign an attempt
-// or replace the resource ID. It retains this attempt and compacts other confirmed, unreleased
-// attempts for the same (session, backend, resource ID), regardless of operation. Identical retries
+// or replace its session-scoped handle. It retains this attempt and compacts other confirmed,
+// unreleased attempts for the same (session, backend, handle), regardless of operation. Identical retries
 // succeed while the attempt is retained; compacted IDs return ErrAllocationNotFound.
 func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Incarnation) error {
 	if in.ID == "" {

@@ -170,8 +170,9 @@ id is what the harness says about itself, so it does not authenticate the harnes
 
 Any caller that can reach the default Sessions service can permanently tombstone a known UID:
 Delete has no additional authorization unless the host installs `WithAuthorization`. `PENDING`
-acknowledges durable intent only until #88 provides authoritative ownership and cleanup. Actors,
-snapshots and fork-child pins remain retained indefinitely; Delete does not
+acknowledges durable intent only. The SQLite allocation-attempt ledger is incomplete, not
+authoritative cleanup inventory. Until #88 provides authoritative cleanup inventory and reclamation,
+actors, snapshots and fork-child pins remain retained indefinitely; Delete does not
 call Stop, reclaim resources or stop an actor's independent external activity. The retained metadata
 and journal are audit evidence, not a complete inventory of resources to clean up.
 

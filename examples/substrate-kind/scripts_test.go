@@ -14,8 +14,26 @@ import (
 func fixture(t *testing.T, scripts map[string]string) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_REAL_GO", realGo)
+	const checkModel = `if [[ "$#" == 4 && "$1" == -C && "$3" == run && "$4" == ./hack/check-model ]]; then
+  exec "$TEST_REAL_GO" "$@"
+fi
+`
 	for name, body := range scripts {
+		if name == "go" {
+			body = checkModel + body
+		}
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/usr/bin/env bash\nset -euo pipefail\n"+body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := scripts["go"]; !ok {
+		if err := os.WriteFile(filepath.Join(dir, "go"),
+			[]byte("#!/usr/bin/env bash\nset -euo pipefail\n"+checkModel+"echo unexpected-go-invocation >&2\nexit 1\n"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -25,6 +43,9 @@ func fixture(t *testing.T, scripts map[string]string) (string, string) {
 	t.Setenv("SUBSTRATE_KIND_WORK", dir)
 	t.Setenv("SUBSTRATE_DIR", filepath.Join(dir, "custom-substrate"))
 	t.Setenv("SUBSTRATE_KIND_KUBECONFIG", filepath.Join(dir, "kubeconfig"))
+	t.Setenv("MODEL_API_KEY", "")
+	t.Setenv("MODEL_PATH", "")
+	t.Setenv("MODEL_AUTH_HEADER", "")
 	state := filepath.Join(dir, "recipe-test")
 	if err := os.Mkdir(state, 0o700); err != nil {
 		t.Fatal(err)
@@ -194,6 +215,10 @@ func deploymentFixture(t *testing.T) string {
 if [[ "$*" == *" -- ollama pull "* && "$TEST_PULL" == timeout ]]; then exit 124; fi
 shift 2
 exec "$@"`,
+		"docker": `echo docker >> "$TEST_DIR/cluster-calls"; exit 1`,
+		"kind":   `echo kind >> "$TEST_DIR/cluster-calls"; exit 1`,
+		"git":    `echo git >> "$TEST_DIR/cluster-calls"; exit 1`,
+		"ko":     `echo ko >> "$TEST_DIR/cluster-calls"; exit 1`,
 		"kubectl": `echo "$*" >> "$TEST_DIR/kube-calls"
 case "$*" in
   *"apply -f -"*)
@@ -214,7 +239,9 @@ case "$*" in
   *"rollout status"*) exit 0 ;;
   *"create configmap"*) echo '{}' ;;
   *"get configmap"*) echo 1 ;;
-  *"get secret"* | *"delete secret"*) exit 0 ;;
+  *"create secret"*) cat >/dev/null; touch "$TEST_DIR/secret"; echo '{}' ;;
+  *"get secret"*) if [[ -f "$TEST_DIR/secret" ]]; then echo 2; fi ;;
+  *"delete secret"*) rm -f "$TEST_DIR/secret" ;;
   *) exit 1 ;;
 esac`,
 	})
@@ -236,6 +263,96 @@ esac`,
 	t.Setenv("WORKER_IMAGE", "example/worker@sha256:"+strings.Repeat("c", 64))
 	t.Setenv("TEST_PULL", "success")
 	return dir
+}
+
+func TestExternalCredentialSwitchRefusesLocalProvider(t *testing.T) {
+	for _, source := range []string{"stub", "ollama"} {
+		t.Run(source, func(t *testing.T) {
+			dir := deploymentFixture(t)
+			t.Setenv("MODEL_API_KEY", "fixture-only")
+			if out, err := exec.CommandContext(t.Context(), "bash", "deploy.sh").CombinedOutput(); err != nil {
+				t.Fatalf("initial external deployment: %v\n%s", err, out)
+			}
+			t.Setenv("MODEL_SOURCE", source)
+			for _, script := range []string{"up.sh", "deploy.sh"} {
+				for _, file := range []string{"kube-calls", "calls"} {
+					if err := os.WriteFile(filepath.Join(dir, file), nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				out, err := exec.CommandContext(t.Context(), "bash", script).CombinedOutput()
+				if err == nil || !strings.Contains(string(out), "unset MODEL_API_KEY") ||
+					strings.Contains(string(out), "fixture-only") {
+					t.Fatalf("%s did not privately refuse leftover credentials: %v\n%s", script, err, out)
+				}
+				for _, file := range []string{"kube-calls", "calls", "cluster-calls"} {
+					calls, err := os.ReadFile(filepath.Join(dir, file))
+					if err != nil && !os.IsNotExist(err) {
+						t.Fatal(err)
+					}
+					if len(calls) != 0 {
+						t.Fatalf("%s contacted the cluster before refusal:\n%s", script, calls)
+					}
+				}
+				if _, err := os.Stat(filepath.Join(dir, "secret")); err != nil {
+					t.Fatalf("refusal changed the working deployment's Secret: %v", err)
+				}
+			}
+			t.Setenv("MODEL_API_KEY", "")
+			t.Setenv("MODELSTUB_IMAGE", "example/stub@sha256:"+strings.Repeat("d", 64))
+			if out, err := exec.CommandContext(t.Context(), "bash", "deploy.sh").CombinedOutput(); err != nil {
+				t.Fatalf("explicitly unkeyed local deployment: %v\n%s", err, out)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "secret")); !os.IsNotExist(err) {
+				t.Fatalf("local deployment retained the external credential Secret: %v", err)
+			}
+		})
+	}
+}
+
+func TestModelRouteRefusalPreservesDeployment(t *testing.T) {
+	for _, script := range []string{"up.sh", "deploy.sh"} {
+		t.Run(script, func(t *testing.T) {
+			dir := deploymentFixture(t)
+			if out, err := exec.CommandContext(t.Context(), "bash", "deploy.sh").CombinedOutput(); err != nil {
+				t.Fatalf("initial deployment: %v\n%s", err, out)
+			}
+			for _, tc := range []struct{ name, base, path, header string }{
+				{"URL typo", "not-a-url", "/chat/completions", "Authorization"},
+				{"credential-bearing URL", "https://fixture-marker@api.example", "/chat/completions", "Authorization"},
+				{"invalid path", "https://api.example", "//fixture-marker.example/chat", "Authorization"},
+				{"invalid header", "https://api.example", "/chat/completions", "fixture-marker\n"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					t.Setenv("MODEL_BASE_URL", tc.base)
+					t.Setenv("MODEL_PATH", tc.path)
+					t.Setenv("MODEL_AUTH_HEADER", tc.header)
+					before := make(map[string][]byte)
+					for _, file := range []string{"kube-calls", "calls"} {
+						var err error
+						before[file], err = os.ReadFile(filepath.Join(dir, file))
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					out, err := exec.CommandContext(t.Context(), "bash", script).CombinedOutput()
+					if err == nil || !strings.Contains(string(out), "Model provider preflight failed") ||
+						strings.Contains(string(out), "fixture-marker") {
+						t.Fatalf("route was not refused privately: %v\n%s", err, out)
+					}
+					for file, previous := range before {
+						calls, err := os.ReadFile(filepath.Join(dir, file))
+						if err != nil || !bytes.Equal(calls, previous) {
+							t.Fatalf("refused route contacted the cluster (%s): %v\n%s", file, err, calls)
+						}
+					}
+					if calls, err := os.ReadFile(filepath.Join(dir, "cluster-calls")); !os.IsNotExist(err) {
+						t.Fatalf("refused route reached setup commands: %v\n%s", err, calls)
+					}
+				})
+			}
+		})
+	}
 }
 
 func TestDeploySandboxChangePreservesExistingWorkerPool(t *testing.T) {

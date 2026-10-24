@@ -56,6 +56,18 @@ from the environment and are submitted to a Kubernetes Secret through stdin, nev
 the key removes any previously configured key. ConfigMap/Secret resource versions restart the
 daemon when its settings change.
 
+`MODEL_API_KEY` is accepted only with `MODEL_SOURCE=external`. Before switching back to Ollama or
+the stub, run `unset MODEL_API_KEY`; setup refuses a leftover key instead of sending it to a local
+provider. A successful unkeyed deployment removes the previous credential Secret.
+
+Both setup and direct deployment validate the effective model route before cluster operations,
+using the daemon's model constructor without contacting the provider. The base URL must use HTTP
+or HTTPS with a host and no userinfo, query or fragment. The model path must start with a single
+`/`; its only supported query is one date-shaped `api-version` (for example,
+`/chat/completions?api-version=2025-04-01-preview`). Header names accept letters, digits and hyphens.
+Refusals do not print configuration values. This catches invalid configuration, not provider
+availability or model access.
+
 Setup defaults to microVM when Docker can expose `/dev/kvm` to a short-lived BusyBox container.
 It visibly falls back to gVisor when Docker reports that device is missing; image download,
 other Docker, installation, or startup failures stop setup. This checks device access, not VM

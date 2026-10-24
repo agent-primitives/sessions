@@ -54,6 +54,9 @@ not provide.
 
 ### Fixed
 
+- The Substrate kind example refuses leftover model credentials in Ollama/stub modes and
+  validates model routes before cluster operations, preserving a working deployment when a
+  rerun supplies invalid provider settings.
 - SQLite-backed `Replay` preserves the stored protobuf event's field presence, so audit clients
   can detect presence-only tampering instead of verifying a normalized event. Stored bytes,
   hashes, and journal/wire schemas are unchanged; no journal migration is required.

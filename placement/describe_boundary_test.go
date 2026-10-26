@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -16,7 +17,6 @@ import (
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/placement"
-	"github.com/agent-primitives/sessions/runtime/local"
 	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
@@ -47,7 +47,7 @@ func TestControllerDescribeBoundaryUsesAdmissionClassification(t *testing.T) {
 			{name: "caller deadline", peerErr: status.Error(codes.Unavailable, "peer unavailable"), deadline: true, want: placement.ErrAdmissionInterrupted, wantCause: context.DeadlineExceeded},
 			{name: "unsupported Describe", peerErr: status.Error(codes.Unimplemented, "no Describe"), want: controller.ErrHarnessDescribeFailed},
 		} {
-			t.Run(operation+"/"+tc.name, func(t *testing.T) {
+			check := func(t *testing.T) {
 				store, err := sqlitelog.Open(":memory:")
 				if err != nil {
 					t.Fatal(err)
@@ -65,8 +65,12 @@ func TestControllerDescribeBoundaryUsesAdmissionClassification(t *testing.T) {
 				}
 				before := toolRecords(t, log)
 				base := &identityToolHarness{version: "v1"}
-				backend := local.New(base)
-				t.Cleanup(func() { _ = backend.Close() })
+				desc, err := base.Describe(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				// The controller is dialed in-process below; no real harness listener is needed.
+				backend := &routedBackend{desc: desc}
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 				if tc.deadline {
@@ -107,6 +111,10 @@ func TestControllerDescribeBoundaryUsesAdmissionClassification(t *testing.T) {
 				if base.runs.Load() != 0 || models.Load() != 0 || tools.Load() != 0 || closes.Load() != 1 || !reflect.DeepEqual(before, toolRecords(t, log)) {
 					t.Fatalf("Describe failure ran effects, changed records, or leaked connection: Run/model/tool/close=%d/%d/%d/%d", base.runs.Load(), models.Load(), tools.Load(), closes.Load())
 				}
+			}
+			t.Run(operation+"/"+tc.name, func(t *testing.T) {
+				// Fake time advances only at the blocking Describe, not during allocation IO.
+				synctest.Test(t, check)
 			})
 		}
 	}

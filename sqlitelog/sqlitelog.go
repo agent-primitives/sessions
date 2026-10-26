@@ -86,8 +86,9 @@ CREATE INDEX IF NOT EXISTS sessions_project_created
 // build can identify a database without inspecting its columns. Version 1 is what v0.1.0 through
 // v0.1.2 shipped. Version 2 adds the harness registry; version 3 adds approval reporting;
 // version 4 adds permanent deletion intent; version 5 adds caller ownership and an authorization marker;
-// version 6 records explicit session model-policy eligibility.
-const SchemaVersion = 6
+// version 6 records explicit session model-policy eligibility; version 7 adds the allocation
+// ledger and inventory completeness/evidence columns.
+const SchemaVersion = 7
 
 // migrations[i] moves a database from version i+1 to i+2, inside the migration transaction. The
 // array length is tied to SchemaVersion, so bumping one without the other does not compile.
@@ -97,6 +98,7 @@ var migrations = [SchemaVersion - 1]func(*sql.Tx) error{
 	migrateV3ToV4,
 	migrateV4ToV5,
 	migrateV5ToV6,
+	migrateCleanupInventory,
 }
 
 // migrateV5ToV6 leaves every existing session on legacy model semantics, including empty logs.
@@ -105,10 +107,9 @@ func migrateV5ToV6(tx *sql.Tx) error {
 	return err
 }
 
-// migrateV3ToV4 adds the deletion columns. deletion_completed_at is reserved for resource cleanup
-// (#88): it defaults to 0, and this build never reads or writes it, so values a later build wrote are
-// left as is. It stays in the v4 shape so databases already at v4 keep opening unchanged; cleanup
-// defines its meaning when it lands.
+// migrateV3ToV4 adds the deletion columns. The v4 release reserved deletion_completed_at for
+// resource cleanup, defaulting it to 0 without reading or writing it. Later cleanup work must
+// preserve this historical migration and values already stored in the column.
 func migrateV3ToV4(tx *sql.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE sessions ADD COLUMN deletion_state TEXT NOT NULL DEFAULT 'ACTIVE';
 		ALTER TABLE sessions ADD COLUMN deletion_requested_at INTEGER NOT NULL DEFAULT 0;

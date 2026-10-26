@@ -30,6 +30,11 @@ const skip = new Set(["README.md"]);
 // Descriptions are written here rather than derived from the first paragraph, which is usually a
 // sentence of context rather than a summary and reads badly as a page description.
 const meta = {
+  "allocation-ownership.md": {
+    title: "Allocation ownership",
+    description:
+      "Write-ahead allocation tracking, conservative inventory completeness, and operator reconciliation.",
+  },
   "api-reference.md": {
     title: "API reference",
     description:

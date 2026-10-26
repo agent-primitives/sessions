@@ -1143,9 +1143,10 @@ RESUME marker. These tests prove orchestration and retention behavior, not real 
   derived from the child session UID, so `Stop` deletes it after the child and a failed fork
   deletes it on the way out. `DeleteSession` permanently tombstones the UID and returns
   `PENDING`: durable deletion intent only, without calling `Stop` or reclaiming resources.
-  Suspended actors and fork tags remain retained indefinitely. Ownership and cleanup-target
-  persistence, retryable teardown and completion belong to #88; until that lands, operators must
-  reconcile and reclaim actors and fork tags directly in Substrate. There is no automatic
+  Suspended actors and fork tags remain retained indefinitely. The SQLite allocation-attempt ledger
+  is incomplete, not authoritative cleanup inventory. Authoritative cleanup inventory, retryable
+  teardown and completion remain future work (#88); operators must reconcile and reclaim actors
+  and fork tags directly in Substrate. There is no automatic
   retention deadline. One tag per fan-out instead of per child would save N-1 copies, but a
   shared tag can only be deleted once every child has suspended at least once.
 - **I4 is harness-side.** `controller.Exec` sends the full journal as `Start.History` on every turn,

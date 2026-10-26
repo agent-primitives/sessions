@@ -1069,8 +1069,10 @@ does not erase data or reclaim compute.
 - `OPS-35`: `DELETION_PENDING` acknowledges intent only. The host MUST NOT report deletion as
   reclamation. The reference host calls no runtime method for it (no `Stop`, `RT-7`), releases
   no actor, snapshot, or fork-child pin, and never reports `COMPUTE_TERMINATED` or a completed
-  deletion. Retained compute has to be reclaimed in the backend by the operator. Ownership and
-  cleanup are future work (#88).
+  deletion. Retained compute has to be reclaimed in the backend by the operator. The reference
+  SQLite store records allocation attempts, but that incomplete intent ledger is not authoritative
+  cleanup inventory. Authoritative cleanup inventory and automatic reclamation remain future work
+  (#88).
 - `OPS-36`: The exclusion in `OPS-30` and the checks in `OPS-34` are per host. Durable refusal
   (`LOG-19`) stops later writes from any host that enforces it, but a host that does not (an
   older binary that already has the journal open, §18) keeps writing, and another host can
@@ -1272,8 +1274,12 @@ The reference host takes it as `placement.Backend` in
   error, since compute that is still there can fail a restore for another reason. With no recorded
   instance, `runtime/substrate` reports lost after a `NOT_FOUND` resume whenever the actor does not
   hold the session's snapshot, if a lifecycle change races the held-ref preflight (§13.4).
-- The returned `Incarnation.ID` is used by the reference host only for diagnostics; every in-repo
-  backend sets it to the session uid.
+- `Create` and `Restore` MUST return a nonempty `Incarnation.ID`, regardless of the host's log
+  implementation. SQLite-tracked placement enforces this before dialing: an empty ID fails with
+  `sqlitelog.ErrAllocationConflict` after the runtime call, leaving the allocation attempt unresolved.
+  Logs without allocation recording do not enforce this requirement and retain the diagnostic-only
+  use of ID. Every in-repo backend sets it to the session uid; it is not the
+  immutable compute-instance identity used to detect replacement (`RT-4h`).
 - `RT-4d`: The `Incarnation` returned by `Create` and `Restore` MUST carry an `Address` at which
   the harness is reachable (the reference dialer takes `unix://<path>` or `host:port`). The host
   dials that address and attaches the incarnation's `CallMetadata` to every call it makes to the
@@ -1374,6 +1380,24 @@ The reference host takes it as `placement.Backend` in
 - The reference host does not call `Status`.
 
 ### 13.4 Reference backends (informative)
+
+The SQLite placement path durably records allocation intent before Create/Restore and confirms
+only the returned session-scoped handle, not an immutable compute-instance identity. A replaced
+compute instance can reuse the same handle. Confirmation gets a bounded context independent of
+client cancellation once the runtime returns. A successful confirmation atomically replaces prior
+confirmed, unreleased attempts for the same (session, backend key, handle), retaining the attempt
+being confirmed, not the one with the greatest random ID. Unresolved attempts and released history
+are preserved, so repeated unknown outcomes can still grow the ledger. Confirming or releasing a
+compacted attempt returns `sqlitelog.ErrAllocationNotFound`; cleanup must reread the live inventory
+if a late confirmation retires a paged attempt. Addresses and call credentials are not inventory.
+Optional `api.CleanupRuntime` keys identify exact non-destructive release configurations, not
+harness aliases or a generic Stop fallback. Fork keeps its legacy allocation/rollback path at this
+stage. Version 7 adds the allocation ledger and inventory completeness/evidence columns, without
+fork-publication or reaper state. It enables no reclamation. Every newly created inventory remains
+incomplete, as does every migrated row; tracking a later restore does not certify a previous
+untracked fork. A host embedding `sqlitelog` can establish coverage by calling
+`Store.CertifyInventory` only after explicit reconciliation. Stop all old writers before migration
+and never downgrade the migrated journal to v0.3.0 or older.
 
 - `runtime/local`: serves the harness in the host process over a unix socket shared by all
   sessions. `Describe` asks that in-process harness. All capabilities false.
@@ -1736,7 +1760,8 @@ The reference implementation protects the integrity of the record, not access to
     execution (`EXE-29`), so `Resume` no longer re-runs that turn. A legacy harness invocation
     (reconstruction, or recovery of an unfinished legacy execution) needs a session uid; `Resume`
     of a complete legacy execution is a no-op without one.
-  - The reference SQLite store versions its schema with `PRAGMA user_version` (currently 5),
+  - The reference SQLite store versions its schema with `PRAGMA user_version` (see
+    `sqlitelog.SchemaVersion`),
     migrates forward in one transaction without rewriting events or hashes, and refuses a newer or
     negative version. Version 4 adds the deletion state; migrated sessions are
     `DELETION_ACTIVE`. Version 5 adds exact caller ownership and an off-mode authorization marker.
@@ -1746,6 +1771,11 @@ The reference implementation protects the integrity of the record, not access to
     an already-open older writer does not check the marker. The marker is checked only at Open,
     including by this build: changing the mode requires stopping every writer (including embedded
     CLI processes), then restarting all hosts with binaries that support the new mode.
+    Version 6 adds explicit model-policy eligibility. Version 7 adds the allocation ledger and
+    inventory completeness/evidence columns, without fork-publication or reaper state. Journal bytes
+    are unchanged. Stop all older writers before that migration; no downgrade to v0.3.0 or older is
+    supported. All
+    inventories remain incomplete until explicit operator reconciliation (§13.4).
   - An older binary refuses a version 4 journal when it opens it, but one that already had the
     journal open does not enforce deletion (`OPS-36`): it can still append, mint fences, and
     update metadata after a `LIFECYCLE_DELETE`. Every older host and embedded `agentctl` sharing

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -26,7 +27,7 @@ import (
 // newClient runs a real Sessions service over bufconn and returns the SDK pointed at it. These
 // exercise the SDK against the actual server rather than a stub, since the bookkeeping it exists to
 // hide (the session frame, pagination, draining) is only meaningful against real responses.
-func newClient(t *testing.T) *client.Client {
+func newClient(t *testing.T, opts ...client.Option) *client.Client {
 	t.Helper()
 
 	backend := local.New(echoagent.Harness{})
@@ -51,14 +52,15 @@ func newClient(t *testing.T) *client.Client {
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
-	c, err := client.Dial("passthrough:///bufnet",
+	opts = append([]client.Option{
 		client.WithDialOptions(
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 				return lis.DialContext(ctx)
 			}),
 		),
-	)
+	}, opts...)
+	c, err := client.Dial("passthrough:///bufnet", opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,18 +279,80 @@ func TestListSessionsWalksEveryPage(t *testing.T) {
 // WithProject supplies the project for calls given none, so a single-tenant caller is not repeating
 // it on every request.
 func TestWithProjectDefaultsTheProject(t *testing.T) {
-	backendClient := newClient(t)
-	if _, err := backendClient.CreateSession(t.Context(), &v1.Session{
-		Metadata: &v1.ResourceMetadata{Project: "acme"},
-	}); err != nil {
-		t.Fatal(err)
+	c := newClient(t, client.WithProject("acme"))
+	wantIDs := map[string][]string{}
+	for _, tt := range []struct {
+		name    string
+		session *v1.Session
+		project string
+	}{
+		{name: "nil session", project: "acme"},
+		{name: "missing metadata", session: &v1.Session{}, project: "acme"},
+		{name: "empty project", session: &v1.Session{Metadata: &v1.ResourceMetadata{Name: "named"}}, project: "acme"},
+		{name: "explicit project", session: &v1.Session{Metadata: &v1.ResourceMetadata{Project: "other"}}, project: "other"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			created, err := c.CreateSession(t.Context(), tt.session)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := created.GetMetadata().GetProject(); got != tt.project {
+				t.Fatalf("created project = %q, want %q", got, tt.project)
+			}
+			wantIDs[tt.project] = append(wantIDs[tt.project], created.GetMetadata().GetUid())
+		})
 	}
-	all, err := backendClient.ListSessions(t.Context(), "acme")
-	if err != nil {
-		t.Fatal(err)
+	for _, ids := range wantIDs {
+		slices.Sort(ids)
 	}
-	if len(all) != 1 {
-		t.Fatalf("listed %d sessions in acme, want 1", len(all))
+	for _, tt := range []struct {
+		name    string
+		project string
+		want    string
+	}{
+		{name: "default listing", want: "acme"},
+		{name: "explicit default project listing", project: "acme", want: "acme"},
+		{name: "explicit other project listing", project: "other", want: "other"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			checkSessions := func(sessions []*v1.Session) {
+				t.Helper()
+				var ids []string
+				for _, s := range sessions {
+					if got := s.GetMetadata().GetProject(); got != tt.want {
+						t.Fatalf("listed project = %q, want %q", got, tt.want)
+					}
+					ids = append(ids, s.GetMetadata().GetUid())
+				}
+				slices.Sort(ids)
+				if !slices.Equal(ids, wantIDs[tt.want]) {
+					t.Fatalf("listed session IDs = %v, want %v", ids, wantIDs[tt.want])
+				}
+			}
+			all, err := c.ListSessions(t.Context(), tt.project)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkSessions(all)
+
+			var paged []*v1.Session
+			token := ""
+			for i := range len(wantIDs[tt.want]) {
+				page, err := c.ListSessionsPage(t.Context(), tt.project, 1, token)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(page.GetSessions()) != 1 {
+					t.Fatalf("page %d returned %d sessions, want 1", i, len(page.GetSessions()))
+				}
+				paged = append(paged, page.GetSessions()...)
+				token = page.GetNextPageToken()
+				if wantMore := i+1 < len(wantIDs[tt.want]); (token != "") != wantMore {
+					t.Fatalf("page %d next token = %q, want more pages = %v", i, token, wantMore)
+				}
+			}
+			checkSessions(paged)
+		})
 	}
 }
 

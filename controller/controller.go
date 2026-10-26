@@ -58,6 +58,10 @@ var ErrInheritedToolIntent = fmt.Errorf("%w: inherited tool intent cannot be res
 // whose compatibility identity cannot be scoped to a session.
 var ErrMissingSessionUID = errors.New("controller: a session UID is required")
 
+// ErrMissingModel is returned by a live model call when the controller has neither a ModelFunc
+// nor a WithStreamingModel callback. It is a host configuration error, not a provider failure.
+var ErrMissingModel = errors.New("controller: model callback is not configured")
+
 // ErrIncompleteInvocation identifies an unfinished trailing turn whose inputs were only partly
 // committed. It wraps ErrInvalidExecutionLog; the caller can retry with Exec and all inputs.
 var ErrIncompleteInvocation = fmt.Errorf("%w: incomplete invocation", ErrInvalidExecutionLog)
@@ -222,7 +226,8 @@ type Controller struct {
 // WithFence is supplied (the placement layer minted the fence and stamped it on the incarnation), New
 // uses that token instead — the log remains the single authority either way. A tool executor
 // without a nonempty WithSessionUID returns ErrMissingSessionUID before advancing the fence.
-// A nil model permits replay and streaming-only use; live model calls without either return an error.
+// A nil model permits replay and streaming-only use; live model calls without either return
+// ErrMissingModel.
 func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, error) {
 	c := &Controller{log: log, model: model, logger: slog.New(slog.DiscardHandler)}
 	for _, o := range opts {
@@ -585,7 +590,7 @@ func (c *Controller) emitDelta(executionID string, partIndex int32, chunk string
 func (c *Controller) invokeModel(ctx context.Context, executionID string, req api.ModelRequest) (api.ModelResponse, error) {
 	if c.stream == nil {
 		if c.model == nil {
-			return api.ModelResponse{}, errors.New("controller: model callback is not configured")
+			return api.ModelResponse{}, ErrMissingModel
 		}
 		return c.model(ctx, req)
 	}

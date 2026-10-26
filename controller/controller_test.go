@@ -118,9 +118,9 @@ func TestExecModelConfiguration(t *testing.T) {
 		name    string
 		model   controller.ModelFunc
 		stream  controller.StreamFunc
-		wantErr bool
+		wantErr error
 	}{
-		{name: "unconfigured", wantErr: true},
+		{name: "unconfigured", wantErr: controller.ErrMissingModel},
 		{name: "plain", model: echoModel},
 		{
 			name: "streaming only",
@@ -136,8 +136,8 @@ func TestExecModelConfiguration(t *testing.T) {
 				t.Fatal(err)
 			}
 			err = c.Exec(t.Context(), &echoHarness{}, []api.Message{msg("hi")}, 0)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("Exec error = %v, want error = %v", err, tc.wantErr)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Exec error = %v, want errors.Is(err, %v)", err, tc.wantErr)
 			}
 			if err := log.Verify(); err != nil {
 				t.Fatal(err)

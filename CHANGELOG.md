@@ -12,6 +12,9 @@ not provide.
 - Durable allocation intent and session-scoped handle acknowledgements for SQLite-backed Create and
   Restore, plus optional non-destructive release contracts for local and remote runtimes. No reaper
   runs yet; Fork retains its existing allocation and rollback behavior.
+- `controller.ErrMissingModel`: a live model call on a controller with neither a `ModelFunc` nor
+  `WithStreamingModel` returns it (match with `errors.Is`) instead of dereferencing a nil model.
+  Replay and streaming-only controllers still accept a nil model.
 
 ### Compatibility
 

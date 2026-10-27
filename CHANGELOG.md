@@ -23,6 +23,9 @@ not provide.
 
 ### Fixed
 
+- The durable Substrate kind example has its own live CI cluster, exercising fresh setup,
+  unchanged reruns, restart/persistence smoke and teardown through its public scripts instead
+  of borrowing the conformance cluster. Both live jobs gate `substrate-conformance`.
 - The Substrate kind example bootstraps and pins a new managed checkout before inspecting clusters,
   so a first run does not require kind on `PATH`. Relative kubeconfig overrides resolve
   consistently across setup commands; stale installations still refuse checkout changes.

@@ -88,7 +88,7 @@ architecture.
 | `deploy/workerpool.yaml` | Two workers of the selected sandbox class |
 | `deploy/ollama.yaml`, `deploy/modelstub.yaml` | Local Ollama provider and deterministic CI provider |
 | `up.sh`, `common.sh`, `down.sh` | Owned cluster setup/teardown and common settings |
-| `deploy.sh` | Apply the example to an already-installed cluster; also used by CI |
+| `deploy.sh` | Apply the example to an already-installed cluster; called by setup |
 | `smoke.sh` | Client-only restart/persistence demonstration |
 | `cmd/modelstub`, `scripts_test.go` | Example-local fixture and regression tests; separate Go module |
 

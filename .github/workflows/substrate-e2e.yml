@@ -26,13 +26,16 @@
 #
 # On a pull request the changes job first diffs the merge commit against the base branch with
 # hack/ci-path-filter.sh. When only paths the suite does not read changed (docs, markdown, the site,
-# the license, CODEOWNERS, the dependabot and copilot configs), substrate-conformance skips every
-# step and reports success in seconds; it still runs, because it is a required check. Push to main,
+# the license, CODEOWNERS, the dependabot and copilot configs), both live jobs skip their cluster
+# work and the required gate reports success in seconds. Push to main,
 # the nightly schedule and manual runs always run the full suite.
 #
 # Substrate's binaries are built from source at SUBSTRATE_REF (it publishes no images), so the Go
 # build and module caches and the envoy-dataplane image's build cache are kept between runs, and a
 # warm run reuses them instead of compiling from scratch.
+# The durable example has a separate runner and cluster, exercising up.sh, reuse, smoke.sh and
+# down.sh without conformance setup hiding bootstrap bugs. The existing required check combines
+# the pinned conformance suite and the example lifecycle.
 name: substrate-e2e
 
 on:
@@ -40,7 +43,7 @@ on:
     branches: [main]
   # No paths filter: substrate-conformance is a required check, and a workflow a paths filter skips
   # never reports it, so the pull request could not merge. The changes job below decides instead,
-  # and substrate-conformance skips its steps when nothing it checks changed.
+  # and the live jobs skip their cluster work when nothing they check changed.
   pull_request:
   schedule:
     - cron: "0 7 * * *" # nightly, so a green main is re-proven against a fresh cluster
@@ -116,10 +119,10 @@ jobs:
           fi
           echo "decision=${decision}" | tee -a "${GITHUB_OUTPUT}"
 
-  substrate-conformance:
-    # The pinned entry keeps the bare job name: it is the required status check. The canary entry
-    # (main) exists only on scheduled and manual runs, so it can never gate a pull request, and
-    # continue-on-error keeps its failure out of the run's result.
+  substrate-conformance-suite:
+    # The final substrate-conformance gate combines this suite and the independent example.
+    # The canary (main) exists only on scheduled and manual runs; continue-on-error keeps its
+    # failure out of the run's result.
     #
     # The canary is known red until the substrate bump: at main's head (603e0062) ateom-microvm is
     # cmd/ateworker-microvm and the module path is go.ate.dev/substrate, so it fails at "Apply the
@@ -127,10 +130,9 @@ jobs:
     # job list until then; continue-on-error hides it from the run's status and notifications.
     # TODO(canary): drop continue-on-error once the canary is green after the bump, so new drift
     # turns the nightly run red (it still never runs on a pull request).
-    name: ${{ matrix.substrate == 'main' && 'substrate-conformance (substrate main)' || 'substrate-conformance' }}
+    name: ${{ matrix.substrate == 'main' && 'substrate-conformance (substrate main)' || 'substrate-conformance suite' }}
     needs: changes
-    # Runs even when the changes job fails, so this required check fails instead of being
-    # skipped: a skipped required check would count as passing.
+    # Runs even when the changes job fails, so a filter failure cannot silently skip coverage.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.substrate == 'main' }}
@@ -405,23 +407,6 @@ jobs:
           E2E_IDLE_GAP: 6m30s
         run: hack/run-e2e-job.sh 'TestHarnessStreamIdlePastRouteTimeout' "${E2E_IMAGE}" 1200
 
-      - name: Durable Substrate kind example
-        if: needs.changes.outputs.decision != 'skip'
-        timeout-minutes: 20
-        run: |
-          (cd examples/substrate-kind && go test -race ./...)
-          export SUBSTRATE_KIND_WORK="$RUNNER_TEMP/substrate-kind"
-          export SUBSTRATE_KIND_KUBECONFIG="$HOME/.kube/config"
-          export CLUSTER=kind PROJECT=smoke MODEL_SOURCE=stub SANDBOX_CLASS=microvm
-          mkdir -p "$SUBSTRATE_KIND_WORK/$CLUSTER"
-          (cd _substrate && go build -o "$SUBSTRATE_KIND_WORK/$CLUSTER/kubectl-ate" ./cmd/kubectl-ate)
-          DAEMON_IMAGE="$(cd integrations/substrate && ko build ./cmd/agentsessionsd)"
-          MODELSTUB_IMAGE="$(cd examples/substrate-kind && ko build ./cmd/modelstub)"
-          export DAEMON_IMAGE MODELSTUB_IMAGE
-          export WORKER_IMAGE="$ATEOM_MV_IMG"
-          bash examples/substrate-kind/deploy.sh
-          bash examples/substrate-kind/smoke.sh
-
       - name: Apply the counter micro-VM WorkerPool
         if: needs.changes.outputs.decision != 'skip'
         run: |
@@ -445,9 +430,123 @@ jobs:
         run: |
           df -h / || true
           kubectl --context kind-kind get workerpool,jobs,pods -A -o wide || true
-          for ns in ate-agentsessions ate-system sessions-example; do
+          for ns in ate-agentsessions ate-system; do
             for p in $(kubectl --context kind-kind get pods -n "$ns" -o name 2>/dev/null); do
               echo "=== logs: $ns/$p ==="
               kubectl --context kind-kind logs -n "$ns" "$p" --all-containers --tail=200 2>/dev/null || true
             done
           done
+
+  substrate-kind-example:
+    name: substrate-kind example lifecycle
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.decision != 'skip' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CLUSTER: sessions-example-ci
+      SUBSTRATE_KIND_WORK: ${{ github.workspace }}/_local/substrate-kind-ci
+      PROJECT: smoke
+      MODEL_SOURCE: stub
+      SANDBOX_CLASS: microvm
+    steps:
+      - name: Fail when the path filter failed
+        if: needs.changes.result != 'success'
+        run: |
+          echo "::error::The path filter failed; refusing to skip lifecycle coverage."
+          exit 1
+
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: integrations/substrate/go.mod
+          cache-dependency-path: |
+            go.sum
+            integrations/substrate/go.sum
+
+      - name: Setup ko
+        uses: ko-build/setup-ko@v0.10
+
+      - name: Offline example regressions
+        working-directory: examples/substrate-kind
+        run: go test -race -shuffle=on ./...
+
+      - name: Free runner disk space
+        # This dedicated runner needs room for a cold Substrate build and micro-VM assets.
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Require the example to bootstrap its own kind tool
+        # Do not let a runner's preinstalled kind hide a missing-checkout bootstrap failure.
+        run: |
+          mkdir -p "${RUNNER_TEMP}/without-system-kind"
+          cat >"${RUNNER_TEMP}/without-system-kind/kind" <<'EOF'
+          #!/usr/bin/env bash
+          echo "Unexpected system kind invocation; use the pinned checkout wrapper." >&2
+          exit 1
+          EOF
+          chmod +x "${RUNNER_TEMP}/without-system-kind/kind"
+          echo "${RUNNER_TEMP}/without-system-kind" >>"${GITHUB_PATH}"
+
+      - name: Set up the example from scratch
+        id: up
+        run: bash examples/substrate-kind/up.sh
+
+      - name: Reuse the owned cluster without changing its identity
+        run: |
+          cp "${SUBSTRATE_KIND_WORK}/${CLUSTER}/owner" "${RUNNER_TEMP}/owner-before"
+          bash examples/substrate-kind/up.sh
+          cmp "${RUNNER_TEMP}/owner-before" "${SUBSTRATE_KIND_WORK}/${CLUSTER}/owner"
+
+      - name: Verify persistence and continuation across daemon replacement
+        run: bash examples/substrate-kind/smoke.sh
+
+      - name: Dump diagnostics before teardown on failure
+        if: ${{ failure() && steps.up.outcome != '' && steps.up.outcome != 'skipped' }}
+        run: |
+          df -h /
+          docker ps --all
+          config="${SUBSTRATE_KIND_WORK}/${CLUSTER}/kubeconfig"
+          kubectl --context "kind-${CLUSTER}" --kubeconfig "${config}" get workerpool,pods -A -o wide || true
+          for ns in ate-system sessions-example; do
+            for pod in $(kubectl --context "kind-${CLUSTER}" --kubeconfig "${config}" get pods -n "${ns}" -o name 2>/dev/null); do
+              echo "=== logs: ${ns}/${pod} ==="
+              kubectl --context "kind-${CLUSTER}" --kubeconfig "${config}" logs -n "${ns}" "${pod}" --all-containers --tail=200 || true
+            done
+          done
+
+      - name: Tear down the example-owned cluster
+        if: ${{ always() && steps.up.outcome != '' && steps.up.outcome != 'skipped' }}
+        run: bash examples/substrate-kind/down.sh
+
+  substrate-conformance:
+    # Preserve the existing required status name while gating both independent live clusters.
+    name: substrate-conformance
+    needs: [changes, substrate-conformance-suite, substrate-kind-example]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    env:
+      FILTER_RESULT: ${{ needs.changes.result }}
+      DECISION: ${{ needs.changes.outputs.decision }}
+      SUITE_RESULT: ${{ needs.substrate-conformance-suite.result }}
+      EXAMPLE_RESULT: ${{ needs.substrate-kind-example.result }}
+    steps:
+      - name: Require conformance and example lifecycle coverage
+        run: |
+          [[ "${FILTER_RESULT}" == success ]] || { echo "::error::Path filter failed."; exit 1; }
+          [[ "${SUITE_RESULT}" == success ]] || { echo "::error::Conformance suite did not pass."; exit 1; }
+          if [[ "${DECISION}" == skip && "${EXAMPLE_RESULT}" == skipped ]]; then
+            exit 0
+          fi
+          [[ "${EXAMPLE_RESULT}" == success ]] || { echo "::error::Example lifecycle did not pass."; exit 1; }

@@ -23,7 +23,7 @@ record. Stable fields are:
 | `request_id` | Correlation ID propagated over gRPC |
 | `session_uid` | Session correlation where available |
 | `error_kind` | Stable error category; logs do not depend on parsing error text |
-| `trace_id`, `span_id` | Present when tracing is enabled, so a log line opens its trace |
+| `trace_id`, `span_id` | Present when the request has a valid span context, including one the caller propagated while tracing is off |
 
 Operations add bounded fields such as `runtime`, `incarnation_id`, `actor`, `atespace`,
 `expected_last_seq`, and record/effect counts. Placement records its capability decision and runtime

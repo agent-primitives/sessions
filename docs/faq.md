@@ -186,10 +186,11 @@ for an explicit caller decision. RPC/SDK `Approve` commits only that decision; c
 CLI approve and deny do both, and say "decision committed" if recovery fails. Get/List and final paused
 Exec frames expose the pending tuple at their captured cursor. A decision clears that reference, but
 new input stays blocked until its receipt commits. Identity is not authorization; custom hosts can
-require independent [approve permission](security.md#optional-go-rpc-authorization). There is no
-tool/resource policy hook, timeout or expiry. Snapshots and unresolved requests are retained
-indefinitely, and Cancel remains `UNIMPLEMENTED`. DeleteSession commits permanent intent without
-reclaiming resources.
+require independent [approve permission](security.md#optional-go-rpc-authorization). Custom Go
+hosts can also install a [pre-dispatch tool policy hook](security.md#pre-dispatch-tool-policy) that
+refuses a call before its executor runs. There is no timeout or expiry. Snapshots and unresolved
+requests are retained indefinitely, and Cancel remains `UNIMPLEMENTED`. DeleteSession commits
+permanent intent without reclaiming resources.
 Tool calls align with the MCP shape (name plus structured arguments). The bundled Chat Completions
 adapter maps function tools, tool choices, assistant tool calls and text tool results; see the
 [harness tool loop](harness-authoring.md#rule-6-carry-the-tool-loop-in-the-model-request).

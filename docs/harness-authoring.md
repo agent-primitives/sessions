@@ -399,16 +399,19 @@ protobuf representation, not a guarantee of strict argument validation. Non-nil 
 cannot be represented by the journal conversion are rejected as replay divergence.
 
 On a direct controller sink, a handled `ToolCall` error replays as an error. Unsupported mediation
-is rejected before recording intent. If the next recorded `TOOL_CALL` has a different ID, replay
-and recorded-prefix recovery reproduce that rejection without consuming the next call, so a
-handled rejection can fall back to a distinct-ID `CONTROLLER_MEDIATED` call. Same-ID mismatches
-and malformed recorded evidence remain fatal; identity checks on the actual fallback are unchanged.
-For ordinary `CONTROLLER_MEDIATED` calls, an executor Go error still leaves no failure receipt, so
-an immediately following reported result remains ambiguous under the existing correlation rules.
-Over `Harness.Connect`, an ordinary sink tool-call error ends the turn; this direct-sink fallback
-does not add a general handle-and-continue wire protocol. Approved gated calls instead record an
+is rejected before recording intent. If the next recorded `TOOL_CALL` has a different ID, replay and
+recorded-prefix recovery reproduce that rejection without consuming the next call, so a handled
+rejection can fall back to a distinct-ID `CONTROLLER_MEDIATED` call. Same-ID mismatches and
+malformed recorded evidence remain fatal; identity checks on the actual fallback are unchanged. For
+ordinary `CONTROLLER_MEDIATED` calls, an executor Go error still leaves no failure receipt, so an
+immediately following reported result remains ambiguous under the existing correlation rules. Over
+`Harness.Connect`, an ordinary sink tool-call error ends the turn; this direct-sink fallback does
+not add a general handle-and-continue wire protocol. Approved gated calls instead record an
 `EXECUTOR_ERROR` receipt, which the harness must render into `ToolResult.Content` before the next
-model call.
+model call. A host with a [pre-dispatch tool policy hook](security.md#pre-dispatch-tool-policy) can
+answer an ordinary or approved call with a `POLICY_DENIED` receipt (`IsError=true`, executor not
+called); render it the same way. A transient refusal from that hook arrives as a `ToolCall` error,
+like an executor error.
 
 #### Approval-gated calls
 
@@ -425,22 +428,23 @@ append failures leave the request recoverable and retain the actual error, not a
 On decided Resume, rebuild the same call from the original inputs/config and keep its identity/key.
 The bridge delivers the committed decision before the correlated receipt, even when that receipt is
 already journaled. A denial supplies `APPROVAL_DENIED` with `IsError=true` and never invokes the
-executor. An approved call can return success or a durable `EXECUTOR_ERROR` receipt, not an
-unrecorded executor Go error. For an executor Go error the receipt's `Content` is the fixed text
-"Tool execution failed." and the error text stays in `Error`. Render the receipt into
-`ToolResult.Content` before the next model call; do not forge approval request/decision or host
-receipt fields with `sink.Report`. A missing executor is a recoverable host precondition, not an
-executor-failure receipt. If the host cancels Resume while the executor runs and the executor
-returns that cancellation, or Resume's deadline has passed and the executor returns a deadline
-error, the call returns the host's context error with no receipt and the sink stays closed:
-propagate it. The decision stays recoverable, and the next Resume runs the executor again under the
-same key. Resume's state when the executor returns decides this, not which context ended the call:
-an error returned while Resume's context is live and before its deadline, including one from
-cancelling a context you derived for this `ToolCall` or from that context's deadline, is a durable
-`EXECUTOR_ERROR` receipt, which no later Resume retries. A cancellation error after Resume was
-cancelled, or a deadline error after Resume's deadline passed, leaves the call pending with no
-receipt even if your per-call deadline expired first. Any other error is still an `EXECUTOR_ERROR`
-receipt.
+executor. An approved call can return success, a durable `EXECUTOR_ERROR` receipt, or a durable
+`POLICY_DENIED` receipt when the host's pre-dispatch policy refused it, not an unrecorded executor
+Go error. For an executor Go error the receipt's `Content` is the fixed text "Tool execution
+failed." and the error text stays in `Error`. Render the receipt into `ToolResult.Content` before
+the next model call; do not forge approval request/decision or host receipt fields with
+`sink.Report`. A missing executor, or a transient refusal from the host's policy hook, is a
+recoverable host precondition, not an executor-failure receipt. If the host cancels Resume while the
+executor runs and the executor returns that cancellation, or Resume's deadline has passed and the
+executor returns a deadline error, the call returns the host's context error with no receipt and the
+sink stays closed: propagate it. The decision stays recoverable, and the next Resume runs the
+executor again under the same key. Resume's state when the executor returns decides this, not which
+context ended the call: an error returned while Resume's context is live and before its deadline,
+including one from cancelling a context you derived for this `ToolCall` or from that context's
+deadline, is a durable `EXECUTOR_ERROR` receipt, which no later Resume retries. A cancellation error
+after Resume was cancelled, or a deadline error after Resume's deadline passed, leaves the call
+pending with no receipt even if your per-call deadline expired first. Any other error is still an
+`EXECUTOR_ERROR` receipt.
 
 The gate serializes sink operations across decision/effect/receipt handling. Observer/model/executor
 callbacks must not re-enter the same sink: re-entry can deadlock the serialized operation. Recorded
@@ -453,10 +457,10 @@ Clients discover the pending tuple from Session metadata, commit a decision usin
 Approve, then Resume explicitly. Both CLI `approve` and `deny` do those steps. Identity is
 provenance only, not policy/authentication. Custom Go hosts can install
 [optional RPC authorization](security.md#optional-go-rpc-authorization), including independent
-approve permission; the default daemon remains unenforced. There is no tool/resource authorization
-hook, approval timeout or expiry. Snapshots and unresolved requests are retained indefinitely;
-Cancel remains unavailable. DeleteSession commits permanent intent without resource cleanup and
-refuses further decisions, including exact retries. See
+approve permission; the default daemon remains unenforced. There is no approval timeout or expiry.
+Snapshots and unresolved requests are retained indefinitely; Cancel remains unavailable.
+DeleteSession commits permanent intent without resource cleanup and refuses further decisions,
+including exact retries. See
 [client examples](interaction-model.md#approval-decisions-and-recovery).
 
 ### Rule 5: pass reasoning parts back verbatim

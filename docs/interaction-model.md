@@ -241,13 +241,17 @@ Decided recovery restores the recorded snapshot/name/version/config/inputs. It c
 gate without `RESUME`, or finish and record `RESUME`. An approved call without a host executor is
 `FAILED_PRECONDITION` and leaves its decision recoverable. Denial records `APPROVAL_DENIED` without
 executing the tool; an approved executor failure records `EXECUTOR_ERROR` for harness/model
-continuation rather than turning that handled receipt into an RPC transport failure.
+continuation rather than turning that handled receipt into an RPC transport failure. A host's
+optional [pre-dispatch tool policy hook](security.md#pre-dispatch-tool-policy) can refuse the
+approved call: a transient refusal is `FAILED_PRECONDITION` and leaves the decision recoverable, and
+a definitive refusal records `POLICY_DENIED` without executing the tool.
 
 This gate is stateless only. Identity is provenance, not authorization. Custom Go hosts can install
 [optional RPC authorization](security.md#optional-go-rpc-authorization), including independent
-approve permission; the default daemon remains unenforced. There is no tool/resource authorization
-hook, automatic decision, approval timeout or expiry. Snapshots and unresolved requests are retained
-indefinitely. Cancel remains `UNIMPLEMENTED`; a decision is not cancellation or teardown.
+approve permission; the default daemon remains unenforced. The pre-dispatch policy hook is a Go
+host option, not a decision: there is no automatic decision, approval timeout or expiry. Snapshots
+and unresolved requests are retained indefinitely. Cancel remains `UNIMPLEMENTED`; a decision is not
+cancellation or teardown.
 DeleteSession commits permanent intent without reclaiming resources and refuses all decisions,
 including exact historical retries.
 A fork's inherited unresolved request cannot authorize effects in the child; fork at/after a receipt,

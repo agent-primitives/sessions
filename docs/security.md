@@ -189,10 +189,11 @@ See [deletion semantics](concepts.md#permanent-soft-deletion).
 `REQUIRES_APPROVAL` is supported only for stateless replay. The RPC/SDK commits a decision without
 compute or an executor call; explicit Resume performs recovery. CLI approve/deny do both, and a
 recovery failure leaves the decision committed. The default Sessions service has no caller
-enforcement; custom hosts can require an independent approve permission (below). There is no
+enforcement; custom hosts can require an independent approve permission (below). Sessions ships no
 tool/resource policy evaluator, approval timeout, expiry, automatic decision or implemented Cancel
-path. Unresolved requests and suspended snapshots/handles are retained indefinitely; operators must
-manage retained resources outside these APIs.
+path; a custom host can supply its own check through the [pre-dispatch tool policy
+hook](#pre-dispatch-tool-policy). Unresolved requests and suspended snapshots/handles are retained
+indefinitely; operators must manage retained resources outside these APIs.
 
 A custom host executor must authorize tools/resources itself and durably deduplicate by **session UID
 plus idempotency key**, storing the original receipt across host restarts. Resume re-drives an
@@ -208,6 +209,53 @@ Resume with `FAILED_PRECONDITION`; denial requires no executor and records a den
 Configured executor errors instead become durable `EXECUTOR_ERROR` receipts: the effect may have
 committed before the response was lost, and recovery does not retry a receipted failure. Neither path
 prevents a trusted harness from doing unmediated work outside the sink.
+
+## Pre-dispatch tool policy
+
+A custom Go host can install `placement.WithToolPolicy` (or `controller.WithToolPolicy`) to check a
+host-executed call right before its executor runs: an ordinary `CONTROLLER_MEDIATED` call, including
+one Resume re-drives, and an approved `REQUIRES_APPROVAL` call on recovery. The hook receives the
+session UID, execution ID, a copy of the call rebuilt from its journaled form (so the hook cannot
+change what runs), the verified caller of the Exec or Resume that dispatches it (empty when
+authentication is off), and the committed decision for an approved call. It does not receive the
+decision's request actor, which is caller-supplied. Sessions defines no policy language and the
+stock daemon installs no hook.
+
+A call whose journaled form differs from the arguments the executor receives is refused transiently
+before the hook, so the hook never judges one value while the executor receives another: the
+integer 2^53+1 that the journal's float64 numbers round, a `json.Number` such as
+`0.30000000000000001` that the journal records as 0.3, a `float32` such as 1e20 whose JSON text
+reads as a different float64, or a string that is not valid UTF-8. An argument the guard cannot
+compare is refused the same way: a Go struct that `encoding/json` writes field by field, or a value
+or non-string map key whose type has a `MarshalJSON` or `MarshalText` method, such as `time.Time`,
+since the journal holds only that method's output while the executor receives the Go value. Below
+2^53 in magnitude, a hook compares a `float64` argument as its JSON value, the shortest decimal that
+reads back as that float (`strconv.FormatFloat(f, 'g', -1, 64)`), not as its exact binary
+expansion. At or above 2^53 every `float64` is an integer and the host dispatches only an argument
+with exactly that value, so the hook reads it exactly: 2^60 is 1152921504606846976, not the
+1152921504606847000 its shortest text gives.
+
+The hook returns one of three verdicts. Allow runs the executor as before. A transient refusal (a
+credential refresh failed, a provider is down) runs nothing and writes no receipt: on an approved
+call Resume fails with `FAILED_PRECONDITION`, the decision stays recoverable and the next Resume
+asks again; on an ordinary call the error reaches the harness like an executor error. A definitive
+refusal (a grant was revoked, policy says no) runs nothing and records a `POLICY_DENIED` receipt,
+which the harness receives as the tool's result and which recovery and replay serve without asking
+again. An unset or unknown verdict is a transient refusal. Keep secrets out of the refusal reason:
+a definitive reason is journaled in the receipt's `error` and sent to the harness, and a transient
+reason is returned to the harness and the caller and, when it ends an ordinary call's turn,
+journaled in the `ERROR` record. Replay and recorded receipts never call the hook. Only the hook
+writes `POLICY_DENIED`: an executor result carrying it is rejected without a receipt, and on an
+approved call Resume fails with `FAILED_PRECONDITION` and the decision stays recoverable.
+
+`POLICY_DENIED` is a new receipt code with no SQLite schema change (the schema stays at v7). A
+binary built before it still opens the database, but for a session that holds one, hash-chain
+verification fails (`DATA_LOSS`) and its Exec, Resume, VerifyJournal and `controller.Replay` refuse
+the session. Its `Sessions.Replay` RPC does not verify and streams the record with the code as the
+number 3. An older harness rejects the receipt, so upgrade every host sharing a journal and every
+harness before installing a hook that can refuse definitively. See
+[spec §9.4](../spec.md#94-pre-dispatch-policy) and
+[§18](../spec.md#18-versioning-and-compatibility).
 
 ## Operator access
 

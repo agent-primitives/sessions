@@ -118,8 +118,9 @@ type SessionsClient interface {
 	// for a non-stateless execution; Approve does not Describe or resolve a harness.
 	// ABORTED: local contention, append-CAS conflict or superseded fence; retry
 	// after reading the session. Identity is unverified provenance, ignored by an enforcing Go host.
-	// Independent read+approve permission checks are opt-in; this method implies no tool/resource
-	// policy hook, expiry, implicit Resume, or Cancel behavior.
+	// Independent read+approve permission checks are opt-in. This method does not run a host's
+	// pre-dispatch tool policy hook (it runs when recovery dispatches the approved call) and implies
+	// no expiry, implicit Resume, or Cancel behavior.
 	Approve(ctx context.Context, in *ApproveRequest, opts ...grpc.CallOption) (*ApproveResponse, error)
 	// In-flight control: cancel the running execution. Not implemented: the server returns
 	// UNIMPLEMENTED.
@@ -136,9 +137,11 @@ type SessionsClient interface {
 	// A call-only cut repairs the request; neither outcome proves cold compute. After a decision,
 	// recovery uses the recorded invocation and SnapshotRef. It may park at another gate (without
 	// RESUME), or finish and commit RESUME. A missing executor is FAILED_PRECONDITION and leaves
-	// the decision recoverable. Approved executor failures are durable EXECUTOR_ERROR receipts,
-	// available to the harness for continuation, not transport failures. Snapshots and unresolved
-	// requests are retained indefinitely; there is no approval expiry or automatic decision.
+	// the decision recoverable, and so does a transient refusal from the host's optional tool
+	// policy. Approved executor failures are durable EXECUTOR_ERROR receipts and definitive policy
+	// refusals durable POLICY_DENIED receipts, available to the harness for continuation, not
+	// transport failures. Snapshots and unresolved requests are retained indefinitely; there is no
+	// approval expiry or automatic decision.
 	Resume(ctx context.Context, in *ResumeRequest, opts ...grpc.CallOption) (*Session, error)
 	// The differentiator: branch a session at a sequence into one or more children. Forking a
 	// REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event
@@ -363,8 +366,9 @@ type SessionsServer interface {
 	// for a non-stateless execution; Approve does not Describe or resolve a harness.
 	// ABORTED: local contention, append-CAS conflict or superseded fence; retry
 	// after reading the session. Identity is unverified provenance, ignored by an enforcing Go host.
-	// Independent read+approve permission checks are opt-in; this method implies no tool/resource
-	// policy hook, expiry, implicit Resume, or Cancel behavior.
+	// Independent read+approve permission checks are opt-in. This method does not run a host's
+	// pre-dispatch tool policy hook (it runs when recovery dispatches the approved call) and implies
+	// no expiry, implicit Resume, or Cancel behavior.
 	Approve(context.Context, *ApproveRequest) (*ApproveResponse, error)
 	// In-flight control: cancel the running execution. Not implemented: the server returns
 	// UNIMPLEMENTED.
@@ -381,9 +385,11 @@ type SessionsServer interface {
 	// A call-only cut repairs the request; neither outcome proves cold compute. After a decision,
 	// recovery uses the recorded invocation and SnapshotRef. It may park at another gate (without
 	// RESUME), or finish and commit RESUME. A missing executor is FAILED_PRECONDITION and leaves
-	// the decision recoverable. Approved executor failures are durable EXECUTOR_ERROR receipts,
-	// available to the harness for continuation, not transport failures. Snapshots and unresolved
-	// requests are retained indefinitely; there is no approval expiry or automatic decision.
+	// the decision recoverable, and so does a transient refusal from the host's optional tool
+	// policy. Approved executor failures are durable EXECUTOR_ERROR receipts and definitive policy
+	// refusals durable POLICY_DENIED receipts, available to the harness for continuation, not
+	// transport failures. Snapshots and unresolved requests are retained indefinitely; there is no
+	// approval expiry or automatic decision.
 	Resume(context.Context, *ResumeRequest) (*Session, error)
 	// The differentiator: branch a session at a sequence into one or more children. Forking a
 	// REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event

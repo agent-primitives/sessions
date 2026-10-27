@@ -288,7 +288,8 @@ func approvalContinuationError(executionID string) error {
 func validateApprovalReceipt(decision *api.ApprovalResult, result *api.ToolResult) error {
 	valid := result.IsError && result.Code == api.ToolResultCodeApprovalDenied
 	if decision.Approved {
-		valid = !result.IsError && result.Code == api.ToolResultCodeUnspecified || result.IsError && result.Code == api.ToolResultCodeExecutorError
+		valid = !result.IsError && result.Code == api.ToolResultCodeUnspecified ||
+			result.IsError && (result.Code == api.ToolResultCodeExecutorError || result.Code == api.ToolResultCodePolicyDenied)
 	}
 	if !valid {
 		return fmt.Errorf("%w: receipt status contradicts approval decision", ErrReplayDiverged)

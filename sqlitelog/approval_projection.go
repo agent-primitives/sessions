@@ -249,7 +249,8 @@ func (s *approvalExecution) reduce(tx *sql.Tx, uid string, seq int64, ev api.Eve
 			}
 			valid := result.IsError && result.Code == api.ToolResultCodeApprovalDenied
 			if s.approved {
-				valid = !result.IsError && result.Code == api.ToolResultCodeUnspecified || result.IsError && result.Code == api.ToolResultCodeExecutorError
+				valid = !result.IsError && result.Code == api.ToolResultCodeUnspecified ||
+					result.IsError && (result.Code == api.ToolResultCodeExecutorError || result.Code == api.ToolResultCodePolicyDenied)
 			}
 			if result.ID != s.callID || result.ApprovalRequestSeq != s.requestSeq || result.ApprovalDecisionSeq != s.decisionSeq || !valid {
 				s.invalid = true

@@ -1062,7 +1062,9 @@ func (x *ReplayRequest) GetToSeq() int64 {
 // request owned by this session, not an inherited parent request. By default identity is recorded
 // on the decision's Event.actor as unverified provenance. An opt-in enforcing Go host ignores it,
 // normalizing the actor to empty before append/retry comparison; verified audit is not available.
-// No tool/resource policy hook, expiry, automatic decision, or Cancel semantics are implied.
+// Approve does not run a host's pre-dispatch tool policy hook, which runs when recovery
+// dispatches the approved call (spec §9.4). No expiry, automatic decision, or Cancel
+// semantics are implied.
 type ApproveRequest struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	Session     string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`

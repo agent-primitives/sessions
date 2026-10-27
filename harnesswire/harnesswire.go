@@ -359,7 +359,7 @@ func (s *streamSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolRes
 			return api.ToolResult{}, s.fail(err)
 		}
 		res.Approval = approval
-	} else if err := rejectApprovalReport(*res); err != nil {
+	} else if err := validateOrdinaryReply(*res); err != nil {
 		return api.ToolResult{}, s.fail(err)
 	}
 	return *res, nil
@@ -523,7 +523,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 				}); err != nil {
 					return err
 				}
-			} else if err := rejectApprovalReport(res); err != nil {
+			} else if err := validateOrdinaryReply(res); err != nil {
 				return err
 			}
 			if err := stream.Send(&v1.ControllerFrame{
@@ -603,17 +603,31 @@ func validateApprovalReceipt(callID string, decision *api.ApprovalResult, receip
 		if receipt.Code == api.ToolResultCodeApprovalDenied && receipt.IsError {
 			return nil
 		}
-	} else if receipt.Code == api.ToolResultCodeUnspecified && !receipt.IsError || receipt.Code == api.ToolResultCodeExecutorError && receipt.IsError {
+	} else if receipt.Code == api.ToolResultCodeUnspecified && !receipt.IsError ||
+		(receipt.Code == api.ToolResultCodeExecutorError || receipt.Code == api.ToolResultCodePolicyDenied) && receipt.IsError {
 		return nil
 	}
 	return errors.New("harnesswire: approval receipt status conflicts with decision")
 }
 
+// rejectApprovalReport refuses a harness report that carries host-owned receipt fields or a code
+// only the host writes (APPROVAL_DENIED, POLICY_DENIED, or one this build does not know).
 func rejectApprovalReport(receipt api.ToolResult) error {
 	if receipt.Approval != nil || receipt.ApprovalRequestSeq != 0 || receipt.ApprovalDecisionSeq != 0 || (receipt.Code != api.ToolResultCodeUnspecified && receipt.Code != api.ToolResultCodeExecutorError) {
 		return errors.New("harnesswire: harness report or ordinary reply contains host-owned approval receipt")
 	}
 	return nil
+}
+
+// validateOrdinaryReply checks the host's reply to an ordinary host-executed call. It accepts
+// what a report may carry, plus the host's POLICY_DENIED receipt with is_error set. A code this
+// build does not know is refused, so a peer older than a new code fails closed.
+func validateOrdinaryReply(receipt api.ToolResult) error {
+	if receipt.Code == api.ToolResultCodePolicyDenied && receipt.IsError && receipt.Approval == nil &&
+		receipt.ApprovalRequestSeq == 0 && receipt.ApprovalDecisionSeq == 0 {
+		return nil
+	}
+	return rejectApprovalReport(receipt)
 }
 
 // endError maps a terminal HarnessEnd into a Go error. COMPLETED is the only success; a FAILED (or

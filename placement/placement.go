@@ -116,6 +116,7 @@ type Placer struct {
 	policyError  error
 	stream       controller.StreamFunc
 	tool         controller.ToolFunc
+	toolPolicy   controller.ToolPolicyFunc
 	durableDedup func(tool string) bool
 	dial         Dialer
 	logger       *slog.Logger
@@ -262,6 +263,9 @@ func (p *Placer) controllerOpts(fence int64, sessionUID string, observer control
 	if p.durableDedup != nil {
 		opts = append(opts, controller.WithDurableDedup(p.durableDedup))
 	}
+	if p.toolPolicy != nil {
+		opts = append(opts, controller.WithToolPolicy(p.toolPolicy))
+	}
 	return opts
 }
 
@@ -282,6 +286,12 @@ func WithStreamingModel(fn controller.StreamFunc) Option { return func(p *Placer
 // owns session-scoped authorization and durable deduplication by session UID plus idempotency key.
 // Resume re-drives an interrupted call only for tools declared with WithDurableDedup.
 func WithToolExecutor(fn controller.ToolFunc) Option { return func(p *Placer) { p.tool = fn } }
+
+// WithToolPolicy installs a pre-dispatch tool policy hook for Exec and Resume, as
+// controller.WithToolPolicy. Without it, the executor is called as before.
+func WithToolPolicy(fn controller.ToolPolicyFunc) Option {
+	return func(p *Placer) { p.toolPolicy = fn }
+}
 
 // WithDurableDedup declares which tools the WithToolExecutor executor durably deduplicates, as
 // controller.WithDurableDedup. Without it, Resume refuses a trailing call that is not

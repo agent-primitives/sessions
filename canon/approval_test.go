@@ -82,3 +82,29 @@ func TestApprovalCanonicalVectors(t *testing.T) {
 		result.Approval = nil
 	}
 }
+
+// POLICY_DENIED hashes by name (CHAIN-1). A build that predates it reads the stored value as an
+// unknown enum number and canonicalizes it as that number, so its hash of the same record differs
+// and its chain verification fails closed instead of accepting the receipt. Code 4 stands in for
+// a value newer than this build.
+func TestPolicyDeniedCanonicalVector(t *testing.T) {
+	event := api.Event{ExecutionID: "e1", Kind: api.EventToolResult, Result: &api.ToolResult{ID: "c1", IsError: true, Code: api.ToolResultCodePolicyDenied, ApprovalRequestSeq: 3, ApprovalDecisionSeq: 4}}
+	const want = `{"event":{"execution_id":"e1","kind":"EVENT_TOOL_RESULT","result":{"approval_decision_seq":"4","approval_request_seq":"3","code":"POLICY_DENIED","id":"c1","is_error":true}},"prev_hash":"","seq":"1"}`
+	b, err := canon.Record("", 1, event)
+	if err != nil || string(b) != want {
+		t.Fatalf("canonical bytes = %s, %v; want %s", b, err, want)
+	}
+	h, err := canon.HashRecord("", 1, event)
+	if err != nil || h != "b5972e7e004b043d9895b71ce2341b58f87050e63967569d4af09cd4b76da44a" {
+		t.Fatalf("hash = %s, %v", h, err)
+	}
+	newer := event
+	result := *event.Result
+	result.Code = 4
+	newer.Result = &result
+	b, err = canon.Record("", 1, newer)
+	const wantNewer = `{"event":{"execution_id":"e1","kind":"EVENT_TOOL_RESULT","result":{"approval_decision_seq":"4","approval_request_seq":"3","code":4,"id":"c1","is_error":true}},"prev_hash":"","seq":"1"}`
+	if err != nil || string(b) != wantNewer {
+		t.Fatalf("unknown code bytes = %s, %v; want %s", b, err, wantNewer)
+	}
+}

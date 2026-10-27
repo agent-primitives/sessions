@@ -22,7 +22,8 @@ var ErrApprovalUnavailable = errors.New("controller: approval requires STATELESS
 var ErrInvalidApprovalCall = errors.New("controller: invalid approval call identity")
 
 // ErrApprovalReceiptReport rejects harness reports and ordinary executor replies carrying
-// host-owned approval receipt fields or unsupported result codes.
+// host-owned approval receipt fields or unsupported result codes, and an approved call's executor
+// reply carrying POLICY_DENIED.
 var ErrApprovalReceiptReport = errors.New("controller: approval receipts are host owned")
 
 // ErrMissingToolExecutor is a recoverable host precondition, not an executor-failure receipt.
@@ -141,24 +142,44 @@ func (s *liveSink) completeApproval(ctx context.Context, state *ApprovalState) (
 			s.guard.stop = err
 			return api.ToolResult{}, err
 		}
-		res, err := s.c.tool(ctx, ToolCallContext{SessionUID: s.c.sessionUID}, call)
-		s.c.liveToolCalls++
-		result = res
+		denied, err := s.checkToolPolicy(ctx, call, &ToolPolicyApproval{Decision: *decision, DecisionSeq: state.Decision.Seq})
 		if err != nil {
-			// A host-caused cancellation is not an executor outcome. Leave the approved call
-			// without a receipt, as a crash at this point would, so the next Resume re-drives it
-			// under the same key. The stop keeps the harness from continuing past the open call.
-			if hostErr := hostEnded(s.runCtx, err); hostErr != nil {
-				s.guard.stop = hostErr
-				return api.ToolResult{}, hostErr
-			}
-			// Like the ordinary path, a Go error discards any partial result. The error text
-			// stays in Error; the model-facing Content is fixed so it never carries host detail.
-			result = api.ToolResult{IsError: true, Error: err.Error(), Content: api.TextMessage("tool", executorFailure).Parts}
+			// A transient refusal is a host precondition, like a missing executor: no receipt,
+			// and the decision stays recoverable for the next Resume.
+			s.guard.stop = err
+			return api.ToolResult{}, err
 		}
-		result.Code = api.ToolResultCodeUnspecified
-		if result.IsError {
-			result.Code = api.ToolResultCodeExecutorError
+		if denied != nil {
+			result = *denied
+		} else {
+			result, err = s.c.tool(ctx, ToolCallContext{SessionUID: s.c.sessionUID}, call)
+			s.c.liveToolCalls++
+			if err != nil {
+				// A host-caused cancellation is not an executor outcome. Leave the approved
+				// call without a receipt, as a crash at this point would, so the next Resume
+				// re-drives it under the same key. The stop keeps the harness from continuing
+				// past the open call.
+				if hostErr := hostEnded(s.runCtx, err); hostErr != nil {
+					s.guard.stop = hostErr
+					return api.ToolResult{}, hostErr
+				}
+				// Like the ordinary path, a Go error discards any partial result. The error
+				// text stays in Error; the model-facing Content is fixed so it never carries
+				// host detail.
+				result = api.ToolResult{IsError: true, Error: err.Error(), Content: api.TextMessage("tool", executorFailure).Parts}
+			}
+			if result.Code == api.ToolResultCodePolicyDenied {
+				// POLICY_DENIED is host owned (TOOL-16): only the policy hook's refusal writes it.
+				// Reject the reply before the code is normalized, as ordinary dispatch does, and
+				// write no receipt: the decision stays recoverable and the next Resume calls the
+				// executor again under the same key.
+				s.guard.stop = ErrApprovalReceiptReport
+				return api.ToolResult{}, s.guard.stop
+			}
+			result.Code = api.ToolResultCodeUnspecified
+			if result.IsError {
+				result.Code = api.ToolResultCodeExecutorError
+			}
 		}
 	}
 	result.ID = state.Call.ID

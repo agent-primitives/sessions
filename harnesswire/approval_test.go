@@ -221,6 +221,13 @@ func TestApprovalServerRejectsMalformedFrames(t *testing.T) {
 		{"approved unclassified error", "session", receiptWith(func(p *v1.ControllerFrame) { p.GetTool().IsError = true }), "status"},
 		{"executor code without error", "session", receiptWith(func(p *v1.ControllerFrame) { p.GetTool().Code = v1.ToolResult_EXECUTOR_ERROR }), "status"},
 		{"unknown receipt code", "session", receiptWith(func(p *v1.ControllerFrame) { p.GetTool().Code = v1.ToolResult_Code(99) }), "status"},
+		{"policy code without error", "session", receiptWith(func(p *v1.ControllerFrame) { p.GetTool().Code = v1.ToolResult_POLICY_DENIED }), "status"},
+		{"denied policy denial", "session", []*v1.ControllerFrame{decisionFrame(false), func() *v1.ControllerFrame {
+			frame := receiptFrame()
+			frame.GetTool().Code = v1.ToolResult_POLICY_DENIED
+			frame.GetTool().IsError = true
+			return frame
+		}()}, "status"},
 		{"closure between frames", "session", []*v1.ControllerFrame{decisionFrame(true)}, "EOF"},
 	}
 	for _, test := range tests {
@@ -279,6 +286,7 @@ func TestApprovalClientRejectsHostAuthorityForgery(t *testing.T) {
 		"decision receipt": {Kind: v1.EventKind_EVENT_TOOL_RESULT, Body: &v1.Event_Result{Result: &v1.ToolResult{Id: "call", ApprovalDecisionSeq: 19}}},
 		"denial receipt":   {Kind: v1.EventKind_EVENT_TOOL_RESULT, Body: &v1.Event_Result{Result: &v1.ToolResult{Id: "call", Code: v1.ToolResult_APPROVAL_DENIED, IsError: true}}},
 		"unknown code":     {Kind: v1.EventKind_EVENT_TOOL_RESULT, Body: &v1.Event_Result{Result: &v1.ToolResult{Id: "call", Code: v1.ToolResult_Code(7)}}},
+		"policy receipt":   {Kind: v1.EventKind_EVENT_TOOL_RESULT, Body: &v1.Event_Result{Result: &v1.ToolResult{Id: "call", Code: v1.ToolResult_POLICY_DENIED, IsError: true}}},
 	}
 	for name, event := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -592,6 +600,12 @@ func TestApprovalClientRejectsInvalidHostReplies(t *testing.T) {
 		{"approved legacy error", func(h *gateHost) { h.result.IsError = true }, "status"},
 		{"executor code without error", func(h *gateHost) { h.result.Code = api.ToolResultCodeExecutorError }, "status"},
 		{"unknown code", func(h *gateHost) { h.result.Code = api.ToolResultCode(99) }, "status"},
+		{"policy code without error", func(h *gateHost) { h.result.Code = api.ToolResultCodePolicyDenied }, "status"},
+		{"denied policy denial", func(h *gateHost) {
+			h.result.Approval.Approved = false
+			h.result.Code = api.ToolResultCodePolicyDenied
+			h.result.IsError = true
+		}, "status"},
 		{"bare park sentinel", func(h *gateHost) { h.err = api.ErrApprovalParked }, "park"},
 		{"foreign park execution", func(h *gateHost) {
 			h.err = &api.ApprovalParkedError{Ref: api.ApprovalRef{ExecutionID: "foreign", ToolCallID: "call", RequestSeq: 17}}
@@ -648,6 +662,7 @@ func TestApprovalServerReportForgeryIsSticky(t *testing.T) {
 		{"decision", api.ToolResult{ApprovalDecisionSeq: 19}},
 		{"denial", api.ToolResult{Code: api.ToolResultCodeApprovalDenied, IsError: true}},
 		{"unknown code", api.ToolResult{Code: api.ToolResultCode(7)}},
+		{"policy denial", api.ToolResult{Code: api.ToolResultCodePolicyDenied, IsError: true}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			observed := make(chan []error, 1)
@@ -667,6 +682,104 @@ func TestApprovalServerReportForgeryIsSticky(t *testing.T) {
 			}
 			if host.reports != 0 || len(host.outputs) != 0 {
 				t.Fatalf("forged receipt/effect reached host: %#v", host)
+			}
+		})
+	}
+}
+
+var ordinaryCall = api.ToolCall{ID: "call", Tool: "charge", Mediation: api.MediationControllerMediated, IdempotencyKey: "k"}
+
+// A harness accepts the host's POLICY_DENIED receipt for an ordinary call and, after an approval,
+// for an approved call. It refuses a code it does not know, which is how a harness built before
+// POLICY_DENIED treats it: the call fails instead of the receipt being misread.
+func TestPolicyDeniedReceiptHarnessSide(t *testing.T) {
+	ordinary := func(code v1.ToolResult_Code, isError bool) []*v1.ControllerFrame {
+		return []*v1.ControllerFrame{{Session: "session", ExecutionId: "exec", Frame: &v1.ControllerFrame_Tool{Tool: &v1.ToolResult{Id: "call", Code: code, IsError: isError, Error: "grant revoked"}}}}
+	}
+	approved := receiptFrame()
+	approved.GetTool().Code = v1.ToolResult_POLICY_DENIED
+	approved.GetTool().IsError = true
+	for _, test := range []struct {
+		name   string
+		call   api.ToolCall
+		frames []*v1.ControllerFrame
+		want   string // empty: accepted
+	}{
+		{"ordinary policy denial", ordinaryCall, ordinary(v1.ToolResult_POLICY_DENIED, true), ""},
+		{"approved policy denial", gateCall, []*v1.ControllerFrame{decisionFrame(true), approved}, ""},
+		{"ordinary policy code without error", ordinaryCall, ordinary(v1.ToolResult_POLICY_DENIED, false), "host-owned"},
+		{"ordinary approval denial", ordinaryCall, ordinary(v1.ToolResult_APPROVAL_DENIED, true), "host-owned"},
+		{"ordinary code newer than this build", ordinaryCall, ordinary(v1.ToolResult_Code(4), true), "host-owned"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			type outcome struct {
+				result api.ToolResult
+				err    error
+			}
+			observed := make(chan outcome, 1)
+			server := NewServer(gateHarness{run: func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+				result, err := sink.ToolCall(ctx, test.call)
+				observed <- outcome{result, err}
+				return err
+			}})
+			stream := openGate(t, approvalClient(t, server), "session")
+			for _, frame := range test.frames {
+				if err := stream.Send(frame); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := <-observed
+			if test.want != "" {
+				if got.err == nil || !strings.Contains(got.err.Error(), test.want) {
+					t.Fatalf("ToolCall = %+v, %v; want %s refusal", got.result, got.err, test.want)
+				}
+				return
+			}
+			if got.err != nil || got.result.Code != api.ToolResultCodePolicyDenied || !got.result.IsError {
+				t.Fatalf("ToolCall = %+v, %v; want the POLICY_DENIED receipt", got.result, got.err)
+			}
+		})
+	}
+}
+
+// The host side relays an ordinary POLICY_DENIED receipt to the harness and refuses an unknown
+// code before sending anything.
+func TestPolicyDeniedReceiptHostSide(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		result api.ToolResult
+		ok     bool
+	}{
+		{"policy denial", api.ToolResult{ID: "call", Code: api.ToolResultCodePolicyDenied, IsError: true}, true},
+		{"unknown code", api.ToolResult{ID: "call", Code: api.ToolResultCode(4), IsError: true}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			frames := make(chan *v1.ControllerFrame, 1)
+			peer := connectPeer{run: func(s v1.Harness_ConnectServer) error {
+				if _, err := s.Recv(); err != nil {
+					return err
+				}
+				if err := s.Send(&v1.Event{ExecutionId: "exec", Kind: v1.EventKind_EVENT_TOOL_CALL, Body: &v1.Event_Tool{Tool: &v1.ToolCall{Id: "call", Tool: "charge", Mediation: v1.Mediation_MEDIATION_CONTROLLER_MEDIATED, IdempotencyKey: "k"}}}); err != nil {
+					return err
+				}
+				f, err := s.Recv()
+				frames <- f
+				if err != nil {
+					return err
+				}
+				return s.Send(&v1.Event{ExecutionId: "exec", Kind: v1.EventKind_EVENT_END, Body: &v1.Event_End{End: &v1.HarnessEnd{State: "COMPLETED"}}})
+			}}
+			host := &gateHost{result: test.result}
+			err := NewClientHarness(approvalClient(t, peer)).Run(approvalContext(t), &api.Start{SessionUID: "session", ExecutionID: "exec"}, host)
+			f := <-frames
+			if test.ok {
+				if err != nil || f.GetTool().GetCode() != v1.ToolResult_POLICY_DENIED || !f.GetTool().GetIsError() {
+					t.Fatalf("relay = %v, frame %v", err, f)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "host-owned") || f != nil {
+				t.Fatalf("unknown code relay = %v, frame %v", err, f)
 			}
 		})
 	}

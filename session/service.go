@@ -1194,7 +1194,7 @@ func resumeError(uid string, err error) error {
 		return status.Error(codes.DataLoss, err.Error())
 	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
 		return status.Error(codes.Aborted, err.Error())
-	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport):
+	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrToolPolicyRefused), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
 	case errors.Is(err, controller.ErrUnansweredToolCall):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v; re-driving it needs a host executor that declares durable dedup for the tool, or Exec a new turn", err)
@@ -1257,7 +1257,7 @@ func execError(uid string, err error) error {
 		return status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, api.ErrInvalidCheckpoint):
 		return checkpointRefusal("exec", uid, err)
-	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport), errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrStatefulOverride), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch),
+	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrToolPolicyRefused), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport), errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrStatefulOverride), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch),
 		errors.Is(err, api.ErrMemoryStateLost):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):

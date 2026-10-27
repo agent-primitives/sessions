@@ -142,6 +142,7 @@ type Option func(*Controller)
 // emits a host-mediated ToolCall gets an error (in-harness-reported tools use Report instead).
 // A non-nil executor requires a nonempty WithSessionUID; New rejects an unscoped executor.
 // Resume re-drives an interrupted call only for tools declared with WithDurableDedup.
+// WithToolPolicy can refuse a call before it reaches the executor.
 func WithToolExecutor(tool ToolFunc) Option { return func(c *Controller) { c.tool = tool } }
 
 // WithDurableDedup declares, per tool name, that the WithToolExecutor executor deduplicates that
@@ -209,6 +210,7 @@ type Controller struct {
 	startConfig        []byte
 	startResumeFromSeq int64
 	tool               ToolFunc
+	toolPolicy         ToolPolicyFunc
 	durableDedup       func(tool string) bool
 	fence              int64
 	liveModelCalls     int
@@ -699,6 +701,8 @@ func controllerErrorKind(err error) string {
 		return "unmediated_tool_call"
 	case errors.Is(err, ErrUnansweredToolCall):
 		return "unanswered_tool_call"
+	case errors.Is(err, ErrToolPolicyRefused):
+		return "tool_policy_refused"
 	case errors.Is(err, context.Canceled):
 		return "canceled"
 	case errors.Is(err, context.DeadlineExceeded):

@@ -720,3 +720,160 @@ func TestApprovalBusyVersusBackendAborted(t *testing.T) {
 		t.Fatalf("snapshot retry=%v %v", suspended, err)
 	}
 }
+
+// Over the public API, a transient policy refusal on an approved call is FAILED_PRECONDITION with
+// no receipt, and the next Resume asks again. A definitive refusal commits a POLICY_DENIED receipt
+// that the harness hands to the model, and a later Resume does not ask again.
+func TestPublicApprovalToolPolicyRefusals(t *testing.T) {
+	store := openStore(t, ":memory:")
+	b := local.New(publicReceiptHarness{})
+	t.Cleanup(func() { _ = b.Close() })
+	var effects, models, asked atomic.Int32
+	verdicts := []controller.ToolPolicyVerdict{controller.ToolPolicyTransientRefusal, controller.ToolPolicyDefinitiveRefusal}
+	p := placement.New(b, func(_ context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+		models.Add(1)
+		if len(req.Messages) != 1 || len(req.Messages[0].Parts) != 1 {
+			t.Errorf("model did not receive the tool receipt: %+v", req)
+		} else if receipt := req.Messages[0].Parts[0].ToolResult; receipt == nil || receipt.Code != api.ToolResultCodePolicyDenied || !receipt.IsError || receipt.Error != "grant revoked" {
+			t.Errorf("model receipt = %+v", receipt)
+		}
+		return api.ModelResponse{Message: *api.TextMessage("assistant", "handled refusal")}, nil
+	}, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+		effects.Add(1)
+		return api.ToolResult{}, nil
+	}), placement.WithToolPolicy(func(_ context.Context, in controller.ToolPolicyInput) controller.ToolPolicyDecision {
+		n := asked.Add(1)
+		if in.Approval == nil || !in.Approval.Decision.Approved || in.Scope.SessionUID == "" {
+			t.Errorf("hook input = %+v", in)
+		}
+		return controller.ToolPolicyDecision{Verdict: verdicts[n-1], Reason: map[int32]string{1: "provider outage", 2: "grant revoked"}[n]}
+	}))
+	r, err := placement.NewRegistry("gate", map[string]*placement.Placer{"gate": p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := serveRegistry(t, store, r)
+	uid := mustCreate(t, c)
+	frames, err := collectPublicExec(c, &v1.ExecRequest{Session: uid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asked.Load() != 0 {
+		t.Fatal("hook asked before the approval")
+	}
+	ref := frames[len(frames)-1].GetSession().GetPendingApproval()
+	decision, err := c.Approve(t.Context(), &v1.ApproveRequest{Session: uid, ExecutionId: ref.ExecutionId, ToolCallId: ref.ToolCallId, RequestSeq: ref.RequestSeq, Approved: proto.Bool(true)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := routingRecords(t, store.Session(uid))
+	if _, err := c.Resume(t.Context(), &v1.ResumeRequest{Session: uid}); status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "provider outage") {
+		t.Fatalf("transient refusal Resume = %v, want FAILED_PRECONDITION with the reason", err)
+	}
+	for _, record := range routingRecords(t, store.Session(uid))[len(before):] {
+		if record.Event.Kind == api.EventToolResult || record.Event.Kind == api.EventError || record.Event.Kind == api.EventEnd {
+			t.Fatalf("transient refusal journaled %s", record.Event.Kind)
+		}
+	}
+	current, err := c.Resume(t.Context(), &v1.ResumeRequest{Session: uid})
+	if err != nil {
+		t.Fatalf("definitive refusal became an RPC error: %v", err)
+	}
+	if current.PendingApproval != nil || effects.Load() != 0 || models.Load() != 1 || asked.Load() != 2 {
+		t.Fatalf("session=%v effects=%d models=%d asked=%d", current, effects.Load(), models.Load(), asked.Load())
+	}
+	records := routingRecords(t, store.Session(uid))
+	receipt := routingEvent(t, records, api.EventToolResult).Result
+	if receipt.Code != api.ToolResultCodePolicyDenied || !receipt.IsError || receipt.ApprovalRequestSeq != ref.RequestSeq || receipt.ApprovalDecisionSeq != decision.Decision.Seq {
+		t.Fatalf("durable refusal receipt=%+v", receipt)
+	}
+	if _, err := c.Resume(t.Context(), &v1.ResumeRequest{Session: uid}); err != nil || asked.Load() != 2 || effects.Load() != 0 {
+		t.Fatalf("Resume after the receipt = %v asked=%d effects=%d", err, asked.Load(), effects.Load())
+	}
+}
+
+type publicOrdinaryToolHarness struct{}
+
+func (publicOrdinaryToolHarness) Describe(ctx context.Context) (api.Descriptor, error) {
+	return (&publicGateHarness{}).Describe(ctx)
+}
+
+func (publicOrdinaryToolHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	_, err := sink.ToolCall(ctx, api.ToolCall{ID: "call", Tool: "write", IdempotencyKey: "key", Mediation: api.MediationControllerMediated})
+	return err
+}
+
+// A transient policy refusal of an ordinary call that ends the turn is FAILED_PRECONDITION on
+// Exec, with the intent left without a receipt and the executor not called.
+func TestPublicOrdinaryToolPolicyTransientRefusal(t *testing.T) {
+	store := openStore(t, ":memory:")
+	b := local.New(publicOrdinaryToolHarness{})
+	t.Cleanup(func() { _ = b.Close() })
+	var effects atomic.Int32
+	p := placement.New(b, nil, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+		effects.Add(1)
+		return api.ToolResult{}, nil
+	}), placement.WithToolPolicy(func(context.Context, controller.ToolPolicyInput) controller.ToolPolicyDecision {
+		return controller.ToolPolicyDecision{Verdict: controller.ToolPolicyTransientRefusal, Reason: "provider outage"}
+	}))
+	r, err := placement.NewRegistry("gate", map[string]*placement.Placer{"gate": p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := serveRegistry(t, store, r)
+	uid := mustCreate(t, c)
+	if _, err := collectPublicExec(c, &v1.ExecRequest{Session: uid, Inputs: []*v1.Message{wire.MessageToProto(api.TextMessage("user", "go"))}}); status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "provider outage") {
+		t.Fatalf("Exec = %v, want FAILED_PRECONDITION with the reason", err)
+	}
+	records := routingRecords(t, store.Session(uid))
+	for _, record := range records {
+		if record.Event.Kind == api.EventToolResult {
+			t.Fatalf("transient refusal journaled a receipt: %+v", record)
+		}
+	}
+	if routingEvent(t, records, api.EventToolCall).ToolCall == nil || effects.Load() != 0 {
+		t.Fatalf("intent missing or executor ran: effects=%d", effects.Load())
+	}
+}
+
+// Over the public API, an approved call's executor reply carrying the host-owned POLICY_DENIED
+// code is FAILED_PRECONDITION with no receipt, ERROR or END, and the decision stays recoverable.
+func TestPublicApprovalExecutorPolicyDeniedRejected(t *testing.T) {
+	store := openStore(t, ":memory:")
+	b := local.New(publicReceiptHarness{})
+	t.Cleanup(func() { _ = b.Close() })
+	var effects atomic.Int32
+	p := placement.New(b, nil, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+		effects.Add(1)
+		return api.ToolResult{IsError: true, Code: api.ToolResultCodePolicyDenied, Error: "forged"}, nil
+	}))
+	r, err := placement.NewRegistry("gate", map[string]*placement.Placer{"gate": p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := serveRegistry(t, store, r)
+	uid := mustCreate(t, c)
+	frames, err := collectPublicExec(c, &v1.ExecRequest{Session: uid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := frames[len(frames)-1].GetSession().GetPendingApproval()
+	if _, err := c.Approve(t.Context(), &v1.ApproveRequest{Session: uid, ExecutionId: ref.ExecutionId, ToolCallId: ref.ToolCallId, RequestSeq: ref.RequestSeq, Approved: proto.Bool(true)}); err != nil {
+		t.Fatal(err)
+	}
+	before := routingRecords(t, store.Session(uid))
+	if _, err := c.Resume(t.Context(), &v1.ResumeRequest{Session: uid}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("Resume with a forged POLICY_DENIED = %v, want FAILED_PRECONDITION", err)
+	}
+	for _, record := range routingRecords(t, store.Session(uid))[len(before):] {
+		if record.Event.Kind == api.EventToolResult || record.Event.Kind == api.EventError || record.Event.Kind == api.EventEnd {
+			t.Fatalf("forged POLICY_DENIED journaled %s", record.Event.Kind)
+		}
+	}
+	if effects.Load() != 1 {
+		t.Fatalf("executor calls = %d, want 1", effects.Load())
+	}
+	if _, err := c.Resume(t.Context(), &v1.ResumeRequest{Session: uid}); status.Code(err) != codes.FailedPrecondition || effects.Load() != 2 {
+		t.Fatalf("second Resume = %v (executor calls %d), want the decision re-driven and refused again", err, effects.Load())
+	}
+}

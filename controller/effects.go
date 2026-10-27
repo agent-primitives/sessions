@@ -164,6 +164,17 @@ func (s *liveSink) execTool(ctx context.Context, call api.ToolCall) (api.ToolRes
 		// (in-harness-reported tools use Report instead).
 		return api.ToolResult{}, errors.New("controller: no tool executor configured")
 	}
+	denied, err := s.checkToolPolicy(ctx, call, nil)
+	if err != nil {
+		// Like an executor error: the intent stays without a receipt.
+		return api.ToolResult{}, err
+	}
+	if denied != nil {
+		if _, err := s.append(api.Event{Kind: api.EventToolResult, Result: denied}); err != nil {
+			return api.ToolResult{}, err
+		}
+		return *denied, nil
+	}
 	res, err := s.c.tool(ctx, ToolCallContext{SessionUID: s.c.sessionUID}, call)
 	if err != nil {
 		return api.ToolResult{}, err

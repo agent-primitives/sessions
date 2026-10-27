@@ -53,7 +53,7 @@ func TestOpenAddsSessionTracesWithoutVersionBump(t *testing.T) {
 	if v := readUserVersion(t, path); v != sqlitelog.SchemaVersion {
 		t.Fatalf("user_version = %d, want %d", v, sqlitelog.SchemaVersion)
 	}
-	if err := s.SetLastTraceParent("s", "tp"); err != nil {
+	if err := s.InitTraceParent("s", "tp"); err != nil {
 		t.Fatal(err)
 	}
 }

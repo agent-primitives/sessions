@@ -3,6 +3,8 @@ package session_test
 import (
 	"context"
 	"net"
+	"path/filepath"
+	"sync"
 	"testing"
 
 	"go.opentelemetry.io/otel"
@@ -17,6 +19,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/test/bufconn"
 
+	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/harness/echoagent"
 	"github.com/agent-primitives/sessions/observability"
@@ -171,5 +174,102 @@ func TestUnsampledForkRecordsNoTraceLinks(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// blockSecondCloneBackend holds the second clone of a fan-out until release closes, so the first
+// child is published and reachable while the fork is still running.
+type blockSecondCloneBackend struct {
+	*local.Backend
+	first      chan string
+	release    chan struct{}
+	calls      int
+	firstChild string
+}
+
+// Fork is called once per child, in order, so the counter needs no lock.
+func (b *blockSecondCloneBackend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOpts) (api.Incarnation, error) {
+	b.calls++
+	if b.calls == 2 {
+		b.first <- b.firstChild // the first child is cloned and published
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+			return api.Incarnation{}, ctx.Err()
+		}
+	} else {
+		b.firstChild = opts.ChildSessionUID
+	}
+	return b.Backend.Fork(ctx, ref, opts)
+}
+
+// TestForkChildChainsOperationsDuringFanout checks that a child operation that runs while its
+// fork is still fanning out links to the fork, and that the fork does not later hide it from the
+// child's next operation.
+func TestForkChildChainsOperationsDuringFanout(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	prevTP, prevProp := otel.GetTracerProvider(), otel.GetTextMapPropagator()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		otel.SetTracerProvider(prevTP)
+		otel.SetTextMapPropagator(prevProp)
+	})
+
+	store := openStore(t, filepath.Join(t.TempDir(), "fork.db"))
+	backend := &blockSecondCloneBackend{Backend: local.New(echoagent.Harness{}), first: make(chan string, 1), release: make(chan struct{})}
+	t.Cleanup(func() { _ = backend.Close() })
+	var release sync.Once
+	defer release.Do(func() { close(backend.release) })
+	c := serveRegistry(t, store, echoRegistry(t, backend))
+
+	s, err := c.CreateSession(t.Context(), &v1.CreateSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forked := make(chan error, 1)
+	go func() {
+		_, err := c.Fork(t.Context(), &v1.ForkRequest{Session: s.GetMetadata().GetUid(), Count: 2})
+		forked <- err
+	}()
+	child := <-backend.first
+	// The child is reachable, as through ListSessions, before the fork finishes.
+	cur, err := c.GetSession(t.Context(), &v1.GetSessionRequest{Uid: child})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execOutputs(t, c, child, "during", cur.GetLastSeq())
+	release.Do(func() { close(backend.release) })
+	if err := <-forked; err != nil {
+		t.Fatal(err)
+	}
+	cur, err = c.GetSession(t.Context(), &v1.GetSessionRequest{Uid: child})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execOutputs(t, c, child, "after", cur.GetLastSeq())
+
+	var fork sdktrace.ReadOnlySpan
+	var execs []sdktrace.ReadOnlySpan
+	for _, sp := range rec.Ended() {
+		switch sp.Name() {
+		case "session.fork":
+			fork = sp
+		case "session.exec":
+			execs = append(execs, sp)
+		}
+	}
+	if fork == nil || len(execs) != 2 {
+		t.Fatalf("got fork %v and %d exec spans, want a fork and 2 execs", fork != nil, len(execs))
+	}
+	linksTo := func(sp, prev sdktrace.ReadOnlySpan) bool {
+		links := sp.Links()
+		return len(links) == 1 && links[0].SpanContext.SpanID() == prev.SpanContext().SpanID()
+	}
+	if !linksTo(execs[0], fork) {
+		t.Fatalf("exec during the fan-out has links %v, want the fork", execs[0].Links())
+	}
+	if !linksTo(execs[1], execs[0]) {
+		t.Fatalf("exec after the fork has links %v, want the exec during the fan-out", execs[1].Links())
 	}
 }

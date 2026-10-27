@@ -121,8 +121,10 @@ func (s *Service) chainTrace(ctx context.Context, uid string) {
 	)
 }
 
-// recordTrace makes the current operation uid's latest without linking back, which is how a fork
-// child starts its chain at the fork that created it.
+// recordTrace makes the current operation uid's first without linking back, which is how a fork
+// child starts its chain at the fork that created it. It must run before uid is published: once a
+// caller can reach uid, its own operations chain from whatever is recorded, and recordTrace never
+// replaces a recorded operation.
 //
 // Only a sampled, recording span is recorded. With tracing off or the operation dropped by the
 // sampler, ctx can still carry a valid span context (the caller's, propagated in), but no span of
@@ -140,7 +142,7 @@ func (s *Service) recordTrace(ctx context.Context, uid string) {
 	if !ok {
 		return
 	}
-	if err := links.SetLastTraceParent(uid, tp); err != nil {
+	if err := links.InitTraceParent(uid, tp); err != nil {
 		observability.Logger(ctx, s.logger).Debug("record trace link failed", "session_uid", uid, "error_kind", "store_failed")
 	}
 }
@@ -1040,15 +1042,17 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		metadata = append(metadata, meta)
 		children = append(children, placement.ForkChild{UID: uid, Log: log})
 	}
+	// Each child is published at its first fence during the fan-out, so its chain starts here. A
+	// failed fan-out keeps the stamps, as it keeps the children it published.
+	for _, child := range children {
+		s.recordTrace(ctx, child.UID)
+	}
 	// The fan-out is all-or-nothing: Placer.Fork rolls back everything it provisioned on failure,
 	// so children_created stays 0 rather than reporting compute that no longer exists.
 	if err := placer.Fork(ctx, parent, req.GetSession(), children, atSeq); err != nil {
 		return nil, forkError(req.GetSession(), err)
 	}
 	childrenCreated = len(children)
-	for _, child := range children {
-		s.recordTrace(ctx, child.UID)
-	}
 	// Finalize metadata after the fan-out as before. Modern children already inherited admission
 	// metadata atomically at their first fence; legacy children retain their publication behavior.
 	// Neither handle construction nor a refused/unprovisioned fork creates phantom rows.

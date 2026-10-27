@@ -113,7 +113,7 @@ func TestAuthorizationEveryGeneratedRPC(t *testing.T) {
 		"CreateSession": {api.ActionCreate}, "GetSession": {api.ActionRead}, "ListSessions": {api.ActionList}, "DeleteSession": {api.ActionDelete},
 		"Exec": {api.ActionExec}, "Replay": {api.ActionRead}, "Approve": {api.ActionRead, api.ActionApprove}, "Cancel": {api.ActionCancel},
 		"Suspend": {api.ActionSuspend}, "Resume": {api.ActionResume, api.ActionExec}, "Fork": {api.ActionFork, api.ActionCreate},
-		"RegisterHarness": {api.ActionRegistryRegister}, "GetHarness": {api.ActionRegistryRead}, "ListHarnesses": {api.ActionRegistryList}, "RetireHarness": {api.ActionRegistryRetire},
+		"RegisterHarness": {api.ActionRegistryRegister}, "CreateHarness": {api.ActionRegistryRegister}, "GetHarness": {api.ActionRegistryRead}, "ListHarnesses": {api.ActionRegistryList}, "RetireHarness": {api.ActionRegistryRetire},
 	}
 	for _, service := range []struct {
 		desc *grpc.ServiceDesc

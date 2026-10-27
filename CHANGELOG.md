@@ -15,9 +15,19 @@ not provide.
 - `controller.ErrMissingModel`: a live model call on a controller with neither a `ModelFunc` nor
   `WithStreamingModel` returns it (match with `errors.Is`) instead of dereferencing a nil model.
   Replay and streaming-only controllers still accept a nil model.
+- `HarnessRegistry.CreateHarness`: atomic create-only registration (spec `REG-3a`), needing the
+  `registry.register` action. A create that timed out may have committed: inspect with
+  `GetHarness` rather than retry. New in Go: `sqlitelog.Store.CreateHarness`,
+  `sqlitelog.Store.HarnessNameReserved` and `sqlitelog.ErrHarnessExists`.
 
 ### Compatibility
 
+- `CreateHarness` is a new RPC, not a field on `RegisterHarnessRequest`, so a server that predates
+  it refuses with `UNIMPLEMENTED` and changes nothing, rather than ignoring a create-only flag and
+  reactivating the name. `RegisterHarness` is unchanged. The generated Go `HarnessRegistryClient`
+  and `HarnessRegistryServer` interfaces gain the method: a hand-written client implementation must
+  add it; servers embedding `UnimplementedHarnessRegistryServer` compile unchanged. No journal
+  schema change.
 - The SQLite journal gains the allocation ledger and inventory completeness/evidence columns.
   Stop all old writers and back up the database and WAL before migration. There is no downgrade to
   v0.3.0 or older; an already-open old writer is not fenced by the schema stamp. Every inventory,

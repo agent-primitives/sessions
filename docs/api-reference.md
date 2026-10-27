@@ -885,6 +885,22 @@ unauthenticated. Every local or same-pod process that can reach the operator por
 registrations. See docs/security.md.
 
 
+<a name="agentsessions-v1-CreateHarnessRequest"></a>
+
+### CreateHarnessRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| name | [string](#string) |  | An RFC 1123 DNS label, as for RegisterHarnessRequest.name. |
+| spec | [HarnessSpec](#agentsessions-v1-HarnessSpec) |  |  |
+
+
+
+
+
+
 <a name="agentsessions-v1-GetHarnessRequest"></a>
 
 ### GetHarnessRequest
@@ -1044,8 +1060,8 @@ RemotePlacement is a harness already running at address, dialed over the Harness
 
 ### SubstratePlacement
 SubstratePlacement runs each session in its own actor created from an ActorTemplate. A host
-serves it only if it was built with a substrate placement backend; otherwise RegisterHarness
-returns FAILED_PRECONDITION.
+serves it only if it was built with a substrate placement backend; otherwise RegisterHarness and
+CreateHarness return FAILED_PRECONDITION.
 
 
 | Field | Type | Label | Description |
@@ -1069,7 +1085,7 @@ returns FAILED_PRECONDITION.
 | ---- | ------ | ----------- |
 | HARNESS_SOURCE_UNSPECIFIED | 0 |  |
 | HARNESS_SOURCE_STATIC | 1 | Built into the host or configured when it started. Never stored, always ACTIVE, and read-only through this API: its name cannot be registered or retired. |
-| HARNESS_SOURCE_REGISTERED | 2 | Created through RegisterHarness and stored in the host&#39;s journal database. |
+| HARNESS_SOURCE_REGISTERED | 2 | Created through RegisterHarness or CreateHarness and stored in the host&#39;s journal database. |
 
 
 
@@ -1128,7 +1144,8 @@ docs/security.md#optional-go-rpc-authorization for the opt-in contract and deplo
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| RegisterHarness | [RegisterHarnessRequest](#agentsessions-v1-RegisterHarnessRequest) | [RegisterHarnessResponse](#agentsessions-v1-RegisterHarnessResponse) | Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec, or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve a new placement. An identical repeat of a registration isolated during startup returns UNCHANGED or REACTIVATED with unservable_reason set; it does not claim this host serves it. An identical compatible repeat of a row added since startup can load it locally without restart. Repeating a RETIRED registration reactivates it for every host sharing the journal; restart the host instead to serve only its existing sessions without reactivation. |
+| RegisterHarness | [RegisterHarnessRequest](#agentsessions-v1-RegisterHarnessRequest) | [RegisterHarnessResponse](#agentsessions-v1-RegisterHarnessResponse) | Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec, or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve a new placement. An identical repeat of a registration isolated during startup returns UNCHANGED or REACTIVATED with unservable_reason set; it does not claim this host serves it. An identical compatible repeat of a row added since startup can load it locally without restart. Repeating a RETIRED registration reactivates it for every host sharing the journal; restart the host instead to serve only its existing sessions without reactivation. To register only a name that was never registered, use CreateHarness: a GetHarness check before RegisterHarness races with other writers. |
+| CreateHarness | [CreateHarnessRequest](#agentsessions-v1-CreateHarnessRequest) | [HarnessRegistration](#agentsessions-v1-HarnessRegistration) | Create-only registration: stores a new ACTIVE registration only if the name has never been registered, and returns it. The absence check and the insert are one transaction in the journal database, so it holds across every host sharing the journal, and of concurrent CreateHarness calls for one name at most one succeeds. The name and spec are validated as for RegisterHarness before registration rows are read, so an invalid spec is INVALID_ARGUMENT even under a registered name. A valid request is ALREADY_EXISTS when the name has a registration row of any spec, ACTIVE or RETIRED (whether or not this host has loaded or can serve it), or is taken by or reserved for a STATIC harness; nothing is stored, reactivated or loaded. A free name is FAILED_PRECONDITION, like RegisterHarness, when the host cannot serve its placement. A server that predates this RPC returns UNIMPLEMENTED and changes nothing. A call that fails with DEADLINE_EXCEEDED, CANCELLED or a transport error may or may not have stored the registration, and a retry that finds it returns ALREADY_EXISTS whoever stored it. Do not retry blindly: inspect with GetHarness, whose spec_digest says whether the stored spec is the one requested (not which caller stored it). |
 | GetHarness | [GetHarnessRequest](#agentsessions-v1-GetHarnessRequest) | [HarnessRegistration](#agentsessions-v1-HarnessRegistration) | NOT_FOUND for a name that is neither STATIC nor registered. |
 | ListHarnesses | [ListHarnessesRequest](#agentsessions-v1-ListHarnessesRequest) | [ListHarnessesResponse](#agentsessions-v1-ListHarnessesResponse) |  |
 | RetireHarness | [RetireHarnessRequest](#agentsessions-v1-RetireHarnessRequest) | [HarnessRegistration](#agentsessions-v1-HarnessRegistration) | Idempotent: retiring a RETIRED harness returns it unchanged. FAILED_PRECONDITION for a STATIC harness; NOT_FOUND for an unknown name. |

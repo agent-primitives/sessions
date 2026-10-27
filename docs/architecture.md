@@ -54,6 +54,10 @@ the harness stream, so what is journaled is what the harness emitted.
   listable. `compute_state` is a projection
   advanced in the **same transaction** that appends an event, since an event body is an opaque
   blob no query can filter on; being in-transaction is what stops it drifting from the log.
+- **Store interfaces** (`session/store.go`) — `session.Service` and `session.HarnessRegistry` take
+  the `SessionStore` and `HarnessStore` interfaces rather than `*sqlitelog.Store`, which is the only
+  implementation in this repository. Another backend implements both and keeps the transactional
+  properties they document; the record types and sentinel errors are still `sqlitelog`'s.
 - **Canonical hash** (`canon/`) — the `content_hash` is **RFC 8785 JCS over proto3-JSON**, computed over
   the proto, not Go's `json.Marshal`. The chain is therefore language-neutral: `hack/verify_chain.py`
   (a ~30-line non-Go verifier) reproduces the Go hash for the golden vector, so any implementation or

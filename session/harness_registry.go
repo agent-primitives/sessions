@@ -59,7 +59,7 @@ type PlacerFactory func(name string, spec *v1.HarnessSpec) (p *placement.Placer,
 // off the Sessions listener and protect its reachability and transport.
 type HarnessRegistry struct {
 	v1.UnimplementedHarnessRegistryServer
-	store    *sqlitelog.Store
+	store    HarnessStore
 	registry *placement.Registry
 	factory  PlacerFactory
 	auth     *authorization
@@ -89,8 +89,8 @@ func WithRegistryLogger(logger *slog.Logger) HarnessRegistryOption {
 // Operational logs use slog.Default() unless WithRegistryLogger is supplied.
 // Registrations are loaded at startup. A registration another process makes in a shared database
 // is served after this host restarts, or if RegisterHarness loads its identical compatible spec.
-func NewHarnessRegistry(store *sqlitelog.Store, registry *placement.Registry, factory PlacerFactory, opts ...HarnessRegistryOption) (*HarnessRegistry, error) {
-	if store == nil || registry == nil || factory == nil {
+func NewHarnessRegistry(store HarnessStore, registry *placement.Registry, factory PlacerFactory, opts ...HarnessRegistryOption) (*HarnessRegistry, error) {
+	if nilStore(store) || registry == nil || factory == nil {
 		return nil, errors.New("session: NewHarnessRegistry needs a store, a registry and a factory")
 	}
 	h := &HarnessRegistry{store: store, registry: registry, factory: factory}
@@ -122,8 +122,8 @@ func NewHarnessRegistry(store *sqlitelog.Store, registry *placement.Registry, fa
 // Service also refuses, when it creates or routes a session, a static name that has a
 // registration row, so a host that skips this call fails closed instead of mixing the two. The
 // reservation is what lets the registering host refuse the name up front instead.
-func ReserveStaticHarnessNames(store *sqlitelog.Store, registry *placement.Registry) error {
-	if store == nil || registry == nil {
+func ReserveStaticHarnessNames(store HarnessStore, registry *placement.Registry) error {
+	if nilStore(store) || registry == nil {
 		return errors.New("session: ReserveStaticHarnessNames needs a store and a registry")
 	}
 	if err := store.ReserveHarnessNames(registry.ReservedNames()); err != nil {
@@ -133,7 +133,7 @@ func ReserveStaticHarnessNames(store *sqlitelog.Store, registry *placement.Regis
 }
 
 // forEachRegistration calls fn for every stored registration, retired ones included, in name order.
-func forEachRegistration(ctx context.Context, logger *slog.Logger, store *sqlitelog.Store, fn func(sqlitelog.HarnessRecord) error) error {
+func forEachRegistration(ctx context.Context, logger *slog.Logger, store HarnessStore, fn func(sqlitelog.HarnessRecord) error) error {
 	after := ""
 	for {
 		recs, err := store.ListHarnesses(sqlitelog.HarnessListOptions{After: after, Limit: sqlitelog.MaxPageSize, IncludeRetired: true})

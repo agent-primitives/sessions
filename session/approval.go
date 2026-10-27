@@ -53,7 +53,7 @@ func (s *Service) Approve(ctx context.Context, req *v1.ApproveRequest) (response
 	// Only the authentication interceptors install a caller, so no request field reaches it.
 	// Without authentication the decision records no approver, as before.
 	approver, _ := authn.Caller(ctx)
-	decision, err := s.registry.Approve(ctx, s.store.Session(uid), uid, api.ApprovalDecision{
+	decision, err := s.registry.Approve(ctx, s.store.SessionLog(uid), uid, api.ApprovalDecision{
 		ExecutionID: req.GetExecutionId(), ToolCallID: req.GetToolCallId(), RequestSeq: req.GetRequestSeq(),
 		Approved: req.GetApproved(), Reason: req.GetReason(), Identity: actor, VerifiedApprover: approver,
 	})

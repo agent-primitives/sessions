@@ -446,6 +446,10 @@ func setWALMode(db *sql.DB) error {
 // Session returns a handle to one session's append-only chain.
 func (s *Store) Session(uid string) *Log { return &Log{store: s, session: uid} }
 
+// SessionLog is Session as an eventlog.SessionJournal, the form session.SessionStore needs. The
+// value is the same *Log, so its CheckWritable and the optional allocation recording apply to it.
+func (s *Store) SessionLog(uid string) eventlog.SessionJournal { return s.Session(uid) }
+
 // Log is one session's durable, single-writer, hash-chained event log.
 type Log struct {
 	store        *Store

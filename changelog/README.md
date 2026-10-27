@@ -52,6 +52,35 @@ category: Added
 - A later pull request that changes an unreleased feature edits that feature's fragment rather than
   adding a second one.
 
+## When a fragment is required
+
+The `changelog` workflow fails a pull request that changes a public contract path without adding or
+editing a fragment. Public contract paths are:
+
+- `spec.md`;
+- everything under `api/` (the protos, the generated stubs and the Go Runtime SPI), and any `.proto`
+  file;
+- the non-test Go source (`*.go` but not `*_test.go`) of an importable package: any directory
+  outside `internal/`, `testdata/`, `cmd/`, `hack/` and `examples/`, including the
+  `integrations/substrate` module.
+
+A change outside those paths still needs a fragment when users need to know about it, for example a
+changed `agentsessionsd` or `agentctl` flag, a new default, or a relicensing; reviewers check that.
+
+If a change to a public contract path needs no release note (a refactor, a comment, an internal
+helper in an exported package), a maintainer adds the `skip-changelog` label to the pull request and
+the check passes. The label waives only the requirement: a fragment that is present is still
+validated. The repository has no workflow that manages labels; maintainers create the label once.
+
+The workflow runs on every pull request, and again when a label is added or removed. To run the
+same check locally against your branch (`upstream` is the agent-primitives/sessions remote; in a
+clone with only `origin`, the command uses `origin/main`):
+
+```bash
+base="$(git merge-base upstream/main HEAD 2>/dev/null || git merge-base origin/main HEAD)" &&
+  go run ./hack/changelog check -base "${base}" -head HEAD
+```
+
 ## Release assembly
 
 Before tagging `vX.Y.Z`, a maintainer opens a release pull request that runs:

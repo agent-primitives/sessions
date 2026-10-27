@@ -33,6 +33,7 @@ Run these before pushing; they are the same gates the `ci` workflow enforces.
 | Persisted-format compatibility | `go test ./session ./sqlitelog -run 'SchemaV4Fixture\|MigratedAndFresh'` (part of Tests) |
 | Proto lint | `buf lint` |
 | Go blocks in docs (`docs` workflow, every pull request) | `go run ./hack/doccheck` |
+| Changelog fragment (`changelog` workflow, every pull request, rerun when a label changes) | `go run ./hack/changelog check -base "$(git merge-base upstream/main HEAD)" -head HEAD`, with `origin/main` in a clone without an `upstream` remote (see [Changelog](#changelog)) |
 | Release build (`release-check`, on changes to Go, `Dockerfile`, `LICENSE`, `README.md`, `.goreleaser.yaml`, `.ko.yaml`, the `release` and `release-check` workflows, `hack/release-tags.sh`, `hack/release-tags-test.sh`) | `hack/release-tags-test.sh`, `goreleaser check`, then `tags="$(hack/release-tags.sh)" && env ${tags} goreleaser release --snapshot --clean --skip=sbom` (bash; needs `ko`; publishes nothing) and a check that `dist/artifacts.json` lists the `agentsessionsd` and `harnessnode` ko images; `docker build` of `Dockerfile` after `CGO_ENABLED=0 GOOS=linux go build -o agentnode ./cmd/agentnode` |
 | Fuzzing (30s per target; nightly longer) | `./hack/fuzz.sh <dir> 30s` for each `<dir>` in `./hack/fuzz.sh --packages`; `hack/fuzz-test.sh` checks the one failure `fuzz.sh` lets pass, the Go 1.26 fuzzing coordinator's own deadline ([golang/go#75804](https://github.com/golang/go/issues/75804)) |
 
@@ -61,6 +62,19 @@ Run both after any change to `api/*.proto`.
   see the comment at the top of `hack/doccheck/main.go`.
 - **Docs land with the code they describe**, not ahead of it. If a change alters an interface that a
   document shows, update the document in the same pull request.
+
+## Changelog
+
+Do not edit `CHANGELOG.md` in a feature pull request. Add a fragment instead, one file under
+`changelog/unreleased/` with a category and an entry; a release assembles the fragments into
+`CHANGELOG.md`. Separate files mean concurrent pull requests do not conflict. The format, the
+categories and the release step are in [changelog/README.md](changelog/README.md).
+
+The `changelog` workflow fails a pull request that changes a public contract path (`spec.md`,
+`api/`, a `.proto` file, or the non-test Go source of a package outside `internal/`, `cmd/`,
+`testdata/`, `hack/` and `examples/`) without adding or editing a fragment. Anything else a commit
+list cannot convey, especially compatibility notes, also needs one. When a public contract change
+needs no release note, such as a refactor, a maintainer adds the `skip-changelog` label.
 
 ## Governance
 

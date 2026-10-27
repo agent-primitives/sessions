@@ -26,6 +26,7 @@ func TestAuthorizationRegistryLogger(t *testing.T) {
 	for _, mode := range []string{"custom", "default", "nil"} {
 		for _, method := range []string{
 			pb.HarnessRegistry_RegisterHarness_FullMethodName,
+			pb.HarnessRegistry_CreateHarness_FullMethodName,
 			pb.HarnessRegistry_GetHarness_FullMethodName,
 			pb.HarnessRegistry_RetireHarness_FullMethodName,
 			pb.HarnessRegistry_ListHarnesses_FullMethodName,
@@ -57,6 +58,8 @@ func TestAuthorizationRegistryLogger(t *testing.T) {
 				switch method {
 				case pb.HarnessRegistry_RegisterHarness_FullMethodName:
 					_, err = h.RegisterHarness(ctx, &pb.RegisterHarnessRequest{Name: "registered", Spec: remoteSpec("127.0.0.1:1")})
+				case pb.HarnessRegistry_CreateHarness_FullMethodName:
+					_, err = h.CreateHarness(ctx, &pb.CreateHarnessRequest{Name: "registered", Spec: remoteSpec("127.0.0.1:1")})
 				case pb.HarnessRegistry_GetHarness_FullMethodName:
 					_, err = h.GetHarness(ctx, &pb.GetHarnessRequest{Name: "registered"})
 				case pb.HarnessRegistry_RetireHarness_FullMethodName:

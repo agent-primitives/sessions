@@ -94,7 +94,7 @@ const (
 	// Built into the host or configured when it started. Never stored, always ACTIVE, and read-only
 	// through this API: its name cannot be registered or retired.
 	HarnessSource_HARNESS_SOURCE_STATIC HarnessSource = 1
-	// Created through RegisterHarness and stored in the host's journal database.
+	// Created through RegisterHarness or CreateHarness and stored in the host's journal database.
 	HarnessSource_HARNESS_SOURCE_REGISTERED HarnessSource = 2
 )
 
@@ -243,8 +243,8 @@ func (x *RemotePlacement) GetAddress() string {
 }
 
 // SubstratePlacement runs each session in its own actor created from an ActorTemplate. A host
-// serves it only if it was built with a substrate placement backend; otherwise RegisterHarness
-// returns FAILED_PRECONDITION.
+// serves it only if it was built with a substrate placement backend; otherwise RegisterHarness and
+// CreateHarness return FAILED_PRECONDITION.
 type SubstratePlacement struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Atespace string                 `protobuf:"bytes,1,opt,name=atespace,proto3" json:"atespace,omitempty"`
@@ -658,6 +658,59 @@ func (x *RegisterHarnessResponse) GetOutcome() RegisterOutcome {
 	return RegisterOutcome_REGISTER_OUTCOME_UNSPECIFIED
 }
 
+type CreateHarnessRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// An RFC 1123 DNS label, as for RegisterHarnessRequest.name.
+	Name          string       `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Spec          *HarnessSpec `protobuf:"bytes,2,opt,name=spec,proto3" json:"spec,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateHarnessRequest) Reset() {
+	*x = CreateHarnessRequest{}
+	mi := &file_harness_registry_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateHarnessRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateHarnessRequest) ProtoMessage() {}
+
+func (x *CreateHarnessRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_harness_registry_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateHarnessRequest.ProtoReflect.Descriptor instead.
+func (*CreateHarnessRequest) Descriptor() ([]byte, []int) {
+	return file_harness_registry_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *CreateHarnessRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *CreateHarnessRequest) GetSpec() *HarnessSpec {
+	if x != nil {
+		return x.Spec
+	}
+	return nil
+}
+
 type GetHarnessRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -670,7 +723,7 @@ type GetHarnessRequest struct {
 
 func (x *GetHarnessRequest) Reset() {
 	*x = GetHarnessRequest{}
-	mi := &file_harness_registry_proto_msgTypes[6]
+	mi := &file_harness_registry_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -682,7 +735,7 @@ func (x *GetHarnessRequest) String() string {
 func (*GetHarnessRequest) ProtoMessage() {}
 
 func (x *GetHarnessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harness_registry_proto_msgTypes[6]
+	mi := &file_harness_registry_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -695,7 +748,7 @@ func (x *GetHarnessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetHarnessRequest.ProtoReflect.Descriptor instead.
 func (*GetHarnessRequest) Descriptor() ([]byte, []int) {
-	return file_harness_registry_proto_rawDescGZIP(), []int{6}
+	return file_harness_registry_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GetHarnessRequest) GetName() string {
@@ -727,7 +780,7 @@ type ListHarnessesRequest struct {
 
 func (x *ListHarnessesRequest) Reset() {
 	*x = ListHarnessesRequest{}
-	mi := &file_harness_registry_proto_msgTypes[7]
+	mi := &file_harness_registry_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -739,7 +792,7 @@ func (x *ListHarnessesRequest) String() string {
 func (*ListHarnessesRequest) ProtoMessage() {}
 
 func (x *ListHarnessesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harness_registry_proto_msgTypes[7]
+	mi := &file_harness_registry_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -752,7 +805,7 @@ func (x *ListHarnessesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListHarnessesRequest.ProtoReflect.Descriptor instead.
 func (*ListHarnessesRequest) Descriptor() ([]byte, []int) {
-	return file_harness_registry_proto_rawDescGZIP(), []int{7}
+	return file_harness_registry_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ListHarnessesRequest) GetPageSize() int32 {
@@ -788,7 +841,7 @@ type ListHarnessesResponse struct {
 
 func (x *ListHarnessesResponse) Reset() {
 	*x = ListHarnessesResponse{}
-	mi := &file_harness_registry_proto_msgTypes[8]
+	mi := &file_harness_registry_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -800,7 +853,7 @@ func (x *ListHarnessesResponse) String() string {
 func (*ListHarnessesResponse) ProtoMessage() {}
 
 func (x *ListHarnessesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harness_registry_proto_msgTypes[8]
+	mi := &file_harness_registry_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -813,7 +866,7 @@ func (x *ListHarnessesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListHarnessesResponse.ProtoReflect.Descriptor instead.
 func (*ListHarnessesResponse) Descriptor() ([]byte, []int) {
-	return file_harness_registry_proto_rawDescGZIP(), []int{8}
+	return file_harness_registry_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ListHarnessesResponse) GetHarnesses() []*HarnessRegistration {
@@ -841,7 +894,7 @@ type RetireHarnessRequest struct {
 
 func (x *RetireHarnessRequest) Reset() {
 	*x = RetireHarnessRequest{}
-	mi := &file_harness_registry_proto_msgTypes[9]
+	mi := &file_harness_registry_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -853,7 +906,7 @@ func (x *RetireHarnessRequest) String() string {
 func (*RetireHarnessRequest) ProtoMessage() {}
 
 func (x *RetireHarnessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harness_registry_proto_msgTypes[9]
+	mi := &file_harness_registry_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -866,7 +919,7 @@ func (x *RetireHarnessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetireHarnessRequest.ProtoReflect.Descriptor instead.
 func (*RetireHarnessRequest) Descriptor() ([]byte, []int) {
-	return file_harness_registry_proto_rawDescGZIP(), []int{9}
+	return file_harness_registry_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *RetireHarnessRequest) GetName() string {
@@ -918,7 +971,10 @@ const file_harness_registry_proto_rawDesc = "" +
 	"\x04spec\x18\x02 \x01(\v2\x1d.agentsessions.v1.HarnessSpecR\x04spec\"\x97\x01\n" +
 	"\x17RegisterHarnessResponse\x12?\n" +
 	"\aharness\x18\x01 \x01(\v2%.agentsessions.v1.HarnessRegistrationR\aharness\x12;\n" +
-	"\aoutcome\x18\x02 \x01(\x0e2!.agentsessions.v1.RegisterOutcomeR\aoutcome\"A\n" +
+	"\aoutcome\x18\x02 \x01(\x0e2!.agentsessions.v1.RegisterOutcomeR\aoutcome\"]\n" +
+	"\x14CreateHarnessRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x121\n" +
+	"\x04spec\x18\x02 \x01(\v2\x1d.agentsessions.v1.HarnessSpecR\x04spec\"A\n" +
 	"\x11GetHarnessRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
 	"\aobserve\x18\x02 \x01(\bR\aobserve\"{\n" +
@@ -945,9 +1001,10 @@ const file_harness_registry_proto_rawDesc = "" +
 	"\x1cREGISTER_OUTCOME_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18REGISTER_OUTCOME_CREATED\x10\x01\x12\x1e\n" +
 	"\x1aREGISTER_OUTCOME_UNCHANGED\x10\x02\x12 \n" +
-	"\x1cREGISTER_OUTCOME_REACTIVATED\x10\x032\x95\x03\n" +
+	"\x1cREGISTER_OUTCOME_REACTIVATED\x10\x032\xf5\x03\n" +
 	"\x0fHarnessRegistry\x12f\n" +
-	"\x0fRegisterHarness\x12(.agentsessions.v1.RegisterHarnessRequest\x1a).agentsessions.v1.RegisterHarnessResponse\x12X\n" +
+	"\x0fRegisterHarness\x12(.agentsessions.v1.RegisterHarnessRequest\x1a).agentsessions.v1.RegisterHarnessResponse\x12^\n" +
+	"\rCreateHarness\x12&.agentsessions.v1.CreateHarnessRequest\x1a%.agentsessions.v1.HarnessRegistration\x12X\n" +
 	"\n" +
 	"GetHarness\x12#.agentsessions.v1.GetHarnessRequest\x1a%.agentsessions.v1.HarnessRegistration\x12`\n" +
 	"\rListHarnesses\x12&.agentsessions.v1.ListHarnessesRequest\x1a'.agentsessions.v1.ListHarnessesResponse\x12^\n" +
@@ -966,7 +1023,7 @@ func file_harness_registry_proto_rawDescGZIP() []byte {
 }
 
 var file_harness_registry_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_harness_registry_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_harness_registry_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_harness_registry_proto_goTypes = []any{
 	(HarnessState)(0),               // 0: agentsessions.v1.HarnessState
 	(HarnessSource)(0),              // 1: agentsessions.v1.HarnessSource
@@ -977,42 +1034,46 @@ var file_harness_registry_proto_goTypes = []any{
 	(*HarnessRegistration)(nil),     // 6: agentsessions.v1.HarnessRegistration
 	(*RegisterHarnessRequest)(nil),  // 7: agentsessions.v1.RegisterHarnessRequest
 	(*RegisterHarnessResponse)(nil), // 8: agentsessions.v1.RegisterHarnessResponse
-	(*GetHarnessRequest)(nil),       // 9: agentsessions.v1.GetHarnessRequest
-	(*ListHarnessesRequest)(nil),    // 10: agentsessions.v1.ListHarnessesRequest
-	(*ListHarnessesResponse)(nil),   // 11: agentsessions.v1.ListHarnessesResponse
-	(*RetireHarnessRequest)(nil),    // 12: agentsessions.v1.RetireHarnessRequest
-	(*Capabilities)(nil),            // 13: agentsessions.v1.Capabilities
-	(*ResourceMetadata)(nil),        // 14: agentsessions.v1.ResourceMetadata
-	(*timestamppb.Timestamp)(nil),   // 15: google.protobuf.Timestamp
-	(*HarnessDescriptor)(nil),       // 16: agentsessions.v1.HarnessDescriptor
+	(*CreateHarnessRequest)(nil),    // 9: agentsessions.v1.CreateHarnessRequest
+	(*GetHarnessRequest)(nil),       // 10: agentsessions.v1.GetHarnessRequest
+	(*ListHarnessesRequest)(nil),    // 11: agentsessions.v1.ListHarnessesRequest
+	(*ListHarnessesResponse)(nil),   // 12: agentsessions.v1.ListHarnessesResponse
+	(*RetireHarnessRequest)(nil),    // 13: agentsessions.v1.RetireHarnessRequest
+	(*Capabilities)(nil),            // 14: agentsessions.v1.Capabilities
+	(*ResourceMetadata)(nil),        // 15: agentsessions.v1.ResourceMetadata
+	(*timestamppb.Timestamp)(nil),   // 16: google.protobuf.Timestamp
+	(*HarnessDescriptor)(nil),       // 17: agentsessions.v1.HarnessDescriptor
 }
 var file_harness_registry_proto_depIdxs = []int32{
 	3,  // 0: agentsessions.v1.HarnessSpec.remote:type_name -> agentsessions.v1.RemotePlacement
 	4,  // 1: agentsessions.v1.HarnessSpec.substrate:type_name -> agentsessions.v1.SubstratePlacement
-	13, // 2: agentsessions.v1.HarnessSpec.capabilities:type_name -> agentsessions.v1.Capabilities
-	14, // 3: agentsessions.v1.HarnessRegistration.metadata:type_name -> agentsessions.v1.ResourceMetadata
+	14, // 2: agentsessions.v1.HarnessSpec.capabilities:type_name -> agentsessions.v1.Capabilities
+	15, // 3: agentsessions.v1.HarnessRegistration.metadata:type_name -> agentsessions.v1.ResourceMetadata
 	5,  // 4: agentsessions.v1.HarnessRegistration.spec:type_name -> agentsessions.v1.HarnessSpec
 	0,  // 5: agentsessions.v1.HarnessRegistration.state:type_name -> agentsessions.v1.HarnessState
 	1,  // 6: agentsessions.v1.HarnessRegistration.source:type_name -> agentsessions.v1.HarnessSource
-	15, // 7: agentsessions.v1.HarnessRegistration.retire_time:type_name -> google.protobuf.Timestamp
-	16, // 8: agentsessions.v1.HarnessRegistration.observed:type_name -> agentsessions.v1.HarnessDescriptor
+	16, // 7: agentsessions.v1.HarnessRegistration.retire_time:type_name -> google.protobuf.Timestamp
+	17, // 8: agentsessions.v1.HarnessRegistration.observed:type_name -> agentsessions.v1.HarnessDescriptor
 	5,  // 9: agentsessions.v1.RegisterHarnessRequest.spec:type_name -> agentsessions.v1.HarnessSpec
 	6,  // 10: agentsessions.v1.RegisterHarnessResponse.harness:type_name -> agentsessions.v1.HarnessRegistration
 	2,  // 11: agentsessions.v1.RegisterHarnessResponse.outcome:type_name -> agentsessions.v1.RegisterOutcome
-	6,  // 12: agentsessions.v1.ListHarnessesResponse.harnesses:type_name -> agentsessions.v1.HarnessRegistration
-	7,  // 13: agentsessions.v1.HarnessRegistry.RegisterHarness:input_type -> agentsessions.v1.RegisterHarnessRequest
-	9,  // 14: agentsessions.v1.HarnessRegistry.GetHarness:input_type -> agentsessions.v1.GetHarnessRequest
-	10, // 15: agentsessions.v1.HarnessRegistry.ListHarnesses:input_type -> agentsessions.v1.ListHarnessesRequest
-	12, // 16: agentsessions.v1.HarnessRegistry.RetireHarness:input_type -> agentsessions.v1.RetireHarnessRequest
-	8,  // 17: agentsessions.v1.HarnessRegistry.RegisterHarness:output_type -> agentsessions.v1.RegisterHarnessResponse
-	6,  // 18: agentsessions.v1.HarnessRegistry.GetHarness:output_type -> agentsessions.v1.HarnessRegistration
-	11, // 19: agentsessions.v1.HarnessRegistry.ListHarnesses:output_type -> agentsessions.v1.ListHarnessesResponse
-	6,  // 20: agentsessions.v1.HarnessRegistry.RetireHarness:output_type -> agentsessions.v1.HarnessRegistration
-	17, // [17:21] is the sub-list for method output_type
-	13, // [13:17] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	5,  // 12: agentsessions.v1.CreateHarnessRequest.spec:type_name -> agentsessions.v1.HarnessSpec
+	6,  // 13: agentsessions.v1.ListHarnessesResponse.harnesses:type_name -> agentsessions.v1.HarnessRegistration
+	7,  // 14: agentsessions.v1.HarnessRegistry.RegisterHarness:input_type -> agentsessions.v1.RegisterHarnessRequest
+	9,  // 15: agentsessions.v1.HarnessRegistry.CreateHarness:input_type -> agentsessions.v1.CreateHarnessRequest
+	10, // 16: agentsessions.v1.HarnessRegistry.GetHarness:input_type -> agentsessions.v1.GetHarnessRequest
+	11, // 17: agentsessions.v1.HarnessRegistry.ListHarnesses:input_type -> agentsessions.v1.ListHarnessesRequest
+	13, // 18: agentsessions.v1.HarnessRegistry.RetireHarness:input_type -> agentsessions.v1.RetireHarnessRequest
+	8,  // 19: agentsessions.v1.HarnessRegistry.RegisterHarness:output_type -> agentsessions.v1.RegisterHarnessResponse
+	6,  // 20: agentsessions.v1.HarnessRegistry.CreateHarness:output_type -> agentsessions.v1.HarnessRegistration
+	6,  // 21: agentsessions.v1.HarnessRegistry.GetHarness:output_type -> agentsessions.v1.HarnessRegistration
+	12, // 22: agentsessions.v1.HarnessRegistry.ListHarnesses:output_type -> agentsessions.v1.ListHarnessesResponse
+	6,  // 23: agentsessions.v1.HarnessRegistry.RetireHarness:output_type -> agentsessions.v1.HarnessRegistration
+	19, // [19:24] is the sub-list for method output_type
+	14, // [14:19] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_harness_registry_proto_init() }
@@ -1032,7 +1093,7 @@ func file_harness_registry_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_harness_registry_proto_rawDesc), len(file_harness_registry_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   10,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

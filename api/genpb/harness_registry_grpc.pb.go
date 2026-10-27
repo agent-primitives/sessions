@@ -33,6 +33,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	HarnessRegistry_RegisterHarness_FullMethodName = "/agentsessions.v1.HarnessRegistry/RegisterHarness"
+	HarnessRegistry_CreateHarness_FullMethodName   = "/agentsessions.v1.HarnessRegistry/CreateHarness"
 	HarnessRegistry_GetHarness_FullMethodName      = "/agentsessions.v1.HarnessRegistry/GetHarness"
 	HarnessRegistry_ListHarnesses_FullMethodName   = "/agentsessions.v1.HarnessRegistry/ListHarnesses"
 	HarnessRegistry_RetireHarness_FullMethodName   = "/agentsessions.v1.HarnessRegistry/RetireHarness"
@@ -67,8 +68,25 @@ type HarnessRegistryClient interface {
 	// UNCHANGED or REACTIVATED with unservable_reason set; it does not claim this host serves it.
 	// An identical compatible repeat of a row added since startup can load it locally without restart.
 	// Repeating a RETIRED registration reactivates it for every host sharing the journal; restart the
-	// host instead to serve only its existing sessions without reactivation.
+	// host instead to serve only its existing sessions without reactivation. To register only a name
+	// that was never registered, use CreateHarness: a GetHarness check before RegisterHarness races
+	// with other writers.
 	RegisterHarness(ctx context.Context, in *RegisterHarnessRequest, opts ...grpc.CallOption) (*RegisterHarnessResponse, error)
+	// Create-only registration: stores a new ACTIVE registration only if the name has never been
+	// registered, and returns it. The absence check and the insert are one transaction in the
+	// journal database, so it holds across every host sharing the journal, and of concurrent
+	// CreateHarness calls for one name at most one succeeds. The name and spec are validated as for
+	// RegisterHarness before registration rows are read, so an invalid spec is INVALID_ARGUMENT even
+	// under a registered name. A valid request is ALREADY_EXISTS when the name has a registration
+	// row of any spec, ACTIVE or RETIRED (whether or not this host has loaded or can serve it), or
+	// is taken by or reserved for a STATIC harness; nothing is stored, reactivated or loaded. A free
+	// name is FAILED_PRECONDITION, like RegisterHarness, when the host cannot serve its placement. A
+	// server that predates this RPC returns UNIMPLEMENTED and changes nothing.
+	// A call that fails with DEADLINE_EXCEEDED, CANCELLED or a transport error may or may not have
+	// stored the registration, and a retry that finds it returns ALREADY_EXISTS whoever stored it.
+	// Do not retry blindly: inspect with GetHarness, whose spec_digest says whether the stored spec
+	// is the one requested (not which caller stored it).
+	CreateHarness(ctx context.Context, in *CreateHarnessRequest, opts ...grpc.CallOption) (*HarnessRegistration, error)
 	// NOT_FOUND for a name that is neither STATIC nor registered.
 	GetHarness(ctx context.Context, in *GetHarnessRequest, opts ...grpc.CallOption) (*HarnessRegistration, error)
 	ListHarnesses(ctx context.Context, in *ListHarnessesRequest, opts ...grpc.CallOption) (*ListHarnessesResponse, error)
@@ -89,6 +107,16 @@ func (c *harnessRegistryClient) RegisterHarness(ctx context.Context, in *Registe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RegisterHarnessResponse)
 	err := c.cc.Invoke(ctx, HarnessRegistry_RegisterHarness_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessRegistryClient) CreateHarness(ctx context.Context, in *CreateHarnessRequest, opts ...grpc.CallOption) (*HarnessRegistration, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HarnessRegistration)
+	err := c.cc.Invoke(ctx, HarnessRegistry_CreateHarness_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -154,8 +182,25 @@ type HarnessRegistryServer interface {
 	// UNCHANGED or REACTIVATED with unservable_reason set; it does not claim this host serves it.
 	// An identical compatible repeat of a row added since startup can load it locally without restart.
 	// Repeating a RETIRED registration reactivates it for every host sharing the journal; restart the
-	// host instead to serve only its existing sessions without reactivation.
+	// host instead to serve only its existing sessions without reactivation. To register only a name
+	// that was never registered, use CreateHarness: a GetHarness check before RegisterHarness races
+	// with other writers.
 	RegisterHarness(context.Context, *RegisterHarnessRequest) (*RegisterHarnessResponse, error)
+	// Create-only registration: stores a new ACTIVE registration only if the name has never been
+	// registered, and returns it. The absence check and the insert are one transaction in the
+	// journal database, so it holds across every host sharing the journal, and of concurrent
+	// CreateHarness calls for one name at most one succeeds. The name and spec are validated as for
+	// RegisterHarness before registration rows are read, so an invalid spec is INVALID_ARGUMENT even
+	// under a registered name. A valid request is ALREADY_EXISTS when the name has a registration
+	// row of any spec, ACTIVE or RETIRED (whether or not this host has loaded or can serve it), or
+	// is taken by or reserved for a STATIC harness; nothing is stored, reactivated or loaded. A free
+	// name is FAILED_PRECONDITION, like RegisterHarness, when the host cannot serve its placement. A
+	// server that predates this RPC returns UNIMPLEMENTED and changes nothing.
+	// A call that fails with DEADLINE_EXCEEDED, CANCELLED or a transport error may or may not have
+	// stored the registration, and a retry that finds it returns ALREADY_EXISTS whoever stored it.
+	// Do not retry blindly: inspect with GetHarness, whose spec_digest says whether the stored spec
+	// is the one requested (not which caller stored it).
+	CreateHarness(context.Context, *CreateHarnessRequest) (*HarnessRegistration, error)
 	// NOT_FOUND for a name that is neither STATIC nor registered.
 	GetHarness(context.Context, *GetHarnessRequest) (*HarnessRegistration, error)
 	ListHarnesses(context.Context, *ListHarnessesRequest) (*ListHarnessesResponse, error)
@@ -174,6 +219,9 @@ type UnimplementedHarnessRegistryServer struct{}
 
 func (UnimplementedHarnessRegistryServer) RegisterHarness(context.Context, *RegisterHarnessRequest) (*RegisterHarnessResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RegisterHarness not implemented")
+}
+func (UnimplementedHarnessRegistryServer) CreateHarness(context.Context, *CreateHarnessRequest) (*HarnessRegistration, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateHarness not implemented")
 }
 func (UnimplementedHarnessRegistryServer) GetHarness(context.Context, *GetHarnessRequest) (*HarnessRegistration, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetHarness not implemented")
@@ -219,6 +267,24 @@ func _HarnessRegistry_RegisterHarness_Handler(srv interface{}, ctx context.Conte
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(HarnessRegistryServer).RegisterHarness(ctx, req.(*RegisterHarnessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessRegistry_CreateHarness_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateHarnessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessRegistryServer).CreateHarness(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessRegistry_CreateHarness_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessRegistryServer).CreateHarness(ctx, req.(*CreateHarnessRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -287,6 +353,10 @@ var HarnessRegistry_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RegisterHarness",
 			Handler:    _HarnessRegistry_RegisterHarness_Handler,
+		},
+		{
+			MethodName: "CreateHarness",
+			Handler:    _HarnessRegistry_CreateHarness_Handler,
 		},
 		{
 			MethodName: "GetHarness",

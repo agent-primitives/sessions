@@ -176,6 +176,12 @@ stateDiagram-v2
 ```
 
 - A different spec under a taken name is `ALREADY_EXISTS`; a new spec needs a new name.
+- **`CreateHarness` creates only.** It is `ALREADY_EXISTS` for any taken name, the same spec and a
+  `RETIRED` row included, and changes nothing then. The absence check and the insert are one store
+  transaction, so of concurrent creates for a name on any hosts sharing the journal at most one
+  succeeds. A client that wants "create only if never registered" uses it instead of `GetHarness`
+  followed by `RegisterHarness`, which races with another writer and reactivates a name retired in
+  between. A create that timed out may have committed: inspect with `GetHarness`, do not retry.
 - **Retire refuses new sessions only.** The check runs in the same transaction as the session insert,
   so once `RetireHarness` returns no new session can land on the harness. Existing sessions keep
   `Exec`, `Suspend`, `Resume` and `Fork`; fork children inherit the harness.

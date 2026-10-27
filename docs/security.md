@@ -334,6 +334,7 @@ inputless Exec approval recovery checks `resume` with the Exec method, not the R
 | Fork | `fork` on parent and global `create`, then `FAILED_PRECONDITION` (owned publication unavailable) |
 | ListSessions | global `list`, then exact verified-owner SQL filtering before keyset pagination |
 | GetHarness (including observe), ListHarnesses, RegisterHarness, RetireHarness | global `registry.read`, `registry.list`, `registry.register`, `registry.retire`, respectively |
+| CreateHarness | global `registry.register` |
 
 Ordinary Exec can restore suspended compute with `exec` alone; only inputless approval recovery
 adds `resume`. The Resume RPC always requires both `resume` and `exec`, even for a no-op.

@@ -19,7 +19,10 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/harness/echoagent"
 	"github.com/agent-primitives/sessions/placement"
+	"github.com/agent-primitives/sessions/runtime/local"
+	"github.com/agent-primitives/sessions/session"
 	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
@@ -61,8 +64,8 @@ func TestCreateHarnessCreatesUsableRegistration(t *testing.T) {
 // Every name that is already taken refuses a create-only registration with ALREADY_EXISTS, whatever
 // the spec: an ACTIVE or RETIRED row, a row another host added that this one has not loaded, a
 // static name, or a name reserved here or by another host sharing the journal. The refusal changes
-// nothing: no row is written or reactivated, nothing is loaded, and no Placer is built for a name
-// the journal already holds.
+// nothing: no row is written or reactivated, nothing is loaded, and no Placer is built for any of
+// them.
 func TestCreateHarnessRefusesTakenNames(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "journal.db")
@@ -111,8 +114,9 @@ func TestCreateHarnessRefusesTakenNames(t *testing.T) {
 				if _, err := h.store.Harness(tc.name); !errors.Is(err, sqlitelog.ErrHarnessNotFound) {
 					t.Fatalf("refused CreateHarness(%q) stored a row: %v", tc.name, err)
 				}
-			} else if n := built.Load() - builtBefore; n != 0 {
-				t.Fatalf("CreateHarness(%q) built %d Placers for a name the journal holds", tc.name, n)
+			}
+			if n := built.Load() - builtBefore; n != 0 {
+				t.Fatalf("CreateHarness(%q) built %d Placers for a taken name", tc.name, n)
 			}
 		})
 	}
@@ -137,10 +141,7 @@ func TestCreateHarnessRefusesTakenNames(t *testing.T) {
 func TestCreateHarnessRejectsBadInput(t *testing.T) {
 	ctx := context.Background()
 	h := startRegistryHost(t, filepath.Join(t.TempDir(), "journal.db"))
-	substrate := &v1.HarnessSpec{
-		Placement:    &v1.HarnessSpec_Substrate{Substrate: &v1.SubstratePlacement{Atespace: "a", Template: "t"}},
-		Capabilities: remoteSpec("x").GetCapabilities(),
-	}
+	substrate := substrateSpec()
 	for _, tc := range []struct {
 		name string
 		spec *v1.HarnessSpec
@@ -175,6 +176,97 @@ func TestCreateHarnessRejectsBadInput(t *testing.T) {
 			}
 		}
 	}
+}
+
+// A name that only another host sharing the journal holds, as its static harness or a reserved
+// name, is taken for CreateHarness even when this host cannot build the requested placement:
+// REG-3a makes a reserved name ALREADY_EXISTS for any request that passes REG-1 and REG-2, so the
+// reservation is checked before REG-2a's placement admission, and no Placer is built for it.
+func TestCreateHarnessRefusesRemotelyReservedNameBeforePlacement(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "journal.db")
+	var built atomic.Int32
+	h := startRegistryHostWith(t, path, countingFactory(&built))
+
+	// Host B opens its own store handle on the journal and reserves its static and reserved names
+	// at startup; it never registers them, and host A's registry holds neither.
+	storeB, err := sqlitelog.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { storeB.Close() })
+	backendB := local.New(echoagent.Harness{})
+	t.Cleanup(func() { _ = backendB.Close() })
+	registryB, err := placement.NewRegistry("b-static", map[string]*placement.Placer{
+		"b-static": placement.New(backendB, echoagent.Model),
+	}, placement.WithReservedNames("b-reserved"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.ReserveStaticHarnessNames(storeB, registryB); err != nil {
+		t.Fatal(err)
+	}
+
+	substrate := substrateSpec()
+	for _, name := range []string{"b-static", "b-reserved"} {
+		for _, spec := range []*v1.HarnessSpec{substrate, remoteSpec("127.0.0.1:9000")} {
+			_, err := h.harnesses.CreateHarness(ctx, &v1.CreateHarnessRequest{Name: name, Spec: spec})
+			if status.Code(err) != codes.AlreadyExists {
+				t.Errorf("CreateHarness(%q, %s placement) = %v, want AlreadyExists", name, placementKind(spec), err)
+			}
+			if _, err := h.store.Harness(name); !errors.Is(err, sqlitelog.ErrHarnessNotFound) {
+				t.Errorf("refused CreateHarness(%q) stored a row: %v", name, err)
+			}
+		}
+	}
+	if n := built.Load(); n != 0 {
+		t.Errorf("CreateHarness built %d Placers for names another host reserved", n)
+	}
+
+	// Plain RegisterHarness keeps refusing them in the store's transaction.
+	for _, name := range []string{"b-static", "b-reserved"} {
+		if _, err := h.harnesses.RegisterHarness(ctx, &v1.RegisterHarnessRequest{Name: name, Spec: remoteSpec("127.0.0.1:9000")}); status.Code(err) != codes.AlreadyExists {
+			t.Errorf("RegisterHarness(%q) = %v, want AlreadyExists", name, err)
+		}
+	}
+	// A free name with the placement this host cannot build is still FAILED_PRECONDITION (REG-2a).
+	if _, err := h.harnesses.CreateHarness(ctx, &v1.CreateHarnessRequest{Name: "free", Spec: substrate}); status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("CreateHarness(free, substrate placement) = %v, want FailedPrecondition", err)
+	}
+
+	// The preflight is not what holds: host B reserves a name after host C's preflight read it as
+	// free, while C builds the Placer, and the store's transaction still refuses the insert.
+	racer := startRegistryHostWith(t, path, func(name string, spec *v1.HarnessSpec) (*placement.Placer, func(), error) {
+		if err := storeB.ReserveHarnessNames([]string{name}); err != nil {
+			return nil, nil, err
+		}
+		return echoFactory(name, spec)
+	})
+	if _, err := racer.harnesses.CreateHarness(ctx, &v1.CreateHarnessRequest{Name: "raced", Spec: remoteSpec("127.0.0.1:9000")}); status.Code(err) != codes.AlreadyExists {
+		t.Errorf("CreateHarness(raced) = %v, want AlreadyExists", err)
+	}
+	if _, err := racer.store.Harness("raced"); !errors.Is(err, sqlitelog.ErrHarnessNotFound) {
+		t.Errorf("CreateHarness(raced) stored a row: %v", err)
+	}
+	if _, err := createOn(ctx, racer.sessions, "raced"); err == nil {
+		t.Error("CreateHarness(raced) left a resolvable harness")
+	}
+}
+
+// substrateSpec is a valid spec whose placement echoFactory, standing in for a host without a
+// substrate backend, cannot build.
+func substrateSpec() *v1.HarnessSpec {
+	return &v1.HarnessSpec{
+		Placement:    &v1.HarnessSpec_Substrate{Substrate: &v1.SubstratePlacement{Atespace: "a", Template: "t"}},
+		Capabilities: remoteSpec("x").GetCapabilities(),
+	}
+}
+
+func placementKind(spec *v1.HarnessSpec) string {
+	if spec.GetSubstrate() != nil {
+		return "substrate"
+	}
+	return "remote"
 }
 
 // Many callers on two hosts sharing one journal race CreateHarness for the same name. Each host

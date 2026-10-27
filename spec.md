@@ -1558,15 +1558,15 @@ address, never on the Sessions listener.
 - `REG-3a`: `CreateHarness` is create-only registration. It MUST check that the name has no
   registration row and is not reserved, and insert the new row, in one transaction of the store
   every host sharing the journal uses, so of concurrent `CreateHarness` calls for one name, on any
-  hosts, at most one succeeds. It validates as `RegisterHarness` does (`REG-1`, `REG-2`) before
-  it reads registration rows, so an invalid spec is `INVALID_ARGUMENT` even under a registered
-  name. For a request that passes `REG-1` and `REG-2`, a name with a row (`ACTIVE` or `RETIRED`,
-  any spec, loaded on this host or not), a static name, or a reserved one is `ALREADY_EXISTS`, and
-  the refusal stores, reactivates and loads nothing; a free name can still fail `REG-2a`. A call that ends in `DEADLINE_EXCEEDED`, `CANCELLED` or a
-  transport error may have committed, and a retry then returns `ALREADY_EXISTS`; a client SHOULD
-  inspect the name with `GetHarness` rather than retry. `spec_digest` says whether the stored spec
-  is the one requested, not which caller stored it. A server built before `CreateHarness` returns
-  `UNIMPLEMENTED` and changes nothing.
+  hosts, at most one succeeds. It validates as `RegisterHarness` does (`REG-1`, `REG-2`) before it
+  reads registration rows, so an invalid spec is `INVALID_ARGUMENT` even under a registered name.
+  For a request that passes `REG-1` and `REG-2`, a name with a row (`ACTIVE` or `RETIRED`, any spec,
+  loaded on this host or not), a static name, or a reserved one is `ALREADY_EXISTS`, and the refusal
+  stores, reactivates and loads nothing; a free name can still fail `REG-2a`. A call that ends in
+  `DEADLINE_EXCEEDED`, `CANCELLED` or a transport error may have committed, and a retry then returns
+  `ALREADY_EXISTS`; a client SHOULD inspect the name with `GetHarness` rather than retry.
+  `spec_digest` says whether the stored spec is the one requested, not which caller stored it. A
+  server built before `CreateHarness` returns `UNIMPLEMENTED` and changes nothing.
 - `REG-4`: `RetireHarness` is idempotent, rejects a reason over 1024 bytes, and is
   `FAILED_PRECONDITION` for a static harness and `NOT_FOUND` for an unknown one. A retired harness
   refuses new sessions only; existing sessions keep running on it.

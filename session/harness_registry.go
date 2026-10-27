@@ -419,6 +419,20 @@ func (h *HarnessRegistry) register(ctx context.Context, method, name string, spe
 		}
 		return nil, hostInternalError("register: %v", err)
 	}
+	// A name that a host sharing the journal reserved, and this host's registry does not hold, is
+	// taken too. CreateHarness refuses it ahead of placement admission (REG-3a), so a placement this
+	// host cannot build does not turn ALREADY_EXISTS into FAILED_PRECONDITION. The store checks
+	// again in the transaction that would insert the row.
+	if createOnly {
+		if reserved, err := h.store.HarnessNameReserved(name); err != nil {
+			if h.auth == nil {
+				logHarnessRegistryStoreError(ctx, h.logger, method, err)
+			}
+			return nil, hostInternalError("register: %v", err)
+		} else if reserved {
+			return nil, status.Errorf(codes.AlreadyExists, "%v: %q by a host sharing this journal and cannot be registered", sqlitelog.ErrHarnessNameReserved, name)
+		}
+	}
 	// Build the Placer before anything is stored, so a placement this host cannot serve is refused
 	// with nothing written. It is added only after the row commits: a Placer resolvable under a
 	// name whose row then failed to store would run sessions on a spec nobody registered.

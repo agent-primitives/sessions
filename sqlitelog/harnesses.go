@@ -240,6 +240,11 @@ func (s *Store) ReserveHarnessNames(names []string) error {
 	return nil
 }
 
+// HarnessNameReserved reports whether a host sharing the database reserved name for a static
+// harness. It reads outside any transaction, so it suits a preflight only: RegisterHarness and
+// CreateHarness check the reservation again in the transaction that would store the row.
+func (s *Store) HarnessNameReserved(name string) (bool, error) { return nameReserved(s.db, name) }
+
 // Harness returns one registration, or ErrHarnessNotFound.
 func (s *Store) Harness(name string) (HarnessRecord, error) { return harnessByName(s.db, name) }
 

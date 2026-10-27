@@ -476,6 +476,28 @@ func TestReserveHarnessNames(t *testing.T) {
 	}
 }
 
+// HarnessNameReserved sees a reservation any Store on the database made, and only reservations:
+// a registered name and a free one are not reserved.
+func TestHarnessNameReserved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.db")
+	s, other := mustOpen(t, path), mustOpen(t, path)
+	register(t, s, "reg", "uid-1", "d1")
+	if err := other.ReserveHarnessNames([]string{"static"}); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{"static": true, "reg": false, "free": false} {
+		if got, err := s.HarnessNameReserved(name); err != nil || got != want {
+			t.Errorf("HarnessNameReserved(%q) = %v, %v; want %v", name, got, err, want)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.HarnessNameReserved("static"); err == nil {
+		t.Fatalf("HarnessNameReserved on a closed store = %v, nil; want an error", got)
+	}
+}
+
 // CreateHarness stores only a name that was never registered. Every existing row, active or
 // retired, with the same spec or another, and every reserved name refuses it, and the refusal
 // leaves the stored row exactly as it was: nothing is reactivated.

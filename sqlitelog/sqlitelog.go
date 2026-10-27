@@ -353,9 +353,9 @@ func Open(path string, opts ...Option) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if _, err := db.Exec(sessionTracesSchema); err != nil {
+	if err := ensureSessionTraces(db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("sqlitelog: session_traces: %w", err)
+		return nil, err
 	}
 	return &Store{db: db, defaultProject: cfg.defaultProject}, nil
 }

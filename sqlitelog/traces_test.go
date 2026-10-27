@@ -57,3 +57,17 @@ func TestOpenAddsSessionTracesWithoutVersionBump(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestOpenReadOnlyWithoutSessionTraces(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.db")
+	if err := mustOpen(t, path).Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB(t, path).Exec(`DROP TABLE session_traces`); err != nil {
+		t.Fatal(err)
+	}
+	s := mustOpen(t, "file:"+path+"?mode=ro")
+	if tp, err := s.LastTraceParent("s"); err != nil || tp != "" {
+		t.Fatalf("LastTraceParent = %q, %v; want no link", tp, err)
+	}
+}

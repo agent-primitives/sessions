@@ -4,6 +4,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
+
+	"modernc.org/sqlite"
 )
 
 // sessionTracesSchema holds the W3C traceparent of each session's most recent operation, so the next
@@ -16,12 +19,42 @@ const sessionTracesSchema = `CREATE TABLE IF NOT EXISTS session_traces (
   traceparent TEXT NOT NULL
 );`
 
+// sqliteReadOnly is SQLITE_READONLY, the primary result code for a write on a read-only connection.
+const sqliteReadOnly = 8
+
+// ensureSessionTraces creates session_traces when it is missing. A read-only connection to a
+// journal without it opens anyway, as it would on a build that does not know the table, and reads
+// it as holding no links.
+func ensureSessionTraces(db *sql.DB) error {
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_traces'`).Scan(&n); err != nil {
+		return fmt.Errorf("sqlitelog: session_traces: %w", err)
+	}
+	if n != 0 {
+		return nil
+	}
+	if _, err := db.Exec(sessionTracesSchema); err != nil {
+		var serr *sqlite.Error
+		if errors.As(err, &serr) && serr.Code()&0xff == sqliteReadOnly {
+			return nil
+		}
+		return fmt.Errorf("sqlitelog: session_traces: %w", err)
+	}
+	return nil
+}
+
+// noTraceTable reports whether err is a read of session_traces on a read-only journal that lacks it.
+func noTraceTable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no such table: session_traces")
+}
+
 // LastTraceParent returns the W3C traceparent recorded for uid, or "" when
-// none was recorded (tracing was off, or the session predates it).
+// none was recorded (tracing was off, the session predates it, or the journal is read-only and
+// was written by a build without the table).
 func (s *Store) LastTraceParent(uid string) (string, error) {
 	var tp string
 	err := s.db.QueryRow(`SELECT traceparent FROM session_traces WHERE session = ?`, uid).Scan(&tp)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) || noTraceTable(err) {
 		return "", nil
 	}
 	if err != nil {

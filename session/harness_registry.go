@@ -197,9 +197,9 @@ func logHarnessRegistryStoreError(ctx context.Context, logger *slog.Logger, meth
 		"method", method, "error_kind", "internal", "error_category", "host", "error", err)
 }
 
-func logHarnessRegistryExternalError(ctx context.Context, logger *slog.Logger, err error) {
+func logHarnessRegistryExternalError(ctx context.Context, logger *slog.Logger, method string, err error) {
 	observability.Logger(ctx, logger).ErrorContext(ctx, "harness registration admission failed",
-		"method", v1.HarnessRegistry_RegisterHarness_FullMethodName,
+		"method", method,
 		"error_kind", serviceErrorKind(err), "error_category", "external")
 }
 
@@ -356,13 +356,30 @@ func validName(name string) error {
 }
 
 // RegisterHarness stores a registration and makes it resolvable, or recognizes a repeat of one.
-func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterHarnessRequest) (_ *v1.RegisterHarnessResponse, err error) {
-	ctx = observability.EnsureRequestID(ctx)
-	defer h.auth.internalError(ctx, h.logger, v1.HarnessRegistry_RegisterHarness_FullMethodName, &err)
-	if err := h.auth.global(ctx, v1.HarnessRegistry_RegisterHarness_FullMethodName, api.ActionRegistryRegister); err != nil {
+func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterHarnessRequest) (*v1.RegisterHarnessResponse, error) {
+	return h.register(ctx, v1.HarnessRegistry_RegisterHarness_FullMethodName, req.GetName(), req.GetSpec(), false)
+}
+
+// CreateHarness stores a new registration and makes it resolvable, only if the name was never
+// registered. Unlike RegisterHarness, it refuses an identical spec too, and never reactivates or
+// loads an existing row. The store's transaction, not this host's lock, is what holds against
+// another host sharing the journal.
+func (h *HarnessRegistry) CreateHarness(ctx context.Context, req *v1.CreateHarnessRequest) (*v1.HarnessRegistration, error) {
+	resp, err := h.register(ctx, v1.HarnessRegistry_CreateHarness_FullMethodName, req.GetName(), req.GetSpec(), true)
+	if err != nil {
 		return nil, err
 	}
-	name, spec := req.GetName(), req.GetSpec()
+	return resp.GetHarness(), nil
+}
+
+// register is RegisterHarness, or CreateHarness when createOnly is set. method is the RPC's full
+// name, for authorization and diagnostics; both need the registry.register action.
+func (h *HarnessRegistry) register(ctx context.Context, method, name string, spec *v1.HarnessSpec, createOnly bool) (_ *v1.RegisterHarnessResponse, err error) {
+	ctx = observability.EnsureRequestID(ctx)
+	defer h.auth.internalError(ctx, h.logger, method, &err)
+	if err := h.auth.global(ctx, method, api.ActionRegistryRegister); err != nil {
+		return nil, err
+	}
 	if err := validName(name); err != nil {
 		return nil, err
 	}
@@ -389,16 +406,32 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 	if err := ctx.Err(); err != nil {
 		return nil, registrationInterrupted(err)
 	}
-	// Fail a conflicting spec before building anything for it. The store checks again under its
-	// write lock, which is what holds against another process.
-	if rec, err := h.store.Harness(name); err == nil && rec.SpecDigest != digest {
+	// Fail a taken name or a conflicting spec before building anything for it. The store checks
+	// again under its write lock, which is what holds against another process.
+	if rec, err := h.store.Harness(name); err == nil && createOnly {
+		return nil, status.Errorf(codes.AlreadyExists, "harness %q is already registered (%s, spec %s); create-only registration needs a name that was never registered", name, rec.State, rec.SpecDigest)
+	} else if err == nil && rec.SpecDigest != digest {
 		return nil, status.Errorf(codes.AlreadyExists, "harness %q holds spec %s, request is %s; registrations are immutable, use a new name", name, rec.SpecDigest, digest)
 	} else if err != nil && !errors.Is(err, sqlitelog.ErrHarnessNotFound) {
 		// Enforced INTERNAL errors are logged once by the deferred authorization boundary.
 		if h.auth == nil {
-			logHarnessRegistryStoreError(ctx, h.logger, v1.HarnessRegistry_RegisterHarness_FullMethodName, err)
+			logHarnessRegistryStoreError(ctx, h.logger, method, err)
 		}
 		return nil, hostInternalError("register: %v", err)
+	}
+	// A name that a host sharing the journal reserved, and this host's registry does not hold, is
+	// taken too. CreateHarness refuses it ahead of placement admission (REG-3a), so a placement this
+	// host cannot build does not turn ALREADY_EXISTS into FAILED_PRECONDITION. The store checks
+	// again in the transaction that would insert the row.
+	if createOnly {
+		if reserved, err := h.store.HarnessNameReserved(name); err != nil {
+			if h.auth == nil {
+				logHarnessRegistryStoreError(ctx, h.logger, method, err)
+			}
+			return nil, hostInternalError("register: %v", err)
+		} else if reserved {
+			return nil, status.Errorf(codes.AlreadyExists, "%v: %q by a host sharing this journal and cannot be registered", sqlitelog.ErrHarnessNameReserved, name)
+		}
 	}
 	// Build the Placer before anything is stored, so a placement this host cannot serve is refused
 	// with nothing written. It is added only after the row commits: a Placer resolvable under a
@@ -411,7 +444,7 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 				release()
 			}
 			err = status.Errorf(codes.FailedPrecondition, "harness %q: %v", name, err)
-			logHarnessRegistryExternalError(ctx, h.logger, err)
+			logHarnessRegistryExternalError(ctx, h.logger, method, err)
 			return nil, err
 		}
 		if err := checkPlacer(ctx, placer, spec); err != nil {
@@ -431,7 +464,7 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 			}
 			err = withStatusCause(code, fmt.Errorf("harness %q: %w", name, err))
 			if h.auth == nil || code != codes.Internal {
-				logHarnessRegistryExternalError(ctx, h.logger, err)
+				logHarnessRegistryExternalError(ctx, h.logger, method, err)
 			}
 			return nil, err
 		}
@@ -444,12 +477,20 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 		}
 		return nil, registrationInterrupted(err)
 	}
-	rec, result, err := h.store.RegisterHarness(sqlitelog.HarnessRecord{
-		Name: name, UID: newHarnessUID(), Spec: string(canonical), SpecDigest: digest,
-	})
+	want := sqlitelog.HarnessRecord{Name: name, UID: newHarnessUID(), Spec: string(canonical), SpecDigest: digest}
+	var rec sqlitelog.HarnessRecord
+	result := sqlitelog.HarnessCreated // CreateHarness either creates the row or fails
+	if createOnly {
+		rec, err = h.store.CreateHarness(want)
+	} else {
+		rec, result, err = h.store.RegisterHarness(want)
+	}
 	if err != nil {
 		if release != nil {
 			release()
+		}
+		if errors.Is(err, sqlitelog.ErrHarnessExists) {
+			return nil, status.Errorf(codes.AlreadyExists, "%v; create-only registration needs a name that was never registered", err)
 		}
 		if errors.Is(err, sqlitelog.ErrHarnessSpecConflict) {
 			return nil, status.Errorf(codes.AlreadyExists, "%v; registrations are immutable, use a new name", err)
@@ -458,7 +499,7 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 			return nil, status.Errorf(codes.AlreadyExists, "%v by a host sharing this journal and cannot be registered", err)
 		}
 		if h.auth == nil {
-			logHarnessRegistryStoreError(ctx, h.logger, v1.HarnessRegistry_RegisterHarness_FullMethodName, err)
+			logHarnessRegistryStoreError(ctx, h.logger, method, err)
 		}
 		return nil, hostInternalError("register: %v", err)
 	}

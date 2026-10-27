@@ -86,8 +86,9 @@ CREATE INDEX IF NOT EXISTS sessions_project_created
 // build can identify a database without inspecting its columns. Version 1 is what v0.1.0 through
 // v0.1.2 shipped. Version 2 adds the harness registry; version 3 adds approval reporting;
 // version 4 adds permanent deletion intent; version 5 adds caller ownership and an authorization marker;
-// version 6 records explicit session model-policy eligibility; version 7 adds execution outcomes.
-const SchemaVersion = 7
+// version 6 records explicit session model-policy eligibility; version 7 adds the allocation
+// ledger and inventory completeness/evidence columns; version 8 adds execution outcomes.
+const SchemaVersion = 8
 
 // migrations[i] moves a database from version i+1 to i+2, inside the migration transaction. The
 // array length is tied to SchemaVersion, so bumping one without the other does not compile.
@@ -97,7 +98,8 @@ var migrations = [SchemaVersion - 1]func(*sql.Tx) error{
 	migrateV3ToV4,
 	migrateV4ToV5,
 	migrateV5ToV6,
-	migrateV6ToV7,
+	migrateCleanupInventory,
+	migrateV7ToV8,
 }
 
 // migrateV5ToV6 leaves every existing session on legacy model semantics, including empty logs.
@@ -106,10 +108,9 @@ func migrateV5ToV6(tx *sql.Tx) error {
 	return err
 }
 
-// migrateV3ToV4 adds the deletion columns. deletion_completed_at is reserved for resource cleanup
-// (#88): it defaults to 0, and this build never reads or writes it, so values a later build wrote are
-// left as is. It stays in the v4 shape so databases already at v4 keep opening unchanged; cleanup
-// defines its meaning when it lands.
+// migrateV3ToV4 adds the deletion columns. The v4 release reserved deletion_completed_at for
+// resource cleanup, defaulting it to 0 without reading or writing it. Later cleanup work must
+// preserve this historical migration and values already stored in the column.
 func migrateV3ToV4(tx *sql.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE sessions ADD COLUMN deletion_state TEXT NOT NULL DEFAULT 'ACTIVE';
 		ALTER TABLE sessions ADD COLUMN deletion_requested_at INTEGER NOT NULL DEFAULT 0;
@@ -617,6 +618,20 @@ func touchSession(tx *sql.Tx, session, defaultProject string, ev api.Event) erro
 // Read returns all records with seq >= fromSeq, in order. It returns the stored hashes verbatim
 // and does not re-canonicalize — that is Verify's job (reviewer note: never re-hash on read).
 func (l *Log) Read(fromSeq int64) ([]eventlog.Record, error) {
+	records, err := l.ReadProto(fromSeq)
+	if err != nil {
+		return nil, err
+	}
+	var out []eventlog.Record
+	for _, record := range records {
+		out = append(out, eventlog.RecordFromProto(record))
+	}
+	return out, nil
+}
+
+// ReadProto returns stored records without converting their events to the domain type.
+// Audit callers use it to preserve protobuf field presence; hashes are returned unchanged.
+func (l *Log) ReadProto(fromSeq int64) ([]*v1.LogRecord, error) {
 	rows, err := l.store.db.Query(
 		`SELECT seq, prev_hash, hash, fence, event FROM events
 		 WHERE session = ? AND seq >= ? ORDER BY seq`, l.session, fromSeq,
@@ -625,7 +640,7 @@ func (l *Log) Read(fromSeq int64) ([]eventlog.Record, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []eventlog.Record
+	var out []*v1.LogRecord
 	for rows.Next() {
 		var (
 			seq, fence     int64
@@ -635,11 +650,11 @@ func (l *Log) Read(fromSeq int64) ([]eventlog.Record, error) {
 		if err := rows.Scan(&seq, &prevHash, &hash, &fence, &blob); err != nil {
 			return nil, err
 		}
-		ev, err := decode(blob)
-		if err != nil {
+		ev := &v1.Event{}
+		if err := proto.Unmarshal(blob, ev); err != nil {
 			return nil, fmt.Errorf("sqlitelog: decode seq %d: %w", seq, err)
 		}
-		out = append(out, eventlog.Record{Seq: seq, PrevHash: prevHash, Hash: hash, Fence: fence, Event: ev})
+		out = append(out, &v1.LogRecord{Seq: seq, PrevHash: prevHash, ContentHash: hash, Fence: fence, Event: ev})
 	}
 	return out, rows.Err()
 }

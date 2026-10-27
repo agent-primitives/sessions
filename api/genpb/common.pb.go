@@ -236,6 +236,10 @@ const (
 	// An attempted executor call failed: is_error=true; error describes the failure. This is
 	// a durable handled receipt, not an unrecorded effect or an approval denial.
 	ToolResult_EXECUTOR_ERROR ToolResult_Code = 2
+	// The host's pre-dispatch tool policy refused the call definitively: is_error=true and the
+	// executor MUST NOT have been invoked. Only the host writes it, for an ordinary host-executed
+	// call or an approved call. Peers that predate this value reject it rather than serve it.
+	ToolResult_POLICY_DENIED ToolResult_Code = 3
 )
 
 // Enum value maps for ToolResult_Code.
@@ -244,11 +248,13 @@ var (
 		0: "CODE_UNSPECIFIED",
 		1: "APPROVAL_DENIED",
 		2: "EXECUTOR_ERROR",
+		3: "POLICY_DENIED",
 	}
 	ToolResult_Code_value = map[string]int32{
 		"CODE_UNSPECIFIED": 0,
 		"APPROVAL_DENIED":  1,
 		"EXECUTOR_ERROR":   2,
+		"POLICY_DENIED":    3,
 	}
 )
 
@@ -1608,7 +1614,8 @@ func (x *ToolResult) GetApprovalDecisionSeq() int64 {
 // only the host may commit the request or its later APPROVAL_RESULT. The harness cannot mint
 // requests or decisions by emitting these events. Identity on a decision's Event.actor is
 // recorded provenance only, not authorization. This gate supports STATELESS_REPLAY only;
-// it defines no policy hook, expiry, automatic decision, or Cancel behavior.
+// it defines no expiry, automatic decision, or Cancel behavior. A host's optional pre-dispatch
+// tool policy hook runs only when recovery dispatches an approved call (spec §9.4).
 type ApprovalRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ToolCallId    string                 `protobuf:"bytes,1,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
@@ -2594,7 +2601,7 @@ const file_common_proto_rawDesc = "" +
 	"\x04tool\x18\x02 \x01(\tR\x04tool\x12+\n" +
 	"\x04args\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x04args\x129\n" +
 	"\tmediation\x18\x04 \x01(\x0e2\x1b.agentsessions.v1.MediationR\tmediation\x12'\n" +
-	"\x0fidempotency_key\x18\x05 \x01(\tR\x0eidempotencyKey\"\xd8\x03\n" +
+	"\x0fidempotency_key\x18\x05 \x01(\tR\x0eidempotencyKey\"\xeb\x03\n" +
 	"\n" +
 	"ToolResult\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12/\n" +
@@ -2608,11 +2615,12 @@ const file_common_proto_rawDesc = "" +
 	"\x04code\x18\b \x01(\x0e2!.agentsessions.v1.ToolResult.CodeR\x04code\x120\n" +
 	"\x14approval_request_seq\x18\t \x01(\x03R\x12approvalRequestSeq\x122\n" +
 	"\x15approval_decision_seq\x18\n" +
-	" \x01(\x03R\x13approvalDecisionSeq\"E\n" +
+	" \x01(\x03R\x13approvalDecisionSeq\"X\n" +
 	"\x04Code\x12\x14\n" +
 	"\x10CODE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fAPPROVAL_DENIED\x10\x01\x12\x12\n" +
-	"\x0eEXECUTOR_ERROR\x10\x02\"K\n" +
+	"\x0eEXECUTOR_ERROR\x10\x02\x12\x11\n" +
+	"\rPOLICY_DENIED\x10\x03\"K\n" +
 	"\x0fApprovalRequest\x12 \n" +
 	"\ftool_call_id\x18\x01 \x01(\tR\n" +
 	"toolCallId\x12\x16\n" +

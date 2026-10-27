@@ -19,7 +19,7 @@ gRPC harness transport unchanged, and the core importing zero substrate code:
 - **Fork of a stateful session:** fan out k children from one parent checkpoint and every child
   **continues at N+1 independently**, with the parent still resumable at the same base.
 
-All of it runs in the `substrate-conformance` job (`.github/workflows/substrate-e2e.yml`). Both tiers
+All of it runs in the `substrate-conformance suite` job (`.github/workflows/substrate-e2e.yml`). Both tiers
 run on the micro-VM sandbox class, so the suite exercises the same isolation class in both and covers
 the micro-VM path end to end.
 
@@ -560,38 +560,45 @@ actor, so the capture can be another host's whose `SUSPEND` is not appended yet,
 
 A stateful `Fork` checks the clone a successful `ResumeActor` reports against the child's
 checkpoint, which is none: the clone must hold no capture of its own (`ActorInfo.NoCapture`), only
-the tag snapshot `CreateActor{source_tag}` gave it. The clone is `SUSPENDED` between that create
-and the resume, so another caller (the router on a request addressed to the child's name, then any
+the tag snapshot `CreateActor{source_tag}` gave it. The clone is `SUSPENDED` between that create and
+the resume, so another caller (the router on a request addressed to the child's name, then any
 suspend or pause) can resume and capture it in between, and the resume then restores that capture
 with the clone's UID and `MemoryNotRestored` false. Unlike the refusals above, this one is
 `substrate.ErrActorBusy` (`ABORTED`), as for a clone replaced before its resume: the session at
 stake is a child that does not exist yet, and the parent is untouched. `Fork` logs it at `WARN`
 (`refused a fork clone that holds a capture of its own`, with the clone's `actor` and `actor_uid`,
-`error_kind` `actor_busy`, and `capture` `held` or `unknown`). No journal names the clone and the
-fork never handed it out, so `Fork` tears it down as it does a clone that did not restore the
-parent's memory: `SuspendActor`, `DeleteActor` and `DeleteTag` of `fork-<child-uid>`, by name, on a
-context detached from the caller's. The Placer writes no child journal and tears down the children
-it already cloned. The parent keeps its `SUSPEND` and snapshot, so a retry at the parent's new head
-clones a new child. The teardown is best effort: when its `SuspendActor` fails, for example because
-the caller that captured the clone holds its lease, the clone and its tag stay, and the refusal and
-a second `WARN` (`failed to tear down a refused fork clone`) name the clone's UID and the tag.
-Delete that actor with `options.uid` and `any_state: true`, and the tag, to release them. A clone
-another caller already deleted (`ErrActorNotFound`) counts as torn down, and `Fork` still releases
-its tag.
+`error_kind` `actor_busy`, and `capture` `held`; for `unknown`, below, `error_kind` is
+`memory_state_lost`). No journal names the clone and the fork never handed it out, so `Fork` tears
+it down as it does a clone that did not restore the parent's memory: `SuspendActor`, `DeleteActor`
+and `DeleteTag` of `fork-<child-uid>`, by name, on a context detached from the caller's. The Placer
+writes no child journal and tears down the children it already cloned. The parent keeps its
+`SUSPEND` and snapshot, so a retry at the parent's new head clones a new child. The teardown is best
+effort: when its `SuspendActor` fails, for example because the caller that captured the clone holds
+its lease, the clone and its tag stay, and the refusal and a second `WARN` (`failed to tear down a
+refused fork clone`) name the clone's UID and the tag. Delete that actor with `options.uid` and
+`any_state: true`, and the tag, to release them. A clone another caller already deleted
+(`ErrActorNotFound`) counts as torn down, and `Fork` still releases its tag.
 
 `NoCapture` false also covers a client that cannot tell, such as this adapter reading an
 `ActorStatus` with a field it does not know (a newer substrate's). The refusal tells the two apart
-by the clone's `Snapshot`: when it is no longer the one `CreateActorFromTag` reported, the clone
-`holds a capture of its own` (`capture` `held`) and a retry clones a new child; when it still is,
-the clone `cannot show it holds no capture of its own` (`capture` `unknown`). Both are `ABORTED`,
-but a client that cannot report `NoCapture` makes every stateful `Fork` fail that way, which a retry
-does not fix.
+by the clone's `Snapshot`, and only when `CreateActorFromTag` reported a non-empty one to compare
+with: when the resume then reports a different, non-empty `Snapshot`, or `SnapshotNotReady` (a
+capture with no completed durable copy, which the adapter reports with no `Snapshot`), the clone
+`holds a capture of its own` (`capture` `held`), the refusal is `ABORTED` as above and a retry
+clones a new child. When the resume still reports the one the clone was created with, or reports
+none and not `SnapshotNotReady` (a client whose `ResumeActor` omits `Snapshot` too), or
+`CreateActorFromTag` reported none, the clone `cannot show it holds no capture of its own`
+(`capture` `unknown`, `error_kind` `memory_state_lost`): an empty `Snapshot` is no evidence of a
+capture. A client that cannot report `NoCapture` makes every stateful `Fork` fail that way, which a
+retry does not fix, so that refusal is `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`), not
+`ABORTED`. The clone is torn down the same way and the parent is unaffected; recovery is a client
+that reads the actor's snapshot ownership.
 
-For other refusals here, nothing in sessions recovers the session's memory. Delete or abandon the
-session, and delete the substrate actor named in the warning to release its snapshot, or its worker
-if the router woke it or a refused resume left it running. A `SUSPENDED` actor takes a plain
-`DeleteActor` with `options.uid` set to the warning's `actor_uid`; a `RUNNING` one also needs
-`any_state: true`, as in
+For the refusals here other than a fork clone's, nothing in sessions recovers the session's memory.
+Delete or abandon the session, and delete the substrate actor named in the warning to release its
+snapshot, or its worker if the router woke it or a refused resume left it running. A `SUSPENDED`
+actor takes a plain `DeleteActor` with `options.uid` set to the warning's `actor_uid`; a `RUNNING`
+one also needs `any_state: true`, as in
 [runtime fallback](#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback). The
 session's next turn is then refused as a memory-tier session whose actor is gone. Deleting the
 actor is cleanup, not what makes the refusal stick.
@@ -1032,12 +1039,20 @@ Substrate publishes no images, so its binaries are built from source at `SUBSTRA
 workflow caches the Go build and module caches and the envoy-dataplane image's buildx cache between
 runs.
 
+The durable [kind example](../examples/substrate-kind/README.md) runs independently in the
+`substrate-kind example lifecycle` job, with a fresh managed checkout and its own cluster. That job
+uses the real `up.sh`, checks an unchanged setup rerun, runs the restart/persistence smoke, and
+calls `down.sh` in cleanup. It does not borrow the conformance cluster or its prebuilt images.
+The existing required `substrate-conformance` check now combines both jobs, so an example
+bootstrap, smoke or teardown failure blocks the same gate as a pinned conformance failure.
+
 `substrate-conformance` is a required check, so the workflow has no trigger path filter: a workflow
 a filter skips never reports, and the pull request could not merge. Its first job,
 `substrate-e2e path filter`, diffs the pull request's merge commit against the base branch with
 `hack/ci-path-filter.sh`; the `substrate` profile there is the ignore list (prose, the site, the
 agent UI, demos and a few repository metadata files). When every changed path is on it,
-`substrate-conformance` skips every step and reports success in seconds. Any other path, including
+the suite skips its live steps, the example job is skipped, and the final `substrate-conformance`
+gate reports success in seconds. Any other path, including
 any workflow file and the filter itself, runs the suite. The job decides with the base branch's copy
 of the filter, so a pull request that edits it cannot decide its own run; only while the base branch
 has no copy (the pull request that adds the filter) does the pull request's own copy decide. The job
@@ -1052,7 +1067,7 @@ the runner's checkout only. It surfaces upstream drift before a bump; it never r
 request and its failure does not fail the run. It is known red until the next substrate bump: `main`
 renamed `cmd/ateom-microvm` to `cmd/ateworker-microvm` and the module to `go.ate.dev/substrate`.
 
-The workflow applies only the namespace and the micro-VM WorkerPools
+The conformance suite applies only the namespace and the micro-VM WorkerPools
 (`deploy/substrate/namespace.yaml`, `echo-microvm-workerpool.yaml`,
 `counter-microvm-workerpool.yaml`). The namespace carries `ate.dev/api-access=true`, which every
 tier's Job needs to reach ate-api-server on v0.5.0
@@ -1154,9 +1169,10 @@ RESUME marker. These tests prove orchestration and retention behavior, not real 
   derived from the child session UID, so `Stop` deletes it after the child and a failed fork
   deletes it on the way out. `DeleteSession` permanently tombstones the UID and returns
   `PENDING`: durable deletion intent only, without calling `Stop` or reclaiming resources.
-  Suspended actors and fork tags remain retained indefinitely. Ownership and cleanup-target
-  persistence, retryable teardown and completion belong to #88; until that lands, operators must
-  reconcile and reclaim actors and fork tags directly in Substrate. There is no automatic
+  Suspended actors and fork tags remain retained indefinitely. The SQLite allocation-attempt ledger
+  is incomplete, not authoritative cleanup inventory. Authoritative cleanup inventory, retryable
+  teardown and completion remain future work (#88); operators must reconcile and reclaim actors
+  and fork tags directly in Substrate. There is no automatic
   retention deadline. One tag per fan-out instead of per child would save N-1 copies, but a
   shared tag can only be deleted once every child has suspended at least once.
 - **I4 is harness-side.** `controller.Exec` sends the full journal as `Start.History` on every turn,

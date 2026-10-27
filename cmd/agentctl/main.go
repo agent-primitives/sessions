@@ -8,6 +8,7 @@
 //	agentctl exec    --input "hi"            # create + run a turn (prints the session UID)
 //	agentctl exec    --session <uid> --input "..."
 //	agentctl replay  --session <uid>          # re-deliver the committed log
+//	agentctl verify  --session <uid>          # verify the committed hash chain locally
 //	agentctl fork    --session <uid> --at N    # branch into a child session
 //	agentctl suspend --session <uid>
 //	agentctl resume  --session <uid>
@@ -59,6 +60,7 @@ func main() {
 		"delete":  cmdDelete,
 		"exec":    cmdExec,
 		"replay":  cmdReplay,
+		"verify":  cmdVerify,
 		"fork":    cmdFork,
 		"suspend": cmdSuspend,
 		"resume":  cmdResume,
@@ -84,7 +86,7 @@ func printError(w io.Writer, err error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: agentctl <create|list|get|delete|exec|replay|fork|suspend|resume|approve|deny|harness|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: agentctl <create|list|get|delete|exec|replay|verify|fork|suspend|resume|approve|deny|harness|version> [flags]")
 }
 
 type config struct {

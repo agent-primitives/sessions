@@ -2,9 +2,9 @@
 
 **Status:** Draft
 
-**Version:** `0.2.0-draft`
+**Version:** `0.4.0-draft`
 
-**Last updated:** October 16, 2026
+**Last updated:** October 26, 2026
 
 ## Abstract
 
@@ -97,6 +97,7 @@ This draft does not specify:
 - an HTTP/JSON mapping of the API; the only transport is gRPC;
 - a warm (resident) pause; `COMPUTE_WARM` is declared but never reported;
 - approval policy, expiry, automatic decisions, or approval for memory-snapshot harnesses;
+- a policy language for the pre-dispatch tool policy hook (§9.4);
 - any compute, sandbox, cloud, or vendor technology. Backends such as agent-substrate are examples
   of the runtime contract (§13.4), not requirements;
 - compaction or retention of the log (`LIFECYCLE_BASELINE` is declared but has no defined
@@ -352,6 +353,7 @@ no flattened lifecycle enum.
   the conflict error; it is never deduplicated by the store.
 - The Sessions RPCs carry no request id. The exceptions are `Approve` (an exact retry returns the
   existing decision, §10.2) and `RegisterHarness` (idempotent on the spec digest, §14).
+  `CreateHarness` is deliberately not idempotent (`REG-3a`).
 - Tool-level deduplication is the executor's responsibility (§9.3).
 
 ### 6.6 Reads
@@ -360,6 +362,9 @@ no flattened lifecycle enum.
   stored `prev_hash` and `content_hash` (not recomputed).
 - `LOG-17`: The `Replay` RPC streams committed records only. `from_seq <= 0` reads from 1;
   `to_seq = 0` reads to the head. It never emits deltas and never runs a harness.
+- The reference SQLite-backed `Replay` reads stored protobuf events directly, preserving field
+  presence, including present empty messages, rather than round-tripping through domain events.
+  It returns the stored hashes without verifying or recomputing them.
 - The reference host returns an empty, successful stream for an unknown or empty session on
   `Replay`; it does not return `NOT_FOUND`.
 - `Replay` of a deleted session MUST keep returning its records, including `LIFECYCLE_DELETE`.
@@ -443,6 +448,12 @@ no flattened lifecycle enum.
   gated.
 - The chain is unkeyed. `CHAIN-12` catches storage corruption and edits that do not recompute the
   hashes. A journal writer that rewrites an event and recomputes every later hash is not detected.
+- `agentctl verify --session UID` reads the reference host's session head and records through the
+  Sessions API and verifies that prefix locally, preserving protobuf field presence. It refuses
+  sequence gaps, hash/link mismatches, and a prefix shorter than the reported head; it does not run
+  a harness or call a model. A captured head of zero verifies the empty prefix without calling
+  `Replay`, so later appends are excluded in that case too. This is not an independent external
+  head anchor.
 - Verification proves internal consistency only. Removing records from the end of a log, or
   replacing the whole log, is not detectable from the log alone; detecting it requires an external
   anchor (for example a recorded head hash), which this draft does not define.
@@ -721,11 +732,13 @@ invokes no harness and stays a no-op without one.
   ends the invocation, `EXE-33`) and no `TOOL_RESULT` is written. An approved
   `REQUIRES_APPROVAL` call is different: an executor error becomes a durable receipt with
   `code = EXECUTOR_ERROR` and `is_error` set (§10), unless the host ended the recovery (`APR-14`).
+  A refusal from the host's pre-dispatch policy hook is not an executor error (§9.4).
 - A reference host with no tool executor configured records `TOOL_CALL`, then fails the call ("no
   tool executor configured") and the execution ends with `EVENT_ERROR`. The intent stays without a
   receipt, as in `TOOL-6`.
 - `TOOL-7`: An ordinary receipt MUST NOT carry approval fields, and its code MUST be
-  `CODE_UNSPECIFIED` or `EXECUTOR_ERROR`.
+  `CODE_UNSPECIFIED` or `EXECUTOR_ERROR`, or `POLICY_DENIED` with `is_error` set when the host wrote
+  it (`TOOL-16`).
 
 ### 9.3 At-most-once and re-drive
 
@@ -765,6 +778,63 @@ invokes no harness and stays a no-op without one.
 - TODO(spike): Should reconstruction compare a re-reported `IN_HARNESS_REPORTED` result with the
   recorded one, as it does for output text?
 
+### 9.4 Pre-dispatch policy
+
+- `TOOL-13`: A host MAY install a pre-dispatch policy hook (`controller.WithToolPolicy` or
+  `placement.WithToolPolicy` in the reference host). Without one, dispatch is unchanged. The hook
+  runs on every executor dispatch, after the host's own checks and right before the executor: for an
+  ordinary host-executed call after its `TOOL_CALL` is appended, live or re-driven (`TOOL-10`), and
+  for an approved `REQUIRES_APPROVAL` call after the `APR-14` hash check. It does not run for a
+  denied decision, a call answered from its receipt (`TOOL-9`), reconstruction replay, a reported
+  result, or a host with no executor. Its input is the session uid, the execution id, a copy of the
+  call in its journaled form, the verified caller of the `Exec` or `Resume` that dispatches the call
+  (empty when authentication is off, §17), and, for an approved call, the committed decision and its
+  sequence. It does not receive the decision's `Event.actor`, which is caller-supplied. The hook
+  MUST NOT be able to change the call it judges: the reference host rebuilds the arguments from the
+  JSON form the `TOOL_CALL` records. Without asking the hook, it refuses as a transient refusal
+  (`TOOL-15`) a call whose arguments that form cannot represent, and a call whose arguments that
+  form changes, read as the host's typed values or as their JSON encoding: an integer with more
+  than 53 significant bits, such as 2^53+1, however it is spelled; a decimal number below 2^53
+  whose value differs from the shortest JSON text of the 64-bit float the form records, such as
+  `0.30000000000000001` recorded as 0.3; a 32-bit float whose JSON text reads as a different
+  64-bit number, such as 1e20; or a string that is not valid UTF-8. The hook would judge one value
+  while the executor receives another. It does not refuse another spelling of the recorded value,
+  such as `3e-1` for 0.3, or a nil list or map recorded as an empty one. It also refuses a value
+  it cannot compare with that form: a Go struct that its JSON encoder writes field by field, and a
+  value or non-string map key whose type supplies its own encoding (a Go `MarshalJSON` or
+  `MarshalText` method, as `time.Time` and `big.Int` do), since the form records only that
+  encoding while the executor receives the typed value. Below 2^53 in magnitude, a hook compares a
+  64-bit float argument as its JSON value, the shortest decimal that reads back as that float (Go's
+  `strconv.FormatFloat(f, 'g', -1, 64)`), not as its exact binary expansion. At or above 2^53 every
+  such float is an integer and the host dispatches only an argument with exactly that value, so the
+  hook reads it exactly: 2^60 is 1152921504606846976, not the 1152921504606847000 its shortest
+  text gives.
+- `TOOL-14`: The hook returns allow, a transient refusal, or a definitive refusal. Allow calls the
+  executor as if no hook were installed. The reference host treats a verdict it does not know,
+  including an unset one, as a transient refusal. This specification defines no policy language.
+- `TOOL-15`: A transient refusal (a credential refresh failed, a provider is down) MUST NOT call
+  the executor and MUST NOT write a receipt. On an ordinary call it is handled as an executor
+  transport error (`TOOL-6`): the error goes to the harness and the intent stays without a receipt,
+  so recovery re-drives it only under `TOOL-10`; if the refusal ends the execution, the reference
+  service reports `FAILED_PRECONDITION`. On an approved call it is an exception to `APR-14`:
+  the host writes no receipt, `ERROR` or `END`, the decision stays recoverable, and the call fails
+  with `FAILED_PRECONDITION` (`controller.ErrToolPolicyRefused`), as for a missing executor. The
+  next recovery asks the hook again.
+- `TOOL-16`: A definitive refusal (a grant was revoked, policy says no) MUST NOT call the executor
+  and MUST append a `TOOL_RESULT` receipt with the call id, `code = POLICY_DENIED` and `is_error`
+  set; on an approved call it also carries the approval sequences (`APR-12`). The reference host
+  sets `content` to the fixed text "Tool execution refused by host policy." and puts the hook's
+  reason in `error`, which is journaled and sent to the harness, so the reason must not carry
+  secrets. The receipt is returned to the harness as a result, not an error, and later recovery and
+  replay serve it (`TOOL-9`) without asking the hook or calling the executor. Only the host writes
+  `POLICY_DENIED`: an executor result or a harness report carrying it MUST be rejected
+  (`ErrApprovalReceiptReport`) before any receipt is written, at both dispatch sites, and MUST NOT
+  be rewritten to another code. On an ordinary call the error goes to the harness as for `TOOL-6`.
+  On an approved call the host writes no receipt, `ERROR` or `END` for that result, the call fails
+  with `FAILED_PRECONDITION`, and the decision stays recoverable: the next recovery calls the
+  executor again under the same key, so an executor that applied the effect before returning the
+  code must deduplicate on that key (`TOOL-11`) or the effect can repeat.
+
 ## 10. Approvals
 
 ### 10.1 Gate
@@ -797,8 +867,9 @@ invokes no harness and stays a no-op without one.
   when the request was selected. An opt-in enforcing Go service (§17) ignores the request actor,
   normalizing it to empty before append and retry comparison; verified audit is not yet available.
 - `APR-9`: `Approve` MUST NOT resume compute or call the executor. The caller calls `Resume`.
-- No tool/resource policy hook, expiry or automatic decision applies. The default service has no
-  decision authorization; an enforcing Go service requires independent read and approve permissions.
+- No expiry or automatic decision applies, and the optional pre-dispatch policy hook (§9.4) runs
+  when recovery dispatches the call, not at `Approve`. The default service has no decision
+  authorization; an enforcing Go service requires independent read and approve permissions.
 
 ### 10.3 Wire handshake
 
@@ -814,8 +885,9 @@ invokes no harness and stays a no-op without one.
     identifies the committed decision in the same session;
   - a denial is `APPROVAL_DENIED` with `is_error = true`, and the executor MUST NOT have been
     called;
-  - an approval is `CODE_UNSPECIFIED` with `is_error = false`, or `EXECUTOR_ERROR` with
-    `is_error = true`.
+  - an approval is `CODE_UNSPECIFIED` with `is_error = false`, `EXECUTOR_ERROR` with
+    `is_error = true`, or `POLICY_DENIED` with `is_error = true`, in which case the executor MUST
+    NOT have been called (`TOOL-16`).
 
 ### 10.4 Recovery
 
@@ -829,28 +901,34 @@ invokes no harness and stays a no-op without one.
   cursor) and snapshot reference. A denial writes an `APPROVAL_DENIED` receipt without calling the
   executor. An approval calls the executor with the recorded call, whether or not the executor
   declares durable dedup for the tool (`TOOL-10` does not apply); an executor failure becomes a
-  durable `EXECUTOR_ERROR` receipt. The decision binds that call through the chain: its
-  `request_seq` names the request that follows the call's `TOOL_CALL` record, whose `content_hash`
-  covers the canonical args. Before calling the executor, the host MUST recompute that
-  `content_hash` over the call it is about to send and, on a mismatch, call nothing, write no
-  receipt and fail as a chain failure (`CHAIN-12`, `DATA_LOSS`). When the executor fails with an
-  error instead of a result, the reference host sets the receipt's `content` to the fixed text "Tool
-  execution failed." and keeps the error text in `error`; a result the executor returns with
-  `is_error = true` keeps the `content` it returned. An error the host caused by ending the recovery
-  is not an executor failure: either the context the recovery runs under is done and the executor
-  returned that context's error, or that context's deadline has passed and the executor returned a
-  deadline error (a deadline enforced by I/O can surface just before the context reports it). The
-  host MUST NOT write a receipt, `ERROR` or `END` for it, and returns the context error, so the
-  decision stays recoverable as after a crash and the next recovery calls the executor again with
-  the recorded call. The host decides by the recovery context's state when the executor returns, not
-  by which context ended the call, and matches the error by kind. An error returned while the
-  recovery context is live and before its deadline MUST become an `EXECUTOR_ERROR` receipt,
-  including the error from cancelling a context the harness narrowed for that one call
+  durable `EXECUTOR_ERROR` receipt. An executor result carrying `POLICY_DENIED` is not an executor
+  failure: it is rejected without a receipt (`TOOL-16`). The pre-dispatch policy hook, if one is
+  installed, runs after the hash check below and before the executor (§9.4). The decision binds that
+  call through the chain: its `request_seq` names the request that follows the call's `TOOL_CALL`
+  record, whose `content_hash` covers the canonical args. Before calling the executor, the host MUST
+  recompute that `content_hash` over the call it is about to send and, on a mismatch, call nothing,
+  write no receipt and fail as a chain failure (`CHAIN-12`, `DATA_LOSS`). When the executor fails
+  with an error instead of a result, the reference host sets the receipt's `content` to the fixed
+  text "Tool execution failed." and keeps the error text in `error`; a result the executor returns
+  with `is_error = true` keeps the `content` it returned. An error the host caused by ending the
+  recovery is not an executor failure: either the context the recovery runs under is done and the
+  executor returned that context's error, or that context's deadline has passed and the executor
+  returned a deadline error (a deadline enforced by I/O can surface just before the context reports
+  it). The host MUST NOT write a receipt, `ERROR` or `END` for it, and returns the context error, so
+  the decision stays recoverable as after a crash and the next recovery calls the executor again
+  with the recorded call. The host decides by the recovery context's state when the executor
+  returns, not by which context ended the call, and matches the error by kind. An error returned
+  while the recovery context is live and before its deadline MUST become an `EXECUTOR_ERROR`
+  receipt, including the error from cancelling a context the harness narrowed for that one call
   (`api.Harness`) or from its deadline. A cancellation error returned after the recovery context was
   cancelled, or a deadline error returned after its deadline passed, MUST NOT be receipted, even
   when that per-call deadline expired first. Any other error MUST become an `EXECUTOR_ERROR`
   receipt, including one unrelated to either context returned after the recovery ended. A missing
-  executor is `FAILED_PRECONDITION` and leaves the decision recoverable.
+  executor is `FAILED_PRECONDITION` and leaves the decision recoverable. A transient policy refusal
+  (`TOOL-15`) and an executor result carrying `POLICY_DENIED` (`TOOL-16`) are the exceptions to the
+  receipt rules above: each is `FAILED_PRECONDITION`, writes no receipt and leaves the decision
+  recoverable. A definitive policy refusal writes a `POLICY_DENIED` receipt instead of calling the
+  executor (`TOOL-16`).
 - `APR-15`: An inherited unresolved gate (copied by a fork) MUST be refused with
   `FAILED_PRECONDITION`. A reference inherited through fork cannot authorize an effect in the child.
 - Requests and snapshots are retained indefinitely.
@@ -1087,8 +1165,10 @@ does not erase data or reclaim compute.
 - `OPS-35`: `DELETION_PENDING` acknowledges intent only. The host MUST NOT report deletion as
   reclamation. The reference host calls no runtime method for it (no `Stop`, `RT-7`), releases
   no actor, snapshot, or fork-child pin, and never reports `COMPUTE_TERMINATED` or a completed
-  deletion. Retained compute has to be reclaimed in the backend by the operator. Ownership and
-  cleanup are future work (#88).
+  deletion. Retained compute has to be reclaimed in the backend by the operator. The reference
+  SQLite store records allocation attempts, but that incomplete intent ledger is not authoritative
+  cleanup inventory. Authoritative cleanup inventory and automatic reclamation remain future work
+  (#88).
 - `OPS-36`: The exclusion in `OPS-30` and the checks in `OPS-34` are per host. Durable refusal
   (`LOG-19`) stops later writes from any host that enforces it, but a host that does not (an
   older binary that already has the journal open, §18) keeps writing, and another host can
@@ -1189,7 +1269,8 @@ sequenceDiagram
 - `WIRE-14`: Unknown `EventKind`, `Mediation`, and `Lifecycle.Kind` values decode to unspecified;
   a tool call with unspecified mediation is then rejected by `TOOL-1`.
 - `WIRE-15`: `ToolResult.code` is converted without validation; the checks in `TOOL-3`, `TOOL-7`,
-  and `APR-12` reject unexpected codes.
+  and `APR-12` reject unexpected codes, including a code the peer's build does not know. A peer
+  built before `POLICY_DENIED` therefore rejects that receipt instead of serving it (§18).
 - If an `Event` has more than one body set, only the first in the converter's order is kept.
 
 ## 13. Placement and runtime contract
@@ -1290,8 +1371,12 @@ The reference host takes it as `placement.Backend` in
   error, since compute that is still there can fail a restore for another reason. With no recorded
   instance, `runtime/substrate` reports lost after a `NOT_FOUND` resume whenever the actor does not
   hold the session's snapshot, if a lifecycle change races the held-ref preflight (§13.4).
-- The returned `Incarnation.ID` is used by the reference host only for diagnostics; every in-repo
-  backend sets it to the session uid.
+- `Create` and `Restore` MUST return a nonempty `Incarnation.ID`, regardless of the host's log
+  implementation. SQLite-tracked placement enforces this before dialing: an empty ID fails with
+  `sqlitelog.ErrAllocationConflict` after the runtime call, leaving the allocation attempt unresolved.
+  Logs without allocation recording do not enforce this requirement and retain the diagnostic-only
+  use of ID. Every in-repo backend sets it to the session uid; it is not the
+  immutable compute-instance identity used to detect replacement (`RT-4h`).
 - `RT-4d`: The `Incarnation` returned by `Create` and `Restore` MUST carry an `Address` at which
   the harness is reachable (the reference dialer takes `unix://<path>` or `host:port`). The host
   dials that address and attaches the incarnation's `CallMetadata` to every call it makes to the
@@ -1335,7 +1420,9 @@ The reference host takes it as `placement.Backend` in
   handed out, and the host records nothing. From a stateful `Fork` it MAY refuse a clone its resume
   reports holding a capture of its own, since the child records none; that refusal is
   `api.ErrComputeBusy` (`ABORTED`), not `api.ErrMemoryStateLost`, since the parent keeps its
-  snapshot and a retry clones a new child. The backend tears the clone down best effort (a clone it
+  snapshot and a retry clones a new child. A clone the backend cannot show holds none (its client
+  does not report it) is refused with `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) instead,
+  since a retry is refused alike. The backend tears the clone down best effort (a clone it
   cannot, such as one whose lease another caller holds, is logged at `WARN` naming the clone and its
   tag for an operator to delete), and the host writes no child journal. This reads only fields the
   journal already has; a backend that does not need it ignores it.
@@ -1390,6 +1477,24 @@ The reference host takes it as `placement.Backend` in
 - The reference host does not call `Status`.
 
 ### 13.4 Reference backends (informative)
+
+The SQLite placement path durably records allocation intent before Create/Restore and confirms
+only the returned session-scoped handle, not an immutable compute-instance identity. A replaced
+compute instance can reuse the same handle. Confirmation gets a bounded context independent of
+client cancellation once the runtime returns. A successful confirmation atomically replaces prior
+confirmed, unreleased attempts for the same (session, backend key, handle), retaining the attempt
+being confirmed, not the one with the greatest random ID. Unresolved attempts and released history
+are preserved, so repeated unknown outcomes can still grow the ledger. Confirming or releasing a
+compacted attempt returns `sqlitelog.ErrAllocationNotFound`; cleanup must reread the live inventory
+if a late confirmation retires a paged attempt. Addresses and call credentials are not inventory.
+Optional `api.CleanupRuntime` keys identify exact non-destructive release configurations, not
+harness aliases or a generic Stop fallback. Fork keeps its legacy allocation/rollback path at this
+stage. Version 7 adds the allocation ledger and inventory completeness/evidence columns, without
+fork-publication or reaper state. It enables no reclamation. Every newly created inventory remains
+incomplete, as does every migrated row; tracking a later restore does not certify a previous
+untracked fork. A host embedding `sqlitelog` can establish coverage by calling
+`Store.CertifyInventory` only after explicit reconciliation. Stop all old writers before migration
+and never downgrade the migrated journal to v0.3.0 or older.
 
 - `runtime/local`: serves the harness in the host process over a unix socket shared by all
   sessions. `Describe` asks that in-process harness. All capabilities false.
@@ -1546,6 +1651,18 @@ address, never on the Sessions listener.
 - `REG-3`: `RegisterHarness` is idempotent on `spec_digest` (§7.5): the same spec returns unchanged
   (or reactivated if retired, keeping the uid); a different spec under a taken name is
   `ALREADY_EXISTS`.
+- `REG-3a`: `CreateHarness` is create-only registration. It MUST check that the name has no
+  registration row and is not reserved, and insert the new row, in one transaction of the store
+  every host sharing the journal uses, so of concurrent `CreateHarness` calls for one name, on any
+  hosts, at most one succeeds. It validates as `RegisterHarness` does (`REG-1`, `REG-2`) before it
+  reads registration rows, so an invalid spec is `INVALID_ARGUMENT` even under a registered name.
+  For a request that passes `REG-1` and `REG-2`, a name with a row (`ACTIVE` or `RETIRED`, any spec,
+  loaded on this host or not), a static name, or a reserved one is `ALREADY_EXISTS`, and the refusal
+  stores, reactivates and loads nothing; a free name can still fail `REG-2a`. A call that ends in
+  `DEADLINE_EXCEEDED`, `CANCELLED` or a transport error may have committed, and a retry then returns
+  `ALREADY_EXISTS`; a client SHOULD inspect the name with `GetHarness` rather than retry.
+  `spec_digest` says whether the stored spec is the one requested, not which caller stored it. A
+  server built before `CreateHarness` returns `UNIMPLEMENTED` and changes nothing.
 - `REG-4`: `RetireHarness` is idempotent, rejects a reason over 1024 bytes, and is
   `FAILED_PRECONDITION` for a static harness and `NOT_FOUND` for an unknown one. A retired harness
   refuses new sessions only; existing sessions keep running on it.
@@ -1752,7 +1869,8 @@ The reference implementation protects the integrity of the record, not access to
     execution (`EXE-29`), so `Resume` no longer re-runs that turn. A legacy harness invocation
     (reconstruction, or recovery of an unfinished legacy execution) needs a session uid; `Resume`
     of a complete legacy execution is a no-op without one.
-  - The reference SQLite store versions its schema with `PRAGMA user_version` (currently 7),
+  - The reference SQLite store versions its schema with `PRAGMA user_version` (see
+    `sqlitelog.SchemaVersion`),
     migrates forward in one transaction without rewriting events or hashes, and refuses a newer or
     negative version. Version 4 adds the deletion state; migrated sessions are
     `DELETION_ACTIVE`. Version 5 adds exact caller ownership and an off-mode authorization marker.
@@ -1762,14 +1880,18 @@ The reference implementation protects the integrity of the record, not access to
     an already-open older writer does not check the marker. The marker is checked only at Open,
     including by this build: changing the mode requires stopping every writer (including embedded
     CLI processes), then restarting all hosts with binaries that support the new mode.
-  - Version 7 extends `approval_executions` with an execution outcome and rebuilds the shared
+    Version 6 adds explicit model-policy eligibility. Version 7 adds the allocation ledger and
+    inventory completeness/evidence columns, without fork-publication or reaper state. Journal bytes
+    are unchanged. Stop all older writers before that migration; no downgrade to v0.3.0 or older is
+    supported. All inventories remain incomplete until explicit operator reconciliation (§13.4).
+  - Version 8 extends `approval_executions` with an execution outcome and rebuilds the shared
     execution/approval projection from the journal. Events, canonical bytes, hashes and fences
     do not change. An undecodable session reports RUNNING without an approval reference; SQL
     faults roll back the migration. A read-only open requiring migration fails, leaving the
     database at its original version; migrate with a writable open before using read-only clients.
     This reporting contract and schema change target v0.4.0. Stop all older hosts and embedded
     clients sharing a journal, and back up the database and any WAL before upgrading. Older
-    binaries refuse v7 on open, but an already-open older writer can bypass the projection.
+    binaries refuse v8 on open, but an already-open older writer can bypass the projection.
     There is no downgrade migration; rollback requires restoring the backup.
   - An older binary refuses a version 4 journal when it opens it, but one that already had the
     journal open does not enforce deletion (`OPS-36`): it can still append, mint fences, and
@@ -1777,6 +1899,20 @@ The reference implementation protects the integrity of the record, not access to
     a journal has to be stopped before the first version 4 open.
   - A verifier whose schema lacks `LIFECYCLE_DELETE` cannot reproduce that record's hash:
     `CHAIN-1` hashes enum names, and proto3-JSON writes an unknown enum value as a number.
+  - `ToolResult.Code.POLICY_DENIED` (`TOOL-16`, version `0.4.0-draft`) is a new value in a hashed
+    `TOOL_RESULT`. The value itself adds no SQLite schema fields; execution-state reporting
+    separately advances the schema to version 8. Only a host with a policy hook that refuses a call
+    definitively writes it; journals without one are unchanged. An older build that supports the
+    journal's schema but lacks this value serves every session that holds no `POLICY_DENIED`
+    receipt. For a session that holds one, it canonicalizes the stored value as a number, so hash verification
+    fails at that record (`CHAIN-12`, `DATA_LOSS`): `Exec`, `Resume`, `VerifyJournal` and
+    reconstruction replay (`controller.Replay`) refuse the session instead of serving the receipt.
+    The `Replay` RPC (§6.6) does not verify, so it does not refuse: it streams the stored record,
+    with the code as the unknown enum number 3. A verifier schema built before the value fails the
+    same record. An older harness rejects the receipt on the wire (`WIRE-15`). Upgrade every host
+    sharing a journal, every harness, and every audit schema before installing a hook that can
+    refuse definitively; after one is recorded, rolling a host back leaves that session unusable to
+    it, except as raw records from `Replay`.
 
 ## 19. Open questions
 

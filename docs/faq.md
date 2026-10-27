@@ -84,8 +84,9 @@ fenced by this local guard.
 ## Does deleting a session stop its actor or erase its history?
 
 No. `DeleteSession` permanently tombstones the UID and returns `PENDING`: durable intent only, not
-resource release. Until #88 defines ownership and cleanup, actors, snapshots and fork-child pins
-remain retained indefinitely. Delete does not call Stop or report cleanup completion. Get and raw
+resource release. The SQLite allocation-attempt ledger is incomplete, not authoritative cleanup
+inventory. Until #88 supplies authoritative cleanup inventory and reclamation, actors, snapshots and
+fork-child pins remain retained indefinitely. Delete does not call Stop or report cleanup completion. Get and raw
 Replay still expose the UID, metadata and journal, retained forever; List hides it. There is no
 cascade, erasure or UID reuse. Existing children and grandchildren remain usable and can fork
 themselves.
@@ -185,10 +186,11 @@ for an explicit caller decision. RPC/SDK `Approve` commits only that decision; c
 CLI approve and deny do both, and say "decision committed" if recovery fails. Get/List and final paused
 Exec frames expose the pending tuple at their captured cursor. A decision clears that reference, but
 new input stays blocked until its receipt commits. Identity is not authorization; custom hosts can
-require independent [approve permission](security.md#optional-go-rpc-authorization). There is no
-tool/resource policy hook, timeout or expiry. Snapshots and unresolved requests are retained
-indefinitely, and Cancel remains `UNIMPLEMENTED`. DeleteSession commits permanent intent without
-reclaiming resources.
+require independent [approve permission](security.md#optional-go-rpc-authorization). Custom Go
+hosts can also install a [pre-dispatch tool policy hook](security.md#pre-dispatch-tool-policy) that
+refuses a call before its executor runs. There is no timeout or expiry. Snapshots and unresolved
+requests are retained indefinitely, and Cancel remains `UNIMPLEMENTED`. DeleteSession commits
+permanent intent without reclaiming resources.
 Tool calls align with the MCP shape (name plus structured arguments). The bundled Chat Completions
 adapter maps function tools, tool choices, assistant tool calls and text tool results; see the
 [harness tool loop](harness-authoring.md#rule-6-carry-the-tool-loop-in-the-model-request).

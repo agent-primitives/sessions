@@ -187,14 +187,14 @@ Stale projections, invalid reporting evidence and incomplete declared inputs rep
 than success. Execution and compute axes are independent; recovery uses the journal rather than
 trusting an enum. CANCELED is not yet reported.
 
-SQLite schema v7 adds the outcome to the existing per-execution approval projection, updated in
+SQLite schema v8 adds the outcome to the existing per-execution approval projection, updated in
 the same transaction as each append. Get/List read stored fields without decoding journal blobs.
 This avoids inspecting each listed session's history on every read. The migration rebuilds the
 shared projection without rewriting events, hashes or fences. An undecodable session retains its
 metadata/cursor but reports RUNNING without an approval reference; SQL failures roll back the
 whole migration. A read-only open that needs migration fails clearly rather than partially upgrading.
 Before upgrading to v0.4.0, stop all older hosts and embedded clients sharing the journal and back
-up the database and any WAL. Older binaries refuse v7 at open; there is no downgrade migration,
+up the database and any WAL. Older binaries refuse v8 at open; there is no downgrade migration,
 so rollback requires restoring the backup.
 
 A fork inherits the parent's `project`, `harness` and `model`, because those define the workload and
@@ -225,11 +225,11 @@ and permanently tombstones the UID. `deletion_state` is independent of execution
 `ACTIVE` has no deletion request time; `PENDING` has the committed request time.
 Delete preserves the recorded compute state, not a claim that a running actor has stopped.
 
-`PENDING` acknowledges durable intent only. Until ownership and cleanup are implemented in #88,
-actors, snapshots and fork-child pins remain retained indefinitely: Delete does not call
-`Runtime.Stop`, reclaim resources or report cleanup completion. Metadata and the immutable journal
-preserve route, lineage and snapshot evidence for audit, not an authoritative cleanup-target
-inventory; #88 owns that schema. Do not infer cleanup from gRPC OK.
+`PENDING` acknowledges durable intent only. The SQLite allocation-attempt ledger is incomplete,
+not authoritative cleanup inventory. Until authoritative cleanup inventory and reclamation are
+implemented in #88, actors, snapshots and fork-child pins remain retained indefinitely: Delete does
+not call `Runtime.Stop`, reclaim resources or report cleanup completion. Metadata and the immutable
+journal preserve route, lineage and snapshot evidence for audit. Do not infer cleanup from gRPC OK.
 
 List hides tombstones before pagination. Get and raw `Sessions.Replay` remain audit reads, including
 `DELETE`; UID, metadata and journal are retained forever. There is no UID reuse, cascade or erasure.

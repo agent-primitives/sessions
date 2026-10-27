@@ -3,10 +3,12 @@ package sqlitelog_test
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
@@ -471,5 +473,158 @@ func TestReserveHarnessNames(t *testing.T) {
 	}
 	if err := s.ReserveHarnessNames([]string{""}); err == nil {
 		t.Fatal("reserved an empty name")
+	}
+}
+
+// HarnessNameReserved sees a reservation any Store on the database made, and only reservations:
+// a registered name and a free one are not reserved.
+func TestHarnessNameReserved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.db")
+	s, other := mustOpen(t, path), mustOpen(t, path)
+	register(t, s, "reg", "uid-1", "d1")
+	if err := other.ReserveHarnessNames([]string{"static"}); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{"static": true, "reg": false, "free": false} {
+		if got, err := s.HarnessNameReserved(name); err != nil || got != want {
+			t.Errorf("HarnessNameReserved(%q) = %v, %v; want %v", name, got, err, want)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.HarnessNameReserved("static"); err == nil {
+		t.Fatalf("HarnessNameReserved on a closed store = %v, nil; want an error", got)
+	}
+}
+
+// CreateHarness stores only a name that was never registered. Every existing row, active or
+// retired, with the same spec or another, and every reserved name refuses it, and the refusal
+// leaves the stored row exactly as it was: nothing is reactivated.
+func TestCreateHarnessRefusesEveryTakenName(t *testing.T) {
+	s := mustOpen(t, filepath.Join(t.TempDir(), "h.db"))
+	created, err := s.CreateHarness(sqlitelog.HarnessRecord{Name: "fresh", UID: "uid-1", Spec: "{}", SpecDigest: "d1"})
+	if err != nil || created.Name != "fresh" || created.UID != "uid-1" || created.State != sqlitelog.HarnessActive || created.SpecDigest != "d1" {
+		t.Fatalf("create a free name: %+v, %v", created, err)
+	}
+	register(t, s, "active", "uid-a", "d1")
+	register(t, s, "retired", "uid-r", "d1")
+	if _, err := s.RetireHarness("retired", "superseded"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReserveHarnessNames([]string{"static"}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name, digest string
+		want         error
+	}{
+		{"fresh", "d1", sqlitelog.ErrHarnessExists}, // created by CreateHarness itself
+		{"active", "d1", sqlitelog.ErrHarnessExists},
+		{"active", "d2", sqlitelog.ErrHarnessExists},
+		{"retired", "d1", sqlitelog.ErrHarnessExists},
+		{"retired", "d2", sqlitelog.ErrHarnessExists},
+		{"static", "d1", sqlitelog.ErrHarnessNameReserved},
+	} {
+		before, beforeErr := s.Harness(tc.name)
+		if _, err := s.CreateHarness(sqlitelog.HarnessRecord{Name: tc.name, UID: "uid-new", Spec: "{}", SpecDigest: tc.digest}); !errors.Is(err, tc.want) {
+			t.Errorf("create %q with %s: %v, want %v", tc.name, tc.digest, err, tc.want)
+		}
+		after, afterErr := s.Harness(tc.name)
+		if !reflect.DeepEqual(before, after) || fmt.Sprint(afterErr) != fmt.Sprint(beforeErr) {
+			t.Errorf("create %q with %s changed the row: %+v (%v) -> %+v (%v)", tc.name, tc.digest, before, beforeErr, after, afterErr)
+		}
+	}
+	if got, err := s.Harness("retired"); err != nil || got.State != sqlitelog.HarnessRetired || got.RetireReason != "superseded" {
+		t.Fatalf("retired row after create-only attempts: %+v, %v; want still retired", got, err)
+	}
+	if _, err := s.CreateHarness(sqlitelog.HarnessRecord{Name: "x", UID: "u", Spec: "{}"}); err == nil {
+		t.Fatal("CreateHarness accepted a record without a digest")
+	}
+}
+
+// Many writers on two Stores (two processes) race CreateHarness for one name: exactly one
+// succeeds, every other one sees ErrHarnessExists, and the stored row is the winner's. A plain
+// RegisterHarness racing them for the same name either lands first, so every create fails, or
+// recognizes the created row.
+func TestCreateHarnessAtMostOneWinnerAcrossStores(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.db")
+	stores := []*sqlitelog.Store{mustOpen(t, path), mustOpen(t, path)}
+	for _, withRegister := range []bool{false, true} {
+		name := fmt.Sprintf("h-register-%v", withRegister)
+		const writers = 16
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		uids := make(chan string, writers)
+		errs := make(chan error, writers)
+		for i := range writers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				uid := fmt.Sprintf("uid-%d", i)
+				rec, err := stores[i%len(stores)].CreateHarness(sqlitelog.HarnessRecord{Name: name, UID: uid, Spec: "{}", SpecDigest: "d1"})
+				if err != nil {
+					errs <- err
+					return
+				}
+				if rec.UID != uid {
+					errs <- fmt.Errorf("created row has uid %s, want %s", rec.UID, uid)
+					return
+				}
+				uids <- uid
+			}()
+		}
+		registered := make(chan sqlitelog.RegisterResult, 1)
+		if withRegister {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				_, res, err := stores[1].RegisterHarness(sqlitelog.HarnessRecord{Name: name, UID: "uid-register", Spec: "{}", SpecDigest: "d1"})
+				if err != nil {
+					errs <- fmt.Errorf("racing RegisterHarness: %w", err)
+				}
+				registered <- res
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(uids)
+		close(errs)
+
+		var winners []string
+		for uid := range uids {
+			winners = append(winners, uid)
+		}
+		for err := range errs {
+			if !errors.Is(err, sqlitelog.ErrHarnessExists) {
+				t.Errorf("%s: unexpected error %v", name, err)
+			}
+		}
+		stored, err := stores[0].Harness(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case len(winners) > 1:
+			t.Fatalf("%s: %d creates succeeded (%v), want at most one", name, len(winners), winners)
+		case len(winners) == 1:
+			if stored.UID != winners[0] {
+				t.Fatalf("%s: stored uid %s, winner %s", name, stored.UID, winners[0])
+			}
+			if withRegister {
+				if res := <-registered; res != sqlitelog.HarnessUnchanged {
+					t.Fatalf("%s: RegisterHarness after the create returned %v, want HarnessUnchanged", name, res)
+				}
+			}
+		case withRegister:
+			if res := <-registered; res != sqlitelog.HarnessCreated || stored.UID != "uid-register" {
+				t.Fatalf("%s: no create won, RegisterHarness returned %v and the row is %+v", name, res, stored)
+			}
+		default:
+			t.Fatalf("%s: no create succeeded on a free name", name)
+		}
 	}
 }

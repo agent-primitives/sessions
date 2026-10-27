@@ -28,13 +28,14 @@ var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was supers
 // recorded returns it from Create, Restore and Snapshot when the compute holds one other than the
 // checkpoint the journal last recorded (SessionSpec.RecordedCheckpoint,
 // Incarnation.RecordedCheckpoint, Restore's ref), before it resumes the compute or, from Create
-// and Restore, after, on what the resume reports. The journal cannot rebuild the state (I4), so
-// fresh compute would continue the journal with a harness that has forgotten it. Retrying does not
-// fix it, except when the missing record is still being written or was written after the caller
-// read it: another host's Snapshot between its capture and its SUSPEND append is refused until
-// that append lands, and Restore's check after the resume refuses a SUSPEND another host recorded
-// after Restore's ref was read, which a retry reads. The session service reports it as
-// FAILED_PRECONDITION.
+// and Restore, after, on what the resume reports. From a stateful Fork it returns it for a clone
+// its client cannot show holds no capture of its own, since a retry is refused alike (a clone shown
+// to hold one is ErrComputeBusy). The journal cannot rebuild the state (I4), so fresh compute would
+// continue the journal with a harness that has forgotten it. Retrying does not fix it, except when
+// the missing record is still being written or was written after the caller read it: another host's
+// Snapshot between its capture and its SUSPEND append is refused until that append lands, and
+// Restore's check after the resume refuses a SUSPEND another host recorded after Restore's ref was
+// read, which a retry reads. The session service reports it as FAILED_PRECONDITION.
 var ErrMemoryStateLost = errors.New("runtime: session's in-memory harness state is lost")
 
 // ErrInvalidCheckpoint reports that a runtime cannot produce or resume a checkpoint with the
@@ -66,7 +67,7 @@ var ErrComputeBusy = errors.New("runtime: compute is busy with another operation
 // Sessions API) run on "substrate underneath" (or pod, Kata, ...) with no API change.
 type Runtime interface {
 	// Create starts a cold incarnation (sandbox) for a session and returns a handle
-	// including the address where the harness server listens.
+	// with a nonempty ID and the address where the harness server listens.
 	Create(ctx context.Context, s *SessionSpec) (Incarnation, error)
 
 	// Snapshot captures the incarnation's state. SnapshotLocal (warm/pause) keeps it
@@ -85,9 +86,9 @@ type Runtime interface {
 	// compute that holds another one (see Incarnation.RecordedCheckpoint).
 	Snapshot(ctx context.Context, in Incarnation, kind SnapshotKind) (SnapshotRef, error)
 
-	// Restore brings an incarnation back from a snapshot. Sub-second on memory-capable
-	// backends; a filesystem-only backend restores the workspace and relies on the host
-	// replaying the event log.
+	// Restore brings an incarnation back from a snapshot and returns a nonempty ID.
+	// Sub-second on memory-capable backends; a filesystem-only backend restores the workspace
+	// and relies on the host replaying the event log.
 	Restore(ctx context.Context, ref SnapshotRef) (Incarnation, error)
 
 	// Fork creates a child incarnation. A backend with MemorySnapshot clones ref's captured state so
@@ -124,6 +125,20 @@ type Runtime interface {
 // backend implements it.
 type InstanceRestorer interface {
 	RestoreInstance(ctx context.Context, ref SnapshotRef, recorded func() (string, error)) (Incarnation, error)
+}
+
+// CleanupRuntime optionally opts a Runtime into durable session release. This contract is
+// only safe for backends with NO dedicated per-session resources.
+// Identity-bearing resource cleanup requires a separate, stronger ownership contract; it must
+// never be retrofitted by calling a destructive name-only Stop.
+//
+// CleanupKey identifies the backend configuration across host restarts, not a harness alias.
+// Equal keys must mean interchangeable release behavior, including across local harnesses.
+// ReleaseSession is idempotent and safe even when an allocation response was never confirmed;
+// it must not stop a shared harness server or close a shared connection.
+type CleanupRuntime interface {
+	CleanupKey() string
+	ReleaseSession(ctx context.Context, sessionUID string) error
 }
 
 // SnapshotKind selects local (warm/pause) vs external (cold/suspend) storage.

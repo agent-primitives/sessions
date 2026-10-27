@@ -74,7 +74,7 @@ func TestExecutionProjectionPrefixesAndMigration(t *testing.T) {
 			}
 			assertExecutionProjection(t, migrated, "s", want)
 			if gotJournal, gotMetadata := approvalStored(t, raw); gotJournal != journal || gotMetadata != metadata {
-				t.Fatal("v7 migration rewrote events, hashes, fences or original metadata")
+				t.Fatal("v8 migration rewrote events, hashes, fences or original metadata")
 			}
 			migrated.Close()
 			assertExecutionProjection(t, approvalOpen(t, path), "s", want)
@@ -286,6 +286,64 @@ func executionV6Fixture(t *testing.T) (string, *sql.DB) {
 	return path, raw
 }
 
+func executionV7Fixture(t *testing.T) (string, *sql.DB) {
+	t.Helper()
+	path, raw := executionV6Fixture(t)
+	tx, err := raw.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := migrateCleanupInventory(tx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`PRAGMA user_version=7`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return path, raw
+}
+
+func TestExecutionMigrationPreservesV7Allocations(t *testing.T) {
+	path, raw := executionV7Fixture(t)
+	appendV6Execution(t, raw, "s", api.Event{ExecutionID: "e", Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
+	approvalExec(t, raw, `
+INSERT INTO allocations(id,session,backend,operation,resource_id,confirmed,released)
+VALUES('pending','s','echo','create','',0,0),('confirmed','s','echo','restore','handle',1,0),
+      ('released','s','echo','create','old-handle',1,1);
+UPDATE sessions SET inventory_complete=1, inventory_evidence='operator reconciled' WHERE session='s';`)
+	readInventory := func() (allocations, inventory string) {
+		t.Helper()
+		if err := raw.QueryRow(`SELECT group_concat(value) FROM
+ (SELECT json_array(id,session,backend,operation,resource_id,confirmed,released) value FROM allocations ORDER BY id)`).
+			Scan(&allocations); err != nil {
+			t.Fatal(err)
+		}
+		if err := raw.QueryRow(`SELECT group_concat(value) FROM
+ (SELECT json_array(session,inventory_complete,inventory_evidence) value FROM sessions ORDER BY session)`).
+			Scan(&inventory); err != nil {
+			t.Fatal(err)
+		}
+		return allocations, inventory
+	}
+	allocations, inventory := readInventory()
+	journal, metadata := approvalStored(t, raw)
+	store := approvalOpen(t, path)
+	assertExecutionProjection(t, store, "s", api.ExecCompleted)
+	var version int
+	if err := raw.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != SchemaVersion {
+		t.Fatalf("migration version=%d, want %d: %v", version, SchemaVersion, err)
+	}
+	if gotAllocations, gotInventory := readInventory(); gotAllocations != allocations || gotInventory != inventory {
+		t.Fatal("execution migration changed allocation ownership or inventory evidence")
+	}
+	if gotJournal, gotMetadata := approvalStored(t, raw); gotJournal != journal || gotMetadata != metadata {
+		t.Fatal("execution migration changed journal or original metadata")
+	}
+}
+
 func appendV6Execution(t *testing.T, db *sql.DB, uid string, ev api.Event) {
 	t.Helper()
 	tx, err := db.Begin()
@@ -313,40 +371,51 @@ func appendV6Execution(t *testing.T, db *sql.DB, uid string, ev api.Event) {
 }
 
 func TestExecutionMigrationReadOnlyAndRollback(t *testing.T) {
-	path, raw := executionV6Fixture(t)
-	journal, metadata := approvalStored(t, raw)
-	for _, mode := range []string{"read-only", "SQL fault"} {
-		t.Run(mode, func(t *testing.T) {
-			dsn := path
-			if mode == "read-only" {
-				dsn = "file:" + filepath.ToSlash(path) + "?mode=ro"
-			} else {
-				approvalExec(t, raw, `CREATE TRIGGER fail_v7 BEFORE DELETE ON approval_executions BEGIN SELECT RAISE(ABORT,'v7 fault'); END`)
-			}
+	for _, fixture := range []struct {
+		name    string
+		open    func(*testing.T) (string, *sql.DB)
+		version int
+	}{
+		{"v6", executionV6Fixture, 6},
+		{"v7", executionV7Fixture, 7},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			path, raw := fixture.open(t)
+			journal, metadata := approvalStored(t, raw)
+			for _, mode := range []string{"read-only", "SQL fault"} {
+				t.Run(mode, func(t *testing.T) {
+					dsn := path
+					if mode == "read-only" {
+						dsn = "file:" + filepath.ToSlash(path) + "?mode=ro"
+					} else {
+						approvalExec(t, raw, `CREATE TRIGGER fail_v8 BEFORE DELETE ON approval_executions BEGIN SELECT RAISE(ABORT,'v8 fault'); END`)
+					}
 
-			store, err := Open(dsn)
-			if err == nil {
-				store.Close()
-				t.Fatal("migration unexpectedly succeeded")
+					store, err := Open(dsn)
+					if err == nil {
+						store.Close()
+						t.Fatal("migration unexpectedly succeeded")
+					}
+					if !strings.Contains(err.Error(), "migrate") {
+						t.Fatalf("unclear migration failure: %v", err)
+					}
+					var stamp, columns int
+					if err := raw.QueryRow(`SELECT user_version,(SELECT COUNT(*) FROM pragma_table_info('approval_executions') WHERE name='outcome') FROM pragma_user_version`).Scan(&stamp, &columns); err != nil || stamp != fixture.version || columns != 0 {
+						t.Fatalf("half migration: version=%d columns=%d err=%v", stamp, columns, err)
+					}
+					if gotJournal, gotMetadata := approvalStored(t, raw); gotJournal != journal || gotMetadata != metadata {
+						t.Fatal("failed migration changed persistent evidence")
+					}
+				})
 			}
-			if !strings.Contains(err.Error(), "migrate") {
-				t.Fatalf("unclear migration failure: %v", err)
-			}
-			var stamp, columns int
-			if err := raw.QueryRow(`SELECT user_version,(SELECT COUNT(*) FROM pragma_table_info('approval_executions') WHERE name='outcome') FROM pragma_user_version`).Scan(&stamp, &columns); err != nil || stamp != 6 || columns != 0 {
-				t.Fatalf("half migration: version=%d columns=%d err=%v", stamp, columns, err)
-			}
-			if gotJournal, gotMetadata := approvalStored(t, raw); gotJournal != journal || gotMetadata != metadata {
-				t.Fatal("failed migration changed persistent evidence")
-			}
+			approvalExec(t, raw, `DROP TRIGGER fail_v8`)
+			store := approvalOpen(t, path)
+			assertExecutionProjection(t, store, "s", api.ExecPending)
+			store.Close()
+			readOnly := approvalOpen(t, "file:"+filepath.ToSlash(path)+"?mode=ro")
+			assertExecutionProjection(t, readOnly, "s", api.ExecPending)
 		})
 	}
-	approvalExec(t, raw, `DROP TRIGGER fail_v7`)
-	store := approvalOpen(t, path)
-	assertExecutionProjection(t, store, "s", api.ExecPending)
-	store.Close()
-	readOnly := approvalOpen(t, "file:"+filepath.ToSlash(path)+"?mode=ro")
-	assertExecutionProjection(t, readOnly, "s", api.ExecPending)
 }
 
 func TestExecutionMigrationUndecodableSession(t *testing.T) {

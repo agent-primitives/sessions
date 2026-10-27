@@ -235,6 +235,10 @@ const (
 	ToolResultCodeUnspecified    ToolResultCode = 0
 	ToolResultCodeApprovalDenied ToolResultCode = 1
 	ToolResultCodeExecutorError  ToolResultCode = 2
+	// ToolResultCodePolicyDenied is a host receipt for a call the host's pre-dispatch tool policy
+	// refused definitively. The executor was not called. Only the host writes it; executors and
+	// harness reports must not.
+	ToolResultCodePolicyDenied ToolResultCode = 3
 )
 
 // ToolResult is the outcome of a ToolCall.

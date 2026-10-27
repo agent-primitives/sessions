@@ -6,7 +6,7 @@ import (
 	"github.com/agent-primitives/sessions/api"
 )
 
-func migrateV6ToV7(tx *sql.Tx) error {
+func migrateV7ToV8(tx *sql.Tx) error {
 	if _, err := tx.Exec(`
 ALTER TABLE approval_executions ADD COLUMN outcome TEXT NOT NULL DEFAULT 'RUNNING';
 DELETE FROM approval_calls;

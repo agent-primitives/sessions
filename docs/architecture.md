@@ -176,6 +176,12 @@ stateDiagram-v2
 ```
 
 - A different spec under a taken name is `ALREADY_EXISTS`; a new spec needs a new name.
+- **`CreateHarness` creates only.** It is `ALREADY_EXISTS` for any taken name, the same spec and a
+  `RETIRED` row included, and changes nothing then. The absence check and the insert are one store
+  transaction, so of concurrent creates for a name on any hosts sharing the journal at most one
+  succeeds. A client that wants "create only if never registered" uses it instead of `GetHarness`
+  followed by `RegisterHarness`, which races with another writer and reactivates a name retired in
+  between. A create that timed out may have committed: inspect with `GetHarness`, do not retry.
 - **Retire refuses new sessions only.** The check runs in the same transaction as the session insert,
   so once `RetireHarness` returns no new session can land on the harness. Existing sessions keep
   `Exec`, `Suspend`, `Resume` and `Fork`; fork children inherit the harness.
@@ -218,7 +224,8 @@ stateDiagram-v2
   process sharing the database is served after this host restarts. Harness-registry deletion is not
   implemented: `DeleteSession` tombstones a session but retains its metadata and audit log, so its
   recorded harness identity remains relevant. Session deletion returns `PENDING` without stopping
-  resources; ownership and cleanup-target persistence and teardown belong to #88.
+  resources. The SQLite allocation-attempt ledger is incomplete; authoritative cleanup inventory
+  and teardown remain future work (#88).
 
 The registry is an admin API. `agentsessionsd` loads stored registrations on every start, even
 without the operator listener: existing sessions on retired harnesses still route to their backend

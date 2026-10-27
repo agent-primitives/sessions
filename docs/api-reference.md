@@ -50,7 +50,8 @@ REQUIRES_APPROVAL call the host commits TOOL_CALL then APPROVAL_REQUEST before p
 only the host may commit the request or its later APPROVAL_RESULT. The harness cannot mint
 requests or decisions by emitting these events. Identity on a decision&#39;s Event.actor is
 recorded provenance only, not authorization. This gate supports STATELESS_REPLAY only;
-it defines no policy hook, expiry, automatic decision, or Cancel behavior.
+it defines no expiry, automatic decision, or Cancel behavior. A host&#39;s optional pre-dispatch
+tool policy hook runs only when recovery dispatches an approved call (spec §9.4).
 
 
 | Field | Type | Label | Description |
@@ -626,6 +627,7 @@ Mediation controls how a tool call is executed / who enforces record-before-effe
 | CODE_UNSPECIFIED | 0 | Legacy/unspecified status. With is_error=false this is also a successful receipt. Old is_error=true receipts retain their legacy, unclassified failure shape. |
 | APPROVAL_DENIED | 1 | A denied approval: is_error=true and the executor MUST NOT have been invoked. |
 | EXECUTOR_ERROR | 2 | An attempted executor call failed: is_error=true; error describes the failure. This is a durable handled receipt, not an unrecorded effect or an approval denial. |
+| POLICY_DENIED | 3 | The host&#39;s pre-dispatch tool policy refused the call definitively: is_error=true and the executor MUST NOT have been invoked. Only the host writes it, for an ordinary host-executed call or an approved call. Peers that predate this value reject it rather than serve it. |
 
 
  
@@ -705,10 +707,12 @@ exists. The harness must correlate approval.tool_call_id/request_seq with the wa
 receipt.id/approval_request_seq; the receipt&#39;s approval_decision_seq must identify the committed
 decision in that session&#39;s journal, which the host validates. Denial requires APPROVAL_DENIED
 and is_error=true without an executor call. Approval permits a success (CODE_UNSPECIFIED with
-is_error=false) or EXECUTOR_ERROR with is_error=true. Conflicting decisions or receipt tuples
-fail closed rather than being served to a different call. The harness may not manufacture
-durable APPROVAL_REQUEST/APPROVAL_RESULT events. The gate is not supported for memory-snapshot
-harnesses; reject it before executing an effect rather than pretending a park is a snapshot.
+is_error=false), EXECUTOR_ERROR with is_error=true, or POLICY_DENIED with is_error=true when the
+host&#39;s pre-dispatch policy refused the call without an executor call. Conflicting decisions or
+receipt tuples fail closed rather than being served to a different call. The harness may not
+manufacture durable APPROVAL_REQUEST/APPROVAL_RESULT events. The gate is not supported for
+memory-snapshot harnesses; reject it before executing an effect rather than pretending a park is
+a snapshot.
 Host sink operations for an execution are serialized; callbacks must not re-enter that sink.
 Once a recorded-prefix identity/correlation mismatch occurs, the execution remains divergent:
 catching the error cannot authorize a later model/tool effect or mark recovery complete.
@@ -885,6 +889,22 @@ unauthenticated. Every local or same-pod process that can reach the operator por
 registrations. See docs/security.md.
 
 
+<a name="agentsessions-v1-CreateHarnessRequest"></a>
+
+### CreateHarnessRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| name | [string](#string) |  | An RFC 1123 DNS label, as for RegisterHarnessRequest.name. |
+| spec | [HarnessSpec](#agentsessions-v1-HarnessSpec) |  |  |
+
+
+
+
+
+
 <a name="agentsessions-v1-GetHarnessRequest"></a>
 
 ### GetHarnessRequest
@@ -1044,8 +1064,8 @@ RemotePlacement is a harness already running at address, dialed over the Harness
 
 ### SubstratePlacement
 SubstratePlacement runs each session in its own actor created from an ActorTemplate. A host
-serves it only if it was built with a substrate placement backend; otherwise RegisterHarness
-returns FAILED_PRECONDITION.
+serves it only if it was built with a substrate placement backend; otherwise RegisterHarness and
+CreateHarness return FAILED_PRECONDITION.
 
 
 | Field | Type | Label | Description |
@@ -1069,7 +1089,7 @@ returns FAILED_PRECONDITION.
 | ---- | ------ | ----------- |
 | HARNESS_SOURCE_UNSPECIFIED | 0 |  |
 | HARNESS_SOURCE_STATIC | 1 | Built into the host or configured when it started. Never stored, always ACTIVE, and read-only through this API: its name cannot be registered or retired. |
-| HARNESS_SOURCE_REGISTERED | 2 | Created through RegisterHarness and stored in the host&#39;s journal database. |
+| HARNESS_SOURCE_REGISTERED | 2 | Created through RegisterHarness or CreateHarness and stored in the host&#39;s journal database. |
 
 
 
@@ -1128,7 +1148,8 @@ docs/security.md#optional-go-rpc-authorization for the opt-in contract and deplo
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| RegisterHarness | [RegisterHarnessRequest](#agentsessions-v1-RegisterHarnessRequest) | [RegisterHarnessResponse](#agentsessions-v1-RegisterHarnessResponse) | Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec, or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve a new placement. An identical repeat of a registration isolated during startup returns UNCHANGED or REACTIVATED with unservable_reason set; it does not claim this host serves it. An identical compatible repeat of a row added since startup can load it locally without restart. Repeating a RETIRED registration reactivates it for every host sharing the journal; restart the host instead to serve only its existing sessions without reactivation. |
+| RegisterHarness | [RegisterHarnessRequest](#agentsessions-v1-RegisterHarnessRequest) | [RegisterHarnessResponse](#agentsessions-v1-RegisterHarnessResponse) | Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec, or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve a new placement. An identical repeat of a registration isolated during startup returns UNCHANGED or REACTIVATED with unservable_reason set; it does not claim this host serves it. An identical compatible repeat of a row added since startup can load it locally without restart. Repeating a RETIRED registration reactivates it for every host sharing the journal; restart the host instead to serve only its existing sessions without reactivation. To register only a name that was never registered, use CreateHarness: a GetHarness check before RegisterHarness races with other writers. |
+| CreateHarness | [CreateHarnessRequest](#agentsessions-v1-CreateHarnessRequest) | [HarnessRegistration](#agentsessions-v1-HarnessRegistration) | Create-only registration: stores a new ACTIVE registration only if the name has never been registered, and returns it. The absence check and the insert are one transaction in the journal database, so it holds across every host sharing the journal, and of concurrent CreateHarness calls for one name at most one succeeds. The name and spec are validated as for RegisterHarness before registration rows are read, so an invalid spec is INVALID_ARGUMENT even under a registered name. A valid request is ALREADY_EXISTS when the name has a registration row of any spec, ACTIVE or RETIRED (whether or not this host has loaded or can serve it), or is taken by or reserved for a STATIC harness; nothing is stored, reactivated or loaded. A free name is FAILED_PRECONDITION, like RegisterHarness, when the host cannot serve its placement. A server that predates this RPC returns UNIMPLEMENTED and changes nothing. A call that fails with DEADLINE_EXCEEDED, CANCELLED or a transport error may or may not have stored the registration, and a retry that finds it returns ALREADY_EXISTS whoever stored it. Do not retry blindly: inspect with GetHarness, whose spec_digest says whether the stored spec is the one requested (not which caller stored it). |
 | GetHarness | [GetHarnessRequest](#agentsessions-v1-GetHarnessRequest) | [HarnessRegistration](#agentsessions-v1-HarnessRegistration) | NOT_FOUND for a name that is neither STATIC nor registered. |
 | ListHarnesses | [ListHarnessesRequest](#agentsessions-v1-ListHarnessesRequest) | [ListHarnessesResponse](#agentsessions-v1-ListHarnessesResponse) |  |
 | RetireHarness | [RetireHarnessRequest](#agentsessions-v1-RetireHarnessRequest) | [HarnessRegistration](#agentsessions-v1-HarnessRegistration) | Idempotent: retiring a RETIRED harness returns it unchanged. FAILED_PRECONDITION for a STATIC harness; NOT_FOUND for an unknown name. |
@@ -1155,7 +1176,9 @@ All tuple fields are required and request_seq must be positive. A decision resol
 request owned by this session, not an inherited parent request. By default identity is recorded
 on the decision&#39;s Event.actor as unverified provenance. An opt-in enforcing Go host ignores it,
 normalizing the actor to empty before append/retry comparison; verified audit is not available.
-No tool/resource policy hook, expiry, automatic decision, or Cancel semantics are implied.
+Approve does not run a host&#39;s pre-dispatch tool policy hook, which runs when recovery
+dispatches the approved call (spec §9.4). No expiry, automatic decision, or Cancel
+semantics are implied.
 
 
 | Field | Type | Label | Description |
@@ -1613,8 +1636,10 @@ instead. Wiring session status is tracked separately.
 ### DeletionState
 DeletionState is independent of the execution and compute axes. PENDING is a permanent
 UID tombstone and durable deletion intent, not confirmation that resources were reclaimed.
-Until ownership and cleanup are implemented (#88), deletion emits PENDING only: actors,
-fork-child pins and snapshots remain retained, and no Runtime.Stop is attempted.
+The SQLite allocation-attempt ledger is incomplete, not authoritative cleanup inventory.
+Until authoritative cleanup inventory and reclamation are implemented (#88), deletion emits
+PENDING only: actors, fork-child pins and snapshots remain retained, and no Runtime.Stop is
+attempted.
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -1679,13 +1704,13 @@ provide required-mode deployment, verified approval audit or transport assembly.
 | CreateSession | [CreateSessionRequest](#agentsessions-v1-CreateSessionRequest) | [Session](#agentsessions-v1-Session) |  |
 | GetSession | [GetSessionRequest](#agentsessions-v1-GetSessionRequest) | [Session](#agentsessions-v1-Session) | GetSession remains available for audit after deletion, including metadata and deletion intent time. |
 | ListSessions | [ListSessionsRequest](#agentsessions-v1-ListSessionsRequest) | [ListSessionsResponse](#agentsessions-v1-ListSessionsResponse) |  |
-| DeleteSession | [DeleteSessionRequest](#agentsessions-v1-DeleteSessionRequest) | [Session](#agentsessions-v1-Session) | DeleteSession commits irreversible soft-deletion intent for a known UID. The host atomically appends a session-scoped, host-owned LIFECYCLE_DELETE (empty execution_id), advances the writer fence and marks PENDING. Metadata, the UID and the hash-chained journal are retained forever; the UID cannot be reused. Children and their copied prefixes are unaffected: no cascade or data erasure is promised. ListSessions hides the UID; GetSession and raw Sessions.Replay remain read-only audit access, without reconstructing or running a harness. Valid mutation requests against PENDING fail with FAILED_PRECONDITION before routing, recovery or compute effects: Exec, Fork (including historical at_seq), Resume, Suspend and Approve are refused, including exact historical decision retries. Pending approval metadata grants no permission. Until ownership and cleanup land (#88), OK &#43; PENDING acknowledges durable intent only. No Runtime.Stop, actor/pin release, physical snapshot GC or TERMINATED transition is attempted or promised. Execution and compute reporting stay independent. The retained journal is audit evidence, not a complete or authoritative cleanup-target inventory; the allocation ownership and cleanup-target schema belong to #88, not an inferred default harness or owner. Repeated PENDING deletion returns the identical Session: no timestamp, update_time, journal, fence or compute-projection changes. Clients must inspect deletion_state, not infer reclamation from an OK status. Empty uid is INVALID_ARGUMENT; an unknown nonempty uid is NOT_FOUND without creating a row. Overlap with a mutation in the same Registry/host is ABORTED before mutation, without canceling the holder; retry after it finishes. Storage faults are INTERNAL, cancellation/deadline retain CANCELLED/DEADLINE_EXCEEDED. An error or lost reply after intent commits cannot undo the hidden PENDING tombstone or erase its audit evidence: use GetSession or retry to learn the outcome. Admission serialization is local to one Registry/host. Durable fences block subsequent writes from this build&#39;s writers; already-open older binaries do not enforce tombstones. A separate host can provision compute before its first fence; cross-host exclusion of compute effects is not guaranteed. Operators still need runtime-side resource reconciliation. |
+| DeleteSession | [DeleteSessionRequest](#agentsessions-v1-DeleteSessionRequest) | [Session](#agentsessions-v1-Session) | DeleteSession commits irreversible soft-deletion intent for a known UID. The host atomically appends a session-scoped, host-owned LIFECYCLE_DELETE (empty execution_id), advances the writer fence and marks PENDING. Metadata, the UID and the hash-chained journal are retained forever; the UID cannot be reused. Children and their copied prefixes are unaffected: no cascade or data erasure is promised. ListSessions hides the UID; GetSession and raw Sessions.Replay remain read-only audit access, without reconstructing or running a harness. Valid mutation requests against PENDING fail with FAILED_PRECONDITION before routing, recovery or compute effects: Exec, Fork (including historical at_seq), Resume, Suspend and Approve are refused, including exact historical decision retries. Pending approval metadata grants no permission. OK &#43; PENDING acknowledges durable intent only. No Runtime.Stop, actor/pin release, physical snapshot GC or TERMINATED transition is attempted or promised. Execution and compute reporting stay independent. The retained journal is audit evidence. The SQLite allocation-attempt ledger exists but is incomplete, not authoritative cleanup inventory. Authoritative cleanup inventory and reclamation remain future work (#88), not an inferred default harness or owner. Repeated PENDING deletion returns the identical Session: no timestamp, update_time, journal, fence or compute-projection changes. Clients must inspect deletion_state, not infer reclamation from an OK status. Empty uid is INVALID_ARGUMENT; an unknown nonempty uid is NOT_FOUND without creating a row. Overlap with a mutation in the same Registry/host is ABORTED before mutation, without canceling the holder; retry after it finishes. Storage faults are INTERNAL, cancellation/deadline retain CANCELLED/DEADLINE_EXCEEDED. An error or lost reply after intent commits cannot undo the hidden PENDING tombstone or erase its audit evidence: use GetSession or retry to learn the outcome. Admission serialization is local to one Registry/host. Durable fences block subsequent writes from this build&#39;s writers; already-open older binaries do not enforce tombstones. A separate host can provision compute before its first fence; cross-host exclusion of compute effects is not guaranteed. Operators still need runtime-side resource reconciliation. |
 | Exec | [ExecRequest](#agentsessions-v1-ExecRequest) | [ExecUpdate](#agentsessions-v1-ExecUpdate) stream | Exec runs one execution/turn. The live stream carries committed LogRecords plus ephemeral Deltas; Replay re-delivers committed records only (read-only). |
 | Replay | [ReplayRequest](#agentsessions-v1-ReplayRequest) | [LogRecord](#agentsessions-v1-LogRecord) stream | Raw read-only audit: remains available for tombstoned UIDs, including LIFECYCLE_DELETE records. Unlike controller replay, this does not reconstruct or run the harness. |
-| Approve | [ApproveRequest](#agentsessions-v1-ApproveRequest) | [ApproveResponse](#agentsessions-v1-ApproveResponse) | Implemented durable approval decisions for STATELESS_REPLAY executions. OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple, approved value, reason and identity returns the existing decision, even after resolution. A changed decision/reason/identity for that request is FAILED_PRECONDITION, never an overwrite. INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created for a non-stateless execution; Approve does not Describe or resolve a harness. ABORTED: local contention, append-CAS conflict or superseded fence; retry after reading the session. Identity is unverified provenance, ignored by an enforcing Go host. Independent read&#43;approve permission checks are opt-in; this method implies no tool/resource policy hook, expiry, implicit Resume, or Cancel behavior. |
+| Approve | [ApproveRequest](#agentsessions-v1-ApproveRequest) | [ApproveResponse](#agentsessions-v1-ApproveResponse) | Implemented durable approval decisions for STATELESS_REPLAY executions. OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple, approved value, reason and identity returns the existing decision, even after resolution. A changed decision/reason/identity for that request is FAILED_PRECONDITION, never an overwrite. INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created for a non-stateless execution; Approve does not Describe or resolve a harness. ABORTED: local contention, append-CAS conflict or superseded fence; retry after reading the session. Identity is unverified provenance, ignored by an enforcing Go host. Independent read&#43;approve permission checks are opt-in. This method does not run a host&#39;s pre-dispatch tool policy hook (it runs when recovery dispatches the approved call) and implies no expiry, implicit Resume, or Cancel behavior. |
 | Cancel | [CancelRequest](#agentsessions-v1-CancelRequest) | [Session](#agentsessions-v1-Session) | In-flight control: cancel the running execution. Not implemented: the server returns UNIMPLEMENTED. |
 | Suspend | [SuspendRequest](#agentsessions-v1-SuspendRequest) | [Session](#agentsessions-v1-Session) | Compute-layer durability. There is no warm Pause: no Runtime backend implements a node-local warm checkpoint, so a session goes straight from live to a cold snapshot. Suspend routes an owned unreceipted approval to its recorded harness; inherited approvals and ordinary sessions use their stored default. An unserved recorded name is FAILED_PRECONDITION, with no fallback. cold, free worker |
-| Resume | [ResumeRequest](#agentsessions-v1-ResumeRequest) | [Session](#agentsessions-v1-Session) | A recorded override where either harness is REQUIRES_MEMORY_SNAPSHOT is FAILED_PRECONDITION before compute changes or journal repair, as for Exec admission. Otherwise an unresolved owned approval returns its current paused Session without runtime IO. A call-only cut repairs the request; neither outcome proves cold compute. After a decision, recovery uses the recorded invocation and SnapshotRef. It may park at another gate (without RESUME), or finish and commit RESUME. A missing executor is FAILED_PRECONDITION and leaves the decision recoverable. Approved executor failures are durable EXECUTOR_ERROR receipts, available to the harness for continuation, not transport failures. Snapshots and unresolved requests are retained indefinitely; there is no approval expiry or automatic decision. |
+| Resume | [ResumeRequest](#agentsessions-v1-ResumeRequest) | [Session](#agentsessions-v1-Session) | A recorded override where either harness is REQUIRES_MEMORY_SNAPSHOT is FAILED_PRECONDITION before compute changes or journal repair, as for Exec admission. Otherwise an unresolved owned approval returns its current paused Session without runtime IO. A call-only cut repairs the request; neither outcome proves cold compute. After a decision, recovery uses the recorded invocation and SnapshotRef. It may park at another gate (without RESUME), or finish and commit RESUME. A missing executor is FAILED_PRECONDITION and leaves the decision recoverable, and so does a transient refusal from the host&#39;s optional tool policy. Approved executor failures are durable EXECUTOR_ERROR receipts and definitive policy refusals durable POLICY_DENIED receipts, available to the harness for continuation, not transport failures. Snapshots and unresolved requests are retained indefinitely; there is no approval expiry or automatic decision. |
 | Fork | [ForkRequest](#agentsessions-v1-ForkRequest) | [ForkResponse](#agentsessions-v1-ForkResponse) | The differentiator: branch a session at a sequence into one or more children. Forking a REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event lands on its chain) because the children are cloned from that snapshot; resume brings it back. |
 
  

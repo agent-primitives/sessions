@@ -1171,8 +1171,9 @@ var ErrMemoryStateLost = fmt.Errorf("substrate: refusing to cold-create an actor
 //     so the child is created from the parent's external snapshot (tag the suspended parent,
 //     CreateActor from the tag, then ResumeActor to restore the cloned RAM). The clone the resume
 //     reports must hold no capture of its own, as the child's journal records no checkpoint; one
-//     that does, or that the client cannot show holds none, is ErrActorBusy (forkCloneCaptured)
-//     and is torn down. A retry clones anew, though not past a client that cannot tell.
+//     that does is ErrActorBusy and a retry clones anew, and one the client cannot show holds
+//     none is api.ErrMemoryStateLost, which a retry does not fix (forkCloneCaptured). Either is
+//     torn down.
 //
 // Cloning is NOT copy-on-write: each tag copies the snapshot in object storage and each child
 // restores into a private per-actor directory, so an N-way fan-out costs N copies and N restores.
@@ -1340,34 +1341,48 @@ func (b *Backend) tearDownForkClone(ctx context.Context, cloner SnapshotCloner, 
 // journal records no checkpoint, so it could never accept a capture. The refusal tells two cases
 // apart:
 //
-//   - The clone's Snapshot is no longer the one CreateActorFromTag reported (or its newest is not
-//     ready): another caller resumed and captured it while it was SUSPENDED between its create and
-//     Fork's resume, and its RAM need not be the parent's at the fork point.
-//   - The clone still holds the snapshot it was created with (or the create reported none to
-//     compare): the client cannot tell whether a capture exists, as one that does not read the
-//     actor's snapshot ownership (an ActorStatus field newer than it knows). A retry is refused
-//     the same way while the client cannot report NoCapture.
+//   - The clone reports a Snapshot other than the one CreateActorFromTag reported, or its newest
+//     is not ready: another caller resumed and captured it while it was SUSPENDED between its
+//     create and Fork's resume, and its RAM need not be the parent's at the fork point. Fork never
+//     handed the clone out and the parent still holds its snapshot, so, as for a clone replaced
+//     before its resume, this is ErrActorBusy (ABORTED): a retry clones a new child.
+//   - The clone still holds the snapshot it was created with, or CreateActorFromTag reported none,
+//     or the resume reported neither a Snapshot nor SnapshotNotReady (a client whose ResumeActor
+//     omits Snapshot as well as NoCapture): the client cannot tell whether a capture exists, as one
+//     that does not read the actor's snapshot ownership (an ActorStatus field newer than it knows).
+//     A retry is refused the same way while the client cannot report NoCapture, so this is
+//     api.ErrMemoryStateLost (FAILED_PRECONDITION), not busy. An empty Snapshot is no evidence of a
+//     capture: a clone holds the tag's snapshot until its own capture replaces it, and a capture
+//     with no completed durable copy reports SnapshotNotReady.
 //
-// Fork never handed the clone out and the parent still holds its snapshot, so, as for a clone
-// replaced before its resume, both are ErrActorBusy (ABORTED). It is logged at Warn naming the
-// clone, with capture "held" or "unknown". The error names no snapshot URI; outcome is what
-// tearDownForkClone left.
+// It is logged at Warn naming the clone, with capture "held" or "unknown" and the matching
+// error_kind. The error names no snapshot URI; outcome is what tearDownForkClone left.
 func (b *Backend) forkCloneCaptured(ctx context.Context, ref ActorRef, created, info ActorInfo, outcome string) error {
-	capture, held := "unknown", "cannot show it holds no capture of its own (the client reports no ActorInfo.NoCapture for it"
-	if created.Snapshot != "" {
+	if created.Snapshot != "" && (info.SnapshotNotReady || info.Snapshot != "" && info.Snapshot != created.Snapshot) {
+		b.logForkCloneCaptured(ctx, ref, info, "held", "actor_busy")
+		return fmt.Errorf("%w: fork child %s/%s (clone %q) holds a capture of its own (another caller resumed and "+
+			"captured it between its create and this fork's resume), so its RAM need not be the parent's at the fork "+
+			"point; the parent is unaffected and a retry clones a new child; %s",
+			ErrActorBusy, ref.Atespace, ref.Name, info.UID, outcome)
+	}
+	held := "cannot show it holds no capture of its own (the client reports no ActorInfo.NoCapture for it"
+	switch {
+	case created.Snapshot != "" && info.Snapshot != "":
 		held += " although it still holds the snapshot it was created with"
+	case created.Snapshot != "":
+		held += ", nor the snapshot it holds to compare with the one it was created with"
 	}
-	held += "), so whether its RAM is the parent's at the fork point cannot be told; a retry is refused the same way " +
-		"while the client cannot report it"
-	if created.Snapshot != "" && (info.Snapshot != created.Snapshot || info.SnapshotNotReady) {
-		capture, held = "held", "holds a capture of its own (another caller resumed and captured it between its "+
-			"create and this fork's resume), so its RAM need not be the parent's at the fork point; the parent is "+
-			"unaffected and a retry clones a new child"
-	}
+	b.logForkCloneCaptured(ctx, ref, info, "unknown", "memory_state_lost")
+	return fmt.Errorf("%w: fork child %s/%s (clone %q) %s), so whether its RAM is the parent's at the fork point "+
+		"cannot be told; the parent is unaffected, but a retry is refused the same way while the client cannot report it; %s",
+		api.ErrMemoryStateLost, ref.Atespace, ref.Name, info.UID, held, outcome)
+}
+
+// logForkCloneCaptured is forkCloneCaptured's Warn for operators.
+func (b *Backend) logForkCloneCaptured(ctx context.Context, ref ActorRef, info ActorInfo, capture, kind string) {
 	observability.Logger(ctx, b.logger).WarnContext(ctx, "refused a fork clone that holds a capture of its own",
 		"component", "runtime.substrate", "atespace", ref.Atespace, "actor", ref.Name, "actor_uid", info.UID,
-		"actor_status", info.Status.String(), "capture", capture, "error_kind", "actor_busy")
-	return fmt.Errorf("%w: fork child %s/%s (clone %q) %s; %s", ErrActorBusy, ref.Atespace, ref.Name, info.UID, held, outcome)
+		"actor_status", info.Status.String(), "capture", capture, "error_kind", kind)
 }
 
 // requireSnapshot fails with ErrSnapshotSuperseded unless the actor is SUSPENDED holding exactly

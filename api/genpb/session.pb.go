@@ -151,8 +151,10 @@ func (ComputeState) EnumDescriptor() ([]byte, []int) {
 
 // DeletionState is independent of the execution and compute axes. PENDING is a permanent
 // UID tombstone and durable deletion intent, not confirmation that resources were reclaimed.
-// Until ownership and cleanup are implemented (#88), deletion emits PENDING only: actors,
-// fork-child pins and snapshots remain retained, and no Runtime.Stop is attempted.
+// The SQLite allocation-attempt ledger is incomplete, not authoritative cleanup inventory.
+// Until authoritative cleanup inventory and reclamation are implemented (#88), deletion emits
+// PENDING only: actors, fork-child pins and snapshots remain retained, and no Runtime.Stop is
+// attempted.
 type DeletionState int32
 
 const (
@@ -1064,7 +1066,9 @@ func (x *ReplayRequest) GetToSeq() int64 {
 // request owned by this session, not an inherited parent request. By default identity is recorded
 // on the decision's Event.actor as unverified provenance. An opt-in enforcing Go host ignores it,
 // normalizing the actor to empty before append/retry comparison; verified audit is not available.
-// No tool/resource policy hook, expiry, automatic decision, or Cancel semantics are implied.
+// Approve does not run a host's pre-dispatch tool policy hook, which runs when recovery
+// dispatches the approved call (spec §9.4). No expiry, automatic decision, or Cancel
+// semantics are implied.
 type ApproveRequest struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	Session     string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`

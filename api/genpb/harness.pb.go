@@ -545,10 +545,12 @@ func (x *Cancel) GetReason() string {
 // receipt.id/approval_request_seq; the receipt's approval_decision_seq must identify the committed
 // decision in that session's journal, which the host validates. Denial requires APPROVAL_DENIED
 // and is_error=true without an executor call. Approval permits a success (CODE_UNSPECIFIED with
-// is_error=false) or EXECUTOR_ERROR with is_error=true. Conflicting decisions or receipt tuples
-// fail closed rather than being served to a different call. The harness may not manufacture
-// durable APPROVAL_REQUEST/APPROVAL_RESULT events. The gate is not supported for memory-snapshot
-// harnesses; reject it before executing an effect rather than pretending a park is a snapshot.
+// is_error=false), EXECUTOR_ERROR with is_error=true, or POLICY_DENIED with is_error=true when the
+// host's pre-dispatch policy refused the call without an executor call. Conflicting decisions or
+// receipt tuples fail closed rather than being served to a different call. The harness may not
+// manufacture durable APPROVAL_REQUEST/APPROVAL_RESULT events. The gate is not supported for
+// memory-snapshot harnesses; reject it before executing an effect rather than pretending a park is
+// a snapshot.
 // Host sink operations for an execution are serialized; callbacks must not re-enter that sink.
 // Once a recorded-prefix identity/correlation mismatch occurs, the execution remains divergent:
 // catching the error cannot authorize a later model/tool effect or mark recovery complete.

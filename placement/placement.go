@@ -116,6 +116,7 @@ type Placer struct {
 	policyError  error
 	stream       controller.StreamFunc
 	tool         controller.ToolFunc
+	toolPolicy   controller.ToolPolicyFunc
 	durableDedup func(tool string) bool
 	dial         Dialer
 	logger       *slog.Logger
@@ -262,6 +263,9 @@ func (p *Placer) controllerOpts(fence int64, sessionUID string, observer control
 	if p.durableDedup != nil {
 		opts = append(opts, controller.WithDurableDedup(p.durableDedup))
 	}
+	if p.toolPolicy != nil {
+		opts = append(opts, controller.WithToolPolicy(p.toolPolicy))
+	}
 	return opts
 }
 
@@ -282,6 +286,12 @@ func WithStreamingModel(fn controller.StreamFunc) Option { return func(p *Placer
 // owns session-scoped authorization and durable deduplication by session UID plus idempotency key.
 // Resume re-drives an interrupted call only for tools declared with WithDurableDedup.
 func WithToolExecutor(fn controller.ToolFunc) Option { return func(p *Placer) { p.tool = fn } }
+
+// WithToolPolicy installs a pre-dispatch tool policy hook for Exec and Resume, as
+// controller.WithToolPolicy. Without it, the executor is called as before.
+func WithToolPolicy(fn controller.ToolPolicyFunc) Option {
+	return func(p *Placer) { p.toolPolicy = fn }
+}
 
 // WithDurableDedup declares which tools the WithToolExecutor executor durably deduplicates, as
 // controller.WithDurableDedup. Without it, Resume refuses a trailing call that is not
@@ -421,7 +431,9 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}}
 	createFinished := observability.StartDebug(ctx, p.logger, "placement", "create_compute",
 		"session_uid", sessionUID)
-	inc, err = p.backend.Create(ctx, spec)
+	inc, err = p.allocate(ctx, log, "create", func() (api.Incarnation, error) {
+		return p.backend.Create(ctx, spec)
+	})
 	if err != nil {
 		createFinished(err, "error_kind", "runtime_create_failed")
 		return inc, err
@@ -1191,18 +1203,19 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	// clone a fork child's FORK marker recorded, before its first turn). It can refuse a replacement
 	// before resume and classify permanent loss after a failure. Each callback reads the journal
 	// when the backend decides, so a turn another host journals between those checks is seen.
-	if r, ok := p.backend.(api.InstanceRestorer); ok {
-		inc, err = r.RestoreInstance(ctx, ref, func() (string, error) {
-			recs, err := log.Read(1)
-			if err != nil {
-				return "", fmt.Errorf("placement: read session journal: %w", err)
-			}
-			instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
-			return instance, nil
-		})
-	} else {
-		inc, err = p.backend.Restore(ctx, ref)
-	}
+	inc, err = p.allocate(ctx, log, "restore", func() (api.Incarnation, error) {
+		if r, ok := p.backend.(api.InstanceRestorer); ok {
+			return r.RestoreInstance(ctx, ref, func() (string, error) {
+				recs, err := log.Read(1)
+				if err != nil {
+					return "", fmt.Errorf("placement: read session journal: %w", err)
+				}
+				instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
+				return instance, nil
+			})
+		}
+		return p.backend.Restore(ctx, ref)
+	})
 	if err != nil {
 		return err
 	}

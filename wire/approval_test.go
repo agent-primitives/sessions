@@ -39,7 +39,7 @@ func TestApprovalWireContract(t *testing.T) {
 			}
 		})
 	}
-	for _, code := range []api.ToolResultCode{api.ToolResultCodeUnspecified, api.ToolResultCodeApprovalDenied, api.ToolResultCodeExecutorError, 99} {
+	for _, code := range []api.ToolResultCode{api.ToolResultCodeUnspecified, api.ToolResultCodeApprovalDenied, api.ToolResultCodeExecutorError, api.ToolResultCodePolicyDenied, 99} {
 		want := &api.ToolResult{ID: "c1", Code: code, IsError: code != api.ToolResultCodeUnspecified, ApprovalRequestSeq: 9007199254740993, ApprovalDecisionSeq: 9007199254740994}
 		pb := wire.ToolResultToProto(want)
 		if pb.GetCode() != v1.ToolResult_Code(code) || !reflect.DeepEqual(wire.ToolResultFromProto(pb), want) {

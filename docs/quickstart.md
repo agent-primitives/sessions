@@ -404,8 +404,9 @@ agentctl list   --journal "$DELETE_JOURNAL" --project default
 ```
 
 Delete/Get report `deletion=PENDING` and the committed RFC3339 request time. PENDING means durable
-intent only until #88 supplies ownership and cleanup: actors, snapshots and fork-child pins remain
-retained indefinitely. No Stop or reclamation is attempted. List hides the UID, but Get and raw
+intent only: the SQLite allocation-attempt ledger is incomplete, not authoritative cleanup inventory.
+Until #88 supplies authoritative cleanup inventory and reclamation, actors, snapshots and fork-child
+pins remain retained indefinitely. No Stop or reclamation is attempted. List hides the UID, but Get and raw
 Replay retain metadata and the full audit chain, including DELETE. Retry returns the original
 timestamps; use Get/retry after a lost response. Exec, historical Fork, Resume, Suspend and Approve
 (including exact retries) now return `FAILED_PRECONDITION`. Existing children remain usable. There

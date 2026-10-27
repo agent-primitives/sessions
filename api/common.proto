@@ -203,6 +203,10 @@ message ToolResult {
     // An attempted executor call failed: is_error=true; error describes the failure. This is
     // a durable handled receipt, not an unrecorded effect or an approval denial.
     EXECUTOR_ERROR = 2;
+    // The host's pre-dispatch tool policy refused the call definitively: is_error=true and the
+    // executor MUST NOT have been invoked. Only the host writes it, for an ordinary host-executed
+    // call or an approved call. Peers that predate this value reject it rather than serve it.
+    POLICY_DENIED = 3;
   }
   string id = 1;
   google.protobuf.Struct output = 2;
@@ -228,7 +232,8 @@ message ToolResult {
 // only the host may commit the request or its later APPROVAL_RESULT. The harness cannot mint
 // requests or decisions by emitting these events. Identity on a decision's Event.actor is
 // recorded provenance only, not authorization. This gate supports STATELESS_REPLAY only;
-// it defines no policy hook, expiry, automatic decision, or Cancel behavior.
+// it defines no expiry, automatic decision, or Cancel behavior. A host's optional pre-dispatch
+// tool policy hook runs only when recovery dispatches an approved call (spec §9.4).
 message ApprovalRequest {
   string tool_call_id = 1;
   string reason = 2;

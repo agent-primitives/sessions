@@ -86,8 +86,8 @@ CREATE INDEX IF NOT EXISTS sessions_project_created
 // build can identify a database without inspecting its columns. Version 1 is what v0.1.0 through
 // v0.1.2 shipped. Version 2 adds the harness registry; version 3 adds approval reporting;
 // version 4 adds permanent deletion intent; version 5 adds caller ownership and an authorization marker;
-// version 6 records explicit session model-policy eligibility.
-const SchemaVersion = 6
+// version 6 records explicit session model-policy eligibility; version 7 adds execution outcomes.
+const SchemaVersion = 7
 
 // migrations[i] moves a database from version i+1 to i+2, inside the migration transaction. The
 // array length is tied to SchemaVersion, so bumping one without the other does not compile.
@@ -97,6 +97,7 @@ var migrations = [SchemaVersion - 1]func(*sql.Tx) error{
 	migrateV3ToV4,
 	migrateV4ToV5,
 	migrateV5ToV6,
+	migrateV6ToV7,
 }
 
 // migrateV5ToV6 leaves every existing session on legacy model semantics, including empty logs.
@@ -538,8 +539,8 @@ func (l *Log) Append(expectedLastSeq, fence int64, ev api.Event) (eventlog.Recor
 		return eventlog.Record{}, err
 	}
 	// Report only the selected wire body and normalized enums that strict journal reads see.
-	if err := projectApproval(tx, l.session, record.Seq, wire.EventFromProto(pb)); err != nil {
-		return eventlog.Record{}, fmt.Errorf("sqlitelog: project approval seq %d: %w", record.Seq, err)
+	if err := projectExecution(tx, l.session, record.Seq, wire.EventFromProto(pb)); err != nil {
+		return eventlog.Record{}, fmt.Errorf("sqlitelog: project execution seq %d: %w", record.Seq, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return eventlog.Record{}, err

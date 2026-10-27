@@ -126,7 +126,7 @@ func TestDeletionRenderingIndependentAxesAndUnknownState(t *testing.T) {
 		wire    v1.DeletionState
 		request time.Time
 	}{{api.DeletionActive, v1.DeletionState_DELETION_ACTIVE, time.Time{}}, {api.DeletionPending, v1.DeletionState_DELETION_PENDING, requested}, {api.DeletionState("UNRECOGNIZED"), v1.DeletionState_DELETION_STATE_UNSPECIFIED, requested}, {api.DeletionState("unknown"), v1.DeletionState_DELETION_STATE_UNSPECIFIED, time.Time{}}} {
-		info := sqlitelog.SessionInfo{SessionMeta: sqlitelog.SessionMeta{UID: "uid"}, ComputeState: api.ComputeCold, LastSeq: 1, DeletionSeq: 1, DeletionState: tc.state, DeletionRequestedAt: tc.request}
+		info := sqlitelog.SessionInfo{SessionMeta: sqlitelog.SessionMeta{UID: "uid"}, ExecState: api.ExecPending, ComputeState: api.ComputeCold, LastSeq: 1, DeletionSeq: 1, DeletionState: tc.state, DeletionRequestedAt: tc.request}
 		got, err := sessionProto(info)
 		if err != nil {
 			t.Fatal(err)

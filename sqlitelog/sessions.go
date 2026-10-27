@@ -76,6 +76,7 @@ type SessionInfo struct {
 	DeletionRequestedAt time.Time
 	DeletionSeq         int64 // DELETE anchor; its predecessor is the pre-intent audit head
 	PendingApproval     api.ApprovalRef
+	ExecState           api.ExecState
 }
 
 // ListOptions bounds one page of ListSessions. Enforcing callers must always set
@@ -212,6 +213,11 @@ func (s *Store) putSession(db execer, m SessionMeta) error {
 // LEFT JOIN keeps sessions without executions. The indexed event head remains current even
 // when an older writer skips the projection; a lagging projection cannot report an approval.
 // No rendering query reads event blobs.
+//
+// The outcome CASE trusts the stored outcome only when the projection cursor matches the
+// journal head and execution/input evidence is consistent. Otherwise RUNNING means uncertain,
+// not confirmed live. PENDING requires no execution row, since empty IDs also identify legacy
+// executions. scanSession gives a valid pending approval precedence over the outcome.
 const sessionSelect = `
 SELECT s.session, s.project, s.name, s.harness, s.model, s.parent_uid, s.fork_seq,
        s.compute_state, s.created_at, s.updated_at,
@@ -225,7 +231,17 @@ SELECT s.session, s.project, s.name, s.harness, s.model, s.parent_uid, s.fork_se
                  AND (a.has_start = 0 OR (a.expected_inputs >= 0
                       AND a.input_records = a.input_messages AND a.input_records = a.expected_inputs))
             THEN a.request_seq ELSE 0 END,
-       COALESCE(a.execution_id, ''), COALESCE(a.call_id, '')
+       COALESCE(a.execution_id, ''), COALESCE(a.call_id, ''),
+       CASE
+         WHEN s.last_seq != (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session = s.session)
+              OR s.approval_corrupt != 0 THEN 'RUNNING'
+         WHEN s.latest_execution = '' AND a.execution_id IS NULL THEN 'PENDING'
+         WHEN a.invalid != 0 OR s.invalid_approval_executions != 0
+              OR (a.has_start != 0 AND (a.expected_inputs IS NULL OR a.expected_inputs < 0
+                  OR a.input_records != a.input_messages OR a.input_records != a.expected_inputs))
+              THEN 'RUNNING'
+         ELSE COALESCE(a.outcome, 'RUNNING')
+       END
 FROM sessions s LEFT JOIN approval_executions a
   ON a.session = s.session AND a.execution_id = s.latest_execution`
 
@@ -336,6 +352,7 @@ func scanSession(row scanner) (SessionInfo, error) {
 		&deletionState, &requested, &info.DeletionSeq,
 		&info.LastSeq, &info.PendingApproval.RequestSeq,
 		&info.PendingApproval.ExecutionID, &info.PendingApproval.ToolCallID,
+		&info.ExecState,
 	); err != nil {
 		return SessionInfo{}, err
 	}
@@ -346,6 +363,13 @@ func scanSession(row scanner) (SessionInfo, error) {
 	info.ModelPolicyEligible = policyFlags&(modelPolicyOptIn|modelPolicyBirth) != 0
 	if info.PendingApproval.RequestSeq == 0 {
 		info.PendingApproval = api.ApprovalRef{}
+	} else {
+		info.ExecState = api.ExecAwaiting
+	}
+	switch info.ExecState {
+	case api.ExecPending, api.ExecRunning, api.ExecAwaiting, api.ExecCompleted, api.ExecFailed:
+	default:
+		return SessionInfo{}, fmt.Errorf("sqlitelog: unsupported execution outcome")
 	}
 	info.CreatedAt = time.Unix(0, createdAt)
 	info.UpdatedAt = time.Unix(0, updatedAt)

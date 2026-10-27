@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -23,6 +24,94 @@ import (
 	"github.com/agent-primitives/sessions/sqlitelog"
 	"github.com/agent-primitives/sessions/wire"
 )
+
+func TestGetAndListShowExecutionState(t *testing.T) {
+	for _, state := range []v1.ExecState{
+		v1.ExecState_EXEC_PENDING,
+		v1.ExecState_EXEC_RUNNING,
+		v1.ExecState_EXEC_AWAITING,
+		v1.ExecState_EXEC_COMPLETED,
+		v1.ExecState_EXEC_FAILED,
+	} {
+		t.Run(state.String(), func(t *testing.T) {
+			lis, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := grpc.NewServer()
+			v1.RegisterSessionsServer(srv, &executionStateServer{state: state})
+			go func() { _ = srv.Serve(lis) }()
+			t.Cleanup(srv.Stop)
+			for _, command := range []struct {
+				name string
+				run  func([]string) error
+				args []string
+			}{
+				{"get", cmdGet, []string{"--session", "state-session"}},
+				{"list", cmdList, nil},
+			} {
+				args := append([]string{"--server", lis.Addr().String()}, command.args...)
+				out, err := captureApprovalOutput(t, func() error { return command.run(args) })
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := "exec=" + strings.TrimPrefix(state.String(), "EXEC_")
+				if !strings.Contains(out, want) || !strings.Contains(out, "compute=LIVE") {
+					t.Fatalf("%s hides execution/compute axes: %s", command.name, out)
+				}
+			}
+		})
+	}
+}
+
+type executionStateServer struct {
+	v1.UnimplementedSessionsServer
+	state v1.ExecState
+}
+
+func (s *executionStateServer) GetSession(context.Context, *v1.GetSessionRequest) (*v1.Session, error) {
+	return &v1.Session{Metadata: &v1.ResourceMetadata{Uid: "state-session"}, ExecState: s.state, ComputeState: v1.ComputeState_COMPUTE_LIVE}, nil
+}
+
+func (s *executionStateServer) ListSessions(ctx context.Context, _ *v1.ListSessionsRequest) (*v1.ListSessionsResponse, error) {
+	sess, err := s.GetSession(ctx, nil)
+	return &v1.ListSessionsResponse{Sessions: []*v1.Session{sess}}, err
+}
+
+func TestEmbeddedExecutionStateOutput(t *testing.T) {
+	runBinary := deleteCLI(t)
+	journal := filepath.Join(t.TempDir(), "journal.db")
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := runBinary(append(args, "--journal", journal)...)
+		if err != nil {
+			t.Fatalf("%v: %s %v", args, out, err)
+		}
+		return strings.TrimSpace(out)
+	}
+	uid := run("create")
+	assertState := func(want string) {
+		t.Helper()
+		for _, out := range []string{run("get", "--session", uid), run("list")} {
+			if !strings.Contains(out, "exec="+want) {
+				t.Fatalf("missing execution state %s: %s", want, out)
+			}
+		}
+	}
+	assertState("PENDING")
+	run("exec", "--session", uid, "--input", "hello")
+	assertState("COMPLETED")
+	for _, step := range []struct{ command, compute string }{
+		{"suspend", "COMPUTE_COLD"},
+		{"resume", "COMPUTE_LIVE"},
+	} {
+		out := run(step.command, "--session", uid)
+		if !strings.Contains(out, "exec=COMPLETED") || !strings.Contains(out, "compute="+step.compute) {
+			t.Fatalf("%s hides independent execution/compute states: %s", step.command, out)
+		}
+		assertState("COMPLETED")
+	}
+}
 
 func TestExecHarnessFlag(t *testing.T) {
 	for _, tt := range []struct {

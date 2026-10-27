@@ -105,7 +105,7 @@ func approval(args []string, approved bool) error {
 		}
 		fmt.Println(string(data))
 	} else {
-		fmt.Printf("session %s decision committed seq=%d approved=%t compute=%s last_seq=%d\n", uid, response.GetDecision().GetSeq(), approved, current.GetComputeState(), current.GetLastSeq())
+		fmt.Printf("session %s decision committed seq=%d approved=%t compute=%s exec=%s last_seq=%d\n", uid, response.GetDecision().GetSeq(), approved, current.GetComputeState(), strings.TrimPrefix(current.GetExecState().String(), "EXEC_"), current.GetLastSeq())
 	}
 	return nil
 }

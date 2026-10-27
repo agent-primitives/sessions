@@ -1497,7 +1497,7 @@ stable when a session is created mid-pagination; an offset would skip or repeat 
 | metadata | [ResourceMetadata](#agentsessions-v1-ResourceMetadata) |  |  |
 | harness | [string](#string) |  |  |
 | model | [string](#string) |  | Optional model-agnostic session default. New sessions apply the selected route&#39;s host-owned policy when configured, including overrides from an initially unconfigured route. Empty uses its explicit default. Without current policy this is metadata; genuine pre-policy sessions retain legacy behavior even when policy is added later. HarnessDescriptor.models never defines the default. Policy is host embedder configuration, not Sessions clients or daemon configuration. |
-| exec_state | [ExecState](#agentsessions-v1-ExecState) |  | Every Session reply uses the same append-transaction projection at last_seq: no events before deletion reports EXEC_PENDING; a valid owned unanswered host approval request in the latest first-seen execution reports EXEC_AWAITING; other histories retain EXEC_COMPLETED. DELETE preserves this execution axis but withholds actionable pending_approval. COMPLETED is a compatibility fallback, not proof of END, a receipt, or admission. |
+| exec_state | [ExecState](#agentsessions-v1-ExecState) |  | Every Session reply uses the same append-transaction projection at last_seq. With no execution records, report EXEC_PENDING. In the latest first-seen execution, a valid owned unanswered host approval request reports EXEC_AWAITING; otherwise the last execution event reports EXEC_COMPLETED for END, EXEC_FAILED for ERROR, or EXEC_RUNNING for other progress. Stale or ambiguous projection evidence reports EXEC_RUNNING, never inferred success. Lifecycle events preserve the outcome; FORK excludes inherited pending approvals. EXEC_RUNNING includes interrupted executions and is not proof of controller liveness. Recovery can move FAILED to RUNNING on journaled progress, then COMPLETED on END. DELETE preserves this execution axis but withholds actionable pending_approval. |
 | compute_state | [ComputeState](#agentsessions-v1-ComputeState) |  | incarnation axis |
 | pending_approval | [ApprovalRef](#agentsessions-v1-ApprovalRef) |  | Set for a valid unanswered host-owned APPROVAL_REQUEST in the latest first-seen execution at last_seq on an ACTIVE session. Requests/decisions match execution_id, tool_call_id and request_seq. Calls whose TOOL_CALL precedes the child&#39;s latest FORK are excluded. Unset when deleted, no request is reportable, approval-bearing evidence is invalid, or the projection lags last_seq. |
 | deletion_state | [DeletionState](#agentsessions-v1-DeletionState) |  | independent permanent-deletion axis |
@@ -1634,12 +1634,12 @@ flattened lifecycle enum, because collapsing them loses which axis actually move
 | Name | Number | Description |
 | ---- | ------ | ----------- |
 | EXEC_STATE_UNSPECIFIED | 0 |  |
-| EXEC_PENDING | 1 |  |
-| EXEC_RUNNING | 2 |  |
+| EXEC_PENDING | 1 | no execution records |
+| EXEC_RUNNING | 2 | unfinished or uncertain; not a controller liveness guarantee |
 | EXEC_AWAITING | 3 | blocked on approval/input, resolved from the log |
-| EXEC_COMPLETED | 4 |  |
-| EXEC_FAILED | 5 |  |
-| EXEC_CANCELED | 6 |  |
+| EXEC_COMPLETED | 4 | latest execution&#39;s last execution event is END |
+| EXEC_FAILED | 5 | latest execution&#39;s last execution event is ERROR; recovery remains possible |
+| EXEC_CANCELED | 6 | reserved for Cancel; not currently reported |
 
 
  

@@ -146,7 +146,12 @@ binding policy configuration yet; see
 ### How exec_state is derived
 
 Every Session reply — Create, Get, List, Fork, Resume, Suspend, Approve, Delete and Exec frames
-— uses the same captured projection. No pre-deletion event reports `PENDING`. A valid owned
+— uses the same captured projection. No execution records reports `PENDING`, even if lifecycle
+records exist. Executions are ordered by their first non-lifecycle record, not the execution ID
+of the final journal record. In the latest execution, the last non-lifecycle event determines
+the outcome: `END` reports `COMPLETED`, `ERROR` reports `FAILED`, and other progress reports
+`RUNNING`. ID-less legacy records share one reporting identity and use the same last-event rule.
+A valid owned
 unanswered host request in the latest execution (ordered by first-seen non-lifecycle identity)
 reports `AWAITING` and exposes `pending_approval` on ACTIVE sessions. Deleted sessions retain
 `AWAITING` for audit but expose no actionable reference. Requests and decisions match execution
@@ -167,10 +172,30 @@ permanently withholding references while healthy neighbors remain readable. SQL 
 migration. Queries are not integrity checks: raw journal reads/Verify and strict commands still
 detect undecodable evidence.
 
-Other histories retain the compatibility `COMPLETED` fallback, including ordinary/legacy interrupted
-turns and decided calls without receipts. That status does not prove completion or admission: an
-unreceipted owned call still blocks new input. Execution and compute axes are independent; recovery
-uses the journal rather than trusting an enum.
+`RUNNING` means unfinished or uncertain, **not confirmed alive**. A crashed controller can leave
+its execution RUNNING; reliable liveness reporting is separate work in
+[#213](https://github.com/agent-primitives/sessions/issues/213). A child forked mid-execution also
+reports RUNNING, including when an inherited approval reference is excluded. This does not mean
+the child is actively executing. A decided approval without a receipt reports RUNNING, not
+COMPLETED, and still blocks new input under the existing admission rules.
+
+FAILED does not prevent recovery of a modern execution. Later journaled progress changes it to
+RUNNING, then END changes it to COMPLETED. Taking a fence or starting the harness without appending
+progress does not change the reported outcome. Suspend, Resume and Delete lifecycle records
+preserve the outcome; a valid unanswered approval still reports AWAITING even after an ERROR.
+Stale projections, invalid reporting evidence and incomplete declared inputs report RUNNING rather
+than success. Execution and compute axes are independent; recovery uses the journal rather than
+trusting an enum. CANCELED is not yet reported.
+
+SQLite schema v7 adds the outcome to the existing per-execution approval projection, updated in
+the same transaction as each append. Get/List read stored fields without decoding journal blobs.
+This avoids inspecting each listed session's history on every read. The migration rebuilds the
+shared projection without rewriting events, hashes or fences. An undecodable session retains its
+metadata/cursor but reports RUNNING without an approval reference; SQL failures roll back the
+whole migration. A read-only open that needs migration fails clearly rather than partially upgrading.
+Before upgrading to v0.4.0, stop all older hosts and embedded clients sharing the journal and back
+up the database and any WAL. Older binaries refuse v7 at open; there is no downgrade migration,
+so rollback requires restoring the backup.
 
 A fork inherits the parent's `project`, `harness` and `model`, because those define the workload and
 a branch of a run is still that run. It does **not** inherit the parent's name. A name is a label the

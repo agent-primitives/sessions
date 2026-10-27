@@ -43,7 +43,7 @@ func TestDeleteApprovalCapturedRepliesAndAuthority(t *testing.T) {
 					if _, err := svc.Approve(ctx, publicDecision(uid)); err != nil {
 						t.Fatal(err)
 					}
-					wantState, wantSeq = v1.ExecState_EXEC_COMPLETED, 6
+					wantState, wantSeq = v1.ExecState_EXEC_RUNNING, 6
 				}
 			}
 			beforeIO := b.ioCounts()

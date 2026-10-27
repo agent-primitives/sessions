@@ -190,16 +190,34 @@ no flattened lifecycle enum.
 - `SES-7`: `exec_state` MUST be derived from the log at `last_seq`, by reading it or from a
   projection updated in the same transaction as the append (`LOG-8`), which is what the reference
   host reads. The value is:
+  - `EXEC_RUNNING` when the projection lags the journal head, missed earlier records, or the
+    reporting evidence is ambiguous (invalid execution/approval structure or incomplete declared
+    inputs). The reference store never skips a projection gap to regain reporting authority;
   - `EXEC_AWAITING` when a valid, owned, unanswered host approval request exists in the latest
     execution (§10);
-  - otherwise `EXEC_PENDING` when the log has no record before its `LIFECYCLE_DELETE` (§11.8),
-    which for a session that is not deleted means `last_seq = 0`;
-  - otherwise `EXEC_COMPLETED`.
+  - otherwise `EXEC_PENDING` when the log has no execution records (lifecycle-only histories
+    remain pending);
+  - otherwise `EXEC_COMPLETED` when the latest execution's last non-lifecycle event is an
+    `EVENT_END` with a body;
+  - otherwise `EXEC_FAILED` when that event is an `EVENT_ERROR` with a body;
+  - otherwise `EXEC_RUNNING`.
 
+  Latest means first-seen execution order, not the execution ID of the last record. ID-less
+  legacy execution records share one reporting identity; their last non-lifecycle event selects
+  the outcome. A valid unanswered approval takes precedence over a recorded ERROR.
   Deletion leaves this value as it was: a deleted session with a valid unanswered request still
   reports `EXEC_AWAITING`, but without `pending_approval` (`SES-12`).
-- `EXEC_COMPLETED` is a compatibility fallback. It does not prove that an `EVENT_END` or a receipt
-  exists. The reference host never reports `EXEC_RUNNING`, `EXEC_FAILED`, or `EXEC_CANCELED`.
+  Other lifecycle records preserve the execution outcome; FORK excludes inherited approval calls
+  under §10. A fork cut mid-execution therefore reports RUNNING until later execution records
+  change it, without asserting the child is actively executing.
+- `EXEC_RUNNING` means unfinished or uncertain, not confirmed controller liveness. Crashed
+  executions may remain RUNNING; execution leases and liveness reporting are separate work
+  ([#213](https://github.com/agent-primitives/sessions/issues/213)).
+  FAILED does not make a modern execution unrecoverable (`EXE-6`): subsequent journaled progress
+  reports RUNNING, or END reports COMPLETED. Merely taking a fence or entering Run changes no
+  execution records and therefore does not clear FAILED.
+  These values grant no admission or recovery authority. The reference host does not report
+  `EXEC_CANCELED`; Cancel remains unimplemented.
 - `SES-8`: `compute_state` MUST be updated in the same transaction as the append that changes it:
   - `LIFECYCLE_SUSPEND` and `LIFECYCLE_FORK` set `COMPUTE_COLD`;
   - `LIFECYCLE_RESUME` sets `COMPUTE_LIVE`;
@@ -288,7 +306,7 @@ no flattened lifecycle enum.
   if `expected_last_seq` equals the current head. Otherwise it MUST fail with a conflict error
   (`eventlog.ErrConflict`) and commit nothing.
 - `LOG-8`: The head read, the sequence check, the fence check, the insert, and any projection
-  updates (`compute_state`, approval projection) MUST be atomic. Two concurrent appends at the
+  updates (`compute_state`, execution/approval projection) MUST be atomic. Two concurrent appends at the
   same head MUST NOT both commit; if either carries the current fence, exactly one commits. The
   loser fails with the conflict error, or with the fenced error (`LOG-12`) when its fence is stale
   and it reaches the store first.
@@ -1734,7 +1752,7 @@ The reference implementation protects the integrity of the record, not access to
     execution (`EXE-29`), so `Resume` no longer re-runs that turn. A legacy harness invocation
     (reconstruction, or recovery of an unfinished legacy execution) needs a session uid; `Resume`
     of a complete legacy execution is a no-op without one.
-  - The reference SQLite store versions its schema with `PRAGMA user_version` (currently 5),
+  - The reference SQLite store versions its schema with `PRAGMA user_version` (currently 7),
     migrates forward in one transaction without rewriting events or hashes, and refuses a newer or
     negative version. Version 4 adds the deletion state; migrated sessions are
     `DELETION_ACTIVE`. Version 5 adds exact caller ownership and an off-mode authorization marker.
@@ -1744,6 +1762,15 @@ The reference implementation protects the integrity of the record, not access to
     an already-open older writer does not check the marker. The marker is checked only at Open,
     including by this build: changing the mode requires stopping every writer (including embedded
     CLI processes), then restarting all hosts with binaries that support the new mode.
+  - Version 7 extends `approval_executions` with an execution outcome and rebuilds the shared
+    execution/approval projection from the journal. Events, canonical bytes, hashes and fences
+    do not change. An undecodable session reports RUNNING without an approval reference; SQL
+    faults roll back the migration. A read-only open requiring migration fails, leaving the
+    database at its original version; migrate with a writable open before using read-only clients.
+    This reporting contract and schema change target v0.4.0. Stop all older hosts and embedded
+    clients sharing a journal, and back up the database and any WAL before upgrading. Older
+    binaries refuse v7 on open, but an already-open older writer can bypass the projection.
+    There is no downgrade migration; rollback requires restoring the backup.
   - An older binary refuses a version 4 journal when it opens it, but one that already had the
     journal open does not enforce deletion (`OPS-36`): it can still append, mint fences, and
     update metadata after a `LIFECYCLE_DELETE`. Every older host and embedded `agentctl` sharing

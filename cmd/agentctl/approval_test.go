@@ -37,7 +37,7 @@ func (s *approvalCLIRecorder) Resume(context.Context, *v1.ResumeRequest) (*v1.Se
 	if s.fail {
 		return nil, status.Error(codes.Unavailable, "offline")
 	}
-	return &v1.Session{LastSeq: 15}, nil
+	return &v1.Session{LastSeq: 15, ExecState: v1.ExecState_EXEC_COMPLETED}, nil
 }
 func captureApprovalOutput(t *testing.T, run func() error) (string, error) {
 	t.Helper()
@@ -109,9 +109,11 @@ func TestCLIApproval(t *testing.T) {
 			}
 			if tc.json {
 				var got v1.ApproveResponse
-				if err := protojson.Unmarshal([]byte(output), &got); err != nil || got.Decision.GetContentHash() != "original" || got.Session.GetLastSeq() != 15 {
+				if err := protojson.Unmarshal([]byte(output), &got); err != nil || got.Decision.GetContentHash() != "original" || got.Session.GetLastSeq() != 15 || got.Session.GetExecState() != v1.ExecState_EXEC_COMPLETED {
 					t.Fatalf("JSON=%s err=%v", output, err)
 				}
+			} else if tc.errorText == "" && !strings.Contains(output, "exec=COMPLETED") {
+				t.Fatalf("approval output hides execution state: %s", output)
 			}
 		})
 	}

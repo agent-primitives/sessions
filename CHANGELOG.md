@@ -5,6 +5,34 @@ Release notes are generated from commits and published on the
 reader needs to know beyond a commit list: what a release means for compatibility, and what it does
 not provide.
 
+## v0.4.0 - Unreleased
+
+### Execution-state reporting and SQLite schema v7
+
+- Every Session reply now reports the latest execution's recorded outcome instead of using
+  COMPLETED for any nonempty journal. No execution records reports PENDING; valid owned
+  unanswered approvals retain AWAITING; END reports COMPLETED, ERROR reports FAILED, and other
+  progress reports RUNNING. Lifecycle events preserve the outcome. FAILED remains recoverable:
+  journaled recovery progress reports RUNNING and a later END reports COMPLETED.
+- `agentctl get` and `list` now print `exec=<state>` alongside compute state. Suspend, resume,
+  approve and deny status output includes the execution state returned by the server.
+- RUNNING means unfinished or uncertain, not confirmed controller liveness. It includes crashed
+  executions, forks cut mid-execution, and stale or ambiguous reporting evidence. Lease/liveness
+  reporting is tracked in [#213](https://github.com/agent-primitives/sessions/issues/213).
+  Cancel and CANCELED reporting remain out of scope.
+- SQLite schema v7 extends the existing per-execution approval projection with an outcome and
+  rebuilds the shared projection from existing journals in one transaction. No journal bytes,
+  sequence numbers, hashes or fences change. Read-only opens requiring migration fail without
+  partially upgrading. Undecodable sessions report RUNNING without approval references; SQL
+  faults abort the migration.
+- **Upgrade:** stop every older host and embedded CLI sharing a journal and back up the database
+  and any WAL before opening with v0.4.0. Older binaries refuse v7 on open. Already-open older
+  writers must not continue writing: they can advance the shared approval cursor without updating
+  execution outcomes, making stale outcomes appear current. The journal-head comparison detects
+  lagging projections, not all mixed-version writes. No downgrade migration is provided: restore
+  the backup to roll back. Clients must handle RUNNING and FAILED, which were defined but not
+  previously reported, and no longer treat COMPLETED as a compatibility fallback.
+
 ## v0.3.0 - 2026-10-22
 
 ### Compatibility

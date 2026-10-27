@@ -49,15 +49,15 @@ func TestSessionLifecycleRealBinaries(t *testing.T) {
 	if !regexp.MustCompile(`^sess-[0-9a-f]+$`).MatchString(uid) {
 		t.Fatalf("create printed %q, want a session UID", uid)
 	}
-	expect(ctl("get", "--session", uid), `^session `+uid+` project=smoke name=smoke-parent harness=echo last_seq=0 compute=NONE deletion=ACTIVE deletion_requested=unset$`)
+	expect(ctl("get", "--session", uid), `^session `+uid+` project=smoke name=smoke-parent harness=echo last_seq=0 compute=NONE exec=PENDING deletion=ACTIVE deletion_requested=unset$`)
 
 	out := ctl("exec", "--session", uid, "--input", "hello")
 	expect(out, `^seq=4 +EVENT_OUTPUT  assistant: echo:hello$`)
 	expect(out, `^seq=5 +EVENT_END$`)
 
-	expect(ctl("suspend", "--session", uid), `^session `+uid+` suspend compute=COMPUTE_COLD last_seq=6$`)
-	expect(ctl("get", "--session", uid), `^session `+uid+` .* last_seq=6 compute=COLD deletion=ACTIVE deletion_requested=unset$`)
-	expect(ctl("resume", "--session", uid), `^session `+uid+` resume compute=COMPUTE_LIVE last_seq=7$`)
+	expect(ctl("suspend", "--session", uid), `^session `+uid+` suspend compute=COMPUTE_COLD exec=COMPLETED last_seq=6$`)
+	expect(ctl("get", "--session", uid), `^session `+uid+` .* last_seq=6 compute=COLD exec=COMPLETED deletion=ACTIVE deletion_requested=unset$`)
+	expect(ctl("resume", "--session", uid), `^session `+uid+` resume compute=COMPUTE_LIVE exec=COMPLETED last_seq=7$`)
 
 	out = ctl("exec", "--session", uid, "--input", "again")
 	expect(out, `^seq=11 +EVENT_OUTPUT  assistant: echo:again$`)
@@ -74,8 +74,8 @@ func TestSessionLifecycleRealBinaries(t *testing.T) {
 	}
 
 	list := ctl("list")
-	expect(list, `^`+uid+`\tlast_seq=12\tcompute=LIVE\tharness=echo\tname=smoke-parent$`)
-	expect(list, `^`+child+`\tlast_seq=\d+\tcompute=\w+\tharness=echo\tname=smoke-child$`)
+	expect(list, `^`+uid+`\tlast_seq=12\tcompute=LIVE\texec=COMPLETED\tharness=echo\tname=smoke-parent$`)
+	expect(list, `^`+child+`\tlast_seq=\d+\tcompute=\w+\texec=COMPLETED\tharness=echo\tname=smoke-child$`)
 
 	// Delete the child. It is a permanent tombstone: the reply carries PENDING and the committed
 	// request time, a retry returns that same time, Get and Replay still serve the UID with Replay
@@ -86,7 +86,7 @@ func TestSessionLifecycleRealBinaries(t *testing.T) {
 	}
 	tombstone := ` deletion=PENDING deletion_requested=` + regexp.QuoteMeta(requested) + `$`
 	expect(ctl("delete", "--session", child), `^session `+child+tombstone)
-	expect(ctl("get", "--session", child), `^session `+child+` project=smoke name=smoke-child harness=echo last_seq=\d+ compute=\w+`+tombstone)
+	expect(ctl("get", "--session", child), `^session `+child+` project=smoke name=smoke-child harness=echo last_seq=\d+ compute=\w+ exec=COMPLETED`+tombstone)
 	before := replay
 	replay = ctl("replay", "--session", child)
 	if !strings.HasPrefix(replay, before) {
@@ -103,7 +103,7 @@ func TestSessionLifecycleRealBinaries(t *testing.T) {
 	// A restarted daemon reports the same sessions from the journal and continues them.
 	daemon.stop(t)
 	startServer(t, bin, addr, "-journal", journalPath)
-	expect(ctl("get", "--session", uid), `^session `+uid+` project=smoke name=smoke-parent harness=echo last_seq=12 compute=\w+ deletion=ACTIVE deletion_requested=unset$`)
+	expect(ctl("get", "--session", uid), `^session `+uid+` project=smoke name=smoke-parent harness=echo last_seq=12 compute=\w+ exec=COMPLETED deletion=ACTIVE deletion_requested=unset$`)
 	expect(ctl("get", "--session", child), `^session `+child+` .*`+tombstone)
 	if again := ctl("replay", "--session", child); again != replay {
 		t.Fatalf("child replay changed across a restart:\nbefore\n%s\nafter\n%s", replay, again)

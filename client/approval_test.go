@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 
@@ -89,6 +90,12 @@ func TestApprovalSDK(t *testing.T) {
 				if err != nil || response.GetDecision().GetSeq() != 14 || q == nil || q.Approved == nil || q.GetApproved() != approved || q.Session != "known" || q.ExecutionId != "e" || q.ToolCallId != "c" || q.RequestSeq != 12 || q.Reason != "reviewed" || !proto.Equal(q.Identity, &v1.IdentityRef{Principal: "human", Issuer: "issuer", Subject: "subject"}) || server.resumes != 0 {
 					t.Fatalf("SDK forwarding/implicit resume: %v %v %v", q, response, err)
 				}
+			}
+			// Only the server's authentication sets the approver; the SDK refuses to imply otherwise.
+			server.request = nil
+			claimed := api.ApprovalDecision{ExecutionID: "e", ToolCallID: "c", RequestSeq: 12, Approved: true, VerifiedApprover: api.CallerIdentity{Issuer: "issuer", Subject: "approver"}}
+			if _, err := c.Approve(t.Context(), "known", claimed); !errors.Is(err, client.ErrVerifiedApproverNotSendable) || server.request != nil {
+				t.Fatalf("client-set approver = %v, request %v; want ErrVerifiedApproverNotSendable before any RPC", err, server.request)
 			}
 		})
 	}

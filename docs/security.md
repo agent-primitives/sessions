@@ -217,9 +217,9 @@ host-executed call right before its executor runs: an ordinary `CONTROLLER_MEDIA
 one Resume re-drives, and an approved `REQUIRES_APPROVAL` call on recovery. The hook receives the
 session UID, execution ID, a copy of the call rebuilt from its journaled form (so the hook cannot
 change what runs), the verified caller of the Exec or Resume that dispatches it (empty when
-authentication is off), and the committed decision for an approved call. It does not receive the
-decision's request actor, which is caller-supplied. Sessions defines no policy language and the
-stock daemon installs no hook.
+authentication is off), and the committed decision for an approved call, including its verified
+approver when the host recorded one. It does not receive the decision's request actor, which is
+caller-supplied. Sessions defines no policy language and the stock daemon installs no hook.
 
 A call whose journaled form differs from the arguments the executor receives is refused transiently
 before the hook, so the hook never judges one value while the executor receives another: the
@@ -248,8 +248,10 @@ journaled in the `ERROR` record. Replay and recorded receipts never call the hoo
 writes `POLICY_DENIED`: an executor result carrying it is rejected without a receipt, and on an
 approved call Resume fails with `FAILED_PRECONDITION` and the decision stays recoverable.
 
-`POLICY_DENIED` is a new receipt code with no SQLite schema change (the schema stays at v7). A
-binary built before it still opens the database, but for a session that holds one, hash-chain
+`POLICY_DENIED` is a new receipt code that needs no SQLite schema change of its own. A binary
+built before it refuses this release's journal at open (schema v8, which marks the
+[verified approver](#optional-go-rpc-authorization)), but one that already had the journal open
+still serves it. For a session that holds a `POLICY_DENIED` receipt, that binary's hash-chain
 verification fails (`DATA_LOSS`) and its Exec, Resume, VerifyJournal and `controller.Replay` refuse
 the session. Its `Sessions.Replay` RPC does not verify and streams the record with the code as the
 number 3. An older harness rejects the receipt, so upgrade every host sharing a journal and every
@@ -425,16 +427,26 @@ A separate non-owner approver needs a custom read policy. Configure policies bef
 mutate their allowlists concurrently.
 
 Enforced Approve ignores request identity and clears the actor before decision/retry comparison.
-It does **not** yet journal a verified caller or distinguish required-mode decisions from anonymous
-off-mode history. Historical decisions with a nonempty actor are not identical retries after this
-normalization. Verified attribution and caller-bound retries require a versioned journal contract.
+Historical decisions with a nonempty actor are not identical retries after this normalization.
+Whenever the authentication interceptors verified the caller, with or without authorization, Approve
+journals that exact issuer/subject as `ApprovalResult.verified_approver`. No request field or
+forwarded header can set it. An exact retry must come from the same verified approver: the same
+decision from another caller, an authenticated retry of a decision recorded without an approver, and
+an unauthenticated retry of one recorded with an approver are all `FAILED_PRECONDITION`. The
+approver is covered by the hash chain and visible to anyone who can read the session's journal
+through `Replay`. It is not sent to harnesses: the host clears it in the live decision, the
+receipt's decision and every earlier decision in `Start.History`. A
+[pre-dispatch tool policy](#pre-dispatch-tool-policy) hook, which is host code, receives it with the
+committed decision. Role, grants and policy version are not journaled; a host that needs them keeps
+them in its own ledger keyed to the decision. Journal schema v8 marks journals that can hold the
+field; see [spec §18](../spec.md#18-versioning-and-compatibility).
 
 **This is not cross-host isolation or supported required-mode activation.** Journals remain marked
 `off`, so unenforced hosts and CLI processes can still read/write owned sessions, create unbound
 rows, and bypass these checks. Do not share an enforcement test journal with them. Owned Fork
 remains refused before discovery or effects until ownership can be reserved before the first copied
-record. Complete activation also needs verified approval audit, an immutable journal policy marker
-and startup validation, a daemon required switch, and TLS assembly with server identity validation
+record. Complete activation also needs an immutable journal policy marker and startup
+validation, a daemon required switch, and TLS assembly with server identity validation
 ([#127](https://github.com/agent-primitives/sessions/issues/127)). Registry stays on its separate,
 opt-in loopback listener; there is no same-pod/self-dial exemption or implicit credential
 forwarding.

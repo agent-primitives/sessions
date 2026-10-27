@@ -163,3 +163,55 @@ func TestVerifyRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A decision's verified approver is part of the stored event that Replay streams and verify
+// hashes: a journal holding one verifies, and removing it from the stored event is refused.
+func TestVerifyVerifiedApprover(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.db")
+	store, err := sqlitelog.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	log := store.Session("approved")
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	approver := api.CallerIdentity{Issuer: "https://issuer.example", Subject: "approver-1"}
+	if _, err := log.Append(0, fence, api.Event{ExecutionID: "e", Kind: api.EventApprovalResult, ApprovalResult: &api.ApprovalResult{
+		ToolCallID: "c", RequestSeq: 3, Approved: true, VerifiedApprover: approver,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdVerify([]string{"--journal", path, "--session", "approved"}); err != nil {
+		t.Fatalf("journal with a verified approver rejected: %v", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var blob []byte
+	if err := db.QueryRow("SELECT event FROM events WHERE session = ? AND seq = 1", "approved").Scan(&blob); err != nil {
+		t.Fatal(err)
+	}
+	event := &v1.Event{}
+	if err := proto.Unmarshal(blob, event); err != nil {
+		t.Fatal(err)
+	}
+	if got := event.GetApprovalResult().GetVerifiedApprover(); got.GetIssuer() != approver.Issuer || got.GetSubject() != approver.Subject {
+		t.Fatalf("stored approver = %v, want %+v", got, approver)
+	}
+	event.GetApprovalResult().VerifiedApprover = nil
+	if blob, err = proto.Marshal(event); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE events SET event = ? WHERE session = ? AND seq = 1", blob, "approved"); err != nil {
+		t.Fatal(err)
+	}
+	err = cmdVerify([]string{"--journal", path, "--session", "approved"})
+	if err == nil || !strings.Contains(err.Error(), "content_hash mismatch at seq 1") {
+		t.Fatalf("verify after removing the approver = %v, want a content_hash mismatch", err)
+	}
+}

@@ -1740,8 +1740,8 @@ type ApprovalResult struct {
 	// The approver as verified by the host's caller authentication when it journaled the decision,
 	// never taken from ApproveRequest. Empty when the host did not authenticate the caller, and in
 	// every decision written before this field. It is journal and audit state: the host leaves it
-	// empty in ControllerFrame.approval. Covered by content_hash when set; a build that predates it
-	// drops it on read and fails verification of that record.
+	// empty in ControllerFrame.approval and in Start.history. Covered by content_hash when set; a
+	// build that predates it drops it on read and fails verification of that record.
 	VerifiedApprover *CallerIdentity `protobuf:"bytes,5,opt,name=verified_approver,json=verifiedApprover,proto3" json:"verified_approver,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache

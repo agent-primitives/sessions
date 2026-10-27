@@ -179,7 +179,7 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		Model:         execution.model,
 		SessionUID:    c.sessionUID,
 		Inputs:        execution.inputs,
-		History:       events[:execution.start],
+		History:       harnessHistory(events[:execution.start]),
 		Config:        execution.config,
 		ResumeFromSeq: execution.resumeFromSeq,
 	}

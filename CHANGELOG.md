@@ -44,6 +44,14 @@ not provide.
   nothing changes. The stock daemon installs none. See
   [pre-dispatch tool policy](docs/security.md#pre-dispatch-tool-policy) and spec §9.4, now version
   `0.4.0-draft`.
+- `APPROVAL_RESULT` records the verified approver: when the host's authentication interceptors
+  verified the caller, `Approve` journals its exact issuer and subject as the new
+  `ApprovalResult.verified_approver` (`CallerIdentity`, also new), never a request field. Exact
+  retries are bound to it (`APR-7`, `APR-8`). Harnesses do not receive it: the host clears it in the
+  decision frame, the receipt and every earlier decision sent in `Start.History` (`EXE-7`). A
+  pre-dispatch tool policy hook, which is host code, does: `controller.ToolPolicyApproval.Decision`
+  carries it (`TOOL-13`). New `api.ApprovalDecision.VerifiedApprover` is host-set; `client.Approve`
+  refuses a decision that sets it with the new `client.ErrVerifiedApproverNotSendable`.
 
 ### Fixed
 
@@ -73,16 +81,29 @@ not provide.
   and `HarnessRegistryServer` interfaces gain the method: a hand-written client implementation must
   add it; servers embedding `UnimplementedHarnessRegistryServer` compile unchanged. No journal
   schema change.
-- `POLICY_DENIED` adds no SQLite schema version: the schema stays at v7 and the spec moves to
-  `0.4.0-draft`. Only a host whose policy hook refuses a call definitively records the code. An
-  older build that reads v7 still opens the database and serves every session without the code. For
-  a session holding a `POLICY_DENIED` receipt, hash-chain verification fails (`DATA_LOSS`), so its
-  Exec, Resume, VerifyJournal and `controller.Replay` refuse the session; its `Sessions.Replay` RPC
-  does not verify and streams the record unverified, with the code as the unknown number 3. An older
-  harness rejects the receipt instead of reading it. v0.3.0 already refuses this release's SQLite
-  journal at open. Upgrade every host sharing a journal and every harness before installing such a
-  hook; after one is recorded, rolling a host back leaves that session unusable to it except through
-  raw Replay.
+- `POLICY_DENIED` adds no SQLite schema version of its own; the spec moves to `0.4.0-draft`. Only a
+  host whose policy hook refuses a call definitively records the code. Builds older than this
+  release refuse its journal at open (schema v8, below). A writer built before `POLICY_DENIED`
+  (v0.3.0 and older) that already holds the journal open still serves every session without the
+  code. For a session holding a `POLICY_DENIED` receipt, that writer's hash-chain verification fails
+  (`DATA_LOSS`), so its Exec, Resume, VerifyJournal and `controller.Replay` refuse the session; its
+  `Sessions.Replay` RPC does not verify and streams the record unverified, with the code as the
+  unknown number 3. An unreleased schema v7 build that already includes the code verifies and serves
+  these receipts, and fails only on a session holding a verified approver (below). An older harness
+  rejects the receipt instead of reading it. Upgrade every host sharing a journal and every harness
+  before installing such a hook; after one is recorded, rolling a host back leaves that session
+  unusable to it except through raw Replay.
+- The SQLite journal moves to schema v8, which changes no table and rewrites no event; the stamp
+  marks journals that can hold a verified approver, so a v7 build refuses them at Open. Stop every
+  older writer, including embedded `agentctl`, and back up the database and WAL before the first v8
+  open: Open stamps the journal even for a metadata-only read, and there is no downgrade to v7.
+  An older writer already holding the journal open drops the approver on read: its `Exec`,
+  `Resume`, `VerifyJournal` and `controller.Replay` fail with `DATA_LOSS` on a session holding
+  one, and its `Approve` RPC, like the `Replay` RPC of v0.3.0, omits it.
+- On a host with authentication, an `Approve` retry of a decision recorded without a verified
+  approver (before this release, or by an unauthenticated host) now fails `FAILED_PRECONDITION`
+  instead of returning the decision, as does a retry by any caller other than the recorded approver.
+  Decisions recorded without authentication still retry as before on a host without it.
 
 - The SQLite journal gains the allocation ledger and inventory completeness/evidence columns.
   Stop all old writers and back up the database and WAL before migration. There is no downgrade to

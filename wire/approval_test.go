@@ -20,6 +20,7 @@ func TestApprovalWireContract(t *testing.T) {
 		{"legacy receipt", api.Event{Kind: api.EventToolResult, Result: &api.ToolResult{ID: "c1"}}, "38055a040a026331"},
 		{"legacy denial", api.Event{Kind: api.EventApprovalResult, ApprovalResult: &api.ApprovalResult{ToolCallID: "c1", Reason: "no"}}, "38076a080a0263311a026e6f"},
 		{"decision", api.Event{ExecutionID: "e1", Kind: api.EventApprovalResult, Actor: api.IdentityRef{Principal: "human", Issuer: "issuer", Subject: "subject"}, ApprovalResult: &api.ApprovalResult{ToolCallID: "c1", Approved: true, RequestSeq: 9007199254740993}}, ""},
+		{"verified approver", api.Event{ExecutionID: "e1", Kind: api.EventApprovalResult, ApprovalResult: &api.ApprovalResult{ToolCallID: "c1", Approved: true, RequestSeq: 3, VerifiedApprover: api.CallerIdentity{Issuer: "https://issuer", Subject: "approver"}}}, ""},
 		{"park", api.Event{ExecutionID: "e1", Kind: api.EventParked, Parked: &api.ApprovalRef{ExecutionID: "e1", ToolCallID: "c1", RequestSeq: 9007199254740993}}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

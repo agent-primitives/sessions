@@ -49,9 +49,10 @@ Approval is durable journal state, not a mutable session flag or side table. For
 REQUIRES_APPROVAL call the host commits TOOL_CALL then APPROVAL_REQUEST before parking;
 only the host may commit the request or its later APPROVAL_RESULT. The harness cannot mint
 requests or decisions by emitting these events. Identity on a decision&#39;s Event.actor is
-recorded provenance only, not authorization. This gate supports STATELESS_REPLAY only;
-it defines no expiry, automatic decision, or Cancel behavior. A host&#39;s optional pre-dispatch
-tool policy hook runs only when recovery dispatches an approved call (spec §9.4).
+recorded provenance only, not authorization; ApprovalResult.verified_approver is the
+authenticated approver. This gate supports STATELESS_REPLAY only; it defines no expiry,
+automatic decision, or Cancel behavior. A host&#39;s optional pre-dispatch tool policy hook runs
+only when recovery dispatches an approved call (spec §9.4).
 
 
 | Field | Type | Label | Description |
@@ -79,6 +80,26 @@ during decided recovery/replay. approved=false is a real denial, not an absent d
 | approved | [bool](#bool) |  | non-optional durable value; request-level decision presence is in ApproveRequest |
 | reason | [string](#string) |  |  |
 | request_seq | [int64](#int64) |  | Positive sequence of the resolved APPROVAL_REQUEST. Zero is retained for legacy decisions; it cannot identify a new durable approval request. |
+| verified_approver | [CallerIdentity](#agentsessions-v1-CallerIdentity) |  | The approver as verified by the host&#39;s caller authentication when it journaled the decision, never taken from ApproveRequest. Empty when the host did not authenticate the caller, and in every decision written before this field. It is journal and audit state: the host leaves it empty in ControllerFrame.approval. Covered by content_hash when set; a build that predates it drops it on read and fails verification of that record. |
+
+
+
+
+
+
+<a name="agentsessions-v1-CallerIdentity"></a>
+
+### CallerIdentity
+CallerIdentity is the exact issuer/subject pair of a caller that the host&#39;s own authentication
+verified (Go authn.Caller), not caller-supplied provenance such as IdentityRef. The host compares
+both values byte for byte, with no trimming, case folding or issuer mapping. Both are set or
+both are empty.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| issuer | [string](#string) |  |  |
+| subject | [string](#string) |  |  |
 
 
 

@@ -23,6 +23,11 @@ type ApprovalDecision struct {
 	Approved    bool
 	Reason      string
 	Identity    IdentityRef
+	// VerifiedApprover is set only by a host, from the caller its own authentication verified
+	// (authn.Caller); it is journaled as ApprovalResult.VerifiedApprover. No request field carries
+	// it, so client.Client.Approve refuses a decision that sets it. Zero records no approver;
+	// otherwise both parts are required.
+	VerifiedApprover CallerIdentity
 }
 
 // ErrApprovalParked distinguishes a host-requested approval park from execution failure.

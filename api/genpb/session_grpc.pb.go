@@ -63,7 +63,7 @@ const (
 // other methods. Mixed phases fail closed; store faults inside runtime are not trusted unless known
 // at the service storage boundary. No heuristic redaction is used. Request metadata, credentials
 // and session payloads remain excluded. Trusted/off behavior is unchanged. These checks do not
-// provide required-mode deployment, verified approval audit or transport assembly.
+// provide required-mode deployment or transport assembly.
 type SessionsClient interface {
 	CreateSession(ctx context.Context, in *CreateSessionRequest, opts ...grpc.CallOption) (*Session, error)
 	// GetSession remains available for audit after deletion, including metadata and deletion intent
@@ -110,8 +110,9 @@ type SessionsClient interface {
 	Replay(ctx context.Context, in *ReplayRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogRecord], error)
 	// Implemented durable approval decisions for STATELESS_REPLAY executions.
 	// OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple,
-	// approved value, reason and identity returns the existing decision, even after resolution.
-	// A changed decision/reason/identity for that request is FAILED_PRECONDITION, never an overwrite.
+	// approved value, reason, identity and verified approver returns the existing decision, even
+	// after resolution. A changed decision/reason/identity, or a different verified approver, for
+	// that request is FAILED_PRECONDITION, never an overwrite.
 	// INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent
 	// approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request
 	// tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created
@@ -311,7 +312,7 @@ func (c *sessionsClient) Fork(ctx context.Context, in *ForkRequest, opts ...grpc
 // other methods. Mixed phases fail closed; store faults inside runtime are not trusted unless known
 // at the service storage boundary. No heuristic redaction is used. Request metadata, credentials
 // and session payloads remain excluded. Trusted/off behavior is unchanged. These checks do not
-// provide required-mode deployment, verified approval audit or transport assembly.
+// provide required-mode deployment or transport assembly.
 type SessionsServer interface {
 	CreateSession(context.Context, *CreateSessionRequest) (*Session, error)
 	// GetSession remains available for audit after deletion, including metadata and deletion intent
@@ -358,8 +359,9 @@ type SessionsServer interface {
 	Replay(*ReplayRequest, grpc.ServerStreamingServer[LogRecord]) error
 	// Implemented durable approval decisions for STATELESS_REPLAY executions.
 	// OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple,
-	// approved value, reason and identity returns the existing decision, even after resolution.
-	// A changed decision/reason/identity for that request is FAILED_PRECONDITION, never an overwrite.
+	// approved value, reason, identity and verified approver returns the existing decision, even
+	// after resolution. A changed decision/reason/identity, or a different verified approver, for
+	// that request is FAILED_PRECONDITION, never an overwrite.
 	// INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent
 	// approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request
 	// tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created

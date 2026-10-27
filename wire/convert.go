@@ -513,14 +513,22 @@ func approvalResToProto(a *api.ApprovalResult) *v1.ApprovalResult {
 	if a == nil {
 		return nil
 	}
-	return &v1.ApprovalResult{ToolCallId: a.ToolCallID, Approved: a.Approved, Reason: a.Reason, RequestSeq: a.RequestSeq}
+	out := &v1.ApprovalResult{ToolCallId: a.ToolCallID, Approved: a.Approved, Reason: a.Reason, RequestSeq: a.RequestSeq}
+	// Unset stays absent so a decision without a verified approver keeps its canonical bytes.
+	if a.VerifiedApprover != (api.CallerIdentity{}) {
+		out.VerifiedApprover = &v1.CallerIdentity{Issuer: a.VerifiedApprover.Issuer, Subject: a.VerifiedApprover.Subject}
+	}
+	return out
 }
 
 func approvalResFromProto(a *v1.ApprovalResult) *api.ApprovalResult {
 	if a == nil {
 		return nil
 	}
-	return &api.ApprovalResult{ToolCallID: a.GetToolCallId(), Approved: a.GetApproved(), Reason: a.GetReason(), RequestSeq: a.GetRequestSeq()}
+	return &api.ApprovalResult{
+		ToolCallID: a.GetToolCallId(), Approved: a.GetApproved(), Reason: a.GetReason(), RequestSeq: a.GetRequestSeq(),
+		VerifiedApprover: api.CallerIdentity{Issuer: a.GetVerifiedApprover().GetIssuer(), Subject: a.GetVerifiedApprover().GetSubject()},
+	}
 }
 
 // DeltaToProto converts an ephemeral streaming chunk. Deltas are transport only, so unlike Event

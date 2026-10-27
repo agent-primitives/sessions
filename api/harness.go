@@ -70,10 +70,12 @@ type Start struct {
 	// Model-only callers that do not use that envelope may leave it empty.
 	// Model is the host-resolved default for a policy-enabled execution. Empty retains the
 	// harness's existing default. Replay/resume restore the recorded value, not today's policy.
-	Model         string    `json:",omitempty"`
-	SessionUID    string    `json:",omitempty"`
-	Config        []byte    // opaque per-execution config; journaled verbatim and restored on replay/resume
-	History       []Event   // every event before this execution's start, also after a memory restore
+	Model      string `json:",omitempty"`
+	SessionUID string `json:",omitempty"`
+	Config     []byte // opaque per-execution config; journaled verbatim and restored on replay/resume
+	// History is every event before this execution's start, also after a memory restore. The host
+	// clears ApprovalResult.VerifiedApprover in it.
+	History       []Event
 	Inputs        []Message // invocation inputs; originals are restored on controller replay/resume
 	Identity      IdentityContext
 	ResumeFromSeq int64 // opaque harness cursor, journaled with Config; distinct from the append CAS cursor

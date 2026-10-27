@@ -108,3 +108,30 @@ func TestPolicyDeniedCanonicalVector(t *testing.T) {
 		t.Fatalf("unknown code bytes = %s, %v; want %s", b, err, wantNewer)
 	}
 }
+
+// A decision's verified approver is hashed under approval_result (CHAIN-1). The vector is shared
+// with hack/verify_chain.py. A build that predates the field drops it on read, so its re-encoding
+// is the decision without the approver and hashes differently: verification fails closed.
+func TestVerifiedApproverCanonicalVector(t *testing.T) {
+	event := api.Event{ExecutionID: "e1", Kind: api.EventApprovalResult, ApprovalResult: &api.ApprovalResult{
+		ToolCallID: "c1", Approved: true, Reason: "ok", RequestSeq: 3,
+		VerifiedApprover: api.CallerIdentity{Issuer: "https://issuer.example", Subject: "approver-1"},
+	}}
+	const want = `{"event":{"approval_result":{"approved":true,"reason":"ok","request_seq":"3","tool_call_id":"c1","verified_approver":{"issuer":"https://issuer.example","subject":"approver-1"}},"execution_id":"e1","kind":"EVENT_APPROVAL_RESULT"},"prev_hash":"","seq":"1"}`
+	const wantHash = "0d1ff028379c892d4f15b1f331a6a8baabfa2dfb43bf32fbb8095fe03725e0a2"
+	b, err := canon.Record("", 1, event)
+	if err != nil || string(b) != want {
+		t.Fatalf("canonical bytes = %s, %v; want %s", b, err, want)
+	}
+	h, err := canon.HashRecord("", 1, event)
+	if err != nil || h != wantHash {
+		t.Fatalf("verified approver hash = %s, %v; want %s (also update hack/verify_chain.py)", h, err, wantHash)
+	}
+	dropped := event
+	decision := *event.ApprovalResult
+	decision.VerifiedApprover = api.CallerIdentity{}
+	dropped.ApprovalResult = &decision
+	if old, err := canon.HashRecord("", 1, dropped); err != nil || old == wantHash {
+		t.Fatalf("hash without the approver = %s, %v; want a different hash", old, err)
+	}
+}

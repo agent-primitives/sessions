@@ -194,6 +194,7 @@ func (s *liveSink) completeApproval(ctx context.Context, state *ApprovalState) (
 	// A decision is transient reply data only after its receipt commits. Return a copy so harness
 	// code cannot change the authority kept in scanned evidence.
 	approval := *decision
+	approval.VerifiedApprover = api.CallerIdentity{} // host audit state, never sent to a harness (harnessHistory)
 	result.Approval = &approval
 	return result, nil
 }
@@ -259,8 +260,36 @@ func serveApproval(state *ApprovalState, receipt *api.ToolResult) (api.ToolResul
 		return api.ToolResult{}, err
 	}
 	decision := *state.Decision.Event.ApprovalResult
+	decision.VerifiedApprover = api.CallerIdentity{}
 	result.Approval = &decision
 	return result, nil
+}
+
+// harnessHistory returns the journal events a harness receives as Start.History. A recorded
+// decision's verified approver is host audit state, so it is cleared on a copy of each
+// APPROVAL_RESULT that carries one; the journaled events, whose hashes cover it, are never
+// modified. Resume and Replay pass a prefix of the whole journal, so the result's capacity is
+// capped at its length: an in-process harness that reslices Start.History to its capacity must not
+// reach later records, such as the current execution's decision. Without an approver in the
+// prefix, the input's backing array is reused.
+func harnessHistory(events []api.Event) []api.Event {
+	var out []api.Event
+	for i, event := range events {
+		if event.ApprovalResult == nil || event.ApprovalResult.VerifiedApprover == (api.CallerIdentity{}) {
+			continue
+		}
+		if out == nil {
+			out = make([]api.Event, len(events))
+			copy(out, events)
+		}
+		decision := *event.ApprovalResult
+		decision.VerifiedApprover = api.CallerIdentity{}
+		out[i].ApprovalResult = &decision
+	}
+	if out == nil {
+		return events[:len(events):len(events)]
+	}
+	return out
 }
 
 // pendingApproval repairs a call-only cut with the captured scan head and existing fence.

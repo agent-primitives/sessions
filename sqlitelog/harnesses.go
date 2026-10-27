@@ -18,6 +18,9 @@ var (
 	// ErrHarnessNameReserved is returned when a registration names a harness that a host sharing
 	// the database reserved for a static harness.
 	ErrHarnessNameReserved = errors.New("sqlitelog: harness name is reserved for a static harness")
+	// ErrHarnessExists is returned by CreateHarness when the name already has a registration row,
+	// active or retired, whatever its spec.
+	ErrHarnessExists = errors.New("sqlitelog: harness name is already registered")
 	// ErrHarnessNameCollision is returned when a name a host serves as a static harness also has a
 	// registration row.
 	ErrHarnessNameCollision = errors.New("sqlitelog: registered harness collides with a static harness name")
@@ -119,9 +122,8 @@ func (s *Store) RegisterHarness(rec HarnessRecord) (HarnessRecord, RegisterResul
 	existing, err := harnessByName(tx, rec.Name)
 	switch {
 	case errors.Is(err, ErrHarnessNotFound):
-		if _, err := tx.Exec(`INSERT INTO harnesses(name, uid, spec, spec_digest, state, created_at, updated_at)
-			VALUES(?, ?, ?, ?, ?, ?, ?)`, rec.Name, rec.UID, rec.Spec, rec.SpecDigest, string(HarnessActive), now, now); err != nil {
-			return HarnessRecord{}, 0, fmt.Errorf("sqlitelog: register harness %q: %w", rec.Name, err)
+		if err := insertHarness(tx, rec, now); err != nil {
+			return HarnessRecord{}, 0, err
 		}
 		result = HarnessCreated
 	case err != nil:
@@ -145,6 +147,56 @@ func (s *Store) RegisterHarness(rec HarnessRecord) (HarnessRecord, RegisterResul
 		return HarnessRecord{}, 0, fmt.Errorf("sqlitelog: register harness %q: %w", rec.Name, err)
 	}
 	return out, result, nil
+}
+
+// CreateHarness stores rec as a new active registration only if its name has never been
+// registered: a name with a registration row, active or retired and whatever its spec, is
+// ErrHarnessExists, and a reserved name is ErrHarnessNameReserved. Neither refusal changes
+// anything. The checks and the insert share one transaction on a table keyed by name, so of
+// concurrent CreateHarness calls for one name at most one succeeds, even from processes sharing the
+// database, and a concurrent RegisterHarness or ReserveHarnessNames either commits first and makes
+// this call fail, or sees this call's row. With Open's default BEGIN IMMEDIATE the transactions
+// serialize, so the others fail with ErrHarnessExists rather than a lock error.
+func (s *Store) CreateHarness(rec HarnessRecord) (HarnessRecord, error) {
+	if rec.Name == "" || rec.UID == "" || rec.Spec == "" || rec.SpecDigest == "" {
+		return HarnessRecord{}, errors.New("sqlitelog: harness registration needs name, uid, spec and digest")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return HarnessRecord{}, fmt.Errorf("sqlitelog: create harness %q: %w", rec.Name, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if reserved, err := nameReserved(tx, rec.Name); err != nil {
+		return HarnessRecord{}, err
+	} else if reserved {
+		return HarnessRecord{}, fmt.Errorf("%w: %q", ErrHarnessNameReserved, rec.Name)
+	}
+	switch existing, err := harnessByName(tx, rec.Name); {
+	case err == nil:
+		return HarnessRecord{}, fmt.Errorf("%w: %q is %s with spec %s", ErrHarnessExists, rec.Name, existing.State, existing.SpecDigest)
+	case !errors.Is(err, ErrHarnessNotFound):
+		return HarnessRecord{}, err
+	}
+	if err := insertHarness(tx, rec, time.Now().UnixNano()); err != nil {
+		return HarnessRecord{}, err
+	}
+	out, err := harnessByName(tx, rec.Name)
+	if err != nil {
+		return HarnessRecord{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return HarnessRecord{}, fmt.Errorf("sqlitelog: create harness %q: %w", rec.Name, err)
+	}
+	return out, nil
+}
+
+func insertHarness(tx *sql.Tx, rec HarnessRecord, now int64) error {
+	if _, err := tx.Exec(`INSERT INTO harnesses(name, uid, spec, spec_digest, state, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?)`, rec.Name, rec.UID, rec.Spec, rec.SpecDigest, string(HarnessActive), now, now); err != nil {
+		return fmt.Errorf("sqlitelog: register harness %q: %w", rec.Name, err)
+	}
+	return nil
 }
 
 func nameReserved(q queryRower, name string) (bool, error) {

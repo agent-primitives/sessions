@@ -57,7 +57,10 @@ the harness stream, so what is journaled is what the harness emitted.
 - **Store interfaces** (`session/store.go`) — `session.Service` and `session.HarnessRegistry` take
   the `SessionStore` and `HarnessStore` interfaces rather than `*sqlitelog.Store`, which is the only
   implementation in this repository. Another backend implements both and keeps the transactional
-  properties they document; the record types and sentinel errors are still `sqlitelog`'s.
+  properties they document. The session metadata and harness catalog types and their sentinel
+  errors are still `sqlitelog`'s; the journals a store returns are `eventlog.SessionJournal` values,
+  an `eventlog.Store` with a required `CheckWritable` deletion preflight, whose records and
+  sentinel errors (such as `eventlog.ErrDeleted`) are `eventlog`'s (spec §6.7).
 - **Canonical hash** (`canon/`) — the `content_hash` is **RFC 8785 JCS over proto3-JSON**, computed over
   the proto, not Go's `json.Marshal`. The chain is therefore language-neutral: `hack/verify_chain.py`
   (a ~30-line non-Go verifier) reproduces the Go hash for the golden vector, so any implementation or

@@ -70,8 +70,8 @@ Unless stated otherwise:
 This draft specifies:
 
 - the session resource, its two-axis state, its deletion state, and its metadata (§5);
-- the event log: record shape, event kinds, sequence assignment, compare-and-swap append, fencing
-  (§6);
+- the event log: record shape, event kinds, sequence assignment, compare-and-swap append, fencing,
+  and the Go session and harness stores (§6);
 - the canonical encoding and the provenance hash chain, including fork lineage (§7);
 - executions, the determinism invariants, reconstruction replay, and crash recovery (§8);
 - tool execution modes, receipts, and at-most-once re-drive (§9);
@@ -109,6 +109,7 @@ This draft does not specify:
 |---|---|---|
 | Sessions host | `Sessions` service, controller semantics, harness driving | §5, §6.3 to §6.5, §8 to §12, §13.1 to §13.3, §15 |
 | Event-log store | the append, head, fence, read and verify contract | §6, §7 |
+| Session store | `session.SessionStore` and `session.HarnessStore` (§6.7) | §5.1 to §5.4, §6, §7, §10.2, §11.2, §11.8, §14, §17 |
 | Harness | `Harness` service (`Describe`, `Connect`) or `api.Harness` | §8.4, §9, §10.3, §12 |
 | Runtime backend | `api.Runtime` plus `Describe` (§13.3) | §13 |
 | Chain verifier | independent recomputation of `content_hash` | §7 |
@@ -327,7 +328,8 @@ no flattened lifecycle enum.
   session reports the deleted error, not a conflict or fenced error. The in-memory store has no
   deletion. A store MAY also expose a read-only writable check (`CheckWritable`), which the
   reference host runs before any runtime call (`OPS-34`); a wrapper around such a store has to
-  forward it to keep that ordering.
+  forward it to keep that ordering. The journals of a Go session store MUST expose it
+  (`STORE-7`).
 
 ### 6.5 Idempotency
 
@@ -344,12 +346,106 @@ no flattened lifecycle enum.
   stored `prev_hash` and `content_hash` (not recomputed).
 - `LOG-17`: The `Replay` RPC streams committed records only. `from_seq <= 0` reads from 1;
   `to_seq = 0` reads to the head. It never emits deltas and never runs a harness.
-- The reference SQLite-backed `Replay` reads stored protobuf events directly, preserving field
-  presence, including present empty messages, rather than round-tripping through domain events.
-  It returns the stored hashes without verifying or recomputing them.
+- The reference SQLite-backed `Replay` reads stored protobuf events directly (through the
+  journal's `ReadProto`, §6.7), preserving field presence, including present empty messages,
+  rather than round-tripping through domain events. It returns the stored hashes without
+  verifying or recomputing them.
 - The reference host returns an empty, successful stream for an unknown or empty session on
   `Replay`; it does not return `NOT_FOUND`.
 - `Replay` of a deleted session MUST keep returning its records, including `LIFECYCLE_DELETE`.
+
+### 6.7 Session and harness stores
+
+The reference host reaches durable state through two Go interfaces in
+[`session/store.go`](session/store.go): `session.SessionStore` (session metadata, journals,
+listing, deletion), taken by `session.NewService`, and `session.HarnessStore` (the harness
+catalog), taken by `session.NewHarnessRegistry` and `session.ReserveStaticHarnessNames`.
+`*sqlitelog.Store` implements both and is the only implementation in this repository. The
+session metadata and harness catalog types (`SessionMeta`, `SessionInfo`, `HarnessRecord` and
+their list options) and the sentinel errors for them are `sqlitelog`'s. The journals a store
+returns are `eventlog.SessionJournal` values (`STORE-7`), each an `eventlog.Store` with a
+required `CheckWritable` deletion preflight: their records and sentinel errors,
+`eventlog.ErrDeleted` among them, are `eventlog`'s, and they meet §6.1 to §6.6 and §7. This
+section adds what the host needs from the rest. It specifies no storage schema (§3). A host that
+serves sessions gives both interfaces the same store, because session admission (`STORE-3`)
+reads the catalog that registration writes; the reference daemon does.
+
+- `STORE-1`: A store MUST return these sentinel errors, wrapped so that `errors.Is` matches, for
+  these conditions:
+  - `sqlitelog.ErrSessionNotFound`: `SessionInfo` or `DeleteSession` of a `uid` with no metadata
+    row;
+  - `sqlitelog.ErrSessionExists`: `CreateOwnedSession` of any existing `uid`, deleted or created
+    by a journal write included;
+  - `sqlitelog.ErrInvalidPageToken`: a `ListSessions` page token the store cannot parse
+    (`SES-10`);
+  - `sqlitelog.ErrHarnessNotFound`: `Harness` or `RetireHarness` of a name with no registration,
+    and admission (`STORE-3`) of a registered name with none;
+  - `sqlitelog.ErrHarnessRetired`: admission of a registered name whose registration is retired;
+  - `sqlitelog.ErrHarnessNameCollision`: admission of a static name that has a registration,
+    active or retired, and `ReserveHarnessNames` of such a name;
+  - `sqlitelog.ErrHarnessSpecConflict`: `RegisterHarness` of a taken name with a different
+    `SpecDigest` (`REG-3`);
+  - `sqlitelog.ErrHarnessExists`: `CreateHarness` of a name with a registration, active or retired
+    and whatever its spec (`REG-3a`);
+  - `sqlitelog.ErrHarnessNameReserved`: `RegisterHarness` or `CreateHarness` of a reserved name;
+  - `eventlog.ErrDeleted`: `PutSession` or `PutSessionOnActiveHarness` of a deleted session (the
+    latter before its harness check), and the journal writes in `LOG-19`.
+- `STORE-2`: `SessionInfo` and `ListSessions` MUST reflect every journal append and
+  `DeleteSession` that returned before the read: `last_seq`, `compute_state` and
+  `pending_approval` come from the committed journal or from projections updated in the
+  append's transaction (`LOG-8`, `SES-7`, `SES-8`). `ListSessions` MUST meet `SES-9` to
+  `SES-11`, and filter by `opts.Owner`, when set, before paging (§17).
+- `STORE-3`: Admission. `PutSessionOnActiveHarness` and `CreateOwnedSession` take `registered`,
+  the caller's statement that the harness name is not one of its static harnesses. Each MUST check
+  the catalog and write the session row in one transaction, and write only when the check passes:
+  a registered name with an active registration, or a static name with no registration. A
+  `RetireHarness` or a registration that committed earlier, on any host sharing the store, is
+  therefore always seen (`OPS-4`, `REG-4`). `CreateOwnedSession` MUST also refuse an existing
+  `uid` and record `owner` in that transaction. `PutSession` is an upsert with no admission check.
+- `STORE-4`: `RegisterHarness`, `CreateHarness` and `ReserveHarnessNames` MUST each check and
+  write in one transaction, and each MUST check the others' rows, so a name is reserved or
+  registered, never both, and of concurrent `CreateHarness` calls for one name at most one
+  succeeds (`REG-3a`), however hosts sharing the store interleave. A refused `CreateHarness`
+  changes nothing. A failing `ReserveHarnessNames` reserves none of its names, and a reservation
+  is never released. `HarnessNameReserved` reports a reservation; the registry uses it only as a
+  preflight, so it MAY read outside any transaction. `RegisterHarness` of the same digest returns
+  the stored registration, reactivating a retired one (`REG-3`); `RetireHarness` of a retired one
+  changes nothing (`REG-4`). `ListHarnesses` MUST return registrations in name order after
+  `opts.After` and, unless `opts.IncludeRetired` is set, only active ones, and fewer than
+  `opts.Limit` only when none remain, because the registry pages until then.
+- `STORE-5`: `DeleteSession` MUST commit `OPS-31` in one transaction (the `LIFECYCLE_DELETE`
+  append, the fence advance, and the deletion fields) or commit none of it, and meet `OPS-32`.
+  Once it returns, every journal the store returns for the session refuses writes (`LOG-19`),
+  including on other hosts sharing the store (older binaries are `OPS-36`), and `PutSession` and
+  `PutSessionOnActiveHarness` refuse with `eventlog.ErrDeleted`.
+- `STORE-6`: `SessionLog(uid)` and `ForkSessionLog(meta)` MUST write nothing when called. A
+  `ForkSessionLog` handle MUST commit `meta` in the transaction of its first `NewFence`, so a fork
+  child refused or not provisioned before that fence leaves no session, and a child with a fence
+  has its inherited metadata (`SES-18`). The reference host takes children whose metadata carries
+  a model-policy flag through `ForkSessionLog`, and writes every child's metadata again with
+  `PutSession` after the fan-out.
+- `STORE-7`: Every journal `SessionLog` and `ForkSessionLog` return MUST implement the deletion
+  preflight `CheckWritable` (`LOG-19`); their `eventlog.SessionJournal` result type requires it,
+  and a journal that wraps another MUST forward it. `CheckWritable` writes nothing. It MUST return
+  an error wrapping `eventlog.ErrDeleted` once `DeleteSession` of the session has returned,
+  including on other hosts sharing the store, and `nil` for a session that is active or has no
+  metadata row; any other error fails the operation. The reference host calls it before
+  `Describe`, a fence or a runtime call, and before `Approve` answers an exact retry (`OPS-34`).
+  Without it, a deletion that commits after the host's lookup stops an operation only at its first
+  fence or append, after its runtime work (`STORE-5`), and never stops an exact approval retry,
+  which writes nothing (`APR-7`). A journal MAY also implement both `BeginAllocation(ctx,
+  backend, operation)` and `ConfirmAllocation(ctx, attempt, incarnation)`. When it does, the
+  reference host calls `BeginAllocation` before each runtime `Create` and `Restore` and
+  `ConfirmAllocation` with the incarnation returned, and fails the operation if either call
+  fails. A journal without them runs without the allocation ledger (§13.4, `OPS-35`). A journal
+  MAY also implement `ReadProto(from_seq)`, returning the records of `LOG-16` with their stored
+  protobuf events. The reference host's `Replay` uses it when present (§6.6); otherwise it
+  converts the `Read` records, which keep the stored hashes but not field presence, so an audit
+  client cannot detect presence-only tampering.
+- No conformance test runs a second store. `session/store_test.go` drives the reference host
+  through a wrapper that exposes only these interfaces, with and without the optional allocation
+  and `ReadProto` methods, and commits a deletion between each operation's lookup and its guarded
+  work (§16.2).
 
 ## 7. Provenance chain and canonical encoding
 

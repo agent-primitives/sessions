@@ -36,6 +36,8 @@ import (
 //   - Replay returns stored events with their protobuf field presence through a journal's optional
 //     ReadProto method, so an audit client can detect presence-only tampering; for a journal
 //     without it, Replay converts Read's domain records, which carry no presence.
+//
+// spec.md §6.7 states these obligations as requirements STORE-1 to STORE-7.
 type SessionStore interface {
 	// SessionLog returns the journal of session uid. Obtaining the handle writes nothing.
 	SessionLog(uid string) eventlog.SessionJournal
@@ -72,7 +74,8 @@ type SessionStore interface {
 // and each checks the others' rows, so a name is either reserved for a static harness or
 // registered, never both, and of concurrent CreateHarness calls for one name at most one succeeds,
 // however hosts sharing the store interleave. A host that serves sessions gives Service and
-// HarnessRegistry the same store, since session admission reads this catalog.
+// HarnessRegistry the same store, since session admission reads this catalog. spec.md §6.7 states
+// these obligations as requirements.
 type HarnessStore interface {
 	// Harness returns one registration, active or retired.
 	Harness(name string) (sqlitelog.HarnessRecord, error)

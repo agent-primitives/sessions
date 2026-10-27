@@ -30,7 +30,7 @@ not provide.
   so a first run does not require kind on `PATH`. Relative kubeconfig overrides resolve
   consistently across setup commands; stale installations still refuse checkout changes.
   Failed or interrupted bootstrap retains an explicit marker, preventing setup or teardown
-  from running an unpinned checkout on retry.
+  from running an unpinned checkout on retry, including through equivalent checkout paths.
 - The Substrate kind example refuses leftover model credentials in Ollama/stub modes and
   validates model routes before cluster operations, preserving a working deployment when a
   rerun supplies invalid provider settings.

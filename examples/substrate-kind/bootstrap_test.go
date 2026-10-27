@@ -127,8 +127,20 @@ func TestSetupBootstrapsManagedCheckoutWithoutSystemKind(t *testing.T) {
 }
 
 func TestSetupRefusesIncompleteBootstrapOnRetry(t *testing.T) {
-	for _, step := range []string{"clone", "partial-clone", "fetch", "checkout"} {
-		t.Run(step, func(t *testing.T) {
+	for _, tc := range []struct {
+		step  string
+		alias string
+	}{
+		{step: "clone"},
+		{step: "partial-clone"},
+		{step: "fetch"},
+		{step: "checkout"},
+		{step: "fetch", alias: "trailing-slash"},
+		{step: "fetch", alias: "dot-component"},
+		{step: "fetch", alias: "symlink"},
+	} {
+		t.Run(tc.step+"/"+tc.alias, func(t *testing.T) {
+			step := tc.step
 			dir, state := bootstrapFixture(t)
 			t.Setenv("TEST_BOOTSTRAP_FAILURE", step)
 			out, err := exec.CommandContext(t.Context(), "bash", "up.sh").CombinedOutput()
@@ -143,6 +155,19 @@ func TestSetupRefusesIncompleteBootstrapOnRetry(t *testing.T) {
 			before, err := os.ReadFile(filepath.Join(dir, "bootstrap-calls"))
 			if err != nil {
 				t.Fatal(err)
+			}
+			checkout := filepath.Join(dir, "substrate")
+			switch tc.alias {
+			case "trailing-slash":
+				t.Setenv("SUBSTRATE_DIR", checkout+"/")
+			case "dot-component":
+				t.Setenv("SUBSTRATE_DIR", dir+"/./substrate")
+			case "symlink":
+				alias := filepath.Join(dir, "checkout-alias")
+				if err := os.Symlink(checkout, alias); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("SUBSTRATE_DIR", alias)
 			}
 			t.Setenv("TEST_BOOTSTRAP_FAILURE", "")
 			for _, script := range []string{"up.sh", "down.sh"} {

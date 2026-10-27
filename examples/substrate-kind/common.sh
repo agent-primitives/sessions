@@ -55,7 +55,8 @@ timeout_command() {
 
 # An unsuccessful bootstrap must never expose its unpinned tools on a later invocation.
 check_managed_bootstrap() {
-	if [[ "${SUBSTRATE_DIR}" == "${WORK}/substrate" && (-e "${BOOTSTRAP}" || -L "${BOOTSTRAP}") ]]; then
+	if [[ ("${SUBSTRATE_DIR}" == "${WORK}/substrate" || "${SUBSTRATE_DIR}" -ef "${WORK}/substrate") &&
+		(-e "${BOOTSTRAP}" || -L "${BOOTSTRAP}") ]]; then
 		die "Incomplete managed Substrate bootstrap; inspect ${SUBSTRATE_DIR} and ${BOOTSTRAP}. Remove the incomplete checkout and bootstrap marker explicitly before retrying."
 	fi
 }

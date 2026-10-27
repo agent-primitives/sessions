@@ -19,7 +19,7 @@ gRPC harness transport unchanged, and the core importing zero substrate code:
 - **Fork of a stateful session:** fan out k children from one parent checkpoint and every child
   **continues at N+1 independently**, with the parent still resumable at the same base.
 
-All of it runs in the `substrate-conformance` job (`.github/workflows/substrate-e2e.yml`). Both tiers
+All of it runs in the `substrate-conformance suite` job (`.github/workflows/substrate-e2e.yml`). Both tiers
 run on the micro-VM sandbox class, so the suite exercises the same isolation class in both and covers
 the micro-VM path end to end.
 
@@ -1021,12 +1021,20 @@ Substrate publishes no images, so its binaries are built from source at `SUBSTRA
 workflow caches the Go build and module caches and the envoy-dataplane image's buildx cache between
 runs.
 
+The durable [kind example](../examples/substrate-kind/README.md) runs independently in the
+`substrate-kind example lifecycle` job, with a fresh managed checkout and its own cluster. That job
+uses the real `up.sh`, checks an unchanged setup rerun, runs the restart/persistence smoke, and
+calls `down.sh` in cleanup. It does not borrow the conformance cluster or its prebuilt images.
+The existing required `substrate-conformance` check now combines both jobs, so an example
+bootstrap, smoke or teardown failure blocks the same gate as a pinned conformance failure.
+
 `substrate-conformance` is a required check, so the workflow has no trigger path filter: a workflow
 a filter skips never reports, and the pull request could not merge. Its first job,
 `substrate-e2e path filter`, diffs the pull request's merge commit against the base branch with
 `hack/ci-path-filter.sh`; the `substrate` profile there is the ignore list (prose, the site, the
 agent UI, demos and a few repository metadata files). When every changed path is on it,
-`substrate-conformance` skips every step and reports success in seconds. Any other path, including
+the suite skips its live steps, the example job is skipped, and the final `substrate-conformance`
+gate reports success in seconds. Any other path, including
 any workflow file and the filter itself, runs the suite. The job decides with the base branch's copy
 of the filter, so a pull request that edits it cannot decide its own run; only while the base branch
 has no copy (the pull request that adds the filter) does the pull request's own copy decide. The job
@@ -1041,7 +1049,7 @@ the runner's checkout only. It surfaces upstream drift before a bump; it never r
 request and its failure does not fail the run. It is known red until the next substrate bump: `main`
 renamed `cmd/ateom-microvm` to `cmd/ateworker-microvm` and the module to `go.ate.dev/substrate`.
 
-The workflow applies only the namespace and the micro-VM WorkerPools
+The conformance suite applies only the namespace and the micro-VM WorkerPools
 (`deploy/substrate/namespace.yaml`, `echo-microvm-workerpool.yaml`,
 `counter-microvm-workerpool.yaml`). The namespace carries `ate.dev/api-access=true`, which every
 tier's Job needs to reach ate-api-server on v0.5.0

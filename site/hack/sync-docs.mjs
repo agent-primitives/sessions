@@ -30,6 +30,11 @@ const skip = new Set(["README.md"]);
 // Descriptions are written here rather than derived from the first paragraph, which is usually a
 // sentence of context rather than a summary and reads badly as a page description.
 const meta = {
+  "substrate-kind.md": {
+    title: "Durable kind example",
+    description:
+      "Deploy the existing Substrate daemon with isolated chat harnesses and a journal that survives pod replacement.",
+  },
   "allocation-ownership.md": {
     title: "Allocation ownership",
     description:

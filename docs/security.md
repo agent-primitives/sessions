@@ -54,10 +54,10 @@ resolves to a cluster service, and the key and prompts cross the pod network une
 network you trusted; loopback and `localhost` are never proxied. Add `.svc,.svc.cluster.local` to
 `NO_PROXY` (a leading dot matches every name under it).
 
-**Model credentials belong in a header, not the URL.** `agentsessionsd` logs the model endpoint at
-startup, including the query of `-model-base-url` and of `-model-path`; only a userinfo password is
-masked. Do not put a key, signature or token in either query: set the key in `MODEL_API_KEY` and
-name its header with `-model-auth-header`.
+**Model credentials belong in a header, not the URL.** `agentsessionsd` logs only the model ID at
+startup, not the provider endpoint. Endpoint URLs can still appear in process arguments and
+deployment configuration. Do not put a key, signature or token in the query of `-model-base-url`
+or `-model-path`: set the key in `MODEL_API_KEY` and name its header with `-model-auth-header`.
 
 ## What is not protected
 

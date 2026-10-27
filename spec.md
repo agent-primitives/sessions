@@ -344,6 +344,9 @@ no flattened lifecycle enum.
   stored `prev_hash` and `content_hash` (not recomputed).
 - `LOG-17`: The `Replay` RPC streams committed records only. `from_seq <= 0` reads from 1;
   `to_seq = 0` reads to the head. It never emits deltas and never runs a harness.
+- The reference SQLite-backed `Replay` reads stored protobuf events directly, preserving field
+  presence, including present empty messages, rather than round-tripping through domain events.
+  It returns the stored hashes without verifying or recomputing them.
 - The reference host returns an empty, successful stream for an unknown or empty session on
   `Replay`; it does not return `NOT_FOUND`.
 - `Replay` of a deleted session MUST keep returning its records, including `LIFECYCLE_DELETE`.
@@ -427,6 +430,12 @@ no flattened lifecycle enum.
   gated.
 - The chain is unkeyed. `CHAIN-12` catches storage corruption and edits that do not recompute the
   hashes. A journal writer that rewrites an event and recomputes every later hash is not detected.
+- `agentctl verify --session UID` reads the reference host's session head and records through the
+  Sessions API and verifies that prefix locally, preserving protobuf field presence. It refuses
+  sequence gaps, hash/link mismatches, and a prefix shorter than the reported head; it does not run
+  a harness or call a model. A captured head of zero verifies the empty prefix without calling
+  `Replay`, so later appends are excluded in that case too. This is not an independent external
+  head anchor.
 - Verification proves internal consistency only. Removing records from the end of a log, or
   replacing the whole log, is not detectable from the log alone; detecting it requires an external
   anchor (for example a recorded head hash), which this draft does not define.

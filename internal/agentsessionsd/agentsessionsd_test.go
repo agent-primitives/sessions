@@ -93,17 +93,14 @@ func TestModelFuncRefusesAKeyOverRemotePlainHTTP(t *testing.T) {
 	})
 }
 
-// The startup log names the endpoint requests actually go to: the path joined to the base URL's
-// path with the base query after it, not the base URL and path concatenated. A userinfo password
-// is masked.
-func TestModelFuncDescribesTheJoinedEndpoint(t *testing.T) {
+func TestModelFuncDescriptionOmitsEndpoint(t *testing.T) {
 	t.Setenv("MODEL_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
 	for _, tc := range []struct{ baseURL, path, want string }{
-		{"https://h/openai/v1?api-version=2", openai.DefaultPath, "m @ https://h/openai/v1/chat/completions?api-version=2"},
-		{"https://h/openai?tenant=a", "/deployments/d/chat/completions?api-version=2", "m @ https://h/openai/deployments/d/chat/completions?tenant=a&api-version=2"},
-		{"https://h/v1/#frag", openai.DefaultPath, "m @ https://h/v1/chat/completions"},
-		{"https://user:pw-secret@h/v1", openai.DefaultPath, "m @ https://user:xxxxx@h/v1/chat/completions"},
+		{"https://h/openai/v1?api-version=2", openai.DefaultPath, "m"},
+		{"https://h/openai?tenant=a", "/deployments/d/chat/completions?api-version=2", "m"},
+		{"https://h/v1/#frag", openai.DefaultPath, "m"},
+		{"https://user:pw-secret@h/v1", openai.DefaultPath, "m"},
 	} {
 		_, _, desc, err := modelFunc("m", tc.baseURL, tc.path, "Authorization")
 		if err != nil {

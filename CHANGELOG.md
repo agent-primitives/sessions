@@ -9,6 +9,11 @@ not provide.
 
 ### Added
 
+- A self-contained [durable Substrate kind example](examples/substrate-kind/README.md), using the
+  existing daemon and stock chat harness, declarative templates, persistent SQLite, optional Ollama,
+  and a pod-restart smoke.
+- `agentctl verify --session UID` verifies a session's committed hash chain locally from the Sessions
+  API, including protobuf field presence. It refuses missing records, changed content, and broken links.
 - Durable allocation intent and session-scoped handle acknowledgements for SQLite-backed Create and
   Restore, plus optional non-destructive release contracts for local and remote runtimes. No reaper
   runs yet; Fork retains its existing allocation and rollback behavior.
@@ -39,6 +44,26 @@ not provide.
   nothing changes. The stock daemon installs none. See
   [pre-dispatch tool policy](docs/security.md#pre-dispatch-tool-policy) and spec §9.4, now version
   `0.4.0-draft`.
+
+### Fixed
+
+- The durable Substrate kind example has its own live CI cluster, exercising fresh setup,
+  unchanged reruns, restart/persistence smoke and teardown through its public scripts instead
+  of borrowing the conformance cluster. Both live jobs gate `substrate-conformance`.
+- The Substrate kind example bootstraps and pins a new managed checkout before inspecting clusters,
+  so a first run does not require kind on `PATH`. Relative kubeconfig overrides resolve
+  consistently across setup commands; stale installations still refuse checkout changes.
+  Failed or interrupted bootstrap retains an explicit marker, preventing setup or teardown
+  from running an unpinned checkout on retry, including through equivalent checkout paths.
+- The Substrate kind example refuses leftover model credentials in Ollama/stub modes and
+  validates model routes before cluster operations, preserving a working deployment when a
+  rerun supplies invalid provider settings.
+- SQLite-backed `Replay` preserves the stored protobuf event's field presence, so audit clients
+  can detect presence-only tampering instead of verifying a normalized event. Stored bytes,
+  hashes, and journal/wire schemas are unchanged; no journal migration is required.
+- `agentctl verify` skips `Replay` for a captured empty prefix, avoiding false failures when a
+  concurrent turn appends after the session head was read.
+- Daemon startup logs identify the model without copying its provider endpoint, userinfo, or query.
 
 ### Compatibility
 

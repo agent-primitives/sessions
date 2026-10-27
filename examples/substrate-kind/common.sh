@@ -15,8 +15,12 @@ WORK="$(cd "${WORK}" && pwd -P)"
 STATE="${WORK}/${CLUSTER}"
 mkdir -p "${STATE}"
 OWNER="${STATE}/owner"
+BOOTSTRAP="${WORK}/substrate-bootstrap-incomplete"
 export KIND_CLUSTER_NAME="${CLUSTER}"
-export KUBECONFIG="${SUBSTRATE_KIND_KUBECONFIG:-${STATE}/kubeconfig}"
+# Commands run from both the caller's directory and Substrate's checkout.
+KUBECONFIG="${SUBSTRATE_KIND_KUBECONFIG:-${STATE}/kubeconfig}"
+[[ "${KUBECONFIG}" == /* ]] || KUBECONFIG="${PWD}/${KUBECONFIG}"
+export KUBECONFIG
 
 # Use the workflow's Substrate revision for compatible tools and control-plane components.
 SUBSTRATE_DIR="${SUBSTRATE_DIR:-${WORK}/substrate}"
@@ -49,8 +53,16 @@ timeout_command() {
 	fi
 }
 
+# An unsuccessful bootstrap must never expose its unpinned tools on a later invocation.
+check_managed_bootstrap() {
+	if [[ "${SUBSTRATE_DIR}" == "${WORK}/substrate" && (-e "${BOOTSTRAP}" || -L "${BOOTSTRAP}") ]]; then
+		die "Incomplete managed Substrate bootstrap; inspect ${SUBSTRATE_DIR} and ${BOOTSTRAP}. Remove the incomplete checkout and bootstrap marker explicitly before retrying."
+	fi
+}
+
 # Prefer Substrate's pinned kind wrapper when its checkout is available.
 kind_command() {
+	check_managed_bootstrap
 	if [[ -x "${SUBSTRATE_DIR}/hack/kind.sh" ]]; then
 		(cd "${SUBSTRATE_DIR}" && hack/kind.sh "$@")
 	else

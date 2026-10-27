@@ -44,10 +44,38 @@ fi
 export SANDBOX_CLASS SANDBOX_CONFIG ACTOR_TEMPLATE PROJECT
 progress "Sandbox: ${SANDBOX_CLASS}; images: linux/${arch}"
 
-# Check ownership and the installed revision before changing the shared checkout.
+# Prepare only managed checkouts; caller-supplied checkouts remain read-only.
+prepare_managed_checkout() {
+	progress "Preparing the managed Substrate checkout at the workflow revision"
+	local checkout_status
+	checkout_status="$(git -C "${SUBSTRATE_DIR}" status --porcelain)" || die "Cannot inspect substrate checkout."
+	[[ -z "${checkout_status}" ]] || die "Dirty managed substrate checkout."
+	git -C "${SUBSTRATE_DIR}" fetch --quiet origin "${SUBSTRATE_REF}"
+	git -C "${SUBSTRATE_DIR}" checkout --quiet --detach "${SUBSTRATE_REF}"
+}
+
+# Bootstrap a missing managed checkout and pin it before executing its kind wrapper.
+# Existing checkouts must wait until their cluster's ownership and revision are checked.
+lock_cluster
+cloned_checkout=0
+if [[ "${SUBSTRATE_DIR}" == "${WORK}/substrate" ]]; then
+	[[ ! -L "${SUBSTRATE_DIR}" ]] || die "Managed substrate checkout must not be a symlink."
+	check_managed_bootstrap
+	if [[ ! -d "${SUBSTRATE_DIR}/.git" ]]; then
+		# Keep failed or interrupted clones distinguishable from ready checkouts across runs.
+		mkdir "${BOOTSTRAP}" 2>/dev/null ||
+			die "Cannot claim managed Substrate bootstrap; inspect ${BOOTSTRAP} before retrying."
+		progress "Cloning Substrate to bootstrap the kind wrapper"
+		git clone --quiet https://github.com/agent-substrate/substrate "${SUBSTRATE_DIR}"
+		prepare_managed_checkout
+		rmdir "${BOOTSTRAP}"
+		cloned_checkout=1
+	fi
+fi
+
+# Check ownership and the installed revision before changing an existing checkout.
 # Older or unrecorded installations require explicit teardown, never an in-place upgrade.
 progress "Checking ownership and setup state for cluster ${CLUSTER}"
-lock_cluster
 stage="$(cluster_state)"
 [[ "${stage}" != creating ]] || die "Incomplete creation; run down.sh before retrying. Storage will not be recreated automatically."
 if [[ "${stage}" == created || "${stage}" == installed ]]; then
@@ -59,15 +87,9 @@ fi
 # Pin the managed Substrate checkout to the CI revision. A caller-supplied checkout
 # is read-only to setup: it must already be clean and at that same revision.
 if [[ "${SUBSTRATE_DIR}" == "${WORK}/substrate" ]]; then
-	progress "Preparing the managed Substrate checkout at the workflow revision"
-	[[ ! -L "${SUBSTRATE_DIR}" ]] || die "Managed substrate checkout must not be a symlink."
-	if [[ ! -d "${SUBSTRATE_DIR}/.git" ]]; then
-		git clone --quiet https://github.com/agent-substrate/substrate "${SUBSTRATE_DIR}"
+	if [[ "${cloned_checkout}" == 0 ]]; then
+		prepare_managed_checkout
 	fi
-	checkout_status="$(git -C "${SUBSTRATE_DIR}" status --porcelain)" || die "Cannot inspect substrate checkout."
-	[[ -z "${checkout_status}" ]] || die "Dirty managed substrate checkout."
-	git -C "${SUBSTRATE_DIR}" fetch --quiet origin "${SUBSTRATE_REF}"
-	git -C "${SUBSTRATE_DIR}" checkout --quiet --detach "${SUBSTRATE_REF}"
 else
 	progress "Checking the supplied Substrate checkout without modifying it"
 	checkout_head="$(git -C "${SUBSTRATE_DIR}" rev-parse HEAD)" || die "Cannot inspect substrate checkout."

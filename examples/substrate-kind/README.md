@@ -144,6 +144,17 @@ automatic adoption or deletion. Override `CLUSTER` and `SUBSTRATE_KIND_WORK` con
 independent deployments. A custom `SUBSTRATE_DIR` must already be clean and at the workflow pin;
 setup does not fetch or switch it.
 
+If cloning or pinning a new managed checkout fails or is interrupted, setup retains
+`${SUBSTRATE_KIND_WORK}/substrate-bootstrap-incomplete` (under `_local/substrate-kind` by
+default). Setup and teardown refuse to execute that checkout's tools while the marker
+exists. Inspect the failed checkout, then explicitly remove only the incomplete `substrate`
+checkout and the `substrate-bootstrap-incomplete` marker before retrying. Keep the per-cluster
+state directories and ownership records intact; this recovery does not require deleting a cluster.
+
+`SUBSTRATE_KIND_KUBECONFIG` overrides the generated kubeconfig location. Relative paths are
+resolved against the directory where you invoke each script, so Substrate and kubectl use
+the same file even when setup changes directories.
+
 This is **production-shaped, not production-ready**:
 
 - SQLite and the static hostPath volume support one daemon replica, not HA. The volume survives

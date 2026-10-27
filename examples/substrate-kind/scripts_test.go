@@ -13,7 +13,10 @@ import (
 
 func fixture(t *testing.T, scripts map[string]string) (string, string) {
 	t.Helper()
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	realGo, err := exec.LookPath("go")
 	if err != nil {
 		t.Fatal(err)
@@ -31,9 +34,16 @@ fi
 			t.Fatal(err)
 		}
 	}
-	if _, ok := scripts["go"]; !ok {
-		if err := os.WriteFile(filepath.Join(dir, "go"),
-			[]byte("#!/usr/bin/env bash\nset -euo pipefail\n"+checkModel+"echo unexpected-go-invocation >&2\nexit 1\n"), 0o700); err != nil {
+	for _, name := range []string{"go", "kubectl", "ko"} {
+		if _, ok := scripts[name]; ok {
+			continue
+		}
+		body := "echo unexpected-" + name + "-invocation >&2\nexit 1\n"
+		if name == "go" {
+			body = checkModel + body
+		}
+		if err := os.WriteFile(filepath.Join(dir, name),
+			[]byte("#!/usr/bin/env bash\nset -euo pipefail\n"+body), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}

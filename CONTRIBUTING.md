@@ -83,6 +83,15 @@ governance structure yet; that will change if and when it needs to.
 
 ## Releasing
 
+First merge a release pull request that assembles the changelog fragments into a new
+`CHANGELOG.md` section, and edit that section: add anything a commit list cannot convey,
+especially a compatibility preamble with upgrade steps
+([release assembly](changelog/README.md#release-assembly)).
+
+```bash
+go run ./hack/changelog assemble vX.Y.Z
+```
+
 A release is cut by pushing a tag. The tag is the trigger, so the artifacts and the git history
 cannot disagree about what shipped.
 
@@ -91,12 +100,14 @@ git tag -s v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
 ```
 
-The `release` workflow re-runs the full suite against the tagged commit before publishing anything,
-then builds `agentctl` and `agentsessionsd` for linux and darwin on amd64 and arm64, attaches an
-SBOM per archive, publishes the `agentsessionsd` and `harnessnode` images to
-`ghcr.io/agent-primitives/sessions`, and signs a build-provenance attestation. Release notes are
-generated from the commits since the previous release tag, which is what conventional commit
-messages buy.
+The `release` workflow first checks that the tagged commit has no changelog fragments left
+(`go run ./hack/changelog verify-assembled`); if it has, nothing is published: delete the tag, merge
+the release pull request and tag its commit. It re-runs the full suite against the tagged commit
+before publishing anything, then builds `agentctl` and `agentsessionsd` for linux and darwin on
+amd64 and arm64, attaches an SBOM per archive, publishes the `agentsessionsd` and `harnessnode`
+images to `ghcr.io/agent-primitives/sessions`, and signs a build-provenance attestation. Release
+notes are generated from the commits since the previous release tag, which is what conventional
+commit messages buy.
 
 Only `v<digit>...` tags without a `/` are root-module releases. The nested `integrations/substrate`
 module is tagged `integrations/substrate/vX.Y.Z`, which does not trigger the `release` workflow.
@@ -110,9 +121,6 @@ tags="$(hack/release-tags.sh)" && env ${tags} goreleaser release --snapshot --cl
 ```
 
 In zsh, write `${=tags}`: zsh does not split an unquoted parameter, so `env` would get one argument.
-
-Add anything a commit list cannot convey, especially compatibility notes, to `CHANGELOG.md` before
-tagging.
 
 ## Reporting security issues
 

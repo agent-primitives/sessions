@@ -24,6 +24,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # A release pull request assembles the changelog fragments into CHANGELOG.md before tagging
+      # (changelog/README.md). Fragments still present mean it did not, so nothing is published.
+      - name: changelog fragments are assembled
+        run: go run ./hack/changelog verify-assembled
+
       - uses: bufbuild/buf-setup-action@v1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}

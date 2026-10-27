@@ -99,3 +99,6 @@ changes nothing, when a fragment is malformed or names an unknown category, when
 already has a `vX.Y.Z` section, or when it still has an `## Unreleased` section. With no fragments
 it changes nothing, so running it twice is safe. The maintainer then edits the section as before:
 a `Compatibility` preamble with upgrade steps, `####` subsections, anchors.
+
+The `release` workflow runs `go run ./hack/changelog verify-assembled` on the tagged commit and
+stops before publishing anything if a fragment is still there.

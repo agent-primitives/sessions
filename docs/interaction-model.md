@@ -85,9 +85,9 @@ The `Sessions` service. You implement none of it.
 
 Treat `Cancel` as unavailable regardless of what a generated client offers. `DeleteSession`
 hides the session from ordinary listings and refuses further mutation, but does not reclaim
-actors or pins. Ownership and cleanup-target persistence and retryable teardown belong to #88;
-until then, `PENDING` means the irreversible tombstone committed, not that resources were
-released.
+actors or pins. The SQLite allocation-attempt ledger is incomplete, not authoritative cleanup
+inventory. Authoritative cleanup inventory and retryable teardown remain future work (#88);
+`PENDING` means the irreversible tombstone committed, not that resources were released.
 
 ### Run a turn
 

@@ -67,12 +67,12 @@ node_id() {
 # Reconcile kind, Docker and the ownership record. Refuse contradictory or foreign
 # state rather than allowing setup or teardown to guess which cluster it owns.
 cluster_state() {
-	local clusters id owner stage
+	local clusters id owner stage ref
 	clusters="$(kind_command get clusters)" || die "Cannot list clusters; nothing was changed."
 	id="$(node_id)" || die "Cannot inspect Docker containers; nothing was changed."
 	if grep -qxF "${CLUSTER}" <<<"${clusters}"; then
 		if [[ -z "${id}" || ! -f "${OWNER}" ]] ||
-			! read -r owner stage <"${OWNER}" || [[ "${owner}" != "${id}" ]]; then
+			! read -r owner stage ref <"${OWNER}" || [[ "${owner}" != "${id}" ]]; then
 			die "Refusing foreign or replaced cluster ${CLUSTER}: no matching container-ID ownership record."
 		fi
 		case "${stage}" in
@@ -92,7 +92,7 @@ unlock() {
 	local result=$? id
 	if [[ "${CREATE_PENDING}" == 1 ]]; then
 		if id="$(node_id)"; then
-			if [[ -n "${id}" ]]; then printf '%s creating\n' "${id}" >"${OWNER}"; fi
+			if [[ -n "${id}" ]]; then printf '%s creating %s\n' "${id}" "${SUBSTRATE_REF}" >"${OWNER}"; fi
 		else
 			echo "Cannot inspect interrupted creation; refusing to claim ownership." >&2
 		fi

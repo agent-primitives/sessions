@@ -10,9 +10,9 @@
 # --templates-only once the ActorTemplates hold their golden snapshots, before the model Secret and
 # the Deployments change.
 #
-# Idempotent: an existing cluster, template or deployment is reused. A template is reused by its
-# name, which does not cover the render itself: after a render change, run down.sh first. See
-# README.md.
+# Idempotent: an existing cluster, template or deployment is reused, except a cluster up.sh
+# installed from another substrate commit, which is refused. A template is reused by its name,
+# which does not cover the render itself: after a render change, run down.sh first. See README.md.
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
@@ -200,6 +200,31 @@ if [[ "${SANDBOX}" == microvm ]] && ! docker run --rm --device /dev/kvm busybox 
 	refuse "AGENTSUITE_DEMO_SANDBOX=microvm needs /dev/kvm in the Docker host, and 'docker run --device /dev/kvm' failed; set AGENTSUITE_DEMO_SANDBOX=gvisor on a host without KVM (an arm64 Mac)"
 fi
 
+# Where the cluster stands (cluster_stage): absent; foreign (up.sh did not create it); incomplete
+# (up.sh created it but create-kind-cluster.sh did not finish); created (ate-system not installed
+# yet); installed (from this checkout's substrate commit; another one is refused). An owned cluster
+# with no setup record for its node is refused: it may be installed and serving, and recreating it
+# would delete the daemon's emptyDir session journal. This runs before the shared substrate checkout
+# below is switched, so a refused cluster leaves it as it was.
+stage="$(cluster_stage)" || exit
+case "${stage}" in
+absent | foreign | created | installed) ;;
+creating) stage=incomplete ;;
+orphaned)
+	# create-kind-cluster.sh deletes a cluster of this name before it creates one.
+	echo "refusing to create kind cluster ${CLUSTER}: kind does not list it, but container ${CLUSTER}-control-plane exists." >&2
+	echo "Delete that container yourself, or set AGENTSUITE_DEMO_CLUSTER to another name." >&2
+	exit 1
+	;;
+*)
+	echo "refusing to reuse or recreate kind cluster ${CLUSTER}: up.sh created it, but ${SETUP} does not record how far its setup got." >&2
+	echo "Recreating it would delete agentsessionsd's session journal if it is installed. Run ./down.sh to delete it, then rerun up.sh." >&2
+	exit 1
+	;;
+esac
+# The control-plane container the stage is for; the install below records it.
+id="$(node_id)"
+
 step "agent-substrate ${SUBSTRATE_REF:0:8} checkout in ${SUBSTRATE}"
 if [[ ! -d "${SUBSTRATE}/.git" ]]; then
 	git clone -q https://github.com/agent-substrate/substrate "${SUBSTRATE}"
@@ -207,35 +232,6 @@ fi
 if [[ "$(git -C "${SUBSTRATE}" rev-parse HEAD)" != "${SUBSTRATE_REF}" ]]; then
 	git -C "${SUBSTRATE}" fetch -q https://github.com/agent-substrate/substrate "${SUBSTRATE_REF}"
 	git -C "${SUBSTRATE}" checkout -q "${SUBSTRATE_REF}"
-fi
-
-# Where the cluster stands: absent; foreign (up.sh did not create it); incomplete (up.sh created it
-# but create-kind-cluster.sh did not finish); created (ate-system not installed yet); installed.
-# An owned cluster with no setup record for its node is refused: it may be installed and serving,
-# and recreating it would delete the daemon's emptyDir session journal.
-if cluster_listed; then
-	id="$(node_id)"
-	if [[ -n "${id}" && "$(owned_id)" == "${id}" ]]; then
-		stage="$(setup_stage "${id}")"
-		case "${stage}" in
-		creating) stage=incomplete ;;
-		created | installed) ;;
-		*)
-			echo "refusing to reuse or recreate kind cluster ${CLUSTER}: up.sh created it, but ${SETUP} does not record how far its setup got." >&2
-			echo "Recreating it would delete agentsessionsd's session journal if it is installed. Run ./down.sh to delete it, then rerun up.sh." >&2
-			exit 1
-			;;
-		esac
-	else
-		stage=foreign
-	fi
-elif [[ -n "$(node_id)" ]]; then
-	# create-kind-cluster.sh deletes a cluster of this name before it creates one.
-	echo "refusing to create kind cluster ${CLUSTER}: kind does not list it, but container ${CLUSTER}-control-plane exists." >&2
-	echo "Delete that container yourself, or set AGENTSUITE_DEMO_CLUSTER to another name." >&2
-	exit 1
-else
-	stage=absent
 fi
 
 if [[ "${stage}" == absent || "${stage}" == incomplete ]]; then
@@ -288,7 +284,7 @@ if [[ "${stage}" == created ]]; then
 		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${ARCH}" \
 		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m \
 		deploy ate-system --setup-csi=none)
-	echo "${id} installed" >"${SETUP}"
+	echo "${id} installed ${SUBSTRATE_REF}" >"${SETUP}"
 else
 	step "reusing kind cluster ${CLUSTER}"
 	if [[ "${stage}" == foreign ]]; then

@@ -600,7 +600,7 @@ const noopResumeMethod = "ResumeActor (already RUNNING)"
 //
 // A ResumeActor that resumed nothing is not a primary line. atenet-router calls ResumeActor on
 // every routed request to make sure the actor runs, and ate-api answers at once, with resumed
-// unset, when it already does (substrate 96dffb2, cmd/ateapi/internal/controlapi/
+// unset, when it already does (substrate v0.5.0, cmd/ateapi/internal/controlapi/
 // workflow_resume.go). ate-api logs the response with the call, so the daemon's resume of a
 // suspended or new actor is the line that says "resumed":true. With keepNoop (a Resume, which
 // routes no turn) a no-op ResumeActor is the daemon's own and counts as a fallback line, labelled

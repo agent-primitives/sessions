@@ -63,6 +63,7 @@ export default defineConfig({
           items: [
             { label: "Durable kind example", slug: "substrate-kind" },
             { label: "Security posture", slug: "security" },
+            { label: "Allocation ownership", slug: "allocation-ownership" },
             { label: "Observability", slug: "observability" },
             { label: "Tool executors", slug: "tool-executors" },
             { label: "Approval-gated tool example", slug: "approval-gated-tool" },

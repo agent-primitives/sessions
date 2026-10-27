@@ -113,6 +113,39 @@ func TestExecReplayIdentityAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestExecModelConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		model   controller.ModelFunc
+		stream  controller.StreamFunc
+		wantErr error
+	}{
+		{name: "unconfigured", wantErr: controller.ErrMissingModel},
+		{name: "plain", model: echoModel},
+		{
+			name: "streaming only",
+			stream: func(ctx context.Context, req api.ModelRequest, _ func(string)) (api.ModelResponse, error) {
+				return echoModel(ctx, req)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := eventlog.AsStore(eventlog.New())
+			c, err := controller.New(log, tc.model, controller.WithStreamingModel(tc.stream))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.Exec(t.Context(), &echoHarness{}, []api.Message{msg("hi")}, 0)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Exec error = %v, want errors.Is(err, %v)", err, tc.wantErr)
+			}
+			if err := log.Verify(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 // TestInMemoryBackend proves the controller runs identically on the in-memory log via the
 // eventlog.AsStore adapter — the eventlog/sqlitelog unification behind one interface.
 func TestInMemoryBackend(t *testing.T) {

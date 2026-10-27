@@ -26,11 +26,18 @@ import (
 type volumesTemplate struct {
 	mu     sync.Mutex
 	actors map[string]substrate.ActorStatus
+	// captures counts each actor's captures, for CaptureLineage and NoCapture.
+	captures map[string]int
 }
 
-// info is the actor's state as substrate reports it; v.mu must be held.
+// info is the actor's state as substrate reports it; v.mu must be held. Its CaptureLineage names
+// the capture a suspend would take, or the one a suspended actor holds.
 func (v *volumesTemplate) info(name string) substrate.ActorInfo {
-	info := substrate.ActorInfo{Status: v.actors[name], Worker: "w", UID: "uid-" + name}
+	n := v.captures[name]
+	if v.actors[name] != substrate.StatusSuspended {
+		n++
+	}
+	info := substrate.ActorInfo{Status: v.actors[name], Worker: "w", UID: "uid-" + name, CaptureLineage: fmt.Sprintf("capture-%d", n), NoCapture: v.captures[name] == 0}
 	if info.Status == substrate.StatusSuspended {
 		info.Snapshot, info.SnapshotFidelity = "gs://snap/"+name, substrate.SnapshotFidelityVolumes
 	}
@@ -60,6 +67,12 @@ func (v *volumesTemplate) transition(name string, st substrate.ActorStatus) (sub
 	defer v.mu.Unlock()
 	if _, ok := v.actors[name]; !ok {
 		return substrate.ActorInfo{}, substrate.ErrActorNotFound
+	}
+	if st == substrate.StatusSuspended && v.actors[name] != substrate.StatusSuspended {
+		if v.captures == nil {
+			v.captures = map[string]int{}
+		}
+		v.captures[name]++
 	}
 	v.actors[name] = st
 	return v.info(name), nil

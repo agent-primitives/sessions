@@ -200,11 +200,11 @@ and permanently tombstones the UID. `deletion_state` is independent of execution
 `ACTIVE` has no deletion request time; `PENDING` has the committed request time.
 Delete preserves the recorded compute state, not a claim that a running actor has stopped.
 
-`PENDING` acknowledges durable intent only. Until ownership and cleanup are implemented in #88,
-actors, snapshots and fork-child pins remain retained indefinitely: Delete does not call
-`Runtime.Stop`, reclaim resources or report cleanup completion. Metadata and the immutable journal
-preserve route, lineage and snapshot evidence for audit, not an authoritative cleanup-target
-inventory; #88 owns that schema. Do not infer cleanup from gRPC OK.
+`PENDING` acknowledges durable intent only. The SQLite allocation-attempt ledger is incomplete,
+not authoritative cleanup inventory. Until authoritative cleanup inventory and reclamation are
+implemented in #88, actors, snapshots and fork-child pins remain retained indefinitely: Delete does
+not call `Runtime.Stop`, reclaim resources or report cleanup completion. Metadata and the immutable
+journal preserve route, lineage and snapshot evidence for audit. Do not infer cleanup from gRPC OK.
 
 List hides tombstones before pagination. Get and raw `Sessions.Replay` remain audit reads, including
 `DELETE`; UID, metadata and journal are retained forever. There is no UID reuse, cascade or erasure.

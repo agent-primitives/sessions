@@ -82,11 +82,11 @@ type SessionsClient interface {
 	// Approve are refused, including exact historical decision retries. Pending approval metadata
 	// grants no permission.
 	//
-	// Until ownership and cleanup land (#88), OK + PENDING acknowledges durable intent only. No
-	// Runtime.Stop, actor/pin release, physical snapshot GC or TERMINATED transition is attempted
-	// or promised. Execution and compute reporting stay independent. The retained journal
-	// is audit evidence, not a complete or authoritative cleanup-target inventory; the allocation
-	// ownership and cleanup-target schema belong to #88, not an inferred default harness or owner.
+	// OK + PENDING acknowledges durable intent only. No Runtime.Stop, actor/pin release, physical
+	// snapshot GC or TERMINATED transition is attempted or promised. Execution and compute reporting
+	// stay independent. The retained journal is audit evidence. The SQLite allocation-attempt ledger
+	// exists but is incomplete, not authoritative cleanup inventory. Authoritative cleanup inventory
+	// and reclamation remain future work (#88), not an inferred default harness or owner.
 	// Repeated PENDING deletion returns the identical Session: no timestamp, update_time, journal,
 	// fence or compute-projection changes. Clients must inspect deletion_state, not infer reclamation
 	// from an OK status.
@@ -327,11 +327,11 @@ type SessionsServer interface {
 	// Approve are refused, including exact historical decision retries. Pending approval metadata
 	// grants no permission.
 	//
-	// Until ownership and cleanup land (#88), OK + PENDING acknowledges durable intent only. No
-	// Runtime.Stop, actor/pin release, physical snapshot GC or TERMINATED transition is attempted
-	// or promised. Execution and compute reporting stay independent. The retained journal
-	// is audit evidence, not a complete or authoritative cleanup-target inventory; the allocation
-	// ownership and cleanup-target schema belong to #88, not an inferred default harness or owner.
+	// OK + PENDING acknowledges durable intent only. No Runtime.Stop, actor/pin release, physical
+	// snapshot GC or TERMINATED transition is attempted or promised. Execution and compute reporting
+	// stay independent. The retained journal is audit evidence. The SQLite allocation-attempt ledger
+	// exists but is incomplete, not authoritative cleanup inventory. Authoritative cleanup inventory
+	// and reclamation remain future work (#88), not an inferred default harness or owner.
 	// Repeated PENDING deletion returns the identical Session: no timestamp, update_time, journal,
 	// fence or compute-projection changes. Clients must inspect deletion_state, not infer reclamation
 	// from an OK status.

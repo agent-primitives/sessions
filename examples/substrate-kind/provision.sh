@@ -31,7 +31,7 @@ jq --arg image "${HARNESS_IMAGE}" --arg model "${MODEL_NAME}" \
 	.containers[0].image = $image |
 	.containers[0].env |= map(if .name == "HARNESS_MODEL" then .value = $model else . end) |
 	.workerSelector.matchLabels.workload = ("sessions-example-" + $class) |
-	.sandboxConfig = {sandboxClass: ("SANDBOX_CLASS_" + ($class | ascii_upcase)), configName: $config} |
+	.sandboxConfig = {sandboxClass: $class, configName: $config} |
 	.snapshotConfig.storageLocation = $location
 ' "${HERE}/deploy/actor-template.json" >"${desired}"
 

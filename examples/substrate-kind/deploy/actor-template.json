@@ -35,7 +35,7 @@
     "goldenSnapshotConfig": {"mode": "GOLDEN_SNAPSHOT_MODE_ENABLED"}
   },
   "sandboxConfig": {
-    "sandboxClass": "SANDBOX_CLASS_MICROVM",
+    "sandboxClass": "microvm",
     "configName": "microvm"
   }
 }

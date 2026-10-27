@@ -538,7 +538,7 @@ func (f *fakeControl) ResumeActor(_ context.Context, a substrate.ActorRef) (subs
 		return substrate.ActorInfo{}, substrate.ErrActorNotFound
 	}
 	f.actors[a.Name] = substrate.StatusRunning
-	return substrate.ActorInfo{Status: substrate.StatusRunning, Worker: "worker-0", UID: "uid-" + a.Name}, nil
+	return substrate.ActorInfo{Status: substrate.StatusRunning, Worker: "worker-0", Snapshot: f.snapshots[a.Name], UID: "uid-" + a.Name}, nil
 }
 
 func (f *fakeControl) SuspendActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {

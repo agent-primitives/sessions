@@ -151,8 +151,10 @@ func (ComputeState) EnumDescriptor() ([]byte, []int) {
 
 // DeletionState is independent of the execution and compute axes. PENDING is a permanent
 // UID tombstone and durable deletion intent, not confirmation that resources were reclaimed.
-// Until ownership and cleanup are implemented (#88), deletion emits PENDING only: actors,
-// fork-child pins and snapshots remain retained, and no Runtime.Stop is attempted.
+// The SQLite allocation-attempt ledger is incomplete, not authoritative cleanup inventory.
+// Until authoritative cleanup inventory and reclamation are implemented (#88), deletion emits
+// PENDING only: actors, fork-child pins and snapshots remain retained, and no Runtime.Stop is
+// attempted.
 type DeletionState int32
 
 const (

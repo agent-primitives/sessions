@@ -124,7 +124,7 @@ func TestRenderMapsTheComposition(t *testing.T) {
 			t.Fatalf("model credentials must stay with the host, found env %s", name)
 		}
 	}
-	if tmpl.GetSandboxConfig().GetSandboxClass() != atepb.SandboxClass_SANDBOX_CLASS_GVISOR || tmpl.GetSandboxConfig().GetConfigName() != "gvisor-default" {
+	if tmpl.GetSandboxConfig().GetSandboxClass() != "gvisor" || tmpl.GetSandboxConfig().GetConfigName() != "gvisor-default" {
 		t.Fatalf("sandbox = %v", tmpl.GetSandboxConfig())
 	}
 	if tmpl.GetSnapshotConfig().GetPreferredFidelity() != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY ||

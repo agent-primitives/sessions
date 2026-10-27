@@ -136,13 +136,8 @@ echo node > "$TEST_DIR/node"
 				}
 			}
 			if tc.reuse {
-				for path, contents := range map[string]string{
-					filepath.Join(dir, "node"):    "node\n",
-					filepath.Join(state, "owner"): "node installed\n",
-				} {
-					if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-						t.Fatal(err)
-					}
+				if err := os.WriteFile(filepath.Join(dir, "node"), []byte("node\n"), 0o600); err != nil {
+					t.Fatal(err)
 				}
 			}
 			workflow, err := os.ReadFile("../../.github/workflows/substrate-e2e.yml")
@@ -152,6 +147,11 @@ echo node > "$TEST_DIR/node"
 			for _, line := range strings.Split(string(workflow), "\n") {
 				if pin, ok := strings.CutPrefix(line, "  SUBSTRATE_REF: "); ok {
 					t.Setenv("TEST_PIN", pin)
+				}
+			}
+			if tc.reuse {
+				if err := os.WriteFile(filepath.Join(state, "owner"), []byte("node installed "+os.Getenv("TEST_PIN")+"\n"), 0o600); err != nil {
+					t.Fatal(err)
 				}
 			}
 			t.Setenv("TEST_MOUNTS", tc.mounts)

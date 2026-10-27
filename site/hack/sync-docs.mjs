@@ -35,6 +35,11 @@ const meta = {
     description:
       "Deploy the existing Substrate daemon with isolated chat harnesses and a journal that survives pod replacement.",
   },
+  "allocation-ownership.md": {
+    title: "Allocation ownership",
+    description:
+      "Write-ahead allocation tracking, conservative inventory completeness, and operator reconciliation.",
+  },
   "api-reference.md": {
     title: "API reference",
     description:

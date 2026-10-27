@@ -688,7 +688,7 @@ EOF
 	lines_hold /tmp/render/actortemplate.json 3:'"atespace": "agentsuite-demo"' 4:"\"name\": \"${TEMPLATE}\"" 8:'"workload": "agentsuite-demo-microvm"' \
 		14:"\"image\": \"${IMAGE}\"" 26:'"value": "/agent"' 29:'"name": "AGENTSUITE_MODEL"' 30:"\"value\": \"${model}\"" \
 		46:"\"storageLocation\": \"gs://ate-snapshots/agentsuite-demo/${TEMPLATE}/\"" 47:'SNAPSHOT_FIDELITY_MEMORY' \
-		50:'SANDBOX_CLASS_MICROVM' 51:'"configName": "microvm"' 53:'"resources"' 57:'"quantity": "1"' 61:'"quantity": "512Mi"'
+		50:'"sandboxClass": "microvm"' 51:'"configName": "microvm"' 53:'"resources"' 57:'"quantity": "1"' 61:'"quantity": "512Mi"'
 	template_check /tmp/render/actortemplate.json 'all("resources" not in c for c in t["containers"])' ||
 		fail "the harness container declares resources: the micro-VM guest is the template's memory less the VMM reserve"
 	template_check /tmp/render/actortemplate.json 'not any(isinstance(v, dict) and any(w in str(v.get("name", "")).upper() for w in ("KEY", "TOKEN", "SECRET", "AUTH", "PASSWORD")) for v in walk(t))' ||

@@ -28,8 +28,8 @@ func harnessContainer(kind string) *atepb.Container {
 		Command: []string{"/ko-app/harnessnode"},
 		// ResumeActor blocks on this probe, so a placed actor's harness is already serving. It also
 		// lets the template controller take the golden snapshot as soon as the harness is ready.
-		WakeupProbe: &atepb.ContainerWakeupProbe{
-			HttpGet:        &atepb.HTTPGetAction{Path: "/readyz", Port: 8081},
+		WakeupProbe: &atepb.WakeupProbe{
+			HttpGet:        &atepb.HttpGetAction{Path: "/readyz", Port: 8081},
 			TimeoutSeconds: 120,
 		},
 		Resources: &atepb.Resources{Limits: []*atepb.Limits{
@@ -43,10 +43,11 @@ func harnessContainer(kind string) *atepb.Container {
 	return c
 }
 
-// tierSandbox is where one tier's template runs: the sandbox class, the SandboxConfig it names, and
+// tierSandbox is where one tier's template runs: the sandbox class ("microvm" or "gvisor", the
+// string SandboxConfig.sandbox_class takes since substrate v0.5.0), the SandboxConfig it names, and
 // the `workload` label of the WorkerPool that serves it (deploy/substrate/<tier>-<class>-workerpool.yaml).
 type tierSandbox struct {
-	class  atepb.SandboxClass
+	class  string
 	config string
 	pool   string
 }
@@ -61,13 +62,13 @@ func sandboxFor(prefix, tier string) (tierSandbox, error) {
 	switch v := env(key, "microvm"); v {
 	case "microvm":
 		return tierSandbox{
-			class:  atepb.SandboxClass_SANDBOX_CLASS_MICROVM,
+			class:  "microvm",
 			config: env(prefix+"_SANDBOX_CONFIG", "microvm"),
 			pool:   "agentsessions-" + tier + "-microvm",
 		}, nil
 	case "gvisor":
 		return tierSandbox{
-			class:  atepb.SandboxClass_SANDBOX_CLASS_GVISOR,
+			class:  "gvisor",
 			config: env(prefix+"_SANDBOX_CONFIG", "gvisor-default"),
 			pool:   "agentsessions-" + tier + "-gvisor",
 		}, nil
@@ -163,9 +164,9 @@ func (f *fixture) createTemplate(t *testing.T, want *atepb.ActorTemplate) string
 		// Same reason: a template left by a run on another sandbox class or config would silently
 		// test that class or config.
 		return "ActorTemplate " + ref.GetAtespace() + "/" + ref.GetName() + " exists on sandbox class " +
-			got.GetSandboxConfig().GetSandboxClass().String() + " (config " + got.GetSandboxConfig().GetConfigName() +
+			got.GetSandboxConfig().GetSandboxClass() + " (config " + got.GetSandboxConfig().GetConfigName() +
 			", pool " + got.GetWorkerSelector().GetMatchLabels()["workload"] + "), not this run's " +
-			want.GetSandboxConfig().GetSandboxClass().String() + " (config " + want.GetSandboxConfig().GetConfigName() +
+			want.GetSandboxConfig().GetSandboxClass() + " (config " + want.GetSandboxConfig().GetConfigName() +
 			", pool " + want.GetWorkerSelector().GetMatchLabels()["workload"] +
 			"); delete it (or use a fresh ACTORTEMPLATE_ATESPACE) and rerun"
 	}
@@ -199,10 +200,10 @@ func TestSandboxFor(t *testing.T) {
 		want                tierSandbox
 		wantErr             bool
 	}{
-		{name: "default", want: tierSandbox{atepb.SandboxClass_SANDBOX_CLASS_MICROVM, "microvm", "agentsessions-echo-microvm"}},
-		{name: "microvm", class: "microvm", want: tierSandbox{atepb.SandboxClass_SANDBOX_CLASS_MICROVM, "microvm", "agentsessions-echo-microvm"}},
-		{name: "gvisor opt-in", class: "gvisor", want: tierSandbox{atepb.SandboxClass_SANDBOX_CLASS_GVISOR, "gvisor-default", "agentsessions-echo-gvisor"}},
-		{name: "config override", class: "gvisor", config: "custom", want: tierSandbox{atepb.SandboxClass_SANDBOX_CLASS_GVISOR, "custom", "agentsessions-echo-gvisor"}},
+		{name: "default", want: tierSandbox{"microvm", "microvm", "agentsessions-echo-microvm"}},
+		{name: "microvm", class: "microvm", want: tierSandbox{"microvm", "microvm", "agentsessions-echo-microvm"}},
+		{name: "gvisor opt-in", class: "gvisor", want: tierSandbox{"gvisor", "gvisor-default", "agentsessions-echo-gvisor"}},
+		{name: "config override", class: "gvisor", config: "custom", want: tierSandbox{"gvisor", "custom", "agentsessions-echo-gvisor"}},
 		{name: "wrong case", class: "gVisor", wantErr: true},
 		{name: "unknown", class: "kata", wantErr: true},
 	} {

@@ -19,14 +19,14 @@ Pick one. `agentctl` is the client CLI; `agentsessionsd` is the standalone serve
 
 ```bash
 # Go toolchain
-go install github.com/agent-primitives/sessions/cmd/agentctl@v0.2.0
-go install github.com/agent-primitives/sessions/cmd/agentsessionsd@v0.2.0
+go install github.com/agent-primitives/sessions/cmd/agentctl@v0.3.0
+go install github.com/agent-primitives/sessions/cmd/agentsessionsd@v0.3.0
 ```
 
 ```bash
 # Release archive: both binaries, for linux/darwin on amd64/arm64.
 # Checksums and SBOMs are published alongside it.
-VERSION=v0.2.0
+VERSION=v0.3.0
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 curl -sSL "https://github.com/agent-primitives/sessions/releases/download/${VERSION}/agentsessions_${VERSION#v}_${OS}_${ARCH}.tar.gz" \
@@ -36,7 +36,7 @@ curl -sSL "https://github.com/agent-primitives/sessions/releases/download/${VERS
 Container images are published for the server and the harness node:
 
 ```bash
-docker run --rm ghcr.io/agent-primitives/sessions/agentsessionsd:v0.2.0 --help
+docker run --rm ghcr.io/agent-primitives/sessions/agentsessionsd:v0.3.0 --help
 ```
 
 The images are multi-arch, built from the tagged source with no Dockerfile. `agentsessionsd` is the
@@ -387,8 +387,9 @@ agentctl list   --journal "$DELETE_JOURNAL" --project default
 ```
 
 Delete/Get report `deletion=PENDING` and the committed RFC3339 request time. PENDING means durable
-intent only until #88 supplies ownership and cleanup: actors, snapshots and fork-child pins remain
-retained indefinitely. No Stop or reclamation is attempted. List hides the UID, but Get and raw
+intent only: the SQLite allocation-attempt ledger is incomplete, not authoritative cleanup inventory.
+Until #88 supplies authoritative cleanup inventory and reclamation, actors, snapshots and fork-child
+pins remain retained indefinitely. No Stop or reclamation is attempted. List hides the UID, but Get and raw
 Replay retain metadata and the full audit chain, including DELETE. Retry returns the original
 timestamps; use Get/retry after a lost response. Exec, historical Fork, Resume, Suspend and Approve
 (including exact retries) now return `FAILED_PRECONDITION`. Existing children remain usable. There

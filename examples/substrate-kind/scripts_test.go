@@ -81,7 +81,12 @@ case "$*" in
       stall) sleep 5 ;;
     esac
     echo '{"metadata":{"name":"sessions-example"}}'; exit ;;
-  *"create actor-template"*) cp "${@: -1}" "$TEST_DIR/current" ;;
+  *"create actor-template"*)
+    jq -e --arg class "$SANDBOX_CLASS" '
+      .sandboxConfig.sandboxClass == $class and
+      .workerSelector.matchLabels.workload == ("sessions-example-" + $class)
+    ' "${@: -1}" >/dev/null
+    cp "${@: -1}" "$TEST_DIR/current" ;;
   *"get actor-template"*)
     if [[ ! -f "$TEST_DIR/current" ]]; then
       echo 'rpc error: code = NotFound desc = absent' >&2; exit 1

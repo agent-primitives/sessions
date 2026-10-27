@@ -171,7 +171,7 @@ func TestDeletionMigrationAddsActiveRows(t *testing.T) {
 			if got, want := schemaOf(t, path), schemaOf(t, fresh); !reflect.DeepEqual(got, want) {
 				t.Fatalf("legacy/fresh schema drift: %v != %v", got, want)
 			}
-			if got, want := queryValues(t, db, `PRAGMA table_info(sessions)`), queryValues(t, rawDB(t, fresh), `PRAGMA table_info(sessions)`); !reflect.DeepEqual(got, want) || len(got) != 27 {
+			if got, want := queryValues(t, db, `PRAGMA table_info(sessions)`), queryValues(t, rawDB(t, fresh), `PRAGMA table_info(sessions)`); !reflect.DeepEqual(got, want) || len(got) != 29 {
 				t.Fatalf("legacy/fresh columns drift: %v != %v", got, want)
 			}
 		})

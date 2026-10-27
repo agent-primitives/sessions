@@ -218,7 +218,8 @@ stateDiagram-v2
   process sharing the database is served after this host restarts. Harness-registry deletion is not
   implemented: `DeleteSession` tombstones a session but retains its metadata and audit log, so its
   recorded harness identity remains relevant. Session deletion returns `PENDING` without stopping
-  resources; ownership and cleanup-target persistence and teardown belong to #88.
+  resources. The SQLite allocation-attempt ledger is incomplete; authoritative cleanup inventory
+  and teardown remain future work (#88).
 
 The registry is an admin API. `agentsessionsd` loads stored registrations on every start, even
 without the operator listener: existing sessions on retired harnesses still route to their backend

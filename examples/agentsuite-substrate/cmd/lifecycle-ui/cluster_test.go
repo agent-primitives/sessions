@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agent-primitives/sessions/examples/agentsuite-substrate/render"
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/protobuf/encoding/protojson"
 )
@@ -525,7 +526,7 @@ func memoryTier(t *testing.T, mutate func(*atepb.ActorTemplate)) ([]byte, string
 	tm := &atepb.ActorTemplate{
 		Metadata:       &atepb.ResourceMetadata{Atespace: "agentsuite-demo", Name: "support-desk-triage-1a2b3c4d"},
 		Containers:     []*atepb.Container{{Name: "harness", Image: "localhost:5001/h@sha256:" + strings.Repeat("0", 64)}},
-		SandboxConfig:  &atepb.SandboxConfig{SandboxClass: atepb.SandboxClass_SANDBOX_CLASS_MICROVM},
+		SandboxConfig:  &atepb.SandboxConfig{SandboxClass: render.SandboxClassMicroVM},
 		SnapshotConfig: &atepb.SnapshotConfig{PreferredFidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, StorageLocation: "gs://ate-snapshots/agentsuite-demo/support-desk-triage-1a2b3c4d/"},
 	}
 	if mutate != nil {
@@ -598,7 +599,8 @@ func TestVolumesTemplateRefusals(t *testing.T) {
 		"not MEMORY": func(tm *atepb.ActorTemplate) {
 			tm.SnapshotConfig.PreferredFidelity = atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
 		},
-		"gVisor": func(tm *atepb.ActorTemplate) { tm.SandboxConfig.SandboxClass = atepb.SandboxClass_SANDBOX_CLASS_GVISOR },
+		"gVisor":   func(tm *atepb.ActorTemplate) { tm.SandboxConfig.SandboxClass = render.SandboxClassGVisor },
+		"no class": func(tm *atepb.ActorTemplate) { tm.SandboxConfig.SandboxClass = "" },
 		"volumes already": func(tm *atepb.ActorTemplate) {
 			tm.Volumes = []*atepb.Volume{{Name: "v", DurableDir: &atepb.DurableDirVolumeSource{}}}
 		},

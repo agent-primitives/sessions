@@ -132,8 +132,12 @@ model. The actor survives the pod restart: this does **not** demonstrate harness
 memory restoration. The full smoke is bounded to fifteen minutes; readiness probes are individually
 bounded to three seconds within a thirty-second readiness budget.
 
-`up.sh` records the kind control-plane container ID, not just its name. Reruns reuse that cluster
-and retain its SQLite volume. `down.sh` refuses foreign/replaced clusters or uncertain inspection
+`up.sh` records the kind control-plane container ID and the installed Substrate revision, not just
+its name. Reruns reuse that cluster and retain its SQLite volume only when the revision matches.
+An older or unrecorded revision is refused before changing the managed checkout: Substrate does
+not support an in-place upgrade to v0.5.0. Use a new `CLUSTER` to preserve the old cluster, or run
+`down.sh` explicitly before recreating it; teardown deletes its journal and model cache.
+`down.sh` refuses foreign/replaced clusters or uncertain inspection
 results and preserves the shared `kind-registry`. Interrupted creation is recorded but never
 automatically recreated. Keep the state directory; losing its ownership record does not authorize
 automatic adoption or deletion. Override `CLUSTER` and `SUBSTRATE_KIND_WORK` consistently for
@@ -148,7 +152,8 @@ This is **production-shaped, not production-ready**:
   deny-all pod ingress requires an enforcing CNI. The pinned kind setup supplies one.
 - The projected ate-api token has a dedicated audience and the default Kubernetes API token is
   disabled. At this Substrate pin, the audience token is not least-privilege service-account
-  authorization or a tenant boundary.
+  authorization or a tenant boundary. The namespace carries `ate.dev/api-access=true` for
+  Substrate v0.5.0's ate-api ingress policy; worker pods are excluded from that allowance.
 - Harness traffic is h2c through atenet-router; routing metadata is not authorization. Long model
   calls can exceed the router's stream/idle timeouts.
 - The actor runs the reference chat context policy, which sends the full recorded conversation

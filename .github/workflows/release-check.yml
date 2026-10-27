@@ -17,6 +17,8 @@ on:
       - .ko.yaml
       - .github/workflows/release.yml
       - .github/workflows/release-check.yml
+      - hack/release-tags.sh
+      - hack/release-tags-test.sh
 
 permissions:
   contents: read
@@ -46,6 +48,17 @@ jobs:
         with:
           version: "~> v2"
           args: check
+
+      # goreleaser would otherwise take the newest tag of either module as the version, and an
+      # integrations/substrate/vX.Y.Z tag is not a valid image tag. See hack/release-tags.sh.
+      - name: release tags select root-module tags only
+        run: hack/release-tags-test.sh
+
+      - name: pin goreleaser to root-module tags
+        # Captured first: the default run shell has no pipefail, so a pipe would hide a failure.
+        run: |
+          tags="$(hack/release-tags.sh)"
+          echo "${tags}" | tee -a "$GITHUB_ENV"
 
       # --snapshot builds every binary and archive for linux and darwin on amd64 and arm64, and has ko
       # load the images into the runner's Docker daemon (goreleaser.ko.local) instead of pushing.

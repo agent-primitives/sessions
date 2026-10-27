@@ -44,6 +44,18 @@ fi
 export SANDBOX_CLASS SANDBOX_CONFIG ACTOR_TEMPLATE PROJECT
 progress "Sandbox: ${SANDBOX_CLASS}; images: linux/${arch}"
 
+# Check ownership and the installed revision before changing the shared checkout.
+# Older or unrecorded installations require explicit teardown, never an in-place upgrade.
+progress "Checking ownership and setup state for cluster ${CLUSTER}"
+lock_cluster
+stage="$(cluster_state)"
+[[ "${stage}" != creating ]] || die "Incomplete creation; run down.sh before retrying. Storage will not be recreated automatically."
+if [[ "${stage}" == created || "${stage}" == installed ]]; then
+	read -r _ _ installed_ref <"${OWNER}" || die "Cannot read the cluster's recorded Substrate revision."
+	[[ "${installed_ref}" == "${SUBSTRATE_REF}" ]] ||
+		die "Cluster Substrate revision is older or unrecorded; Substrate cannot be upgraded in place. Use a new CLUSTER, or run down.sh to delete this cluster and its journal before recreating it."
+fi
+
 # Pin the managed Substrate checkout to the CI revision. A caller-supplied checkout
 # is read-only to setup: it must already be clean and at that same revision.
 if [[ "${SUBSTRATE_DIR}" == "${WORK}/substrate" ]]; then
@@ -64,19 +76,14 @@ else
 		die "Custom SUBSTRATE_DIR must be clean and already at the workflow pin; it will not be changed."
 fi
 
-# Serialize setup/teardown and verify ownership before creating or reusing a cluster.
-# Interrupted creation requires explicit teardown rather than an automatic storage reset.
-progress "Checking ownership and setup state for cluster ${CLUSTER}"
-lock_cluster
-stage="$(cluster_state)"
-[[ "${stage}" != creating ]] || die "Incomplete creation; run down.sh before retrying. Storage will not be recreated automatically."
+# Create only an absent cluster; interrupted creation requires explicit teardown.
 if [[ "${stage}" == absent ]]; then
 	progress "Creating kind cluster ${CLUSTER}"
 	CREATE_PENDING=1
 	(cd "${SUBSTRATE_DIR}" && hack/create-kind-cluster.sh)
 	id="$(node_id)"
 	[[ -n "${id}" ]] || die "New cluster has no control-plane container ID."
-	printf '%s created\n' "${id}" >"${OWNER}"
+	printf '%s created %s\n' "${id}" "${SUBSTRATE_REF}" >"${OWNER}"
 	CREATE_PENDING=0
 	stage=created
 fi
@@ -107,7 +114,7 @@ if [[ "${stage}" == created ]]; then
 	[[ "${stage}" == created ]] || die "Cluster changed during installation."
 	id="$(node_id)"
 	[[ -n "${id}" ]] || die "Cluster disappeared during installation."
-	printf '%s installed\n' "${id}" >"${OWNER}"
+	printf '%s installed %s\n' "${id}" "${SUBSTRATE_REF}" >"${OWNER}"
 else
 	progress "Reusing owned cluster ${CLUSTER}; retaining its journal."
 fi

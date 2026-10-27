@@ -85,8 +85,9 @@ host-to-router hop is not.
 reaches each harness through substrate's `atenet-router`, over plaintext h2c, naming the actor in an
 `ate-target-actor: <atespace>/<actor>` header. The router does not authenticate or authorize callers:
 it resumes whichever actor the header names and proxies the call to it (substrate's threat model
-tracks this as T-04, "check client permissions before resuming actors", not yet implemented), and a
-stock install puts no NetworkPolicy in front of it. So any pod that can reach
+tracks this as T-04, "check client permissions before resuming actors", not yet implemented), and
+the NetworkPolicy a v0.5.0 install puts on it admits any source on its data ports (substrate
+`manifests/ate-install/ate-system-networkpolicies.yaml`). So any pod that can reach
 `atenet-router.ate-system.svc:80` can wake any actor and open a `Harness.Connect` stream to it, and
 the harness accepts the stream, because it does not authenticate the host either. Such a caller can
 feed a harness forged model results or tool results, read what the harness emits, and keep an actor
@@ -100,8 +101,16 @@ unpoisoned. Only the router-to-worker hop is protected
 (mTLS with the router's SPIFFE identity, and the worker checks the actor is assigned to it).
 
 Until this is closed, run the substrate backend only in a cluster where every workload that can
-reach the router is trusted, or restrict the router with a NetworkPolicy that admits only the
-`agentsessions` host.
+reach the router is trusted, or restrict the router to the `agentsessions` host. NetworkPolicies are
+additive, so a narrower policy next to the install's `atenet-router` policy restricts nothing: the
+install's policy itself has to change, and every Substrate install applies it again.
+
+The `ate.dev/api-access=true` label that v0.5.0 requires on the `agentsessionsd` namespace
+([namespace access](substrate-conformance.md#substrate-v050-namespace-access-to-ate-api-server))
+admits every pod in that namespace except worker pods to ate-api-server at the network level.
+ate-api-server still authenticates and authorizes each request (as the policy's comment in substrate
+`manifests/ate-install/ate-system-networkpolicies.yaml` notes), so the label widens reachability,
+not permissions. Keep untrusted workloads out of a labeled namespace.
 
 Not yet implemented: the harness does not authenticate the host. A planned fix delivers a per-session
 credential at actor creation and has `harnessnode` check it on every Connect, so a harness talks only
@@ -161,8 +170,9 @@ id is what the harness says about itself, so it does not authenticate the harnes
 
 Any caller that can reach the default Sessions service can permanently tombstone a known UID:
 Delete has no additional authorization unless the host installs `WithAuthorization`. `PENDING`
-acknowledges durable intent only until #88 provides authoritative ownership and cleanup. Actors,
-snapshots and fork-child pins remain retained indefinitely; Delete does not
+acknowledges durable intent only. The SQLite allocation-attempt ledger is incomplete, not
+authoritative cleanup inventory. Until #88 provides authoritative cleanup inventory and reclamation,
+actors, snapshots and fork-child pins remain retained indefinitely; Delete does not
 call Stop, reclaim resources or stop an actor's independent external activity. The retained metadata
 and journal are audit evidence, not a complete inventory of resources to clean up.
 
@@ -222,7 +232,7 @@ whether active or retired, even with the operator listener off. Static inspectio
 retirement do not require `-model`. This reference daemon does not serve substrate placements. Registry
 responses print proto-JSON, including `spec_digest` and lifecycle state.
 
-The checked-in [Kubernetes manifest](../deploy/kubernetes/agentsessionsd.yaml) pins v0.2.0, which
+The checked-in [Kubernetes manifest](../deploy/kubernetes/agentsessionsd.yaml) pins v0.3.0, which
 supports `-registry-addr` but leaves it off: add `-registry-addr 127.0.0.1:8081` to its args first.
 The manifest does not expose the operator port through a Service. With the listener enabled, an
 operator with **pods/portforward RBAC** may open a local tunnel, then use the CLI against its local

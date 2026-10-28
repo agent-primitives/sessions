@@ -15,7 +15,7 @@ spec:
   replicas: 3
   sandboxClasses:
     - name: gvisor
-  workerImage: ATEOM_IMAGE
+  workerImage: ATEWORKER_IMAGE
   template:
     resources:
       limits:

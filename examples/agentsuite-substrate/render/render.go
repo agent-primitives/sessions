@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,8 +26,8 @@ import (
 	"strconv"
 	"strings"
 
-	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/kaimahi-agents/kaimahi/agentsuite"
+	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
 
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/examples/agentsuite-substrate/agent"
@@ -288,6 +289,9 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 	if err != nil {
 		return nil, err
 	}
+	if err := sandboxConfigName(class, b.Sandbox.ConfigName); err != nil {
+		return nil, err
+	}
 	fidelity, err := snapshotFidelity(b.Snapshot.Fidelity)
 	if err != nil {
 		return nil, err
@@ -297,12 +301,21 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 	if o.Memory && fidelity != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
 		return nil, fmt.Errorf("snapshot.fidelity %q: the memory tier keeps the conversation in RAM, so it needs MEMORY", b.Snapshot.Fidelity)
 	}
-	// Substrate refuses a ROOTFS template on any class but micro-VM, the one that can capture the
-	// root filesystem without memory (at v0.5.0, cmd/ateapi/internal/apivalidation/
-	// actor_template.go, ValidateCustom_CreateActorTemplateRequest_ActorTemplate). Refuse it here, so
-	// no template is emitted that template creation would reject.
+	// Only the micro-VM class captures the root filesystem without memory. substrate v0.5.0 refused a
+	// ROOTFS template on any other class at creation; v0.6.0 templates carry no class, so nothing
+	// would refuse it before a suspend. Refuse it here instead.
 	if fidelity == atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS && class != SandboxClassMicroVM {
 		return nil, fmt.Errorf("snapshot.fidelity %q with sandbox.class %q: substrate takes a ROOTFS snapshot only on microvm", b.Snapshot.Fidelity, b.Sandbox.Class)
+	}
+	// At substrate v0.6.0 a template has no sandbox config: its actors run on whatever class the
+	// WorkerPool it selects runs, with that pool's configRef or the class default. The selector is
+	// therefore the only thing that can honor sandbox.class.
+	if len(b.WorkerSelector.MatchLabels) == 0 {
+		return nil, fmt.Errorf("sandbox.class %q needs workerSelector.matchLabels: substrate takes the sandbox class from the WorkerPool the template selects, so select a pool that runs it", b.Sandbox.Class)
+	}
+	limits, err := resourceLimits(b.Resources.CPU, b.Resources.Memory)
+	if err != nil {
+		return nil, err
 	}
 	name := TemplateName(c.Suite, c.Agent.ID, m[1], b.Digest(), o)
 	container := &atepb.Container{
@@ -328,13 +341,17 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.MemoryEnv, Value: agent.MemoryRAM})
 		harness, resumability, tier = c.Agent.ID+"-memory", v1.Resumability_RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT, ",memory"
 	}
-	// The binding's resources go on the template only. At substrate v0.5.0, the template's
-	// resources size the sandbox and book the worker (cmd/ateapi/internal/controlapi/
-	// workflow_resume.go, actorResourceLimits and schedulingConstraints). ateom-gvisor writes them
-	// into the container's OCI spec (internal/sizing.ApplyToOCISpec). ateom-microvm boots a guest
-	// with the template's memory less a VMM reserve (128MiB by default, resolveGuestMemMiB) and
-	// refuses a container limit above the guest (checkResourceEnvelope), so a container copy of
-	// the same memory limit would fail the golden snapshot; the guest bounds the container instead.
+	// The binding's resources go on the template only. At substrate v0.6.0 the template's
+	// resources size the sandbox and book the worker against the capacity it advertises.
+	// ateworker-gvisor writes them into the container's OCI spec (internal/sizing.ApplyToOCISpec).
+	// ateworker-microvm boots a guest with the template's memory less a VMM reserve (128MiB by
+	// default, cmd/ateworker-microvm/run.go vmmMemReserveMiB) and refuses a container limit above
+	// the guest, so a container copy of the same memory limit would fail the golden snapshot; the
+	// guest bounds the container instead.
+	//
+	// snapshotConfig.storageLocation is a preview field at v0.6.0 (PerTemplateSnapshotLocation):
+	// accepted, but ignored while the gate is off, so snapshots go under the cluster's
+	// --snapshot-location. It is kept so the template still says where the binding wants them.
 	tmpl := &atepb.ActorTemplate{
 		Metadata:   &atepb.ResourceMetadata{Atespace: b.Atespace, Name: name},
 		Containers: []*atepb.Container{container},
@@ -342,11 +359,8 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 			PreferredFidelity: fidelity,
 			StorageLocation:   strings.TrimSuffix(b.Snapshot.StorageLocation, "/") + "/" + name + "/",
 		},
-		SandboxConfig: &atepb.SandboxConfig{SandboxClass: class, ConfigName: b.Sandbox.ConfigName},
-		Resources:     resourceLimits(b.Resources.CPU, b.Resources.Memory),
-	}
-	if len(b.WorkerSelector.MatchLabels) > 0 {
-		tmpl.WorkerSelector = &atepb.Selector{MatchLabels: b.WorkerSelector.MatchLabels}
+		Resources:      &atepb.ResourceRequirements{Limits: limits},
+		WorkerSelector: &atepb.Selector{MatchLabels: b.WorkerSelector.MatchLabels},
 	}
 	reg := &v1.HarnessRegistration{
 		Metadata: &v1.ResourceMetadata{Name: harness},
@@ -367,35 +381,89 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 	}, nil
 }
 
-// resourceLimits is the Resources for a binding's cpu and memory, nil when it sets neither.
-func resourceLimits(cpu, memory string) *atepb.Resources {
-	var limits []*atepb.Limits
-	if cpu != "" {
-		limits = append(limits, &atepb.Limits{Name: "cpu", Quantity: cpu})
+// resourceLimits converts a binding's Kubernetes-style cpu and memory quantities to the template's
+// limits. substrate v0.6.0 rejects a template without both, so both are required.
+func resourceLimits(cpu, memory string) (*atepb.Resources, error) {
+	if cpu == "" || memory == "" {
+		return nil, fmt.Errorf("resources: cpu %q and memory %q are both required: substrate requires a cpu and a memory limit on every template", cpu, memory)
 	}
-	if memory != "" {
-		limits = append(limits, &atepb.Limits{Name: "memory", Quantity: memory})
+	milli, err := parseQuantity("resources.cpu", cpu, cpuUnits, `whole cores ("1") or millicores ("500m")`)
+	if err != nil {
+		return nil, err
 	}
-	if len(limits) == 0 {
-		return nil
+	memBytes, err := parseQuantity("resources.memory", memory, memoryUnits, "bytes, optionally with a Ki, Mi, Gi, Ti, k, M, G or T suffix")
+	if err != nil {
+		return nil, err
 	}
-	return &atepb.Resources{Limits: limits}
+	return &atepb.Resources{CpuMillicores: milli, MemoryBytes: memBytes}, nil
 }
 
-// The sandbox classes a binding's sandbox.class can name. Since substrate v0.5.0
-// SandboxConfig.sandbox_class is the class name itself, not an enum, so these are also its values.
+// cpuUnits maps a cpu quantity's suffix to millicores, memoryUnits a memory quantity's to bytes.
+// They are the integer subset of Kubernetes quantities a binding uses; fractions ("0.5"),
+// exponents ("1e3") and other suffixes are refused rather than approximated.
+var (
+	cpuUnits    = map[string]int64{"": 1000, "m": 1}
+	memoryUnits = map[string]int64{
+		"":  1,
+		"k": 1e3, "M": 1e6, "G": 1e9, "T": 1e12,
+		"Ki": 1 << 10, "Mi": 1 << 20, "Gi": 1 << 30, "Ti": 1 << 40,
+	}
+)
+
+// parseQuantity parses s as a positive whole number followed by one of units' suffixes and returns
+// it in the units' base. Zero, a sign, a fraction, an unknown suffix and an int64 overflow are
+// errors naming field.
+func parseQuantity(field, s string, units map[string]int64, want string) (int64, error) {
+	digits, suffix := s, ""
+	if i := strings.IndexFunc(s, func(r rune) bool { return r < '0' || r > '9' }); i >= 0 {
+		digits, suffix = s[:i], s[i:]
+	}
+	mult, ok := units[suffix]
+	if digits == "" || !ok {
+		return 0, fmt.Errorf("%s %q: want a positive whole number of %s", field, s, want)
+	}
+	n, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil || n > math.MaxInt64/mult {
+		return 0, fmt.Errorf("%s %q: out of range", field, s)
+	}
+	if n == 0 {
+		return 0, fmt.Errorf("%s %q: must be greater than zero", field, s)
+	}
+	return n * mult, nil
+}
+
+// The sandbox classes a binding's sandbox.class can name: the class a WorkerPool's sandboxClasses
+// entry names.
 const (
 	SandboxClassMicroVM = "microvm"
 	SandboxClassGVisor  = "gvisor"
 )
 
-// sandboxClass is the SandboxConfig.sandbox_class for a binding's sandbox.class.
+// sandboxClass validates a binding's sandbox.class.
 func sandboxClass(s string) (string, error) {
 	switch s {
 	case SandboxClassMicroVM, SandboxClassGVisor:
 		return s, nil
 	}
 	return "", fmt.Errorf("sandbox.class %q: want %s or %s", s, SandboxClassMicroVM, SandboxClassGVisor)
+}
+
+// classDefaultConfigs names the SandboxConfig substrate v0.6.0 installs as each class's default
+// (manifests/ate-install/sandboxconfig-gvisor.yaml, manifests/microvm/sandboxconfig-microvm.yaml.tmpl,
+// both annotated sandboxconfig.ate.dev/is-class-default).
+var classDefaultConfigs = map[string]string{
+	SandboxClassGVisor:  "gvisor-default",
+	SandboxClassMicroVM: "microvm",
+}
+
+// sandboxConfigName validates a binding's sandbox.configName. A v0.6.0 template names no config,
+// so the actor runs on the selected pool's configRef or its class default: the renderer cannot
+// honor any other name, and refuses one rather than drop it.
+func sandboxConfigName(class, name string) error {
+	if name == "" || name == classDefaultConfigs[class] {
+		return nil
+	}
+	return fmt.Errorf("sandbox.configName %q: substrate v0.6.0 templates name no SandboxConfig, so the template runs on the selected WorkerPool's config; leave it unset or %q (the %s class default), and to run %q add configRef: {name: %s} to that pool's sandboxClasses entry", name, classDefaultConfigs[class], class, name, name)
 }
 
 func snapshotFidelity(s string) (atepb.SnapshotFidelity, error) {

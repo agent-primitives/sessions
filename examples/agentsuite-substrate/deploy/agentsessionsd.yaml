@@ -24,6 +24,7 @@ spec:
         # resourceVersion here, so a rotated or deleted key restarts the pod.
         agentsuite-demo/model-secret-version: "MODEL_SECRET_VERSION"
     spec:
+      serviceAccountName: agentsessionsd
       containers:
         - name: agentsessionsd
           image: DAEMON_IMAGE

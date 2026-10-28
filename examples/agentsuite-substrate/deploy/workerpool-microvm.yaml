@@ -1,5 +1,5 @@
 # Micro-VM workers (kata + cloud-hypervisor) for the agent's actors: the default class, which needs
-# /dev/kvm in the kind node. up.sh installs the cluster-scoped `microvm` SandboxConfig and its assets
+# /dev/kvm in the kind node. up.sh installs the cluster-scoped `microvm` SandboxConfig (the class default, which this pool runs) and its assets
 # first (substrate's hack/install-microvm-deps.sh). One worker builds each template's golden snapshot
 # (the stateless and the memory tier each have one); the others host session actors and fork children.
 #
@@ -17,4 +17,16 @@ spec:
   replicas: 5
   sandboxClasses:
     - name: microvm
-  workerImage: ATEOM_IMAGE
+  workerImage: ATEWORKER_IMAGE
+  template:
+    # The worker advertises these limits as its scheduling capacity, and substrate's scheduler books
+    # each ActorTemplate's resources against them; a worker with no limits admits no sized actor. The
+    # micro-VM itself is sized by the template (binding-microvm.json), not by these. Requests stay low
+    # so the pool fits on a single kind node.
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+      requests:
+        cpu: 100m
+        memory: 256Mi

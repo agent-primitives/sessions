@@ -29,7 +29,8 @@ wait_state() {
 [[ "${SANDBOX}" == microvm ]] || fail "AGENTSUITE_DEMO_SANDBOX=${SANDBOX}: the smoke test is for the micro-VM class"
 echo "# substrate's counter-microvm demo: its WorkerPool and ActorTemplate on the microvm SandboxConfig"
 (cd "${SUBSTRATE}" && KUBECTL_CONTEXT="kind-${CLUSTER}" KO_DOCKER_REPO=localhost:5001 KO_DEFAULTPLATFORMS=linux/amd64 \
-	NO_DEV_ENV=true ATE_INSTALL_KIND=true hack/install-ate-kind.sh --deploy-demo-counter-microvm) >"${STATE}/counter-demo.log" 2>&1 ||
+	NO_DEV_ENV=true ATE_INSTALL_KIND=true hack/install-ate-kind.sh --atenet-dataplane=agentgateway deploy demo counter-microvm) \
+	>"${STATE}/counter-demo.log" 2>&1 ||
 	{
 		tail -30 "${STATE}/counter-demo.log"
 		fail "deploying substrate's counter-microvm demo failed"
@@ -43,6 +44,7 @@ if [[ "$(actor 'a["status"]["state"]')" == ACTOR_STATE_SUSPENDED ]]; then
 	show "${ATE[@]}" resume actor "${ACTOR}" -a "${CNS}"
 fi
 wait_state ACTOR_STATE_RUNNING
+# Plaintext :80 is the agentgateway router up.sh installs; the envoy router has no plaintext listener.
 "${K[@]}" -n ate-system port-forward svc/atenet-router "${PORT}:80" >/dev/null 2>&1 &
 PF=$!
 trap 'kill ${PF} 2>/dev/null || true' EXIT

@@ -9,7 +9,7 @@
 #                    the substrate adapter runs inside agentsessionsd and logs nothing of its own)
 #   ate-api          the adapter's CreateActor (or ResumeActor) call for the session, in the ate-api
 #                    server's log, with the actor it names
-#   worker           the worker pod's ateom restoring the session's actor from the golden snapshot
+#   worker           the worker pod's ateworker restoring the session's actor from the golden snapshot
 #                    (RestoreWorkload, sent by the node's atelet), with the actor it names
 #   micro-VM         the actor's own lifecycle log: the actor starting in its micro-VM
 #   atenet-router    the harnesswire stream routed to the actor's worker
@@ -50,7 +50,7 @@ hop() { python3 "${here}/trace-hop.py" "$@"; }
 shopt -s nullglob
 hop agentsessionsd "operation=exec session_uid=${session} .*phase=finish" operation,session_uid,outcome "${dir}/agentsessionsd.log"
 hop ate-api "\"method\":\"/ateapi\\.Control/(CreateActor|ResumeActor)\".*\"${session}\"" method,actor=req.actor.metadata.name,actor=req.actor.name "${dir}"/ate-system.ate-api*.log
-hop worker "\"method\":\"/ateom\\.Ateom/(RestoreWorkload|RunWorkload)\".*\"actor_name\":\"${session}\"" method,actor=req.actor_name "${dir}"/agentsuite-demo.*.log
+hop worker "\"method\":\"/ateworker\\.Worker/(RestoreWorkload|RunWorkload)\".*\"actor_name\":\"${session}\"" method,actor=req.actor_name "${dir}"/agentsuite-demo.*.log
 hop micro-VM '"Actor (started|restored)' "" "${dir}/actor-lifecycle.log"
 hop atenet-router "Route ok.*${session}" actor.name,targetAddr "${dir}"/ate-system.atenet-router*.log
 hop harness 'harness: model .* used [0-9]+ input' "" "${dir}/harness.log"

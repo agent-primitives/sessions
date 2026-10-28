@@ -10,8 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/agent-primitives/sessions/examples/agentsuite-substrate/render"
-	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -21,8 +20,8 @@ import (
 // by design, so the template is derived from the memory tier's rendered one with three changes:
 //
 //   - snapshotConfig.preferredFidelity is VOLUMES, so a suspend completes a VOLUMES snapshot;
-//   - one durableDir volume is mounted in the container: at substrate v0.5.0 ateom-microvm
-//     refuses a VOLUMES checkpoint with no durable-dir or CSI volume (cmd/ateom-microvm/
+//   - one durableDir volume is mounted in the container: at substrate v0.6.0 ateworker-microvm
+//     refuses a VOLUMES checkpoint with no durable-dir or CSI volume (cmd/ateworker-microvm/
 //     checkpoint.go), and ate-api then marks the actor CRASHED (cmd/ateapi/internal/controlapi/
 //     crash.go, handleAteletError), which would show a substrate crash rather than the sessions
 //     refusal;
@@ -38,6 +37,10 @@ const (
 	volumesMountPath  = "/var/lib/lifecycle-data"
 	volumesDeployment = "agentsessionsd-volumes"
 	memoryDeployment  = "agentsessionsd-memory"
+	// microVMPool is the `workload` label of the micro-VM WorkerPool (deploy/workerpool-microvm.yaml)
+	// that binding-microvm.json selects. A template carries no sandbox class at substrate v0.6.0,
+	// so the pool it selects is what says it runs on a micro-VM.
+	microVMPool = "agentsuite-demo-microvm"
 )
 
 // runInject writes, from up.sh's rendered memory tier in -state, the VOLUMES template
@@ -106,8 +109,8 @@ func volumesTemplate(memoryTemplate []byte, memoryFlag string) (*derived, error)
 	if got := t.GetSnapshotConfig().GetPreferredFidelity(); got != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
 		return nil, fmt.Errorf("memory-tier template prefers %s, want SNAPSHOT_FIDELITY_MEMORY", got)
 	}
-	if got := t.GetSandboxConfig().GetSandboxClass(); got != render.SandboxClassMicroVM {
-		return nil, fmt.Errorf("memory-tier template runs sandbox class %q; the volumes lane is derived for micro-VMs only", got)
+	if got := t.GetWorkerSelector().GetMatchLabels()["workload"]; got != microVMPool {
+		return nil, fmt.Errorf("memory-tier template selects pool %q, not the micro-VM pool %q; the volumes lane is derived for micro-VMs only", got, microVMPool)
 	}
 	if len(t.GetContainers()) != 1 {
 		return nil, fmt.Errorf("memory-tier template has %d containers, want 1", len(t.GetContainers()))

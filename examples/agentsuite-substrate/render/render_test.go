@@ -10,7 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
+	"google.golang.org/protobuf/proto"
 
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/examples/agentsuite-substrate/agent"
@@ -124,9 +125,6 @@ func TestRenderMapsTheComposition(t *testing.T) {
 			t.Fatalf("model credentials must stay with the host, found env %s", name)
 		}
 	}
-	if tmpl.GetSandboxConfig().GetSandboxClass() != "gvisor" || tmpl.GetSandboxConfig().GetConfigName() != "gvisor-default" {
-		t.Fatalf("sandbox = %v", tmpl.GetSandboxConfig())
-	}
 	if tmpl.GetSnapshotConfig().GetPreferredFidelity() != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY ||
 		tmpl.GetSnapshotConfig().GetStorageLocation() != "gs://ate-snapshots/agentsuite-demo/"+name+"/" {
 		t.Fatalf("snapshot = %v", tmpl.GetSnapshotConfig())
@@ -149,35 +147,30 @@ func TestRenderMapsTheComposition(t *testing.T) {
 }
 
 // Substrate sizes the sandbox (the micro-VM's vCPUs and RAM) and books the worker from the
-// template's resources, so the binding's resources go there. The container declares none: a
-// micro-VM guest gets the template's memory less a 128MiB VMM reserve, and ateom-microvm refuses a
-// container memory limit above the guest, so a copy of the binding's memory on the container (512Mi
-// in a 384MiB guest for the demo binding) would fail the golden snapshot. A binding without
-// resources leaves the template unset.
+// template's resources, so the binding's resources go there, converted to millicores and bytes. The
+// container declares none: a micro-VM guest gets the template's memory less a 128MiB VMM reserve,
+// and ateworker-microvm refuses a container memory limit above the guest, so a copy of the binding's
+// memory on the container (512Mi in a 384MiB guest for the demo binding) would fail the golden
+// snapshot. substrate v0.6.0 rejects a template without both limits, so a binding missing either is
+// refused.
 func TestRenderSizesTheSandboxFromTheTemplate(t *testing.T) {
 	comp, err := Load("../suite", "triage", "linux/arm64")
 	if err != nil {
 		t.Fatal(err)
 	}
 	image := "localhost:5001/agentsuite-harness@" + digestA
-	limits := func(r *atepb.Resources) map[string]string {
-		if r == nil {
-			return nil
-		}
-		m := map[string]string{}
-		for _, l := range r.GetLimits() {
-			m[l.GetName()] = l.GetQuantity()
-		}
-		return m
-	}
 	for _, tc := range []struct {
 		name, cpu, memory string
-		want              map[string]string
+		want              *atepb.Resources
+		wantErr           string
 	}{
-		{name: "the demo binding", cpu: "-", memory: "-", want: map[string]string{"cpu": "1", "memory": "512Mi"}},
-		{name: "memory only", cpu: "", memory: "2Gi", want: map[string]string{"memory": "2Gi"}},
-		{name: "cpu only", cpu: "500m", memory: "", want: map[string]string{"cpu": "500m"}},
-		{name: "none", cpu: "", memory: ""},
+		{name: "the demo binding", cpu: "-", memory: "-", want: &atepb.Resources{CpuMillicores: 1000, MemoryBytes: 512 << 20}},
+		{name: "millicores and decimal memory", cpu: "500m", memory: "2G", want: &atepb.Resources{CpuMillicores: 500, MemoryBytes: 2e9}},
+		{name: "memory only", cpu: "", memory: "2Gi", wantErr: "both required"},
+		{name: "cpu only", cpu: "500m", memory: "", wantErr: "both required"},
+		{name: "none", cpu: "", memory: "", wantErr: "both required"},
+		{name: "fractional cpu", cpu: "0.5", memory: "-", wantErr: "resources.cpu"},
+		{name: "zero memory", cpu: "-", memory: "0Mi", wantErr: "resources.memory"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, err := LoadBinding("../binding-microvm.json")
@@ -191,16 +184,149 @@ func TestRenderSizesTheSandboxFromTheTemplate(t *testing.T) {
 				b.Resources.Memory = tc.memory
 			}
 			out, err := Render(comp, image, b, Options{})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Render err = %v, want one containing %q", err, tc.wantErr)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := limits(out.Template.GetResources()); !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("template resources = %v, want %v", got, tc.want)
+			if got := out.Template.GetResources().GetLimits(); !proto.Equal(got, tc.want) {
+				t.Errorf("template limits = %v, want %v", got, tc.want)
 			}
 			if c := out.Template.GetContainers()[0].GetResources(); c != nil {
-				t.Errorf("container resources = %v, want none: the sandbox bounds the container", limits(c))
+				t.Errorf("container resources = %v, want none: the sandbox bounds the container", c)
 			}
 		})
+	}
+}
+
+// The binding's quantities are Kubernetes-style, the template's are integers. Only exact integer
+// forms convert; anything that would need rounding, or does not fit an int64, is refused.
+func TestParseQuantity(t *testing.T) {
+	for _, tc := range []struct {
+		field, in string
+		want      int64
+		wantErr   string
+	}{
+		{field: "cpu", in: "1", want: 1000},
+		{field: "cpu", in: "2", want: 2000},
+		{field: "cpu", in: "250m", want: 250},
+		{field: "cpu", in: "0", wantErr: "greater than zero"},
+		{field: "cpu", in: "0m", wantErr: "greater than zero"},
+		{field: "cpu", in: "-1", wantErr: "positive whole number"},
+		{field: "cpu", in: "+1", wantErr: "positive whole number"},
+		{field: "cpu", in: "1.5", wantErr: "positive whole number"},
+		{field: "cpu", in: "1e3", wantErr: "positive whole number"},
+		{field: "cpu", in: "1Ki", wantErr: "positive whole number"},
+		{field: "cpu", in: " 1", wantErr: "positive whole number"},
+		{field: "cpu", in: "m", wantErr: "positive whole number"},
+		{field: "cpu", in: "9223372036854775807", wantErr: "out of range"},
+		{field: "cpu", in: "9223372036854775807m", want: 9223372036854775807},
+		{field: "memory", in: "805306368", want: 805306368},
+		{field: "memory", in: "512Mi", want: 512 << 20},
+		{field: "memory", in: "1Ki", want: 1024},
+		{field: "memory", in: "1Gi", want: 1 << 30},
+		{field: "memory", in: "1Ti", want: 1 << 40},
+		{field: "memory", in: "1k", want: 1000},
+		{field: "memory", in: "3M", want: 3e6},
+		{field: "memory", in: "1G", want: 1e9},
+		{field: "memory", in: "1T", want: 1e12},
+		{field: "memory", in: "1K", wantErr: "positive whole number"},
+		{field: "memory", in: "1Pi", wantErr: "positive whole number"},
+		{field: "memory", in: "1.5Gi", wantErr: "positive whole number"},
+		{field: "memory", in: "-512Mi", wantErr: "positive whole number"},
+		{field: "memory", in: "0", wantErr: "greater than zero"},
+		{field: "memory", in: "8388608Ti", wantErr: "out of range"},
+		{field: "memory", in: "99999999999999999999", wantErr: "out of range"},
+	} {
+		t.Run(tc.field+"="+tc.in, func(t *testing.T) {
+			units := cpuUnits
+			if tc.field == "memory" {
+				units = memoryUnits
+			}
+			got, err := parseQuantity("resources."+tc.field, tc.in, units, "units")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "resources."+tc.field) {
+					t.Fatalf("parseQuantity(%q) = %d, %v; want an error naming resources.%s containing %q", tc.in, got, err, tc.field, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("parseQuantity(%q) = %d, %v; want %d", tc.in, got, err, tc.want)
+			}
+		})
+	}
+}
+
+// substrate v0.6.0 templates carry no sandbox config: the class comes from the WorkerPool the
+// template selects. A binding that names a class without a selector to carry it is refused rather
+// than rendered onto whichever pool happens to match; with one, the template has no class of its own
+// and selects exactly the binding's labels.
+func TestRenderCarriesTheSandboxOnlyThroughTheSelector(t *testing.T) {
+	comp, err := Load("../suite", "triage", "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := "localhost:5001/agentsuite-harness@" + digestA
+	for _, path := range []string{"../binding.json", "../binding-microvm.json"} {
+		b, err := LoadBinding(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := Render(comp, image, b, Options{})
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if got := out.Template.GetWorkerSelector().GetMatchLabels(); !reflect.DeepEqual(got, b.WorkerSelector.MatchLabels) {
+			t.Errorf("%s: selector = %v, want %v", path, got, b.WorkerSelector.MatchLabels)
+		}
+		b.WorkerSelector.MatchLabels = nil
+		if out, err := Render(comp, image, b, Options{}); err == nil || !strings.Contains(err.Error(), "workerSelector.matchLabels") ||
+			!strings.Contains(err.Error(), b.Sandbox.Class) {
+			t.Errorf("%s without a selector: out = %v, err = %v, want a refusal naming workerSelector.matchLabels and the class", path, out, err)
+		}
+	}
+}
+
+// A v0.6.0 template names no SandboxConfig, so Render cannot carry a binding's sandbox.configName.
+// It accepts the name only when the pool resolves to it anyway (unset or the class default) and
+// refuses any other, for both classes, rather than render a template that runs on another config.
+func TestRenderRefusesAConfigNameItCannotHonor(t *testing.T) {
+	comp, err := Load("../suite", "triage", "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := "localhost:5001/agentsuite-harness@" + digestA
+	for _, tc := range []struct {
+		path, class, def string
+	}{
+		{"../binding.json", "gvisor", "gvisor-default"},
+		{"../binding-microvm.json", "microvm", "microvm"},
+	} {
+		b, err := LoadBinding(tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Sandbox.Class != tc.class || b.Sandbox.ConfigName != tc.def {
+			t.Fatalf("%s: sandbox = %s/%s, want %s/%s", tc.path, b.Sandbox.Class, b.Sandbox.ConfigName, tc.class, tc.def)
+		}
+		for _, name := range []string{tc.def, ""} {
+			b.Sandbox.ConfigName = name
+			if _, err := Render(comp, image, b, Options{}); err != nil {
+				t.Errorf("%s with configName %q: %v", tc.path, name, err)
+			}
+		}
+		other := map[string]string{"gvisor": "microvm", "microvm": "gvisor-default"}[tc.class]
+		for _, name := range []string{"custom", other} {
+			b.Sandbox.ConfigName = name
+			if out, err := Render(comp, image, b, Options{}); err == nil || !strings.Contains(err.Error(), "sandbox.configName") ||
+				!strings.Contains(err.Error(), "configRef: {name: "+name+"}") {
+				t.Errorf("%s with configName %q: out = %v, err = %v, want a refusal naming configRef", tc.path, name, out, err)
+			}
+		}
 	}
 }
 
@@ -308,8 +434,9 @@ func TestRenderMemoryTierNeedsMemoryFidelity(t *testing.T) {
 	}
 }
 
-// Substrate's template admission refuses ROOTFS on any sandbox class but microvm, so Render refuses
-// a gVisor binding that asks for it, for both tiers, before emitting anything.
+// Only the micro-VM class captures the root filesystem without memory, and a v0.6.0 template carries
+// no class for admission to check, so Render refuses a gVisor binding that asks for ROOTFS, for both
+// tiers, before emitting anything.
 func TestRenderRefusesRootfsOnGvisor(t *testing.T) {
 	comp, err := Load("../suite", "triage", "linux/amd64")
 	if err != nil {

@@ -82,10 +82,9 @@ platform, so kaimahi's suite on arm64, or an agent the suite lacks, is refused w
 | `containers[0].wakeupProbe` | `GET /readyz` on 8081 |
 | `containers[0].securityContext` | `capabilities: {}`, adding none |
 | `containers[0].resources` | Unset: the sandbox bounds the container (see `resources`). |
-| `sandboxConfig` | `binding.sandbox`: class `microvm`, config `microvm` (or `gvisor`, `gvisor-default`) |
-| `snapshotConfig` | `preferredFidelity` from `binding.snapshot.fidelity`, which must be `MEMORY` (or unset) for `-tier memory`: that tier keeps the conversation in RAM. At substrate `v0.5.0` a suspend snapshot takes the template's `preferredFidelity`, and `agentsessionsd-memory` refuses to suspend, fork, resume or run a turn on a session whose completed snapshot is not `MEMORY` with a durable URI (`FAILED_PRECONDITION`; no `SUSPEND` or child is journaled). The stateless tier accepts any fidelity substrate admits: `ROOTFS` only with `sandbox.class` `microvm`, the one class substrate `v0.5.0` takes a `ROOTFS` template on, so `emit render` refuses `ROOTFS` on `gvisor`. `storageLocation` is `binding.snapshot.storageLocation` + `<name>/`. |
-| `workerSelector` | `binding.workerSelector` |
-| `resources` | `binding.resources`. Substrate sizes the sandbox and books the worker from these. A micro-VM gets the CPU rounded up to whole vCPUs and the memory less the VMM reserve (128MiB at substrate `v0.5.0`), so `512Mi` boots a 384MiB guest; ateom-microvm refuses a container limit above the guest, which is why the container declares none. gVisor applies these limits to the container. |
+| `snapshotConfig` | `preferredFidelity` from `binding.snapshot.fidelity`, which must be `MEMORY` (or unset) for `-tier memory`: that tier keeps the conversation in RAM. At substrate `v0.6.0` a suspend snapshot takes the template's `preferredFidelity`, and `agentsessionsd-memory` refuses to suspend, fork, resume or run a turn on a session whose completed snapshot is not `MEMORY` with a durable URI (`FAILED_PRECONDITION`; no `SUSPEND` or child is journaled). The stateless tier accepts any fidelity substrate admits: `ROOTFS` only with `sandbox.class` `microvm`: `emit render` refuses `ROOTFS` on `gvisor`, which substrate `v0.5.0` refused at create time and `v0.6.0` no longer checks there. `storageLocation` is `binding.snapshot.storageLocation` + `<name>/`, a preview field at `v0.6.0` that substrate ignores unless its `PerTemplateSnapshotLocation` gate is on, so snapshots go under the cluster's `--snapshot-location`. |
+| `workerSelector` | `binding.workerSelector`, which is required. Substrate `v0.6.0` templates carry no sandbox configuration: the sandbox is the one the selected WorkerPool runs (its `configRef`, else the class's default SandboxConfig), so the selector is what puts the template on `binding.sandbox.class`. `emit render` refuses a binding without `matchLabels`, and a `binding.sandbox.configName` other than unset or the class default (`gvisor-default`, `microvm`): name a custom config in the pool's `sandboxClasses[].configRef`. |
+| `resources` | `binding.resources` as `limits.cpuMillicores` and `limits.memoryBytes`, both required: `emit render` takes whole Kubernetes quantities (`1`, `500m`, `512Mi`, `2G`) and refuses fractions and zero. Substrate sizes the sandbox and books the worker from these, against the limits the WorkerPool's pods declare (a pool without them admits no actor). A micro-VM gets the CPU rounded up to whole vCPUs and the memory less the VMM reserve (128MiB at substrate `v0.6.0`, cmd/ateworker-microvm/run.go), so `512Mi` boots a 384MiB guest; ateworker-microvm refuses a container limit above the guest, which is why the container declares none. gVisor applies these limits to the container. |
 
 The harness registration is a `HarnessRegistration` with `spec.substrate {atespace, template}`,
 `STATELESS_REPLAY` and `descriptor_id: triage`. `agentsessionsd` does not serve the registry, so
@@ -136,9 +135,16 @@ is named `triage-memory`, is `REQUIRES_MEMORY_SNAPSHOT`, and is applied as
   it installed from another commit, or before it recorded one, before it switches the shared
   substrate checkout. `ui.sh` reads the records the same way: it refuses that cluster too, and one
   `up.sh` created whose setup record is missing, names another node or stops short of the install.
-  Substrate has no in-place upgrade between releases before 1.0, and v0.5.0 reads an ActorTemplate
-  an older install stored with no sandbox class, so its actors cannot resume. Run `./down.sh`, which
+  Substrate has no in-place upgrade between releases before 1.0, and v0.6.0 changed the
+  ActorTemplate (resources required, no sandbox configuration), so an older install's templates and
+  actors do not carry over. Run `./down.sh`, which
   deletes the cluster and its sessions, then `up.sh` again.
+- Substrate v0.6.0 authorizes each call by the atespace's AccessPolicy. Both `agentsessionsd` tiers
+  run as the `agentsessionsd` ServiceAccount (`deploy/namespace.yaml`), and `up.sh` grants
+  `user:system:serviceaccount:agentsuite-demo:agentsessionsd` editor on `agentsuite-demo` when the
+  atespace has no policy. It keeps a policy that already grants it and refuses any other, which it
+  never overwrites: add the member to an editor binding with `kubectl ate get access-policy -a
+  agentsuite-demo -o yaml`, then `kubectl ate update access-policy -a agentsuite-demo -f <file>`.
 - `up.sh` also reuses an ActorTemplate that already has the rendered name. The name covers the
   image, the binding, the model and the tier, not what `emit render` writes from them, so after
   updating this example on a cluster that already has its templates (for example to the render
@@ -237,19 +243,19 @@ header has not been run against a live deployment.
   the client against the session's actor.
 - **Nothing authenticates the host to the harness.** The harness serves harnesswire on :80 with no
   caller authentication, and `agentsessionsd` reaches it over cleartext h2c through the
-  atenet-router, naming the actor only by the `ate-target-actor` header. Substrate's kind install
-  runs the router in its default `--ingress-auth-mode=deprecated-insecure`, which keeps that
-  plaintext listener open to any client. So anything that can reach the router can act as the host
-  for any session's actor and feed it model results. `cmd/replay` relies on exactly this: it drives
-  the session's actor from the laptop through a port-forward to the router. Substrate's threat
-  model says the router reaches the actor through `atunnel` over mTLS, which accepts only the
-  router; this demo did not test that path. What would close it:
-  - router authentication: run the router with `--ingress-auth-mode=static-mtls`, which closes the
-    plaintext listeners and requires a client certificate with an allowed SPIFFE ID, and give
-    `agentsessionsd` (and `cmd/replay`) a TLS client certificate for the router connection, which
-    neither supports today. At substrate v0.5.0, `ate-setup` has no option for this mode: the
-    `ate-setup --ingress-auth-mode` flag and `components/router-static-mtls` that substrate's
-    AGENTS.md names are not in the tree, so it means editing the router Deployment's args;
+  atenet-router on :80, naming the actor only by the `ate-target-actor` header. Substrate v0.6.0
+  removed the envoy router's plaintext mode (substrate #2977): the default envoy router serves only
+  TLS clients whose SPIFFE ID is on `--ingress-allowed-spiffe-ids`, and neither `agentsessionsd`
+  nor `cmd/replay` has a TLS client for it. So `up.sh` installs the agentgateway dataplane
+  (`--atenet-dataplane=agentgateway`), whose :80 listener authenticates no caller. Anything that
+  can reach the router can act as the host for any session's actor and feed it model results.
+  `cmd/replay` relies on exactly this: it drives the session's actor from the laptop through a
+  port-forward to the router. Substrate's threat model says the router reaches the actor through
+  `atunnel` over mTLS, which accepts only the router; this demo did not test that path. What would
+  close it:
+  - router authentication: run the default envoy dataplane with the SPIFFE IDs of
+    `agentsessionsd` (and `cmd/replay`) on `--ingress-allowed-spiffe-ids`, and give both a TLS
+    client certificate for the router connection, which neither supports today;
   - host authentication on the harness: a per-session credential the host presents and the harness
     checks. The router's allowlist lets any listed client reach any actor, so it cannot keep one
     session's host from driving another session's actor.

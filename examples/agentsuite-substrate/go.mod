@@ -6,8 +6,8 @@ toolchain go1.27.3
 
 require (
 	github.com/agent-primitives/sessions v0.0.0
-	github.com/agent-substrate/substrate v0.5.0
 	github.com/kaimahi-agents/kaimahi v0.5.2-0.20261014180858-9c5c993e35ba
+	go.ate.dev/substrate v0.6.0
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 )

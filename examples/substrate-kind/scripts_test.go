@@ -56,6 +56,7 @@ fi
 	t.Setenv("MODEL_API_KEY", "")
 	t.Setenv("MODEL_PATH", "")
 	t.Setenv("MODEL_AUTH_HEADER", "")
+	t.Setenv("SANDBOX_CONFIG", "")
 	state := filepath.Join(dir, "recipe-test")
 	if err := os.Mkdir(state, 0o700); err != nil {
 		t.Fatal(err)
@@ -91,9 +92,25 @@ case "$*" in
       stall) sleep 5 ;;
     esac
     echo '{"metadata":{"name":"sessions-example"}}'; exit ;;
+  *"get access-policy -a sessions-example")
+    if [[ "$TEST_MODE" == policy-transport ]]; then
+      echo 'rpc error: code = Unavailable desc = unavailable' >&2; exit 1
+    fi
+    # A missing policy is a successful get with no output, as kubectl-ate reports it.
+    if [[ -f "$TEST_DIR/policy" ]]; then cat "$TEST_DIR/policy"; else echo 'atespace "sessions-example" has no access policy' >&2; fi
+    exit ;;
+  *"create access-policy -a sessions-example -f -")
+    manifest="$(cat)"
+    [[ "$manifest" == "$(printf 'bindings:\n- role: editor\n  members:\n  - %s' "$TEST_PRINCIPAL")" ]]
+    jq -n --arg member "$TEST_PRINCIPAL" '{bindings:[{role:"editor",members:[$member]}]}' > "$TEST_DIR/policy"
+    if [[ "$TEST_MODE" == policy-race ]]; then
+      echo 'rpc error: code = AlreadyExists desc = exists' >&2; exit 1
+    fi
+    cat "$TEST_DIR/policy"; exit ;;
   *"create actor-template"*)
     jq -e --arg class "$SANDBOX_CLASS" '
-      .sandboxConfig.sandboxClass == $class and
+      (has("sandboxConfig") | not) and
+      .resources == {limits:{cpuMillicores:"1000",memoryBytes:"805306368"}} and
       .workerSelector.matchLabels.workload == ("sessions-example-" + $class)
     ' "${@: -1}" >/dev/null
     cp "${@: -1}" "$TEST_DIR/current" ;;
@@ -106,8 +123,8 @@ esac
 jq --arg mode "$TEST_MODE" '
   .status.goldenSnapshotStatus.goldenTag.name = "ready" |
   if $mode == "containers" then .containers[0].env += [{name:"UNEXPECTED",value:"changed"}]
-  elif $mode == "resources" then .resources.limits[0].quantity = "2"
-  elif $mode == "sandboxConfig" then .sandboxConfig.configName = "changed"
+  elif $mode == "resources" then .resources.limits.cpuMillicores = "2000"
+  elif $mode == "sandboxConfig" then .sandboxConfig = {sandboxClass:"microvm",configName:"microvm"}
   elif $mode == "snapshotConfig" then .snapshotConfig.storageLocation = "changed"
   elif $mode == "workerSelector" then .workerSelector.matchLabels.unexpected = "changed"
   elif $mode == "durable-volume" then .volumes = [{name:"extra",durableDir:{}}]
@@ -131,7 +148,7 @@ func templateFixture(t *testing.T) (string, string) {
 	t.Setenv("MODEL_NAME", `model-with-"quotes"`)
 	t.Setenv("ACTOR_TEMPLATE", "chat-harness")
 	t.Setenv("SANDBOX_CLASS", "microvm")
-	t.Setenv("SANDBOX_CONFIG", "microvm")
+	t.Setenv("TEST_PRINCIPAL", daemonPrincipal)
 	t.Setenv("PROVISION_TIMEOUT_SECONDS", "600")
 	return dir, state
 }
@@ -212,12 +229,109 @@ func TestProvisionFailsClosed(t *testing.T) {
 
 func TestProvisionPreflightDoesNotCreate(t *testing.T) {
 	dir, _ := templateFixture(t)
-	if out, err := exec.CommandContext(t.Context(), "bash", "provision.sh", "--check-only").CombinedOutput(); err != nil {
+	out, err := exec.CommandContext(t.Context(), "bash", "provision.sh", "--check-only").CombinedOutput()
+	if err != nil {
 		t.Fatalf("preflight: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "Access policy is absent") {
+		t.Fatalf("preflight did not report the absent access policy:\n%s", out)
 	}
 	calls, err := os.ReadFile(filepath.Join(dir, "calls"))
 	if err != nil || strings.Contains(string(calls), "create ") {
 		t.Fatalf("preflight created a resource: %s %v", calls, err)
+	}
+}
+
+// daemonPrincipal is deploy/agentsessionsd.yaml's ServiceAccount as substrate's authorizer names it.
+const daemonPrincipal = "user:system:serviceaccount:sessions-example:agentsessions"
+
+func writePolicy(t *testing.T, dir, policy string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "policy"), []byte(policy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProvisionGrantsTheDaemonEditorOnce(t *testing.T) {
+	for _, mode := range []string{"", "policy-race"} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			dir, _ := templateFixture(t)
+			t.Setenv("TEST_MODE", mode)
+			for range 2 {
+				if out, err := exec.CommandContext(t.Context(), "bash", "provision.sh").CombinedOutput(); err != nil {
+					t.Fatalf("provision: %v\n%s", err, out)
+				}
+			}
+			calls, err := os.ReadFile(filepath.Join(dir, "calls"))
+			if err != nil || strings.Count(string(calls), "create access-policy") != 1 {
+				t.Fatalf("access policy not created exactly once: %v\n%s", err, calls)
+			}
+			cmd := exec.CommandContext(t.Context(), "jq", "-e", "--arg", "m", daemonPrincipal,
+				`.bindings == [{role: "editor", members: [$m]}]`, filepath.Join(dir, "policy"))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("policy does not grant only the daemon editor: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+func TestProvisionKeepsAnExistingGrant(t *testing.T) {
+	for name, policy := range map[string]string{
+		"editor": `{"bindings":[{"role":"viewer","members":["user:someone"]},{"role":"editor","members":["user:other","` + daemonPrincipal + `"]}]}`,
+		"owner":  `{"bindings":[{"role":"owner","members":["` + daemonPrincipal + `"]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir, _ := templateFixture(t)
+			writePolicy(t, dir, policy)
+			for _, args := range [][]string{{"provision.sh", "--check-only"}, {"provision.sh"}} {
+				if out, err := exec.CommandContext(t.Context(), "bash", args...).CombinedOutput(); err != nil {
+					t.Fatalf("%v: %v\n%s", args, err, out)
+				}
+			}
+			calls, err := os.ReadFile(filepath.Join(dir, "calls"))
+			if err != nil || strings.Contains(string(calls), "access-policy -a sessions-example -f") {
+				t.Fatalf("an existing grant was rewritten: %v\n%s", err, calls)
+			}
+			if got, err := os.ReadFile(filepath.Join(dir, "policy")); err != nil || string(got) != policy {
+				t.Fatalf("policy changed: %v\n%s", err, got)
+			}
+		})
+	}
+}
+
+func TestProvisionRefusesAPolicyWithoutTheDaemon(t *testing.T) {
+	for name, policy := range map[string]string{
+		"other member": `{"bindings":[{"role":"editor","members":["user:other"]}]}`,
+		"viewer only":  `{"bindings":[{"role":"viewer","members":["` + daemonPrincipal + `"]}]}`,
+		"no bindings":  `{"metadata":{"name":"default"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir, _ := templateFixture(t)
+			writePolicy(t, dir, policy)
+			for _, args := range [][]string{{"provision.sh", "--check-only"}, {"provision.sh"}} {
+				out, err := exec.CommandContext(t.Context(), "bash", args...).CombinedOutput()
+				if err == nil || !strings.Contains(string(out),
+					"kubectl ate update access-policy -a sessions-example -f policy.yaml") {
+					t.Fatalf("%v accepted a policy without the daemon or omitted the remedy: %v\n%s", args, err, out)
+				}
+			}
+			calls, err := os.ReadFile(filepath.Join(dir, "calls"))
+			if err != nil || strings.Contains(string(calls), "create ") || strings.Contains(string(calls), "update ") {
+				t.Fatalf("refusal wrote to substrate: %v\n%s", err, calls)
+			}
+		})
+	}
+}
+
+func TestProvisionPolicyReadErrorFailsClosed(t *testing.T) {
+	dir, _ := templateFixture(t)
+	t.Setenv("TEST_MODE", "policy-transport")
+	if out, err := exec.CommandContext(t.Context(), "bash", "provision.sh").CombinedOutput(); err == nil {
+		t.Fatalf("provision passed a failed policy read:\n%s", out)
+	}
+	calls, err := os.ReadFile(filepath.Join(dir, "calls"))
+	if err != nil || strings.Contains(string(calls), "create ") {
+		t.Fatalf("policy read failure caused a create: %v\n%s", err, calls)
 	}
 }
 
@@ -272,7 +386,7 @@ esac`,
 	t.Setenv("MODEL_NAME", "fixture-model")
 	t.Setenv("MODEL_BASE_URL", "https://model.example")
 	t.Setenv("MODEL_API_KEY", "")
-	t.Setenv("SANDBOX_CONFIG", "")
+	t.Setenv("TEST_PRINCIPAL", daemonPrincipal)
 	t.Setenv("SANDBOX_CLASS", "gvisor")
 	t.Setenv("ACTOR_TEMPLATE", "chat-gvisor")
 	t.Setenv("WORKER_IMAGE", "example/worker@sha256:"+strings.Repeat("c", 64))
@@ -365,6 +479,43 @@ func TestModelRouteRefusalPreservesDeployment(t *testing.T) {
 						t.Fatalf("refused route reached setup commands: %v\n%s", err, calls)
 					}
 				})
+			}
+		})
+	}
+}
+
+// SANDBOX_CONFIG used to name the template's SandboxConfig. v0.6.0 templates name none and the
+// rendered WorkerPool sets no configRef, so a leftover value must be refused before any cluster
+// call rather than ignored in favor of the class default.
+func TestSandboxConfigRefusedBeforeClusterChanges(t *testing.T) {
+	for _, script := range []string{"up.sh", "deploy.sh", "provision.sh"} {
+		t.Run(script, func(t *testing.T) {
+			dir := deploymentFixture(t)
+			if out, err := exec.CommandContext(t.Context(), "bash", "deploy.sh").CombinedOutput(); err != nil {
+				t.Fatalf("initial deployment: %v\n%s", err, out)
+			}
+			before := make(map[string][]byte)
+			for _, file := range []string{"kube-calls", "calls"} {
+				var err error
+				before[file], err = os.ReadFile(filepath.Join(dir, file))
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("SANDBOX_CONFIG", "custom")
+			out, err := exec.CommandContext(t.Context(), "bash", script).CombinedOutput()
+			if err == nil || !strings.Contains(string(out), "SANDBOX_CONFIG is not supported") ||
+				!strings.Contains(string(out), "configRef") {
+				t.Fatalf("SANDBOX_CONFIG was not refused: %v\n%s", err, out)
+			}
+			for file, previous := range before {
+				calls, err := os.ReadFile(filepath.Join(dir, file))
+				if err != nil || !bytes.Equal(calls, previous) {
+					t.Fatalf("refused SANDBOX_CONFIG contacted the cluster (%s): %v\n%s", file, err, calls)
+				}
+			}
+			if calls, err := os.ReadFile(filepath.Join(dir, "cluster-calls")); !os.IsNotExist(err) {
+				t.Fatalf("refused SANDBOX_CONFIG reached setup commands: %v\n%s", err, calls)
 			}
 		})
 	}

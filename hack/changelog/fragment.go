@@ -40,14 +40,16 @@ var (
 	// end of its label, at any indentation and inside block quotes and list items: a label that
 	// starts on the line, or the last line of one that started on an earlier line (label]: or a bare
 	// ]:), with escaped characters (\]) in it, then a target on the same line, bare or in angle
-	// brackets, or on the next. A footnote ([^1]: text) is not one, nor is a label followed by more
-	// than a target and a title, which Markdown renders as text.
+	// brackets, or on the next. A footnote ([^1]: text) is not one (footnote refuses it), nor is a
+	// label followed by more than a target and a title, which Markdown renders as text.
 	linkDefinition = regexp.MustCompile(containers +
 		`(?:\[(?:[^\]\\^]|\\.)(?:[^\]\\]|\\.)*|(?:[^\[\]\\]|\\.)*)\]:[ \t]*` +
 		`(?:$|(?:<(?:[^>\\]|\\.)*>|\S+)[ \t]*(?:$|["'(]))`)
 	// htmlLink matches an HTML link or image target attribute, also when its tag opened on an
 	// earlier line. An anchor without one (<a name="x"></a>), which CHANGELOG.md uses, is allowed.
 	htmlLink = regexp.MustCompile(`(?i)\b(?:href|src|srcset)\s*=`)
+	// footnote matches the start of a footnote reference ([^1]) or definition ([^1]: text).
+	footnote = regexp.MustCompile(`\[\^`)
 	// htmlStart matches a line that starts with an HTML tag or comment, which can open an HTML block,
 	// where backticks do not start code spans.
 	htmlStart = regexp.MustCompile(containers + `<`)
@@ -103,7 +105,8 @@ func parseFragment(name string, data []byte) (fragment, error) {
 // root-relative, and refuses headings, which belong to the release section. It refuses the link
 // forms it cannot rewrite: an inline link in another form than linkTarget, a link reference
 // definition (whose label would also apply to every fragment and release section) and an HTML
-// link or image attribute. As a backstop for any other form, it refuses a parent directory step
+// link or image attribute. It refuses footnote references and definitions too: assembly puts
+// every fragment in one document, where two fragments' footnotes with the same label collide. As a backstop for any other form, it refuses a parent directory step
 // (../) left outside an inline link target and a code span: every in-repository target written
 // relative to the fragment needs one, and a rewritten target has none. A relative target without
 // one could only name a file in fragmentDir, which a release deletes.
@@ -179,6 +182,11 @@ func rewriteLinks(body string) (string, error) {
 		}
 		if htmlLink.MatchString(masked) {
 			return "", fmt.Errorf("line %q: HTML links and images are not allowed; write a Markdown link, [text](target), or image, ![alt](target)", line)
+		}
+		// Footnote-shaped text in an HTML block is not a footnote either, so this check skips code
+		// spans even there.
+		if footnote.MatchString(spans) {
+			return "", fmt.Errorf("line %q: footnotes ([^label] and [^label]: text) are not allowed; assembly puts every fragment in one document, where footnote labels collide; write the note in the entry, or put a literal [^ in inline code", line)
 		}
 		var b, rest strings.Builder // rest is masked without the inline link targets
 		last := 0

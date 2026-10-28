@@ -49,6 +49,9 @@ category: Added
   block and inline code that starts and ends on one line; in a link target, write `../` literally.
   Keep inline code on one line: after a line that leaves a backtick or HTML tag open, the tool
   cannot tell code from a link, so it refuses a relative link target until the paragraph ends.
+- No footnotes, neither references (`[^1]`) nor definitions (`[^1]: note`): a release puts every
+  fragment in one document, where footnotes with the same label collide. Write the note in the
+  entry. Footnote-shaped text in inline code or a fenced block is fine.
 - A later pull request that changes an unreleased feature edits that feature's fragment rather than
   adding a second one.
 

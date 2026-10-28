@@ -18,7 +18,7 @@ updates:
     ignore:
       # Pinned to a commit and bumped by hand together with the adapter changes
       # its API breaks need; a Dependabot bump alone does not build.
-      - dependency-name: github.com/agent-substrate/substrate
+      - dependency-name: go.ate.dev/substrate
 
   - package-ecosystem: github-actions
     directory: /

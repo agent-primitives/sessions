@@ -32,7 +32,7 @@ import (
 	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/runtime/substrate"
 	"github.com/agent-primitives/sessions/sqlitelog"
-	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
 )
 
 // Template names the suite creates in the template atespace (see templates_test.go).
@@ -93,14 +93,43 @@ func newFixture(t *testing.T, atespace string) *fixture {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err = atepb.NewControlClient(conn).CreateAtespace(ctx, &atepb.CreateAtespaceRequest{
-		Atespace: &atepb.Atespace{Metadata: &atepb.ResourceMetadata{Name: atespace}},
-	})
-	if err != nil && status.Code(err) != codes.AlreadyExists {
+	if err := ensureAtespace(ctx, atepb.NewControlClient(conn), atespace); err != nil {
 		t.Fatalf("ensure atespace %q: %v", atespace, err)
 	}
 	t.Logf("Control reachable at %s; atespace %q ready", addr, atespace)
 	return f
+}
+
+// provisionScript creates every fixed e2e atespace and grants the Job's principal editor in it.
+const provisionScript = "hack/provision-e2e-access.sh"
+
+// ensureAtespace looks the atespace up and creates it only when it is absent. Substrate v0.6.0 always
+// enforces authorization: the Job runs with atespace editor (the role the docs tell operators to
+// grant), which can read its atespace but not create one, since CreateAtespace needs a global owner.
+// So the atespaces come from provisionScript, and an atespace it does not list fails here with a
+// message naming it, rather than a bare PERMISSION_DENIED. The create stays for a run with an owner
+// credential.
+func ensureAtespace(ctx context.Context, ctl atepb.ControlClient, name string) error {
+	_, err := ctl.GetAtespace(ctx, &atepb.GetAtespaceRequest{Atespace: &atepb.ObjectRef{Name: name}})
+	switch status.Code(err) {
+	case codes.OK:
+		return nil
+	case codes.NotFound, codes.PermissionDenied:
+	default:
+		return fmt.Errorf("get atespace: %w", err)
+	}
+	_, cerr := ctl.CreateAtespace(ctx, &atepb.CreateAtespaceRequest{
+		Atespace: &atepb.Atespace{Metadata: &atepb.ResourceMetadata{Name: name}},
+	})
+	switch status.Code(cerr) {
+	case codes.OK, codes.AlreadyExists:
+		return nil
+	case codes.PermissionDenied:
+		return fmt.Errorf("atespace %q is not provisioned for this principal (get: %v; create: %v): add it to %s and rerun it",
+			name, err, cerr, provisionScript)
+	default:
+		return fmt.Errorf("create atespace: %w", cerr)
+	}
 }
 
 // backend builds the substrate Runtime for a harness template, creating the template on first use.

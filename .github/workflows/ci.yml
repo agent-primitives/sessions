@@ -200,7 +200,7 @@ jobs:
       # nightly — a stray import from core into the substrate adapter has to fail here.
       - name: core links no backend vendor
         if: needs.changes.outputs.decision != 'skip'
-        run: test "$(go list -deps ./... | grep -c agent-substrate)" = "0"
+        run: test "$(go list -deps ./... | grep -cE 'agent-substrate|go\.ate\.dev')" = "0"
 
       # Cheap always-on integrity gate: the zero-dep golden self-check (stdlib only, no venv).
       - name: integrity golden self-check

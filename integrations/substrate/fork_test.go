@@ -11,7 +11,7 @@ import (
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/runtime/substrate"
-	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -47,7 +47,7 @@ type lifecycleControl struct {
 	// the actor in the window between the backend's check and its resume.
 	beforeResume func(a *atepb.Actor)
 	// runtime is the sandbox runtime ResumeActor binds a worker of; a capture is stamped with it.
-	runtime *atepb.SandboxRuntime
+	runtime *atepb.ActorSandboxRuntime
 }
 
 func newLifecycleControl() *lifecycleControl {

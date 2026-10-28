@@ -1,0 +1,44 @@
+name: changelog
+
+# A pull request that changes a public contract path (spec.md, api/, protos, the Go source of an
+# importable package) must add or edit a fragment under changelog/unreleased/, unless a maintainer
+# adds the skip-changelog label. Fragments are validated either way. See changelog/README.md.
+#
+# No paths filter, so it reports on every pull request; labeled and unlabeled rerun it when the
+# skip-changelog label is added or removed.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: changelog-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fragment:
+    name: changelog fragment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2 # the merge commit and both its parents
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: public contract changes carry a changelog fragment
+        env:
+          SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
+        # A pull_request checkout is the merge commit; its first parent is the base branch head.
+        # Without a second parent, HEAD^1..HEAD would cover only the last commit, so refuse.
+        run: |
+          if ! git rev-parse --verify --quiet 'HEAD^2' >/dev/null; then
+            echo "::error::HEAD is not the pull request's merge commit."
+            exit 1
+          fi
+          go run ./hack/changelog check -base 'HEAD^1' -head HEAD -skip="${SKIP}"

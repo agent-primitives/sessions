@@ -9,6 +9,7 @@ import (
 
 	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"github.com/agent-primitives/sessions/authn"
 	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
 	"github.com/agent-primitives/sessions/observability"
@@ -46,12 +47,15 @@ func (s *Service) Approve(ctx context.Context, req *v1.ApproveRequest) (response
 	actor := wire.EventFromProto(&v1.Event{Actor: req.GetIdentity()}).Actor
 	if s.auth != nil {
 		// Request provenance is not a verified audit identity. Normalize it before
-		// comparison too; verified journal attribution needs a versioned contract.
+		// comparison too; the verified approver below is the attribution.
 		actor = api.IdentityRef{}
 	}
-	decision, err := s.registry.Approve(ctx, s.store.Session(uid), uid, api.ApprovalDecision{
+	// Only the authentication interceptors install a caller, so no request field reaches it.
+	// Without authentication the decision records no approver, as before.
+	approver, _ := authn.Caller(ctx)
+	decision, err := s.registry.Approve(ctx, s.store.SessionLog(uid), uid, api.ApprovalDecision{
 		ExecutionID: req.GetExecutionId(), ToolCallID: req.GetToolCallId(), RequestSeq: req.GetRequestSeq(),
-		Approved: req.GetApproved(), Reason: req.GetReason(), Identity: actor,
+		Approved: req.GetApproved(), Reason: req.GetReason(), Identity: actor, VerifiedApprover: approver,
 	})
 	if err != nil {
 		return nil, approvalError(err)

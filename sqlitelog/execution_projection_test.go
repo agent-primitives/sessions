@@ -29,6 +29,13 @@ func TestExecutionProjectionPrefixesAndMigration(t *testing.T) {
 	legacyEnd.ExecutionID, legacyError.ExecutionID = "", ""
 	newStart := start
 	newStart.ExecutionID = "new"
+	newEnd := end
+	newEnd.ExecutionID = "new"
+	inputStart := start
+	inputStart.ExecutionStart = &api.ExecutionStart{InputCount: proto.Int64(1)}
+	input := api.Event{ExecutionID: "e", Kind: api.EventInput, Message: api.TextMessage("user", "input")}
+	idlessStart := start
+	idlessStart.ExecutionID = ""
 	for _, tc := range []struct {
 		name   string
 		events []api.Event
@@ -45,6 +52,11 @@ func TestExecutionProjectionPrefixesAndMigration(t *testing.T) {
 		{"fork after completion", []api.Event{start, end, fork}, []api.ExecState{api.ExecRunning, api.ExecCompleted, api.ExecCompleted}},
 		{"inherited approval", []api.Event{gate[0], gate[1], gate[2], fork}, []api.ExecState{api.ExecRunning, api.ExecRunning, api.ExecAwaiting, api.ExecRunning}},
 		{"legacy turns", []api.Event{legacyInput, legacyEnd, legacyInput, legacyError, newStart}, []api.ExecState{api.ExecRunning, api.ExecCompleted, api.ExecRunning, api.ExecFailed, api.ExecRunning}},
+		{"legacy prefix then modern", []api.Event{legacyInput, legacyEnd, start, end, resume}, []api.ExecState{api.ExecRunning, api.ExecCompleted, api.ExecRunning, api.ExecCompleted, api.ExecCompleted}},
+		{"ID-less end after modern input stays corrupt", []api.Event{inputStart, input, output, legacyEnd, end, newStart, newEnd}, []api.ExecState{api.ExecRunning, api.ExecRunning, api.ExecRunning, api.ExecRunning, api.ExecRunning, api.ExecRunning, api.ExecRunning}},
+		{"ID-less input reuses legacy row", []api.Event{legacyInput, legacyEnd, inputStart, input, end, legacyInput, newStart, newEnd}, []api.ExecState{api.ExecRunning, api.ExecCompleted, api.ExecRunning, api.ExecRunning, api.ExecCompleted, api.ExecRunning, api.ExecRunning, api.ExecRunning}},
+		{"ID-less record suppresses pending approval", []api.Event{gate[0], gate[1], gate[2], legacyEnd}, []api.ExecState{api.ExecRunning, api.ExecRunning, api.ExecAwaiting, api.ExecRunning}},
+		{"ID-less start is not a legacy record", []api.Event{idlessStart, legacyEnd}, []api.ExecState{api.ExecRunning, api.ExecRunning}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := approvalOpen(t, ":memory:")
@@ -62,22 +74,33 @@ func TestExecutionProjectionPrefixesAndMigration(t *testing.T) {
 				t.Fatalf("delete state=%s err=%v, want %s", deleted.ExecState, err, before.ExecState)
 			}
 
-			path, raw := executionV6Fixture(t)
-			for _, ev := range tc.events {
-				appendV6Execution(t, raw, "s", ev)
+			for _, fixture := range []struct {
+				name string
+				open func(*testing.T) (string, *sql.DB)
+			}{
+				{"v6", executionV6Fixture},
+				{"v7", executionV7Fixture},
+				{"v8", executionV8Fixture},
+			} {
+				t.Run(fixture.name, func(t *testing.T) {
+					path, raw := fixture.open(t)
+					for _, ev := range tc.events {
+						appendV6Execution(t, raw, "s", ev)
+					}
+					journal, metadata := approvalStored(t, raw)
+					migrated := approvalOpen(t, path)
+					want := api.ExecPending
+					if len(tc.want) > 0 {
+						want = tc.want[len(tc.want)-1]
+					}
+					assertExecutionProjection(t, migrated, "s", want)
+					if gotJournal, gotMetadata := approvalStored(t, raw); gotJournal != journal || gotMetadata != metadata {
+						t.Fatal("v9 migration rewrote events, hashes, fences or original metadata")
+					}
+					migrated.Close()
+					assertExecutionProjection(t, approvalOpen(t, path), "s", want)
+				})
 			}
-			journal, metadata := approvalStored(t, raw)
-			migrated := approvalOpen(t, path)
-			want := api.ExecPending
-			if len(tc.want) > 0 {
-				want = tc.want[len(tc.want)-1]
-			}
-			assertExecutionProjection(t, migrated, "s", want)
-			if gotJournal, gotMetadata := approvalStored(t, raw); gotJournal != journal || gotMetadata != metadata {
-				t.Fatal("v8 migration rewrote events, hashes, fences or original metadata")
-			}
-			migrated.Close()
-			assertExecutionProjection(t, approvalOpen(t, path), "s", want)
 		})
 	}
 }
@@ -109,9 +132,10 @@ func assertExecutionProjection(t *testing.T, store *Store, uid string, want api.
 }
 
 // This read-time oracle folds whole executions, independently of the incremental SQL reducer.
-// Its inputs are the well-formed histories above; invalid evidence is exercised separately.
+// It also checks the legacy identity boundary; other invalid evidence is exercised separately.
 func foldExecutionState(records []eventlog.Record) api.ExecState {
 	var latest string
+	var modern bool
 	byID := make(map[string][]eventlog.Record)
 	var forkSeq int64
 	for _, record := range records {
@@ -121,6 +145,12 @@ func foldExecutionState(records []eventlog.Record) api.ExecState {
 				forkSeq = record.Seq
 			}
 			continue
+		}
+		if ev.Kind == api.EventExecutionStart || ev.ExecutionID != "" {
+			modern = true
+		}
+		if modern && ev.ExecutionID == "" {
+			return api.ExecRunning
 		}
 		if _, seen := byID[ev.ExecutionID]; !seen {
 			latest = ev.ExecutionID
@@ -306,8 +336,35 @@ func executionV7Fixture(t *testing.T) (string, *sql.DB) {
 	return path, raw
 }
 
-func TestExecutionMigrationPreservesV7Allocations(t *testing.T) {
+func executionV8Fixture(t *testing.T) (string, *sql.DB) {
+	t.Helper()
 	path, raw := executionV7Fixture(t)
+	tx, err := raw.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := migrateV7ToV8(tx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`PRAGMA user_version=8`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return path, raw
+}
+
+func TestExecutionMigrationPreservesAllocationsAndApprover(t *testing.T) {
+	path, raw := executionV8Fixture(t)
+	for _, ev := range approvalEvents("approved") {
+		appendV6Execution(t, raw, "s", ev)
+	}
+	appendV6Execution(t, raw, "s", api.Event{ExecutionID: "approved", Kind: api.EventApprovalResult, ApprovalResult: &api.ApprovalResult{
+		ToolCallID: "call", RequestSeq: 3, Approved: true,
+		VerifiedApprover: api.CallerIdentity{Issuer: "test-issuer", Subject: "test-approver"},
+	}})
 	appendV6Execution(t, raw, "s", api.Event{ExecutionID: "e", Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
 	approvalExec(t, raw, `
 INSERT INTO allocations(id,session,backend,operation,resource_id,confirmed,released)
@@ -332,6 +389,9 @@ UPDATE sessions SET inventory_complete=1, inventory_evidence='operator reconcile
 	journal, metadata := approvalStored(t, raw)
 	store := approvalOpen(t, path)
 	assertExecutionProjection(t, store, "s", api.ExecCompleted)
+	if err := store.Session("s").Verify(); err != nil {
+		t.Fatalf("migrated verified-approver journal fails verification: %v", err)
+	}
 	var version int
 	if err := raw.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != SchemaVersion {
 		t.Fatalf("migration version=%d, want %d: %v", version, SchemaVersion, err)
@@ -378,6 +438,7 @@ func TestExecutionMigrationReadOnlyAndRollback(t *testing.T) {
 	}{
 		{"v6", executionV6Fixture, 6},
 		{"v7", executionV7Fixture, 7},
+		{"v8", executionV8Fixture, 8},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			path, raw := fixture.open(t)
@@ -388,7 +449,7 @@ func TestExecutionMigrationReadOnlyAndRollback(t *testing.T) {
 					if mode == "read-only" {
 						dsn = "file:" + filepath.ToSlash(path) + "?mode=ro"
 					} else {
-						approvalExec(t, raw, `CREATE TRIGGER fail_v8 BEFORE DELETE ON approval_executions BEGIN SELECT RAISE(ABORT,'v8 fault'); END`)
+						approvalExec(t, raw, `CREATE TRIGGER fail_v9 BEFORE DELETE ON approval_executions BEGIN SELECT RAISE(ABORT,'v9 fault'); END`)
 					}
 
 					store, err := Open(dsn)
@@ -408,7 +469,7 @@ func TestExecutionMigrationReadOnlyAndRollback(t *testing.T) {
 					}
 				})
 			}
-			approvalExec(t, raw, `DROP TRIGGER fail_v8`)
+			approvalExec(t, raw, `DROP TRIGGER fail_v9`)
 			store := approvalOpen(t, path)
 			assertExecutionProjection(t, store, "s", api.ExecPending)
 			store.Close()

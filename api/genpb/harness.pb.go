@@ -394,7 +394,8 @@ func (x *IdentityContext) GetCanMintTokens() bool {
 
 // Start begins one execution. History is pushed here (pull-by-range is a later
 // addition): every event before this execution's EXECUTION_START, also after a memory
-// restore. A REQUIRES_MEMORY_SNAPSHOT harness does not rebuild in-memory state from it.
+// restore, with ApprovalResult.verified_approver left empty. A REQUIRES_MEMORY_SNAPSHOT harness
+// does not rebuild in-memory state from it.
 type Start struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Config  []byte                 `protobuf:"bytes,1,opt,name=config,proto3" json:"config,omitempty"`

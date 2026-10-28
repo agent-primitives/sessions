@@ -275,6 +275,11 @@ type ApprovalResult struct {
 	Approved   bool
 	Reason     string
 	RequestSeq int64 `json:",omitempty"` // sequence of the host-owned APPROVAL_REQUEST; zero for legacy decisions
+	// VerifiedApprover is the caller the host's own authentication verified when it journaled the
+	// decision. It is never read from a request. Zero when the host did not authenticate the
+	// caller, and in decisions recorded before the field existed. The host clears it in every
+	// decision a harness receives: the live decision, the receipt's and those in Start.History.
+	VerifiedApprover CallerIdentity `json:",omitzero"`
 }
 
 // HarnessEnd is the terminal state of one execution.

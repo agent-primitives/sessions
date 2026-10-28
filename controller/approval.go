@@ -56,6 +56,10 @@ func Approve(log eventlog.Store, decision api.ApprovalDecision) (eventlog.Record
 	if decision.ExecutionID == "" || decision.ToolCallID == "" || decision.RequestSeq <= 0 {
 		return eventlog.Record{}, fmt.Errorf("%w: execution, call and positive request sequence are required", ErrInvalidApprovalDecision)
 	}
+	// A half-set approver is a host bug, not a decision to compare or record.
+	if decision.VerifiedApprover != (api.CallerIdentity{}) && !decision.VerifiedApprover.Valid() {
+		return eventlog.Record{}, fmt.Errorf("controller: verified approver: %w", api.ErrInvalidCallerIdentity)
+	}
 	scan, err := scanApprovals(log, 0)
 	if err != nil {
 		return eventlog.Record{}, err
@@ -72,8 +76,11 @@ func Approve(log eventlog.Store, decision api.ApprovalDecision) (eventlog.Record
 	}
 	if target.Decision != nil {
 		old := target.Decision.Event.ApprovalResult
-		// IdentityRef is a value: omitted and explicitly all-empty identity normalize alike.
-		if old.Approved != decision.Approved || old.Reason != decision.Reason || target.Decision.Event.Actor != decision.Identity {
+		// IdentityRef is a value: omitted and explicitly all-empty identity normalize alike. The
+		// verified approver is compared exactly: a decision recorded without one (unauthenticated,
+		// or before the field existed) is not an exact retry for an authenticated caller.
+		if old.Approved != decision.Approved || old.Reason != decision.Reason || target.Decision.Event.Actor != decision.Identity ||
+			old.VerifiedApprover != decision.VerifiedApprover {
 			return eventlog.Record{}, fmt.Errorf("%w: request already has a different decision", ErrInvalidApprovalDecision)
 		}
 		return *target.Decision, nil
@@ -91,6 +98,7 @@ func Approve(log eventlog.Store, decision api.ApprovalDecision) (eventlog.Record
 		ApprovalResult: &api.ApprovalResult{
 			ToolCallID: decision.ToolCallID, RequestSeq: decision.RequestSeq,
 			Approved: decision.Approved, Reason: decision.Reason,
+			VerifiedApprover: decision.VerifiedApprover,
 		},
 	})
 }
@@ -238,6 +246,9 @@ func inspectApprovalExecution(execution approvalExecution, head, forkSeq int64) 
 			decision := event.ApprovalResult
 			if decision.ToolCallID != last.Call.ID || decision.RequestSeq != last.Request.Seq {
 				return nil, fmt.Errorf("%w: approval decision tuple mismatch", ErrReplayDiverged)
+			}
+			if decision.VerifiedApprover != (api.CallerIdentity{}) && !decision.VerifiedApprover.Valid() {
+				return nil, fmt.Errorf("%w: incomplete verified approver", ErrInvalidExecutionLog)
 			}
 			last.Decision = record
 		case api.EventToolResult:

@@ -179,22 +179,24 @@ reports RUNNING, including when an inherited approval reference is excluded. Thi
 the child is actively executing. A decided approval without a receipt reports RUNNING, not
 COMPLETED, and still blocks new input under the existing admission rules.
 
-FAILED does not prevent recovery of a modern execution. Later journaled progress changes it to
-RUNNING, then END changes it to COMPLETED. Taking a fence or starting the harness without appending
-progress does not change the reported outcome. Suspend, Resume and Delete lifecycle records
+FAILED does not prevent recovery of a modern execution. ERROR completes a legacy execution for
+recovery purposes, so Resume does not re-run it. Later journaled progress in a modern execution
+changes it to RUNNING, then END changes it to COMPLETED. Taking a fence or starting the harness
+without appending progress does not change the reported outcome. Suspend, Resume and Delete lifecycle records
 preserve the outcome; a valid unanswered approval still reports AWAITING even after an ERROR.
 Stale projections, invalid reporting evidence and incomplete declared inputs report RUNNING rather
-than success. Execution and compute axes are independent; recovery uses the journal rather than
-trusting an enum. CANCELED is not yet reported.
+than success. ID-less non-lifecycle records after modern execution begins permanently mark reporting
+corruption and suppress pending approval references. Execution and compute axes are independent;
+recovery uses the journal rather than trusting an enum. CANCELED is not yet reported.
 
-SQLite schema v8 adds the outcome to the existing per-execution approval projection, updated in
+SQLite schema v9 adds the outcome to the existing per-execution approval projection, updated in
 the same transaction as each append. Get/List read stored fields without decoding journal blobs.
 This avoids inspecting each listed session's history on every read. The migration rebuilds the
 shared projection without rewriting events, hashes or fences. An undecodable session retains its
 metadata/cursor but reports RUNNING without an approval reference; SQL failures roll back the
 whole migration. A read-only open that needs migration fails clearly rather than partially upgrading.
 Before upgrading to v0.4.0, stop all older hosts and embedded clients sharing the journal and back
-up the database and any WAL. Older binaries refuse v8 at open; there is no downgrade migration,
+up the database and any WAL. Older binaries refuse v9 at open; there is no downgrade migration,
 so rollback requires restoring the backup.
 
 A fork inherits the parent's `project`, `harness` and `model`, because those define the workload and
@@ -249,7 +251,8 @@ Exec, Fork, Resume, Suspend and Approve across its Placers. This is not cross-ho
 exclusion: an independent host can provision before its first durable fence. This build's
 writers reject subsequent durable writes to tombstones; already-open older writers do not.
 Follow the [v4 rollout order](../CHANGELOG.md#sqlite-v4-rollout) before the first upgraded open.
-Direct durable-log wrappers must forward the optional `CheckWritable` preflight to refuse before
+The journals a `session.SessionStore` returns are `eventlog.SessionJournal` values, which must
+implement the `CheckWritable` preflight, and durable-log wrappers must forward it to refuse before
 compute; this build's storage write barriers still enforce the permanent tombstone.
 
 Opening an older SQLite journal migrates it transactionally through approval-reporting v3 to

@@ -6,7 +6,7 @@ import (
 	"github.com/agent-primitives/sessions/api"
 )
 
-func migrateV7ToV8(tx *sql.Tx) error {
+func migrateV8ToV9(tx *sql.Tx) error {
 	if _, err := tx.Exec(`
 ALTER TABLE approval_executions ADD COLUMN outcome TEXT NOT NULL DEFAULT 'RUNNING';
 DELETE FROM approval_calls;
@@ -25,6 +25,15 @@ func projectExecution(tx *sql.Tx, uid string, seq int64, ev api.Event) error {
 	}
 	if ev.Kind == api.EventLifecycle {
 		return nil
+	}
+	if ev.ExecutionID == "" {
+		// Legacy compatibility ends at the first modern execution. A later missing ID
+		// must never regain reporting authority by reusing the legacy execution row.
+		if _, err := tx.Exec(`UPDATE sessions SET approval_corrupt=1 WHERE session=?
+ AND (? OR EXISTS(SELECT 1 FROM approval_executions WHERE session=? AND execution_id!=''))`,
+			uid, ev.Kind == api.EventExecutionStart, uid); err != nil {
+			return err
+		}
 	}
 	outcome := api.ExecRunning
 	switch ev.Kind {

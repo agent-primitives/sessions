@@ -4,7 +4,7 @@
 
 **Version:** `0.4.0-draft`
 
-**Last updated:** October 26, 2026
+**Last updated:** October 27, 2026
 
 ## Abstract
 
@@ -70,8 +70,8 @@ Unless stated otherwise:
 This draft specifies:
 
 - the session resource, its two-axis state, its deletion state, and its metadata (§5);
-- the event log: record shape, event kinds, sequence assignment, compare-and-swap append, fencing
-  (§6);
+- the event log: record shape, event kinds, sequence assignment, compare-and-swap append, fencing,
+  and the Go session and harness stores (§6);
 - the canonical encoding and the provenance hash chain, including fork lineage (§7);
 - executions, the determinism invariants, reconstruction replay, and crash recovery (§8);
 - tool execution modes, receipts, and at-most-once re-drive (§9);
@@ -109,6 +109,7 @@ This draft does not specify:
 |---|---|---|
 | Sessions host | `Sessions` service, controller semantics, harness driving | §5, §6.3 to §6.5, §8 to §12, §13.1 to §13.3, §15 |
 | Event-log store | the append, head, fence, read and verify contract | §6, §7 |
+| Session store | `session.SessionStore` and `session.HarnessStore` (§6.7) | §5.1 to §5.4, §6, §7, §10.2, §11.2, §11.8, §14, §17 |
 | Harness | `Harness` service (`Describe`, `Connect`) or `api.Harness` | §8.4, §9, §10.3, §12 |
 | Runtime backend | `api.Runtime` plus `Describe` (§13.3) | §13 |
 | Chain verifier | independent recomputation of `content_hash` | §7 |
@@ -205,7 +206,9 @@ no flattened lifecycle enum.
 
   Latest means first-seen execution order, not the execution ID of the last record. ID-less
   legacy execution records share one reporting identity; their last non-lifecycle event selects
-  the outcome. A valid unanswered approval takes precedence over a recorded ERROR.
+  the outcome. An ID-less non-lifecycle record after modern execution begins violates `EXE-16`:
+  reporting corruption is sticky, reports RUNNING and suppresses pending approval references.
+  A valid unanswered approval otherwise takes precedence over a recorded ERROR.
   Deletion leaves this value as it was: a deleted session with a valid unanswered request still
   reports `EXEC_AWAITING`, but without `pending_approval` (`SES-12`).
   Other lifecycle records preserve the execution outcome; FORK excludes inherited approval calls
@@ -345,7 +348,8 @@ no flattened lifecycle enum.
   session reports the deleted error, not a conflict or fenced error. The in-memory store has no
   deletion. A store MAY also expose a read-only writable check (`CheckWritable`), which the
   reference host runs before any runtime call (`OPS-34`); a wrapper around such a store has to
-  forward it to keep that ordering.
+  forward it to keep that ordering. The journals of a Go session store MUST expose it
+  (`STORE-7`).
 
 ### 6.5 Idempotency
 
@@ -362,12 +366,106 @@ no flattened lifecycle enum.
   stored `prev_hash` and `content_hash` (not recomputed).
 - `LOG-17`: The `Replay` RPC streams committed records only. `from_seq <= 0` reads from 1;
   `to_seq = 0` reads to the head. It never emits deltas and never runs a harness.
-- The reference SQLite-backed `Replay` reads stored protobuf events directly, preserving field
-  presence, including present empty messages, rather than round-tripping through domain events.
-  It returns the stored hashes without verifying or recomputing them.
+- The reference SQLite-backed `Replay` reads stored protobuf events directly (through the
+  journal's `ReadProto`, §6.7), preserving field presence, including present empty messages,
+  rather than round-tripping through domain events. It returns the stored hashes without
+  verifying or recomputing them.
 - The reference host returns an empty, successful stream for an unknown or empty session on
   `Replay`; it does not return `NOT_FOUND`.
 - `Replay` of a deleted session MUST keep returning its records, including `LIFECYCLE_DELETE`.
+
+### 6.7 Session and harness stores
+
+The reference host reaches durable state through two Go interfaces in
+[`session/store.go`](session/store.go): `session.SessionStore` (session metadata, journals,
+listing, deletion), taken by `session.NewService`, and `session.HarnessStore` (the harness
+catalog), taken by `session.NewHarnessRegistry` and `session.ReserveStaticHarnessNames`.
+`*sqlitelog.Store` implements both and is the only implementation in this repository. The
+session metadata and harness catalog types (`SessionMeta`, `SessionInfo`, `HarnessRecord` and
+their list options) and the sentinel errors for them are `sqlitelog`'s. The journals a store
+returns are `eventlog.SessionJournal` values (`STORE-7`), each an `eventlog.Store` with a
+required `CheckWritable` deletion preflight: their records and sentinel errors,
+`eventlog.ErrDeleted` among them, are `eventlog`'s, and they meet §6.1 to §6.6 and §7. This
+section adds what the host needs from the rest. It specifies no storage schema (§3). A host that
+serves sessions gives both interfaces the same store, because session admission (`STORE-3`)
+reads the catalog that registration writes; the reference daemon does.
+
+- `STORE-1`: A store MUST return these sentinel errors, wrapped so that `errors.Is` matches, for
+  these conditions:
+  - `sqlitelog.ErrSessionNotFound`: `SessionInfo` or `DeleteSession` of a `uid` with no metadata
+    row;
+  - `sqlitelog.ErrSessionExists`: `CreateOwnedSession` of any existing `uid`, deleted or created
+    by a journal write included;
+  - `sqlitelog.ErrInvalidPageToken`: a `ListSessions` page token the store cannot parse
+    (`SES-10`);
+  - `sqlitelog.ErrHarnessNotFound`: `Harness` or `RetireHarness` of a name with no registration,
+    and admission (`STORE-3`) of a registered name with none;
+  - `sqlitelog.ErrHarnessRetired`: admission of a registered name whose registration is retired;
+  - `sqlitelog.ErrHarnessNameCollision`: admission of a static name that has a registration,
+    active or retired, and `ReserveHarnessNames` of such a name;
+  - `sqlitelog.ErrHarnessSpecConflict`: `RegisterHarness` of a taken name with a different
+    `SpecDigest` (`REG-3`);
+  - `sqlitelog.ErrHarnessExists`: `CreateHarness` of a name with a registration, active or retired
+    and whatever its spec (`REG-3a`);
+  - `sqlitelog.ErrHarnessNameReserved`: `RegisterHarness` or `CreateHarness` of a reserved name;
+  - `eventlog.ErrDeleted`: `PutSession` or `PutSessionOnActiveHarness` of a deleted session (the
+    latter before its harness check), and the journal writes in `LOG-19`.
+- `STORE-2`: `SessionInfo` and `ListSessions` MUST reflect every journal append and
+  `DeleteSession` that returned before the read: `last_seq`, `exec_state`, `compute_state` and
+  `pending_approval` come from the committed journal or from projections updated in the
+  append's transaction (`LOG-8`, `SES-7`, `SES-8`). `ListSessions` MUST meet `SES-9` to
+  `SES-11`, and filter by `opts.Owner`, when set, before paging (§17).
+- `STORE-3`: Admission. `PutSessionOnActiveHarness` and `CreateOwnedSession` take `registered`,
+  the caller's statement that the harness name is not one of its static harnesses. Each MUST check
+  the catalog and write the session row in one transaction, and write only when the check passes:
+  a registered name with an active registration, or a static name with no registration. A
+  `RetireHarness` or a registration that committed earlier, on any host sharing the store, is
+  therefore always seen (`OPS-4`, `REG-4`). `CreateOwnedSession` MUST also refuse an existing
+  `uid` and record `owner` in that transaction. `PutSession` is an upsert with no admission check.
+- `STORE-4`: `RegisterHarness`, `CreateHarness` and `ReserveHarnessNames` MUST each check and
+  write in one transaction, and each MUST check the others' rows, so a name is reserved or
+  registered, never both, and of concurrent `CreateHarness` calls for one name at most one
+  succeeds (`REG-3a`), however hosts sharing the store interleave. A refused `CreateHarness`
+  changes nothing. A failing `ReserveHarnessNames` reserves none of its names, and a reservation
+  is never released. `HarnessNameReserved` reports a reservation; the registry uses it only as a
+  preflight, so it MAY read outside any transaction. `RegisterHarness` of the same digest returns
+  the stored registration, reactivating a retired one (`REG-3`); `RetireHarness` of a retired one
+  changes nothing (`REG-4`). `ListHarnesses` MUST return registrations in name order after
+  `opts.After` and, unless `opts.IncludeRetired` is set, only active ones, and fewer than
+  `opts.Limit` only when none remain, because the registry pages until then.
+- `STORE-5`: `DeleteSession` MUST commit `OPS-31` in one transaction (the `LIFECYCLE_DELETE`
+  append, the fence advance, and the deletion fields) or commit none of it, and meet `OPS-32`.
+  Once it returns, every journal the store returns for the session refuses writes (`LOG-19`),
+  including on other hosts sharing the store (older binaries are `OPS-36`), and `PutSession` and
+  `PutSessionOnActiveHarness` refuse with `eventlog.ErrDeleted`.
+- `STORE-6`: `SessionLog(uid)` and `ForkSessionLog(meta)` MUST write nothing when called. A
+  `ForkSessionLog` handle MUST commit `meta` in the transaction of its first `NewFence`, so a fork
+  child refused or not provisioned before that fence leaves no session, and a child with a fence
+  has its inherited metadata (`SES-18`). The reference host takes children whose metadata carries
+  a model-policy flag through `ForkSessionLog`, and writes every child's metadata again with
+  `PutSession` after the fan-out.
+- `STORE-7`: Every journal `SessionLog` and `ForkSessionLog` return MUST implement the deletion
+  preflight `CheckWritable` (`LOG-19`); their `eventlog.SessionJournal` result type requires it,
+  and a journal that wraps another MUST forward it. `CheckWritable` writes nothing. It MUST return
+  an error wrapping `eventlog.ErrDeleted` once `DeleteSession` of the session has returned,
+  including on other hosts sharing the store, and `nil` for a session that is active or has no
+  metadata row; any other error fails the operation. The reference host calls it before
+  `Describe`, a fence or a runtime call, and before `Approve` answers an exact retry (`OPS-34`).
+  Without it, a deletion that commits after the host's lookup stops an operation only at its first
+  fence or append, after its runtime work (`STORE-5`), and never stops an exact approval retry,
+  which writes nothing (`APR-7`). A journal MAY also implement both `BeginAllocation(ctx,
+  backend, operation)` and `ConfirmAllocation(ctx, attempt, incarnation)`. When it does, the
+  reference host calls `BeginAllocation` before each runtime `Create` and `Restore` and
+  `ConfirmAllocation` with the incarnation returned, and fails the operation if either call
+  fails. A journal without them runs without the allocation ledger (§13.4, `OPS-35`). A journal
+  MAY also implement `ReadProto(from_seq)`, returning the records of `LOG-16` with their stored
+  protobuf events. The reference host's `Replay` uses it when present (§6.6); otherwise it
+  converts the `Read` records, which keep the stored hashes but not field presence, so an audit
+  client cannot detect presence-only tampering.
+- No conformance test runs a second store. `session/store_test.go` drives the reference host
+  through a wrapper that exposes only these interfaces, with and without the optional allocation
+  and `ReadProto` methods, and commits a deletion between each operation's lookup and its guarded
+  work (§16.2).
 
 ## 7. Provenance chain and canonical encoding
 
@@ -506,8 +604,9 @@ no flattened lifecycle enum.
 - `EXE-6`: Outside the legacy execution (§8.7), an execution is complete if and only if it has an
   `EVENT_END`. `EVENT_ERROR` does not complete such an execution; a later recovery may still
   finish it. The legacy execution's completion rule is `EXE-29`.
-- `EXE-7`: `Start.history` for a new execution MUST be every event before its `EXECUTION_START`.
-  The reference host always sends the full prior log, including after a memory restore.
+- `EXE-7`: `Start.history` for a new execution MUST be every event before its `EXECUTION_START`,
+  with `ApprovalResult.verified_approver` left empty (`APR-8`). The reference host always sends the
+  full prior log, including after a memory restore.
 
 ### 8.2 Effects
 
@@ -788,27 +887,28 @@ invokes no harness and stays a no-op without one.
   denied decision, a call answered from its receipt (`TOOL-9`), reconstruction replay, a reported
   result, or a host with no executor. Its input is the session uid, the execution id, a copy of the
   call in its journaled form, the verified caller of the `Exec` or `Resume` that dispatches the call
-  (empty when authentication is off, §17), and, for an approved call, the committed decision and its
-  sequence. It does not receive the decision's `Event.actor`, which is caller-supplied. The hook
-  MUST NOT be able to change the call it judges: the reference host rebuilds the arguments from the
-  JSON form the `TOOL_CALL` records. Without asking the hook, it refuses as a transient refusal
-  (`TOOL-15`) a call whose arguments that form cannot represent, and a call whose arguments that
-  form changes, read as the host's typed values or as their JSON encoding: an integer with more
-  than 53 significant bits, such as 2^53+1, however it is spelled; a decimal number below 2^53
-  whose value differs from the shortest JSON text of the 64-bit float the form records, such as
-  `0.30000000000000001` recorded as 0.3; a 32-bit float whose JSON text reads as a different
-  64-bit number, such as 1e20; or a string that is not valid UTF-8. The hook would judge one value
-  while the executor receives another. It does not refuse another spelling of the recorded value,
-  such as `3e-1` for 0.3, or a nil list or map recorded as an empty one. It also refuses a value
-  it cannot compare with that form: a Go struct that its JSON encoder writes field by field, and a
-  value or non-string map key whose type supplies its own encoding (a Go `MarshalJSON` or
-  `MarshalText` method, as `time.Time` and `big.Int` do), since the form records only that
-  encoding while the executor receives the typed value. Below 2^53 in magnitude, a hook compares a
-  64-bit float argument as its JSON value, the shortest decimal that reads back as that float (Go's
-  `strconv.FormatFloat(f, 'g', -1, 64)`), not as its exact binary expansion. At or above 2^53 every
-  such float is an integer and the host dispatches only an argument with exactly that value, so the
-  hook reads it exactly: 2^60 is 1152921504606846976, not the 1152921504606847000 its shortest
-  text gives.
+  (empty when authentication is off, §17), and, for an approved call, the committed decision,
+  including its `verified_approver` (`APR-8`), and its sequence. The hook is host code, not a
+  harness, so `APR-8`'s clearing does not apply to it. It does not receive the decision's
+  `Event.actor`, which is caller-supplied. The hook MUST NOT be able to change the call it judges:
+  the reference host rebuilds the arguments from the JSON form the `TOOL_CALL` records. Without
+  asking the hook, it refuses as a transient refusal (`TOOL-15`) a call whose arguments that form
+  cannot represent, and a call whose arguments that form changes, read as the host's typed values or
+  as their JSON encoding: an integer with more than 53 significant bits, such as 2^53+1, however it
+  is spelled; a decimal number below 2^53 whose value differs from the shortest JSON text of the
+  64-bit float the form records, such as `0.30000000000000001` recorded as 0.3; a 32-bit float whose
+  JSON text reads as a different 64-bit number, such as 1e20; or a string that is not valid UTF-8.
+  The hook would judge one value while the executor receives another. It does not refuse another
+  spelling of the recorded value, such as `3e-1` for 0.3, or a nil list or map recorded as an empty
+  one. It also refuses a value it cannot compare with that form: a Go struct that its JSON encoder
+  writes field by field, and a value or non-string map key whose type supplies its own encoding (a
+  Go `MarshalJSON` or `MarshalText` method, as `time.Time` and `big.Int` do), since the form records
+  only that encoding while the executor receives the typed value. Below 2^53 in magnitude, a hook
+  compares a 64-bit float argument as its JSON value, the shortest decimal that reads back as that
+  float (Go's `strconv.FormatFloat(f, 'g', -1, 64)`), not as its exact binary expansion. At or above
+  2^53 every such float is an integer and the host dispatches only an argument with exactly that
+  value, so the hook reads it exactly: 2^60 is 1152921504606846976, not the 1152921504606847000 its
+  shortest text gives.
 - `TOOL-14`: The hook returns allow, a transient refusal, or a definitive refusal. Allow calls the
   executor as if no hook were installed. The reference host treats a verdict it does not know,
   including an unset one, as a transient refusal. This specification defines no policy language.
@@ -859,13 +959,23 @@ invokes no harness and stays a no-op without one.
 - `APR-6`: A decision MUST target the selected request: the last gated call of the latest
   execution, owned by this session (not copied before a `LIFECYCLE_FORK`), not completed, and
   without a receipt. Otherwise `FAILED_PRECONDITION`.
-- `APR-7`: An exact retry (same tuple, `approved`, `reason`, and identity) MUST return the existing
-  `APPROVAL_RESULT` record and append nothing, even after resolution, unless the session is
-  deleted (`OPS-34`). A changed decision MUST be `FAILED_PRECONDITION` and never overwrites.
+- `APR-7`: An exact retry (same tuple, `approved`, `reason`, identity, and verified approver) MUST
+  return the existing `APPROVAL_RESULT` record and append nothing, even after resolution, unless the
+  session is deleted (`OPS-34`). A changed decision MUST be `FAILED_PRECONDITION` and never
+  overwrites. The verified approver is compared exactly, issuer and subject, so the same tuple from
+  a different verified caller is a changed decision, as is an authenticated retry of a decision
+  recorded without an approver, or an unauthenticated retry of one recorded with an approver.
 - `APR-8`: A new decision MUST mint a fence and append `APPROVAL_RESULT{tool_call_id, approved,
-  reason, request_seq}` with `Event.actor` set from the request's identity, at the head observed
-  when the request was selected. An opt-in enforcing Go service (§17) ignores the request actor,
-  normalizing it to empty before append and retry comparison; verified audit is not yet available.
+  reason, request_seq, verified_approver}` with `Event.actor` set from the request's identity, at
+  the head observed when the request was selected. `verified_approver` is the issuer and subject the
+  host's caller authentication verified for this `Approve` call (Go `authn.Caller`), and MUST NOT
+  be taken from any request field; it is empty when the host did not authenticate the caller, and
+  the host MUST NOT append one with only issuer or only subject. An opt-in enforcing Go service
+  (§17) ignores the request actor, normalizing it to empty before append and retry comparison.
+  `verified_approver` is audit state that no harness receives: the host leaves it empty in
+  `ControllerFrame.approval` (`APR-11`), in the decision a Go harness receives with a receipt, and
+  in every `APPROVAL_RESULT` it sends in `Start.history` (`EXE-7`) on `Exec`, `Resume` and replay.
+  The journaled record keeps it.
 - `APR-9`: `Approve` MUST NOT resume compute or call the executor. The caller calls `Resume`.
 - No expiry or automatic decision applies, and the optional pre-dispatch policy hook (§9.4) runs
   when recovery dispatches the call, not at `Approve`. The default service has no decision
@@ -1806,13 +1916,13 @@ The reference implementation protects the integrity of the record, not access to
   Request metadata, credentials and session payloads remain excluded; trusted/off behavior is
   unchanged. This diagnostic-only exception does not permit sensitive data in errors; see
   [log data policy](docs/observability.md#data-policy).
-  Enforced Approve ignores request actor and stores an empty actor, not a verified audit identity.
-  It normalizes before retry comparison; historical nonempty actors are not identical retries.
-  Verified caller audit and caller-bound retries remain unavailable.
+  Enforced Approve ignores request actor and stores an empty actor. It normalizes before retry
+  comparison; historical nonempty actors are not identical retries. Approve records the verified
+  caller as `ApprovalResult.verified_approver` and binds exact retries to it (`APR-7`, `APR-8`).
 - Embedded enforcement still opens off-marked journals: unenforced hosts and CLI writers can bypass
   it. It is not cross-host isolation or supported required-mode deployment. Activation still needs
-  owned fork reservation, versioned verified approval audit, journal policy/startup validation,
-  daemon required-mode wiring and TLS assembly. There is no same-pod or self-dial exemption.
+  owned fork reservation, journal policy/startup validation, daemon required-mode wiring and TLS
+  assembly. There is no same-pod or self-dial exemption.
 - `IdentityRef` (session identity, `Event.actor`, `ApproveRequest.identity`) is caller-supplied
   provenance. It MUST NOT be read as authenticated identity.
 - `project` is a listing filter, not a tenancy boundary.
@@ -1884,14 +1994,24 @@ The reference implementation protects the integrity of the record, not access to
     inventory completeness/evidence columns, without fork-publication or reaper state. Journal bytes
     are unchanged. Stop all older writers before that migration; no downgrade to v0.3.0 or older is
     supported. All inventories remain incomplete until explicit operator reconciliation (§13.4).
-  - Version 8 extends `approval_executions` with an execution outcome and rebuilds the shared
+  - Version 8, new in `0.4.0-draft`, changes no table and rewrites no event. Its stamp marks a
+    journal whose `APPROVAL_RESULT` records may carry `verified_approver` (`APR-8`), so a version 7
+    build refuses the whole journal at Open. Decisions written earlier carry no approver and read as
+    before. An older writer that already had the journal open is not stopped by the stamp: it drops
+    the field on read, so its `Exec`, `Resume`, `VerifyJournal` and `controller.Replay` fail chain
+    verification (`DATA_LOSS`) on a session holding one, while its `Approve` RPC, and the `Replay`
+    RPC of v0.3.0, read without verifying and omit the approver. Stop every older writer, including
+    embedded `agentctl`, and back up the database and WAL before the first version 8 open: Open
+    stamps the journal even when the process only reads metadata, and there is no downgrade to
+    version 7.
+  - Version 9 extends `approval_executions` with an execution outcome and rebuilds the shared
     execution/approval projection from the journal. Events, canonical bytes, hashes and fences
     do not change. An undecodable session reports RUNNING without an approval reference; SQL
     faults roll back the migration. A read-only open requiring migration fails, leaving the
     database at its original version; migrate with a writable open before using read-only clients.
     This reporting contract and schema change target v0.4.0. Stop all older hosts and embedded
     clients sharing a journal, and back up the database and any WAL before upgrading. Older
-    binaries refuse v8 on open, but an already-open older writer can bypass the projection.
+    binaries refuse v9 on open, but an already-open older writer can bypass the projection.
     There is no downgrade migration; rollback requires restoring the backup.
   - An older binary refuses a version 4 journal when it opens it, but one that already had the
     journal open does not enforce deletion (`OPS-36`): it can still append, mint fences, and
@@ -1900,19 +2020,23 @@ The reference implementation protects the integrity of the record, not access to
   - A verifier whose schema lacks `LIFECYCLE_DELETE` cannot reproduce that record's hash:
     `CHAIN-1` hashes enum names, and proto3-JSON writes an unknown enum value as a number.
   - `ToolResult.Code.POLICY_DENIED` (`TOOL-16`, version `0.4.0-draft`) is a new value in a hashed
-    `TOOL_RESULT`. The value itself adds no SQLite schema fields; execution-state reporting
-    separately advances the schema to version 8. Only a host with a policy hook that refuses a call
-    definitively writes it; journals without one are unchanged. An older build that supports the
-    journal's schema but lacks this value serves every session that holds no `POLICY_DENIED`
-    receipt. For a session that holds one, it canonicalizes the stored value as a number, so hash verification
-    fails at that record (`CHAIN-12`, `DATA_LOSS`): `Exec`, `Resume`, `VerifyJournal` and
-    reconstruction replay (`controller.Replay`) refuse the session instead of serving the receipt.
-    The `Replay` RPC (§6.6) does not verify, so it does not refuse: it streams the stored record,
-    with the code as the unknown enum number 3. A verifier schema built before the value fails the
-    same record. An older harness rejects the receipt on the wire (`WIRE-15`). Upgrade every host
-    sharing a journal, every harness, and every audit schema before installing a hook that can
-    refuse definitively; after one is recorded, rolling a host back leaves that session unusable to
-    it, except as raw records from `Replay`.
+    `TOOL_RESULT`. It needs no SQLite schema version of its own: the new value is its only on-disk
+    difference, and the version 8 stamp that ships with it in `0.4.0-draft` is for
+    `verified_approver`. Only a host with a policy hook that refuses a call definitively writes it;
+    journals without one are unchanged. A build older than version 8 refuses the journal at Open. A
+    writer built before `POLICY_DENIED` (v0.3.0 and older) that already had the journal open still
+    serves every session that holds no `POLICY_DENIED` receipt. For a session that holds one, that
+    writer canonicalizes the stored value as a number, so hash verification fails at that record
+    (`CHAIN-12`, `DATA_LOSS`): `Exec`, `Resume`, `VerifyJournal` and reconstruction replay
+    (`controller.Replay`) refuse the session instead of serving the receipt. The `Replay` RPC (§6.6)
+    does not verify, so it does not refuse: it streams the stored record, with the code as the
+    unknown enum number 3. An unreleased version 7 build that already includes `TOOL-16` verifies
+    and serves these receipts; it fails only on an approver-bearing record, as the version 8 note
+    above describes. A verifier schema built before the value fails the same record. An older
+    harness rejects the receipt on the wire (`WIRE-15`). Upgrade every host sharing a journal, every
+    harness, and every audit schema before installing a hook that can refuse definitively; after one
+    is recorded, rolling a host back leaves that session unusable to it, except as raw records from
+    `Replay`.
 
 ## 19. Open questions
 

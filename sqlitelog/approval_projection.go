@@ -238,7 +238,8 @@ func (s *approvalExecution) reduce(tx *sql.Tx, uid string, seq int64, ev api.Eve
 			break
 		}
 		decision := ev.ApprovalResult
-		if decision.ToolCallID != s.callID || decision.RequestSeq != s.requestSeq {
+		if decision.ToolCallID != s.callID || decision.RequestSeq != s.requestSeq ||
+			decision.VerifiedApprover != (api.CallerIdentity{}) && !decision.VerifiedApprover.Valid() {
 			s.invalid = true
 			break
 		}

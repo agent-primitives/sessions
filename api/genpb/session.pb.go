@@ -38,7 +38,7 @@ const (
 	ExecState_EXEC_RUNNING           ExecState = 2 // unfinished or uncertain; not a controller liveness guarantee
 	ExecState_EXEC_AWAITING          ExecState = 3 // blocked on approval/input, resolved from the log
 	ExecState_EXEC_COMPLETED         ExecState = 4 // latest execution's last execution event is END
-	ExecState_EXEC_FAILED            ExecState = 5 // latest execution's last execution event is ERROR; recovery remains possible
+	ExecState_EXEC_FAILED            ExecState = 5 // latest execution's last execution event is ERROR; recovery remains possible for modern executions
 	ExecState_EXEC_CANCELED          ExecState = 6 // reserved for Cancel; not currently reported
 )
 
@@ -451,7 +451,7 @@ type Session struct {
 	// Stale or ambiguous projection evidence reports EXEC_RUNNING, never inferred success.
 	// Lifecycle events preserve the outcome; FORK excludes inherited pending approvals.
 	// EXEC_RUNNING includes interrupted executions and is not proof of controller liveness.
-	// Recovery can move FAILED to RUNNING on journaled progress, then COMPLETED on END.
+	// Modern execution recovery can move FAILED to RUNNING on journaled progress, then COMPLETED on END.
 	// DELETE preserves this execution axis but withholds actionable pending_approval.
 	ExecState    ExecState    `protobuf:"varint,13,opt,name=exec_state,json=execState,proto3,enum=agentsessions.v1.ExecState" json:"exec_state,omitempty"`
 	ComputeState ComputeState `protobuf:"varint,14,opt,name=compute_state,json=computeState,proto3,enum=agentsessions.v1.ComputeState" json:"compute_state,omitempty"` // incarnation axis
@@ -1065,7 +1065,8 @@ func (x *ReplayRequest) GetToSeq() int64 {
 // All tuple fields are required and request_seq must be positive. A decision resolves only a
 // request owned by this session, not an inherited parent request. By default identity is recorded
 // on the decision's Event.actor as unverified provenance. An opt-in enforcing Go host ignores it,
-// normalizing the actor to empty before append/retry comparison; verified audit is not available.
+// normalizing the actor to empty before append/retry comparison. A host that authenticates the
+// caller records it as ApprovalResult.verified_approver; no request field sets it.
 // Approve does not run a host's pre-dispatch tool policy hook, which runs when recovery
 // dispatches the approved call (spec §9.4). No expiry, automatic decision, or Cancel
 // semantics are implied.

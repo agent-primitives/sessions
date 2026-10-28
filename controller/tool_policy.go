@@ -60,7 +60,9 @@ type ToolPolicyDecision struct {
 // ToolPolicyApproval is the committed decision that authorizes an approved REQUIRES_APPROVAL call.
 type ToolPolicyApproval struct {
 	// Decision is a copy of the APPROVAL_RESULT payload. Approved is always true here: a denial
-	// never reaches the executor or the hook.
+	// never reaches the executor or the hook. VerifiedApprover is the approver the host's
+	// authentication verified when it journaled the decision, zero when it did not; unlike the
+	// harness, the hook receives it.
 	Decision api.ApprovalResult
 	// DecisionSeq is the journal sequence of that APPROVAL_RESULT record.
 	DecisionSeq int64
@@ -97,7 +99,7 @@ type ToolPolicyInput struct {
 	// Caller is the verified caller the authn interceptors installed on the context passed to
 	// Exec or Resume. It is empty when authentication is off or the controller runs without them.
 	// For an approved call it is the caller of the Resume (or input-less Exec) that recovers the
-	// call, not the approver.
+	// call, not the approver, which is Approval.Decision.VerifiedApprover.
 	Caller api.CallerIdentity
 	// Approval is the committed decision for an approved REQUIRES_APPROVAL call, nil otherwise.
 	// The decision's Event.actor is caller-supplied and not included.

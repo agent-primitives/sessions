@@ -1,6 +1,10 @@
 package sqlitelog
 
-import "database/sql"
+import (
+	"database/sql"
+
+	"github.com/agent-primitives/sessions/eventlog"
+)
 
 // ForkSession returns a log handle for a fresh fork child. It defers inherited metadata until
 // NewFence, then commits it atomically with the child's first fence. Obtaining the handle publishes
@@ -8,6 +12,10 @@ import "database/sql"
 func (s *Store) ForkSession(meta SessionMeta) *Log {
 	return &Log{store: s, session: meta.UID, forkMetadata: &meta}
 }
+
+// ForkSessionLog is ForkSession as an eventlog.SessionJournal, the form session.SessionStore
+// needs. The value is the same *Log, so publication still waits for the child's first fence.
+func (s *Store) ForkSessionLog(meta SessionMeta) eventlog.SessionJournal { return s.ForkSession(meta) }
 
 func (l *Log) forkFence() (int64, error) {
 	tx, err := l.store.db.Begin()

@@ -96,6 +96,16 @@ FORK_GOLDENS = [
      "a10f9c7c0bc86360e712fdd926fffa45d56168af238c451d2b494ce0feb8dc8c"),
 ]
 
+# APPROVAL_RESULT carrying the approver the host verified (canon
+# TestVerifiedApproverCanonicalVector).
+APPROVAL_GOLDEN = (
+    {"execution_id": "e1", "kind": "EVENT_APPROVAL_RESULT",
+     "approval_result": {"tool_call_id": "c1", "approved": True, "reason": "ok", "request_seq": "3",
+                         "verified_approver": {"issuer": "https://issuer.example",
+                                               "subject": "approver-1"}}},
+    "0d1ff028379c892d4f15b1f331a6a8baabfa2dfb43bf32fbb8095fe03725e0a2",
+)
+
 EVENT_TYPE = "agentsessions.v1.Event"
 
 
@@ -113,7 +123,7 @@ def golden_check():
         return 1
     print("DELETE canonical:", DELETE_CANONICAL.decode("utf-8"))
     vectors = [(GOLDEN_EVENT, GOLDEN_EXPECTED), *START_GOLDENS, TOOL_CALL_GOLDEN, DELETE_GOLDEN,
-               *FORK_GOLDENS]
+               *FORK_GOLDENS, APPROVAL_GOLDEN]
     for event, expected in vectors:
         record = {"event": event, "prev_hash": "", "seq": "1"}
         digest = hashlib.sha256(_stdlib_jcs(record)).hexdigest()

@@ -20,7 +20,7 @@ enum ExecState {
   EXEC_RUNNING = 2; // unfinished or uncertain; not a controller liveness guarantee
   EXEC_AWAITING = 3; // blocked on approval/input, resolved from the log
   EXEC_COMPLETED = 4; // latest execution's last execution event is END
-  EXEC_FAILED = 5; // latest execution's last execution event is ERROR; recovery remains possible
+  EXEC_FAILED = 5; // latest execution's last execution event is ERROR; recovery remains possible for modern executions
   EXEC_CANCELED = 6; // reserved for Cancel; not currently reported
 }
 
@@ -96,7 +96,7 @@ message Session {
   // Stale or ambiguous projection evidence reports EXEC_RUNNING, never inferred success.
   // Lifecycle events preserve the outcome; FORK excludes inherited pending approvals.
   // EXEC_RUNNING includes interrupted executions and is not proof of controller liveness.
-  // Recovery can move FAILED to RUNNING on journaled progress, then COMPLETED on END.
+  // Modern execution recovery can move FAILED to RUNNING on journaled progress, then COMPLETED on END.
   // DELETE preserves this execution axis but withholds actionable pending_approval.
   ExecState exec_state = 13;
   ComputeState compute_state = 14; // incarnation axis
@@ -203,7 +203,8 @@ message ReplayRequest {
 // All tuple fields are required and request_seq must be positive. A decision resolves only a
 // request owned by this session, not an inherited parent request. By default identity is recorded
 // on the decision's Event.actor as unverified provenance. An opt-in enforcing Go host ignores it,
-// normalizing the actor to empty before append/retry comparison; verified audit is not available.
+// normalizing the actor to empty before append/retry comparison. A host that authenticates the
+// caller records it as ApprovalResult.verified_approver; no request field sets it.
 // Approve does not run a host's pre-dispatch tool policy hook, which runs when recovery
 // dispatches the approved call (spec §9.4). No expiry, automatic decision, or Cancel
 // semantics are implied.
@@ -335,7 +336,7 @@ message Delta {
 // other methods. Mixed phases fail closed; store faults inside runtime are not trusted unless known
 // at the service storage boundary. No heuristic redaction is used. Request metadata, credentials
 // and session payloads remain excluded. Trusted/off behavior is unchanged. These checks do not
-// provide required-mode deployment, verified approval audit or transport assembly.
+// provide required-mode deployment or transport assembly.
 service Sessions {
   rpc CreateSession(CreateSessionRequest) returns (Session);
   // GetSession remains available for audit after deletion, including metadata and deletion intent
@@ -384,8 +385,9 @@ service Sessions {
 
   // Implemented durable approval decisions for STATELESS_REPLAY executions.
   // OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple,
-  // approved value, reason and identity returns the existing decision, even after resolution.
-  // A changed decision/reason/identity for that request is FAILED_PRECONDITION, never an overwrite.
+  // approved value, reason, identity and verified approver returns the existing decision, even
+  // after resolution. A changed decision/reason/identity, or a different verified approver, for
+  // that request is FAILED_PRECONDITION, never an overwrite.
   // INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent
   // approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request
   // tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created

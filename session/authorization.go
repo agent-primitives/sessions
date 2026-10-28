@@ -18,7 +18,8 @@ import (
 // WithAuthorization requires a verified authn.Caller and authorizes each Sessions
 // RPC before disclosure or effects. A nil policy fails closed, not back to off.
 // This is an embedded-host seam, not a complete deployment mode: journals remain
-// marked off, owned Fork is refused, and verified approval audit is not available.
+// marked off and owned Fork is refused. Approve journals the verified caller as the
+// decision's verified approver.
 // Do not share its journal with unenforced writers. The reference daemon does not
 // install this option; activation needs journal policy/startup and TLS assembly.
 func WithAuthorization(policy api.Authorizer) Option {

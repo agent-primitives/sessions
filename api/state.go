@@ -11,7 +11,7 @@ const (
 	ExecRunning   ExecState = "RUNNING"  // unfinished or uncertain, not confirmed controller liveness
 	ExecAwaiting  ExecState = "AWAITING" // blocked on approval/input, resolved from the log
 	ExecCompleted ExecState = "COMPLETED"
-	ExecFailed    ExecState = "FAILED" // recorded error; recovery remains possible
+	ExecFailed    ExecState = "FAILED" // recorded error; recovery remains possible for modern executions
 	ExecCanceled  ExecState = "CANCELED"
 )
 

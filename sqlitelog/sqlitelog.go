@@ -87,8 +87,9 @@ CREATE INDEX IF NOT EXISTS sessions_project_created
 // v0.1.2 shipped. Version 2 adds the harness registry; version 3 adds approval reporting;
 // version 4 adds permanent deletion intent; version 5 adds caller ownership and an authorization marker;
 // version 6 records explicit session model-policy eligibility; version 7 adds the allocation
-// ledger and inventory completeness/evidence columns; version 8 adds execution outcomes.
-const SchemaVersion = 8
+// ledger and inventory completeness/evidence columns; version 8 marks a journal whose
+// APPROVAL_RESULT records may carry a verified approver; version 9 adds execution outcomes.
+const SchemaVersion = 9
 
 // migrations[i] moves a database from version i+1 to i+2, inside the migration transaction. The
 // array length is tied to SchemaVersion, so bumping one without the other does not compile.
@@ -100,7 +101,15 @@ var migrations = [SchemaVersion - 1]func(*sql.Tx) error{
 	migrateV5ToV6,
 	migrateCleanupInventory,
 	migrateV7ToV8,
+	migrateV8ToV9,
 }
+
+// migrateV7ToV8 changes no table and rewrites no event. The stamp alone is the change: this build
+// may write APPROVAL_RESULT.verified_approver, which a version 7 build drops on read and so fails
+// hash verification for. Refusing the newer stamp at Open turns that into a clean refusal of the
+// whole journal, before any read or append. Existing decisions carry no approver and are read as
+// they were.
+func migrateV7ToV8(*sql.Tx) error { return nil }
 
 // migrateV5ToV6 leaves every existing session on legacy model semantics, including empty logs.
 func migrateV5ToV6(tx *sql.Tx) error {
@@ -437,6 +446,10 @@ func setWALMode(db *sql.DB) error {
 
 // Session returns a handle to one session's append-only chain.
 func (s *Store) Session(uid string) *Log { return &Log{store: s, session: uid} }
+
+// SessionLog is Session as an eventlog.SessionJournal, the form session.SessionStore needs. The
+// value is the same *Log, so its CheckWritable and the optional allocation recording apply to it.
+func (s *Store) SessionLog(uid string) eventlog.SessionJournal { return s.Session(uid) }
 
 // Log is one session's durable, single-writer, hash-chained event log.
 type Log struct {

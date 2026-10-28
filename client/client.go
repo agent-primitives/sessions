@@ -306,10 +306,19 @@ func (c *Client) Suspend(ctx context.Context, uid string) (*v1.Session, error) {
 	return c.stub.Suspend(ctx, &v1.SuspendRequest{Session: uid})
 }
 
+// ErrVerifiedApproverNotSendable reports an ApprovalDecision whose VerifiedApprover is set. Only the
+// server sets it, from the caller its authentication verified; no request field can carry it.
+var ErrVerifiedApproverNotSendable = errors.New("client: verified approver is set by the server, not sent")
+
 // Approve commits only a decision, returning the original decision record on an exact retry.
 // It never resumes compute; call Resume separately to continue. Identity is provenance, not
 // authorization. ApprovalDecision represents a supplied bool, including an explicit denial.
+// The server records a verified approver only from its own caller authentication, so a decision
+// that sets VerifiedApprover is refused with ErrVerifiedApproverNotSendable before any RPC.
 func (c *Client) Approve(ctx context.Context, uid string, decision api.ApprovalDecision) (*v1.ApproveResponse, error) {
+	if decision.VerifiedApprover != (api.CallerIdentity{}) {
+		return nil, ErrVerifiedApproverNotSendable
+	}
 	actor := wire.EventToProto(api.Event{Actor: decision.Identity}).GetActor()
 	return c.stub.Approve(ctx, &v1.ApproveRequest{
 		Session: uid, ExecutionId: decision.ExecutionID, ToolCallId: decision.ToolCallID,

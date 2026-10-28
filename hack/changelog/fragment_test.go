@@ -305,3 +305,37 @@ func TestParseFragmentsRefusesStrays(t *testing.T) {
 		}
 	}
 }
+
+func TestUnreleasedHeading(t *testing.T) {
+	for _, tc := range []struct {
+		changelog string
+		want      bool
+	}{
+		{"## Unreleased\n", true},
+		{"## unreleased\n", true},
+		{"  ## Unreleased  \n", true},
+		{"## Unreleased ##\n", true},
+		{"## Unreleased #\t\n", true},
+		{"##\tUnreleased\n", true},
+		{"##\tUnreleased\t##\n", true},
+		{"Unreleased\n---\n", true},
+		{"Unreleased\n  -\n", true},
+		{"# Changelog\r\n\r\n## Unreleased\r\n\r\n## v0.1.0\r\n", true},
+		{"## Unreleased ##\r\n", true},
+		{"Unreleased\r\n---\r\n", true},
+		{"## Unreleased changes\r\n", false},
+		{"## Unreleased changes\n", false},
+		{"## Unreleased##\n", false},
+		{"### Unreleased\n", false},
+		{"# Unreleased\n", false},
+		{"##Unreleased\n", false},
+		{"Unreleased\n", false},
+		{"Unreleased\n===\n", false},
+		{"- Unreleased\n---\n", false},
+		{"## v0.3.0 - 2026-10-22\n\n- Unreleased builds.\n", false},
+	} {
+		if got := unreleasedHeading(tc.changelog); got != tc.want {
+			t.Errorf("unreleasedHeading(%q) = %v, want %v", tc.changelog, got, tc.want)
+		}
+	}
+}

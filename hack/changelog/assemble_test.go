@@ -222,6 +222,16 @@ func TestAssembleRefusals(t *testing.T) {
 			wantErr: `"## Unreleased" section`,
 		},
 		{
+			name: "unreleased section with closing hashes", changelog: intro + "## Unreleased ##\n\n- Old style.\n\n" + history,
+			version: "v0.4.0", date: "2026-10-30", frags: map[string]string{"good.md": good},
+			wantErr: `"## Unreleased" section`,
+		},
+		{
+			name: "unreleased section after a tab", changelog: intro + "##\tUnreleased\n\n- Old style.\n\n" + history,
+			version: "v0.4.0", date: "2026-10-30", frags: map[string]string{"good.md": good},
+			wantErr: `"## Unreleased" section`,
+		},
+		{
 			name: "bad version", changelog: intro + history, version: "0.4.0", date: "2026-10-30",
 			frags: map[string]string{"good.md": good}, wantErr: "not a release tag",
 		},
@@ -266,9 +276,11 @@ func TestVerifyAssembled(t *testing.T) {
 		t.Fatalf("verifyAssembled = %v, want it to name the pending fragment", err)
 	}
 
-	root = newRepo(t, intro+"## Unreleased\n\n"+history, nil)
-	if err := verifyAssembled(root); err == nil || !strings.Contains(err.Error(), "Unreleased") {
-		t.Fatalf("verifyAssembled = %v, want an Unreleased refusal", err)
+	for _, heading := range []string{"## Unreleased\n", "## Unreleased ##\n", "##\tUnreleased\n", "Unreleased\n----------\n"} {
+		root = newRepo(t, intro+heading+"\n"+history, nil)
+		if err := verifyAssembled(root); err == nil || !strings.Contains(err.Error(), "Unreleased") {
+			t.Fatalf("verifyAssembled with %q = %v, want an Unreleased refusal", heading, err)
+		}
 	}
 
 	root = newRepo(t, intro+history, nil)

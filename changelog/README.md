@@ -119,9 +119,10 @@ This inserts `## vX.Y.Z - <date>` above the previous release, with one `###` sub
 in the order Compatibility, Added, Changed, Fixed, Security, and the entries in each ordered by
 fragment file name. It then deletes the fragments, keeping `unreleased/.gitkeep`. It refuses, and
 changes nothing, when a fragment is malformed or names an unknown category, when `CHANGELOG.md`
-already has a `vX.Y.Z` section, or when it still has an `## Unreleased` section. With no fragments
-it changes nothing, so running it twice is safe. The maintainer then edits the section as before:
-a `Compatibility` preamble with upgrade steps, `####` subsections, anchors.
+already has a `vX.Y.Z` section, or when it still has an `## Unreleased` section, in any heading
+syntax (`## Unreleased ##`, a tab after `##`, or `Unreleased` underlined with `-`). With no
+fragments it changes nothing, so running it twice is safe. The maintainer then edits the section as
+before: a `Compatibility` preamble with upgrade steps, `####` subsections, anchors.
 
 The `release` workflow runs `go run ./hack/changelog verify-assembled` on the tagged commit and
 stops before publishing anything if a fragment is still there.

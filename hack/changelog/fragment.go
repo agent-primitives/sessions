@@ -77,6 +77,11 @@ var (
 	autolink = regexp.MustCompile(`^<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\x00-\x20\x7f<>]*|` +
 		`[A-Za-z0-9.!#$%&'*+/=?^_\x60{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?` +
 		`(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>`)
+	// atxH2 matches a level 2 ATX heading and captures its title without the optional closing run
+	// of #s, which must follow a space or tab.
+	atxH2 = regexp.MustCompile(`^[ \t]*##[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$`)
+	// setextH2 matches the underline of a level 2 setext heading.
+	setextH2 = regexp.MustCompile(`^[ \t]*-+[ \t]*$`)
 	// parentDir matches a parent directory step (../), also with dots or slash percent-encoded or
 	// written as HTML character references, or with a backslash, which browsers treat as a slash.
 	parentDir = regexp.MustCompile(`(?i)(?:\.|%2e|&#0*46;?|&#x0*2e;?|&period;){2}` +
@@ -601,10 +606,18 @@ func renderSection(version, date string, frags []fragment) string {
 }
 
 // unreleasedHeading reports whether changelog has an "## Unreleased" section, which fragments
-// replace.
+// replace: a level 2 heading titled Unreleased in any case, written as an ATX heading (## title,
+// with spaces or tabs and an optional closing run of #s) or a setext heading (title over a line of
+// -s). It errs towards finding one: it matches at any indentation and also in a fenced block, and
+// it accepts CRLF line endings, as a Windows checkout may write CHANGELOG.md.
 func unreleasedHeading(changelog string) bool {
-	for line := range strings.SplitSeq(changelog, "\n") {
-		if strings.EqualFold(strings.TrimSpace(line), "## Unreleased") {
+	lines := strings.Split(strings.ReplaceAll(changelog, "\r\n", "\n"), "\n")
+	for i, line := range lines {
+		if m := atxH2.FindStringSubmatch(line); m != nil && strings.EqualFold(m[1], "Unreleased") {
+			return true
+		}
+		if strings.EqualFold(strings.TrimSpace(line), "Unreleased") && i+1 < len(lines) &&
+			setextH2.MatchString(lines[i+1]) {
 			return true
 		}
 	}

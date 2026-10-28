@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/url"
 	"path"
 	"regexp"
 	"slices"
@@ -34,6 +35,9 @@ var (
 	// form rewriteLinks rewrites, and the one hack/check-doc-links.py checks. A target with a
 	// backtick is not matched, so a code span cannot start inside one.
 	linkTarget = regexp.MustCompile(`\]\(([^)\s` + "`" + `]+)((?:\s+"[^"]*")?\))`)
+	// urlScheme matches the scheme of an absolute URL (https:, mailto:), which a browser does not
+	// resolve against the page.
+	urlScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
 	// containers matches the block quote markers and list markers a line may start with.
 	containers = `^[ \t]*(?:(?:>|[-*+][ \t]|[0-9]{1,9}[.)][ \t])[ \t]*)*`
 	// linkDefinition matches the line of a link reference definition ([label]: target) with the
@@ -132,7 +136,7 @@ func parseFragment(name string, data []byte) (fragment, error) {
 // backstop for any other form, it refuses a parent directory step (../) left outside an inline link
 // target and a code span: every in-repository target written relative to the fragment needs one,
 // and a rewritten target has none. A relative target without one could only name a file in
-// fragmentDir, which a release deletes.
+// fragmentDir, which a release deletes; rootRelative refuses those.
 //
 // Fenced code blocks are left alone. A block closes as in CommonMark: on a fence of the opening
 // fence's character, at least as long, with nothing but spaces and tabs after it. A non-blank line
@@ -467,10 +471,16 @@ func indentWidth(line string) int {
 }
 
 // rootRelative turns a link target written relative to fragmentDir into one relative to the
-// repository root. URLs and same-file anchors are returned unchanged.
+// repository root. URLs (a target with a scheme) and same-file anchors are returned unchanged. The
+// target is split once, at its first '?' or '#', into a path and a suffix: only the path is
+// resolved, and the suffix is kept as written. A target that Markdown would decode into another
+// path is refused rather than resolved: a backslash escape (\/ is /) or a character reference
+// (&#47;), which may also end the path (&#63; is ?). So is a target with a parenthesis: linkTarget
+// stops at the first ')', but Markdown's target runs on to the ')' that balances each '(', past
+// the text this function sees. A target that resolves into fragmentDir, such as another fragment,
+// is refused: a release deletes it. That check runs on the returned target.
 func rootRelative(target string) (string, error) {
-	if strings.HasPrefix(target, "#") || strings.Contains(target, "://") ||
-		strings.HasPrefix(target, "mailto:") || strings.HasPrefix(target, "tel:") {
+	if strings.HasPrefix(target, "#") || urlScheme.MatchString(target) {
 		return target, nil
 	}
 	if strings.HasPrefix(target, "/") {
@@ -478,24 +488,61 @@ func rootRelative(target string) (string, error) {
 	}
 	// path.Join resolves only a literal ../; a browser also resolves an encoded one, so a target
 	// with one could still point outside the repository after the rewrite. The whole target is
-	// checked: a character reference has a '#' that is not an anchor.
+	// checked, as the browser may resolve it before splitting off a character reference's '#'.
 	for _, step := range parentDir.FindAllString(target, -1) {
 		if step != "../" {
 			return "", fmt.Errorf("link %q: write each parent directory step as ../, not %q", target, step)
 		}
 	}
-	file, anchor, hasAnchor := strings.Cut(target, "#")
+	if strings.ContainsAny(target, "()") {
+		return "", fmt.Errorf("link %q: a relative target may not contain ( or ): Markdown ends the target at the ) that balances each (, past where assembly checks and rewrites it; percent-encode the parenthesis (%%28, %%29)", target)
+	}
+	if strings.ContainsAny(target, `\&`) {
+		return "", fmt.Errorf("link %q: a relative target may not contain \\ or &: Markdown decodes backslash escapes and character references, so the link would point elsewhere than the target assembly checks and rewrites; percent-encode the character (%%5C, %%26)", target)
+	}
+	file, suffix := splitTarget(target)
 	p := path.Clean(path.Join(fragmentDir, file))
 	if p == ".." || strings.HasPrefix(p, "../") {
 		return "", fmt.Errorf("link %q: points outside the repository", target)
 	}
-	if p == "CHANGELOG.md" && hasAnchor {
-		return "#" + anchor, nil
+	out := p + suffix
+	if p == "CHANGELOG.md" && strings.HasPrefix(suffix, "#") {
+		out = suffix
 	}
-	if hasAnchor {
-		p += "#" + anchor
+	if inFragmentDir(out) {
+		return "", fmt.Errorf("link %q: points into %s/, which a release deletes; link to the documentation or code the entry describes instead", target, fragmentDir)
 	}
-	return p, nil
+	return out, nil
+}
+
+// splitTarget splits a link target into its path and the query or fragment after it, which starts
+// at the first '?' or '#'. rootRelative and inFragmentDir both split a target with it, so they agree
+// on where its path ends.
+func splitTarget(target string) (file, suffix string) {
+	if i := strings.IndexAny(target, "?#"); i >= 0 {
+		return target[:i], target[i:]
+	}
+	return target, ""
+}
+
+// inFragmentDir reports whether a root-relative link target, as rootRelative returns it, resolves to
+// fragmentDir or an entry under it. A browser resolves only the path's literal '/' and its dot
+// segments (also percent-encoded, which parentDir refuses where they step up); a server may also
+// decode the path's percent-encoding (%2F is /, %75 is u), so the check resolves the path both as
+// written and decoded.
+func inFragmentDir(target string) bool {
+	file, _ := splitTarget(target)
+	views := []string{file}
+	if u, err := url.PathUnescape(file); err == nil && u != file {
+		views = append(views, u)
+	}
+	for _, v := range views {
+		p := path.Clean(v)
+		if p == fragmentDir || strings.HasPrefix(p, fragmentDir+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // file is a directory entry under fragmentDir with its contents.

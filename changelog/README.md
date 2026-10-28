@@ -41,12 +41,20 @@ category: Added
   relative to the fragment, so they resolve on GitHub (and links are checked by
   `hack/check-doc-links.py`): `../../docs/allocation-ownership.md`, or
   `../../CHANGELOG.md#sqlite-v4-rollout` for a section of the changelog. Assembly rewrites them to
-  resolve from `CHANGELOG.md` (`docs/allocation-ownership.md`, `#sqlite-v4-rollout`). It cannot
-  rewrite other link forms, so the tool refuses them: reference-style link definitions
-  (`[label]: target`), a target in angle brackets, with a backtick or with a `'title'`, and HTML
-  `href`, `src` and `srcset` attributes. As a backstop for any other form, it refuses `../`, also
-  with its dots or slash encoded (`%2e`, `&#46;`), anywhere but an inline link target, a fenced
-  block and inline code that starts and ends on one line; in a link target, write `../` literally.
+  resolve from `CHANGELOG.md` (`docs/allocation-ownership.md`, `#sqlite-v4-rollout`): it rewrites
+  the path, up to the first `?` or `#`, and keeps the query and anchor as written. A target with a
+  scheme, such as `https:` or `mailto:`, is left as it is. A link to another fragment, or anywhere
+  else under `changelog/unreleased/`, is refused, since a release deletes the fragments; link to
+  the documentation or code the entry describes. A relative target with a backslash, `&`, `(` or
+  `)` is refused: Markdown decodes backslash escapes (`\/` is `/`) and character references
+  (`&#47;`), and runs a target past a `)` that closes a `(` in it, so the link would point
+  elsewhere than the path assembly checks; percent-encode the character (`%5C`, `%26`, `%28`,
+  `%29`). Assembly cannot rewrite other link forms, so the tool refuses them:
+  reference-style link definitions (`[label]: target`), a target in angle brackets, with a backtick
+  or with a `'title'`, and HTML `href`, `src` and `srcset` attributes. As a backstop for any other
+  form, it refuses `../`, also with its dots or slash encoded (`%2e`, `&#46;`), anywhere but an
+  inline link target, a fenced block and inline code that starts and ends on one line; in a link
+  target, write `../` literally.
   Keep inline code on one line: after a line that leaves a backtick or HTML tag open, the tool
   cannot tell code from a link, so it refuses a relative link target until the paragraph ends.
 - No footnotes, neither references (`[^1]`) nor definitions (`[^1]: note`): a release puts every

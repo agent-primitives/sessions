@@ -21,7 +21,19 @@ type Store interface {
 	Verify() error
 }
 
-// CheckWritable performs the optional durable-deletion preflight. Unknown fresh logs remain
+// SessionJournal is a Store for one session of a store that supports deletion, with the deletion
+// preflight required rather than optional. CheckWritable is read-only: it returns an error
+// wrapping ErrDeleted once the session's deletion has committed, nil for a session that is
+// writable or has no record yet, and any other error for a failed check, which the caller treats
+// as a refusal. The host runs it before compute work, so a wrapper forwards it to the journal it
+// wraps; Append and NewFence still enforce the authoritative storage barrier.
+type SessionJournal interface {
+	Store
+	CheckWritable() error
+}
+
+// CheckWritable performs the durable-deletion preflight for a Store that has one, as every
+// SessionJournal does. A Store without it (the in-memory log, which has no deletion) is always
 // writable. Wrappers around durable stores must forward CheckWritable to preserve refusal before
 // compute work; Append and NewFence still enforce the authoritative storage barrier.
 func CheckWritable(log Store) error {

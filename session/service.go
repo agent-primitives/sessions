@@ -1,13 +1,13 @@
-// Package session implements the client-facing Sessions gRPC service, backed by the durable
-// sqlitelog journal and the event-sourced controller. It is the top seam a producer (GitHub,
-// Foundry, a custom app) or the agentctl CLI drives. For M0 it hosts a single harness (echo); the
-// model and harness are injected.
+// Package session implements the client-facing Sessions gRPC service, backed by a durable
+// SessionStore (the sqlitelog journal by default) and the event-sourced controller. It is the top
+// seam a producer (GitHub, Foundry, a custom app) or the agentctl CLI drives. For M0 it hosts a
+// single harness (echo); the model and harness are injected.
 //
-// A session UID is a key in the sqlitelog store. CreateSession persists a metadata row up front,
-// so a session exists — and is listable — from the moment it is created, before it has any events
-// and before any compute is provisioned. The log remains the authority for everything the log
-// knows (cursor, lifecycle); the metadata row carries only what the log cannot express, such as
-// the project, display name, and configured harness/model.
+// A session UID is a key in the store. CreateSession persists a metadata row up front, so a session
+// exists — and is listable — from the moment it is created, before it has any events and before any
+// compute is provisioned. The log remains the authority for everything the log knows (cursor,
+// lifecycle); the metadata row carries only what the log cannot express, such as the project,
+// display name, and configured harness/model.
 package session
 
 import (
@@ -34,10 +34,11 @@ import (
 	"github.com/agent-primitives/sessions/wire"
 )
 
-// Service implements v1.SessionsServer over a sqlitelog store and the controller.
+// Service implements v1.SessionsServer over a SessionStore (a *sqlitelog.Store by default) and
+// the controller.
 type Service struct {
 	v1.UnimplementedSessionsServer
-	store          *sqlitelog.Store
+	store          SessionStore
 	registry       *placement.Registry
 	logger         *slog.Logger
 	defaultProject string
@@ -70,7 +71,7 @@ func WithDefaultProject(project string) Option {
 // registry. There is no default-harness option: the registry already names its default, and a
 // service-level override could name a harness the host does not serve, which would record a
 // harness on every new session that no execution could ever resolve.
-func NewService(store *sqlitelog.Store, registry *placement.Registry, opts ...Option) *Service {
+func NewService(store SessionStore, registry *placement.Registry, opts ...Option) *Service {
 	s := &Service{
 		store:          store,
 		registry:       registry,
@@ -628,7 +629,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		sess = created
 	}
 
-	log := s.store.Session(uid)
+	log := s.store.SessionLog(uid)
 	var recoveryInfo *sqlitelog.SessionInfo
 	var placer *placement.Placer
 	var harness string
@@ -865,7 +866,7 @@ func (s *Service) Replay(req *v1.ReplayRequest, stream v1.Sessions_ReplayServer)
 	if from <= 0 {
 		from = 1
 	}
-	recs, err := s.store.Session(req.GetSession()).ReadProto(from)
+	recs, err := readProto(s.store.SessionLog(req.GetSession()), from)
 	if err != nil {
 		return hostInternalError("read: %v", err)
 	}
@@ -918,7 +919,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		return nil, status.Error(codes.InvalidArgument, "ForkRequest.identity is unsupported: per-child principals are not enforced")
 	}
 
-	parent := s.store.Session(req.GetSession())
+	parent := s.store.SessionLog(req.GetSession())
 	atSeq := req.GetAtSeq()
 	placer, _, _, err := s.placerFor(ctx, req.GetSession(), "", func() error {
 		if atSeq <= 0 {
@@ -970,11 +971,11 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 			// Identity is not inherited; per-child principals are rejected before placement.
 			Annotations: parentInfo.Annotations, Origin: parentInfo.Origin, Labels: childLabels,
 		}
-		log := s.store.Session(uid)
+		log := s.store.SessionLog(uid)
 		if meta.ModelPolicy || meta.ModelPolicyEligible {
 			// First child-row visibility must include its inherited route/default and policy bit,
 			// even if a later clone fails or the process exits before fan-out finalization.
-			log = s.store.ForkSession(meta)
+			log = s.store.ForkSessionLog(meta)
 		}
 		metadata = append(metadata, meta)
 		children = append(children, placement.ForkChild{UID: uid, Log: log})
@@ -1080,7 +1081,7 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 		refused = s.checkResumedHarness(uid, stored, name)
 		return refused
 	}
-	log := s.store.Session(uid)
+	log := s.store.SessionLog(uid)
 	if _, err := s.registry.Suspend(ctx, log, uid, info.Harness, placement.WithResolvedHarnessCheck(check)); err != nil {
 		if refused != nil && err == refused {
 			return nil, refused
@@ -1122,7 +1123,7 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	if err := deletedSessionError(info); err != nil {
 		return nil, err
 	}
-	log := s.store.Session(uid)
+	log := s.store.SessionLog(uid)
 	stored := info.Harness
 	if stored == "" {
 		stored = s.registry.Default()

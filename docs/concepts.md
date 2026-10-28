@@ -224,7 +224,8 @@ Exec, Fork, Resume, Suspend and Approve across its Placers. This is not cross-ho
 exclusion: an independent host can provision before its first durable fence. This build's
 writers reject subsequent durable writes to tombstones; already-open older writers do not.
 Follow the [v4 rollout order](../CHANGELOG.md#sqlite-v4-rollout) before the first upgraded open.
-Direct durable-log wrappers must forward the optional `CheckWritable` preflight to refuse before
+The journals a `session.SessionStore` returns are `eventlog.SessionJournal` values, which must
+implement the `CheckWritable` preflight, and durable-log wrappers must forward it to refuse before
 compute; this build's storage write barriers still enforce the permanent tombstone.
 
 Opening an older SQLite journal migrates it transactionally through approval-reporting v3 to

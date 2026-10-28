@@ -190,8 +190,8 @@ agentctl resume  --journal /tmp/sr.db --session "$SID2"
 ```
 
 ```
-session sess-... suspend compute=COMPUTE_COLD last_seq=5
-session sess-... resume  compute=COMPUTE_LIVE last_seq=6
+session sess-... suspend compute=COMPUTE_COLD exec=COMPLETED last_seq=5
+session sess-... resume  compute=COMPUTE_LIVE exec=COMPLETED last_seq=6
 ```
 
 The first turn is seq 1 to 4, so `SUSPEND` lands at seq 5 and `RESUME` at seq 6. Both are `LIFECYCLE`
@@ -209,7 +209,7 @@ agentctl list   --journal /tmp/qs.db --project acme
 ```
 
 ```
-sess-0d879482...	last_seq=0	compute=NONE	harness=echo	name=triage
+sess-0d879482...	last_seq=0	compute=NONE	exec=PENDING	harness=echo	name=triage
 ```
 
 `last_seq=0` is the point: the session has no events and no compute yet, and it still appears. That
@@ -223,12 +223,29 @@ agentctl list --journal /tmp/sr.db --project default
 ```
 
 ```
-sess-...	last_seq=6	compute=LIVE	harness=echo	name=
+sess-...	last_seq=6	compute=LIVE	exec=COMPLETED	harness=echo	name=
 ```
 
 `compute` reflects what the log implies about compute, which is why the resumed session above reads
 `LIVE`. It is not a live probe of the backend; see
 [`concepts.md`](concepts.md#metadata-and-listing) for what that does and does not guarantee.
+
+`exec` is the independent execution axis. `get` and `list` show PENDING before any execution,
+RUNNING for unfinished work, COMPLETED after END, FAILED after ERROR, or AWAITING for a valid
+pending approval. RUNNING is not proof that a controller is alive.
+
+For a quick manual check, create a session, inspect it, and execute a turn:
+
+```bash
+CHECK=$(agentctl create --journal /tmp/exec-state-check.db)
+agentctl get --journal /tmp/exec-state-check.db --session "$CHECK"  # exec=PENDING
+agentctl exec --journal /tmp/exec-state-check.db --session "$CHECK" --input "hello"
+agentctl get --journal /tmp/exec-state-check.db --session "$CHECK"  # exec=COMPLETED
+agentctl list --journal /tmp/exec-state-check.db                  # exec=COMPLETED
+```
+
+Each command reopens the same database, so this also checks persistence. With a standalone server,
+replace `--journal ...` on the client commands with `--server 127.0.0.1:8080`.
 
 ## 7. Verify the provenance chain with a non-Go verifier
 

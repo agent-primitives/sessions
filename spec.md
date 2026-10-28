@@ -192,16 +192,36 @@ no flattened lifecycle enum.
 - `SES-7`: `exec_state` MUST be derived from the log at `last_seq`, by reading it or from a
   projection updated in the same transaction as the append (`LOG-8`), which is what the reference
   host reads. The value is:
+  - `EXEC_RUNNING` when the projection lags the journal head, missed earlier records, or the
+    reporting evidence is ambiguous (invalid execution/approval structure or incomplete declared
+    inputs). The reference store never skips a projection gap to regain reporting authority;
   - `EXEC_AWAITING` when a valid, owned, unanswered host approval request exists in the latest
     execution (§10);
-  - otherwise `EXEC_PENDING` when the log has no record before its `LIFECYCLE_DELETE` (§11.8),
-    which for a session that is not deleted means `last_seq = 0`;
-  - otherwise `EXEC_COMPLETED`.
+  - otherwise `EXEC_PENDING` when the log has no execution records (lifecycle-only histories
+    remain pending);
+  - otherwise `EXEC_COMPLETED` when the latest execution's last non-lifecycle event is an
+    `EVENT_END` with a body;
+  - otherwise `EXEC_FAILED` when that event is an `EVENT_ERROR` with a body;
+  - otherwise `EXEC_RUNNING`.
 
+  Latest means first-seen execution order, not the execution ID of the last record. ID-less
+  legacy execution records share one reporting identity; their last non-lifecycle event selects
+  the outcome. An ID-less non-lifecycle record after modern execution begins violates `EXE-16`:
+  reporting corruption is sticky, reports RUNNING and suppresses pending approval references.
+  A valid unanswered approval otherwise takes precedence over a recorded ERROR.
   Deletion leaves this value as it was: a deleted session with a valid unanswered request still
   reports `EXEC_AWAITING`, but without `pending_approval` (`SES-12`).
-- `EXEC_COMPLETED` is a compatibility fallback. It does not prove that an `EVENT_END` or a receipt
-  exists. The reference host never reports `EXEC_RUNNING`, `EXEC_FAILED`, or `EXEC_CANCELED`.
+  Other lifecycle records preserve the execution outcome; FORK excludes inherited approval calls
+  under §10. A fork cut mid-execution therefore reports RUNNING until later execution records
+  change it, without asserting the child is actively executing.
+- `EXEC_RUNNING` means unfinished or uncertain, not confirmed controller liveness. Crashed
+  executions may remain RUNNING; execution leases and liveness reporting are separate work
+  ([#213](https://github.com/agent-primitives/sessions/issues/213)).
+  FAILED does not make a modern execution unrecoverable (`EXE-6`): subsequent journaled progress
+  reports RUNNING, or END reports COMPLETED. Merely taking a fence or entering Run changes no
+  execution records and therefore does not clear FAILED.
+  These values grant no admission or recovery authority. The reference host does not report
+  `EXEC_CANCELED`; Cancel remains unimplemented.
 - `SES-8`: `compute_state` MUST be updated in the same transaction as the append that changes it:
   - `LIFECYCLE_SUSPEND` and `LIFECYCLE_FORK` set `COMPUTE_COLD`;
   - `LIFECYCLE_RESUME` sets `COMPUTE_LIVE`;
@@ -290,7 +310,7 @@ no flattened lifecycle enum.
   if `expected_last_seq` equals the current head. Otherwise it MUST fail with a conflict error
   (`eventlog.ErrConflict`) and commit nothing.
 - `LOG-8`: The head read, the sequence check, the fence check, the insert, and any projection
-  updates (`compute_state`, approval projection) MUST be atomic. Two concurrent appends at the
+  updates (`compute_state`, execution/approval projection) MUST be atomic. Two concurrent appends at the
   same head MUST NOT both commit; if either carries the current fence, exactly one commits. The
   loser fails with the conflict error, or with the fenced error (`LOG-12`) when its fence is stale
   and it reaches the store first.
@@ -391,7 +411,7 @@ reads the catalog that registration writes; the reference daemon does.
   - `eventlog.ErrDeleted`: `PutSession` or `PutSessionOnActiveHarness` of a deleted session (the
     latter before its harness check), and the journal writes in `LOG-19`.
 - `STORE-2`: `SessionInfo` and `ListSessions` MUST reflect every journal append and
-  `DeleteSession` that returned before the read: `last_seq`, `compute_state` and
+  `DeleteSession` that returned before the read: `last_seq`, `exec_state`, `compute_state` and
   `pending_approval` come from the committed journal or from projections updated in the
   append's transaction (`LOG-8`, `SES-7`, `SES-8`). `ListSessions` MUST meet `SES-9` to
   `SES-11`, and filter by `opts.Owner`, when set, before paging (§17).
@@ -1973,8 +1993,7 @@ The reference implementation protects the integrity of the record, not access to
     Version 6 adds explicit model-policy eligibility. Version 7 adds the allocation ledger and
     inventory completeness/evidence columns, without fork-publication or reaper state. Journal bytes
     are unchanged. Stop all older writers before that migration; no downgrade to v0.3.0 or older is
-    supported. All
-    inventories remain incomplete until explicit operator reconciliation (§13.4).
+    supported. All inventories remain incomplete until explicit operator reconciliation (§13.4).
   - Version 8, new in `0.4.0-draft`, changes no table and rewrites no event. Its stamp marks a
     journal whose `APPROVAL_RESULT` records may carry `verified_approver` (`APR-8`), so a version 7
     build refuses the whole journal at Open. Decisions written earlier carry no approver and read as
@@ -1985,6 +2004,15 @@ The reference implementation protects the integrity of the record, not access to
     embedded `agentctl`, and back up the database and WAL before the first version 8 open: Open
     stamps the journal even when the process only reads metadata, and there is no downgrade to
     version 7.
+  - Version 9 extends `approval_executions` with an execution outcome and rebuilds the shared
+    execution/approval projection from the journal. Events, canonical bytes, hashes and fences
+    do not change. An undecodable session reports RUNNING without an approval reference; SQL
+    faults roll back the migration. A read-only open requiring migration fails, leaving the
+    database at its original version; migrate with a writable open before using read-only clients.
+    This reporting contract and schema change target v0.4.0. Stop all older hosts and embedded
+    clients sharing a journal, and back up the database and any WAL before upgrading. Older
+    binaries refuse v9 on open, but an already-open older writer can bypass the projection.
+    There is no downgrade migration; rollback requires restoring the backup.
   - An older binary refuses a version 4 journal when it opens it, but one that already had the
     journal open does not enforce deletion (`OPS-36`): it can still append, mint fences, and
     update metadata after a `LIFECYCLE_DELETE`. Every older host and embedded `agentctl` sharing

@@ -6,16 +6,12 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
-	"net"
-	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
 
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
@@ -23,8 +19,6 @@ import (
 	"github.com/agent-primitives/sessions/eventlog"
 	"github.com/agent-primitives/sessions/harness/echoagent"
 	"github.com/agent-primitives/sessions/placement"
-	"github.com/agent-primitives/sessions/session"
-	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 // Observe, never replace, the runtime: a successful Delete must not even consult it. Cleanup and
@@ -67,11 +61,7 @@ func (b *deleteRuntime) Status(ctx context.Context, i api.Incarnation) (api.Comp
 }
 
 type deleteAPI struct {
-	client   *client.Client
-	store    *sqlitelog.Store
-	path     string
-	registry *placement.Registry
-	closeRPC func()
+	*sessionAPI
 }
 
 func newDeleteAPI(t *testing.T, runtime placement.Backend) *deleteAPI {
@@ -80,44 +70,8 @@ func newDeleteAPI(t *testing.T, runtime placement.Backend) *deleteAPI {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &deleteAPI{path: filepath.Join(t.TempDir(), "delete.db"), registry: registry}
-	a.open(t)
-	t.Cleanup(func() { a.close(t) })
-	return a
+	return &deleteAPI{sessionAPI: newSessionAPI(t, registry)}
 }
-func (a *deleteAPI) open(t *testing.T) {
-	t.Helper()
-	var err error
-	a.store, err = sqlitelog.Open(a.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lis := bufconn.Listen(1 << 20)
-	srv := grpc.NewServer()
-	v1.RegisterSessionsServer(srv, session.NewService(a.store, a.registry))
-	go func() { _ = srv.Serve(lis) }()
-	a.client, err = client.Dial("passthrough:///delete-fixture", client.WithDialOptions(grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) })))
-	if err != nil {
-		srv.Stop()
-		_ = a.store.Close()
-		t.Fatal(err)
-	}
-	a.closeRPC = func() { _ = a.client.Close(); srv.Stop(); _ = lis.Close() }
-}
-func (a *deleteAPI) close(t *testing.T) {
-	t.Helper()
-	if a.closeRPC != nil {
-		a.closeRPC()
-		a.closeRPC = nil
-	}
-	if a.store != nil {
-		if err := a.store.Close(); err != nil {
-			t.Error(err)
-		}
-		a.store = nil
-	}
-}
-func (a *deleteAPI) reopen(t *testing.T) { t.Helper(); a.close(t); a.open(t) }
 func (a *deleteAPI) create(t *testing.T, ctx context.Context, name string) string {
 	t.Helper()
 	s, err := a.client.CreateSession(ctx, &v1.Session{Metadata: &v1.ResourceMetadata{Project: "delete-fixture", Name: name}, Labels: map[string]string{"audit": "retain"}})
@@ -148,17 +102,6 @@ func (a *deleteAPI) fork(t *testing.T, ctx context.Context, uid string, count in
 		t.Fatalf("Fork children=%d want %d", len(out), count)
 	}
 	return out
-}
-func (a *deleteAPI) records(t *testing.T, uid string) []eventlog.Record {
-	t.Helper()
-	r, err := a.store.Session(uid).Read(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := a.store.Session(uid).Verify(); err != nil {
-		t.Fatalf("Verify %s: %v", uid, err)
-	}
-	return r
 }
 
 // Read-only retries/refusals must preserve exact durable metadata, fences and original event bytes

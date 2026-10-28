@@ -113,7 +113,7 @@ func sessionProto(info sqlitelog.SessionInfo) (*v1.Session, error) {
 		Metadata:      md,
 		Harness:       info.Harness,
 		Model:         info.Model,
-		ExecState:     execStateOf(info),
+		ExecState:     wire.ExecStateToProto(info.ExecState),
 		ComputeState:  wire.ComputeStateToProto(info.ComputeState),
 		LastSeq:       info.LastSeq,
 		ParentUid:     info.ParentUID,
@@ -131,28 +131,6 @@ func sessionProto(info sqlitelog.SessionInfo) (*v1.Session, error) {
 		return nil, status.Errorf(codes.Internal, "session %q: %v", info.UID, err)
 	}
 	return out, nil
-}
-
-// execStateOf reports the execution axis from the metadata row.
-//
-// A session with no pre-deletion events is PENDING; otherwise the fallback is COMPLETED.
-// A valid owned unresolved host approval request reports AWAITING from the same row snapshot,
-// including after deletion, when its actionable wire reference is withheld.
-// This helper is not a general journal reducer: ordinary/legacy interrupted turns, and decided
-// approval calls without receipts, retain the fallback. Recovery and admission therefore key off
-// the journal, not this enum; COMPLETED here is not proof of a receipt or a terminal END.
-func execStateOf(info sqlitelog.SessionInfo) v1.ExecState {
-	if info.PendingApproval.RequestSeq > 0 {
-		return v1.ExecState_EXEC_AWAITING
-	}
-	head := info.LastSeq
-	if info.DeletionSeq > 0 {
-		head = info.DeletionSeq - 1
-	}
-	if head == 0 {
-		return v1.ExecState_EXEC_PENDING
-	}
-	return v1.ExecState_EXEC_COMPLETED
 }
 
 // CreateSession persists the session's metadata and returns it. The metadata row is written before

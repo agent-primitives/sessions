@@ -50,6 +50,10 @@ func migrateV2ToV3(tx *sql.Tx) error {
 	if _, err := tx.Exec(v2ToV3); err != nil {
 		return err
 	}
+	return backfillExecutions(tx, projectApproval)
+}
+
+func backfillExecutions(tx *sql.Tx, project func(*sql.Tx, string, int64, api.Event) error) error {
 	rows, err := tx.Query(`SELECT session FROM sessions ORDER BY session`)
 	if err != nil {
 		return err
@@ -92,7 +96,7 @@ func migrateV2ToV3(tx *sql.Tx) error {
 				}
 				break
 			}
-			if err := projectApproval(tx, uid, seq, ev); err != nil {
+			if err := project(tx, uid, seq, ev); err != nil {
 				return fmt.Errorf("session %q seq %d: %w", uid, seq, err)
 			}
 		}

@@ -88,8 +88,8 @@ CREATE INDEX IF NOT EXISTS sessions_project_created
 // version 4 adds permanent deletion intent; version 5 adds caller ownership and an authorization marker;
 // version 6 records explicit session model-policy eligibility; version 7 adds the allocation
 // ledger and inventory completeness/evidence columns; version 8 marks a journal whose
-// APPROVAL_RESULT records may carry a verified approver.
-const SchemaVersion = 8
+// APPROVAL_RESULT records may carry a verified approver; version 9 adds execution outcomes.
+const SchemaVersion = 9
 
 // migrations[i] moves a database from version i+1 to i+2, inside the migration transaction. The
 // array length is tied to SchemaVersion, so bumping one without the other does not compile.
@@ -101,6 +101,7 @@ var migrations = [SchemaVersion - 1]func(*sql.Tx) error{
 	migrateV5ToV6,
 	migrateCleanupInventory,
 	migrateV7ToV8,
+	migrateV8ToV9,
 }
 
 // migrateV7ToV8 changes no table and rewrites no event. The stamp alone is the change: this build
@@ -552,8 +553,8 @@ func (l *Log) Append(expectedLastSeq, fence int64, ev api.Event) (eventlog.Recor
 		return eventlog.Record{}, err
 	}
 	// Report only the selected wire body and normalized enums that strict journal reads see.
-	if err := projectApproval(tx, l.session, record.Seq, wire.EventFromProto(pb)); err != nil {
-		return eventlog.Record{}, fmt.Errorf("sqlitelog: project approval seq %d: %w", record.Seq, err)
+	if err := projectExecution(tx, l.session, record.Seq, wire.EventFromProto(pb)); err != nil {
+		return eventlog.Record{}, fmt.Errorf("sqlitelog: project execution seq %d: %w", record.Seq, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return eventlog.Record{}, err

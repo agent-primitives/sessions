@@ -11,7 +11,7 @@ import (
 )
 
 // SessionStore is the durable state Service reads and writes: session metadata, the per-session
-// journals, owner-filtered listing, the approval and deletion projections, and harness lookups.
+// journals, owner-filtered listing, execution, approval and deletion projections, and harness lookups.
 // *sqlitelog.Store is the reference implementation and the only one in this module; every method
 // has the semantics of its *sqlitelog.Store namesake, including the record types, the paging
 // limits and the sentinel errors the service maps to gRPC codes, which an implementation returns
@@ -20,9 +20,9 @@ import (
 // eventlog.ErrDeleted).
 //
 // The service also relies on these properties, which the signatures cannot state:
-//   - Session rows and journals share one transaction scope. SessionInfo's LastSeq, ComputeState
-//     and PendingApproval are projections updated inside the journal append that changes them, so
-//     a SessionInfo read after an append returns the new values.
+//   - Session rows and journals share one transaction scope. SessionInfo's LastSeq, ExecState,
+//     ComputeState and PendingApproval are projections updated inside the journal append that changes
+//     them, so a SessionInfo read after an append returns the new values.
 //   - PutSessionOnActiveHarness and CreateOwnedSession check the harness catalog and write the
 //     row in one transaction, so a RetireHarness that has returned or a registration under a static
 //     name is always seen, including by other hosts sharing the store.

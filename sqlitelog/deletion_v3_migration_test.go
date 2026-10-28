@@ -25,7 +25,7 @@ func TestDeletionUpgradesGenuineApprovalV3(t *testing.T) {
 		t.Fatalf("fixture is v%d, want genuine v3", got)
 	}
 	beforeSessions := queryValues(t, raw, `SELECT * FROM sessions ORDER BY session`)
-	queries := []string{`SELECT * FROM events ORDER BY session,seq`, `SELECT * FROM approval_executions ORDER BY session,execution_id`, `SELECT * FROM approval_calls ORDER BY session,execution_id,call_id`, `SELECT * FROM harnesses ORDER BY name`, `SELECT * FROM reserved_harness_names ORDER BY name`}
+	queries := []string{`SELECT * FROM events ORDER BY session,seq`, `SELECT session,execution_id,first_seq,gated,invalid,has_start,expected_inputs,input_records,input_messages,completed,call_id,call_seq,request_seq,decision_seq,approved,receipt FROM approval_executions ORDER BY session,execution_id`, `SELECT * FROM approval_calls ORDER BY session,execution_id,call_id`, `SELECT * FROM harnesses ORDER BY name`, `SELECT * FROM reserved_harness_names ORDER BY name`}
 	before := make([][][]any, len(queries))
 	for i, q := range queries {
 		before[i] = queryValues(t, raw, q)

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -785,6 +786,88 @@ func TestExecStateReflectsWhetherTheSessionHasRun(t *testing.T) {
 	}
 	if got.GetExecState() != v1.ExecState_EXEC_COMPLETED {
 		t.Fatalf("after a turn exec_state = %v, want EXEC_COMPLETED", got.GetExecState())
+	}
+}
+
+func TestExecStateDuringExecAndRecovery(t *testing.T) {
+	for _, recoverTurn := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recovery=%v", recoverTurn), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			h := &overlapHarness{entered: make(chan struct{}), release: make(chan struct{})}
+			unblock := sync.OnceFunc(func() { close(h.release) })
+			defer unblock()
+			backend := local.New(h)
+			t.Cleanup(func() { _ = backend.Close() })
+			store := openStore(t, ":memory:")
+			c := serveRegistry(t, store, echoRegistry(t, backend))
+			uid := mustCreate(t, c)
+			if recoverTurn {
+				log := store.Session(uid)
+				for i, ev := range []api.Event{
+					{ExecutionID: "recover", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(1)}},
+					{ExecutionID: "recover", Kind: api.EventInput, Message: api.TextMessage("user", "hi")},
+					{ExecutionID: "recover", Kind: api.EventError, Err: &api.Error{Description: "failed"}},
+				} {
+					if _, err := log.Append(int64(i), 0, ev); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, err := c.GetSession(t.Context(), &v1.GetSessionRequest{Uid: uid})
+				if err != nil || before.GetExecState() != v1.ExecState_EXEC_FAILED {
+					t.Fatalf("before recovery=%v %v", before, err)
+				}
+			}
+			type result struct {
+				session *v1.Session
+				err     error
+			}
+			done := make(chan result, 1)
+			go func() {
+				if recoverTurn {
+					current, err := c.Resume(ctx, &v1.ResumeRequest{Session: uid})
+					done <- result{current, err}
+					return
+				}
+				stream, err := c.Exec(ctx, &v1.ExecRequest{
+					Session: uid, Inputs: []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))},
+				})
+				if err == nil {
+					err = drainExec(stream)
+				}
+				done <- result{err: err}
+			}()
+			select {
+			case <-h.entered:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			current, err := c.GetSession(t.Context(), &v1.GetSessionRequest{Uid: uid})
+			want := v1.ExecState_EXEC_RUNNING
+			if recoverTurn {
+				// Taking a fence and entering Run is not journaled progress.
+				want = v1.ExecState_EXEC_FAILED
+			}
+			if err != nil || current.GetExecState() != want {
+				t.Fatalf("blocked turn=%v %v, want %s", current, err, want)
+			}
+			list, err := c.ListSessions(t.Context(), &v1.ListSessionsRequest{})
+			if err != nil || len(list.GetSessions()) != 1 || !proto.Equal(current, list.Sessions[0]) {
+				t.Fatalf("Get/List disagree: %v %v", list, err)
+			}
+			unblock()
+			completed := <-done
+			if completed.err != nil {
+				t.Fatal(completed.err)
+			}
+			if recoverTurn && completed.session.GetExecState() != v1.ExecState_EXEC_COMPLETED {
+				t.Fatalf("Resume response=%v", completed.session)
+			}
+			final, err := c.GetSession(ctx, &v1.GetSessionRequest{Uid: uid})
+			if err != nil || final.GetExecState() != v1.ExecState_EXEC_COMPLETED {
+				t.Fatalf("completed turn=%v %v", final, err)
+			}
+		})
 	}
 }
 

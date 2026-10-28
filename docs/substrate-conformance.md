@@ -947,6 +947,24 @@ Cold suspension is not teardown: `Snapshot(EXTERNAL)` releases the worker and ke
 SUSPENDED; `Stop` deletes it. Calling Stop after the snapshot would make explicit Resume fail with
 NotFound, even for a stateless harness.
 
+### `TestExecutionState*` — durable execution-state reporting
+
+Seven independently runnable tests drive the remote echo harness through the Sessions API, using
+model-call barriers rather than sleeps. Every state checkpoint checks identical Get/List responses.
+
+| Test | Assertion |
+|---|---|
+| `TestExecutionStatePending` | Creation and database reopening retain PENDING without execution events. |
+| `TestExecutionStateSuccessfulTurn` | An unfinished turn reports RUNNING; success and reopening report COMPLETED. |
+| `TestExecutionStateNewTurnAfterCompletion` | A new turn replaces COMPLETED with RUNNING, then completes under its own execution identity. |
+| `TestExecutionStateFailureSurvivesReopen` | A model error records ERROR and reports FAILED, unchanged after reopening. |
+| `TestExecutionStateRecovery` | Entering the harness alone does not clear FAILED; recovery completes with the same execution identity and unchanged journal prefix. |
+| `TestExecutionStateAcrossSuspendResume` | Suspend/Resume preserve COMPLETED as compute changes to COLD and LIVE, without calling the model again. |
+| `TestExecutionStateMidExecutionFork` | A historical fork at MODEL_CALL reports RUNNING without an active controller, survives reopening, and completes independently when resumed. |
+
+Journal reads verify the hash chain, including after recovery and fork. These tests run in the
+stateless-tier CI pass.
+
 ### `TestMemorySnapshotSuspendResume` — memory continuity
 
 Places the in-RAM counter (`harness/counteragent`, `REQUIRES_MEMORY_SNAPSHOT`) on the micro-VM class:

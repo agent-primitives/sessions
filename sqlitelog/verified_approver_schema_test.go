@@ -36,7 +36,7 @@ func TestSchemaV7JournalOpens(t *testing.T) {
 		t.Fatalf("fixture is v%d, want genuine v7", got)
 	}
 	raw := rawDB(t, path)
-	queries := []string{`SELECT * FROM events ORDER BY session,seq`, `SELECT * FROM approval_executions ORDER BY session,execution_id`, `SELECT * FROM approval_calls ORDER BY session,execution_id,call_id`}
+	queries := []string{`SELECT * FROM events ORDER BY session,seq`, `SELECT session,execution_id,first_seq,gated,invalid,has_start,expected_inputs,input_records,input_messages,completed,call_id,call_seq,request_seq,decision_seq,approved,receipt FROM approval_executions ORDER BY session,execution_id`, `SELECT * FROM approval_calls ORDER BY session,execution_id,call_id`}
 	before := make([][][]any, len(queries))
 	for i, q := range queries {
 		before[i] = queryValues(t, raw, q)

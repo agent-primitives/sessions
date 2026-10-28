@@ -34,12 +34,12 @@ type ExecState int32
 
 const (
 	ExecState_EXEC_STATE_UNSPECIFIED ExecState = 0
-	ExecState_EXEC_PENDING           ExecState = 1
-	ExecState_EXEC_RUNNING           ExecState = 2
+	ExecState_EXEC_PENDING           ExecState = 1 // no execution records
+	ExecState_EXEC_RUNNING           ExecState = 2 // unfinished or uncertain; not a controller liveness guarantee
 	ExecState_EXEC_AWAITING          ExecState = 3 // blocked on approval/input, resolved from the log
-	ExecState_EXEC_COMPLETED         ExecState = 4
-	ExecState_EXEC_FAILED            ExecState = 5
-	ExecState_EXEC_CANCELED          ExecState = 6
+	ExecState_EXEC_COMPLETED         ExecState = 4 // latest execution's last execution event is END
+	ExecState_EXEC_FAILED            ExecState = 5 // latest execution's last execution event is ERROR; recovery remains possible for modern executions
+	ExecState_EXEC_CANCELED          ExecState = 6 // reserved for Cancel; not currently reported
 )
 
 // Enum value maps for ExecState.
@@ -444,11 +444,15 @@ type Session struct {
 	// retain legacy behavior even when policy is added later. HarnessDescriptor.models never defines
 	// the default. Policy is host embedder configuration, not Sessions clients or daemon configuration.
 	Model string `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
-	// Every Session reply uses the same append-transaction projection at last_seq: no events
-	// before deletion reports EXEC_PENDING; a valid owned unanswered host approval request in the
-	// latest first-seen execution reports EXEC_AWAITING; other histories retain EXEC_COMPLETED.
+	// Every Session reply uses the same append-transaction projection at last_seq. With no execution
+	// records, report EXEC_PENDING. In the latest first-seen execution, a valid owned unanswered
+	// host approval request reports EXEC_AWAITING; otherwise the last execution event reports
+	// EXEC_COMPLETED for END, EXEC_FAILED for ERROR, or EXEC_RUNNING for other progress.
+	// Stale or ambiguous projection evidence reports EXEC_RUNNING, never inferred success.
+	// Lifecycle events preserve the outcome; FORK excludes inherited pending approvals.
+	// EXEC_RUNNING includes interrupted executions and is not proof of controller liveness.
+	// Modern execution recovery can move FAILED to RUNNING on journaled progress, then COMPLETED on END.
 	// DELETE preserves this execution axis but withholds actionable pending_approval.
-	// COMPLETED is a compatibility fallback, not proof of END, a receipt, or admission.
 	ExecState    ExecState    `protobuf:"varint,13,opt,name=exec_state,json=execState,proto3,enum=agentsessions.v1.ExecState" json:"exec_state,omitempty"`
 	ComputeState ComputeState `protobuf:"varint,14,opt,name=compute_state,json=computeState,proto3,enum=agentsessions.v1.ComputeState" json:"compute_state,omitempty"` // incarnation axis
 	// Set for a valid unanswered host-owned APPROVAL_REQUEST in the latest first-seen execution

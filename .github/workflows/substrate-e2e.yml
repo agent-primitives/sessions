@@ -393,7 +393,7 @@ jobs:
         if: needs.changes.outputs.decision != 'skip'
         env:
           ECHO_SANDBOX_CLASS: microvm
-        run: hack/run-e2e-job.sh '^(TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestSessionDeletePending)$' "${E2E_IMAGE}" 1200
+        run: hack/run-e2e-job.sh '^(TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestSessionDeletePending|TestExecutionState.*)$' "${E2E_IMAGE}" 1200
 
       - name: Idle harness stream across the router's route timeout (in-cluster Job)
         # A turn parked on a slow model call holds its Connect stream idle. The router bounds streams

@@ -86,6 +86,10 @@ func TestRunAndModelUnavailableKeepExistingClassification(t *testing.T) {
 				if len(after) <= len(before) || len(before) > 0 && !reflect.DeepEqual(before, after[:len(before)]) || failure == nil || !strings.Contains(failure.Description, "mid-turn unavailable") {
 					t.Fatalf("mid-turn failure did not journal ERROR: %+v", after)
 				}
+				current, err := client.GetSession(t.Context(), &v1.GetSessionRequest{Uid: uid})
+				if err != nil || current.GetExecState() != v1.ExecState_EXEC_FAILED {
+					t.Fatalf("failed turn status=%v err=%v", current, err)
+				}
 				wantModels := int32(0)
 				if model {
 					wantModels = 1

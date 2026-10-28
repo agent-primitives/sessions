@@ -232,10 +232,11 @@ func cmdList(args []string) error {
 		return err
 	}
 	for _, s := range sessions {
-		fmt.Printf("%s\tlast_seq=%d\tcompute=%s\tharness=%s\tname=%s\n",
+		fmt.Printf("%s\tlast_seq=%d\tcompute=%s\texec=%s\tharness=%s\tname=%s\n",
 			s.GetMetadata().GetUid(),
 			s.GetLastSeq(),
 			strings.TrimPrefix(s.GetComputeState().String(), "COMPUTE_"),
+			strings.TrimPrefix(s.GetExecState().String(), "EXEC_"),
 			s.GetHarness(),
 			s.GetMetadata().GetName(),
 		)
@@ -258,13 +259,14 @@ func cmdGet(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("session %s project=%s name=%s harness=%s last_seq=%d compute=%s %s\n",
+	fmt.Printf("session %s project=%s name=%s harness=%s last_seq=%d compute=%s exec=%s %s\n",
 		sess.GetMetadata().GetUid(),
 		sess.GetMetadata().GetProject(),
 		sess.GetMetadata().GetName(),
 		sess.GetHarness(),
 		sess.GetLastSeq(),
 		strings.TrimPrefix(sess.GetComputeState().String(), "COMPUTE_"),
+		strings.TrimPrefix(sess.GetExecState().String(), "EXEC_"),
 		deletionFields(sess),
 	)
 	return nil
@@ -431,7 +433,7 @@ func lifecycle(args []string, which string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("session %s %s compute=%s last_seq=%d\n", out.GetMetadata().GetUid(), which, out.GetComputeState(), out.GetLastSeq())
+	fmt.Printf("session %s %s compute=%s exec=%s last_seq=%d\n", out.GetMetadata().GetUid(), which, out.GetComputeState(), strings.TrimPrefix(out.GetExecState().String(), "EXEC_"), out.GetLastSeq())
 	return nil
 }
 

@@ -198,6 +198,20 @@ func TestCheck(t *testing.T) {
 			want: 1, output: `CHANGELOG.md has an "## Unreleased" section`,
 		},
 		{
+			name: "reintroducing Unreleased with closing hashes fails",
+			change: func(r *gitRepo) {
+				r.write("CHANGELOG.md", intro+"## Unreleased ##\n\n### Added\n\n- x\n\n"+history)
+			},
+			want: 1, output: `CHANGELOG.md has an "## Unreleased" section`,
+		},
+		{
+			name: "reintroducing Unreleased after a tab fails",
+			change: func(r *gitRepo) {
+				r.write("CHANGELOG.md", intro+"##\tUnreleased\n\n### Added\n\n- x\n\n"+history)
+			},
+			want: 1, output: `CHANGELOG.md has an "## Unreleased" section`,
+		},
+		{
 			name:   "deleting CHANGELOG.md fails",
 			change: func(r *gitRepo) { r.remove("CHANGELOG.md") },
 			want:   1, output: "CHANGELOG.md is missing or not a file",

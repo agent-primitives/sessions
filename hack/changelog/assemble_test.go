@@ -186,6 +186,22 @@ func TestAssembleRefusals(t *testing.T) {
 			wantErr: "bad.md: line \" ### Removed\": headings are not allowed",
 		},
 		{
+			// Assembled, the comment would hide good.md's entry and every older release section.
+			name: "unterminated html comment", changelog: intro + history, version: "v0.4.0", date: "2026-10-30",
+			frags:   map[string]string{"good.md": good, "a-draft.md": frag("Added", "- Entry.\n\n<!-- draft")},
+			wantErr: "a-draft.md: line \"<!-- draft\": HTML comments",
+		},
+		{
+			// Assembled, aa-details.md's HTML block would take in ab-quote.md's entry, where the
+			// inline code would be a raw comment hiding every later entry and older release.
+			name: "fragment ending in an html block", changelog: intro + history, version: "v0.4.0", date: "2026-10-30",
+			frags: map[string]string{
+				"aa-details.md": frag("Added", "- Example output is now collapsible.\n\n<details>\n<summary>Example</summary>\n\nOutput.\n\n</details>"),
+				"ab-quote.md":   frag("Added", "- Fragments may now quote `<!--` in inline code."),
+			},
+			wantErr: "aa-details.md: the entry may end in an HTML block",
+		},
+		{
 			name: "malformed fragment", changelog: intro + history, version: "v0.4.0", date: "2026-10-30",
 			frags:   map[string]string{"good.md": good, "bad.md": "- no front matter\n"},
 			wantErr: "bad.md: must start with front matter",
@@ -202,6 +218,16 @@ func TestAssembleRefusals(t *testing.T) {
 		},
 		{
 			name: "unreleased section", changelog: intro + "## Unreleased\n\n### Added\n\n- Old style.\n\n" + history,
+			version: "v0.4.0", date: "2026-10-30", frags: map[string]string{"good.md": good},
+			wantErr: `"## Unreleased" section`,
+		},
+		{
+			name: "unreleased section with closing hashes", changelog: intro + "## Unreleased ##\n\n- Old style.\n\n" + history,
+			version: "v0.4.0", date: "2026-10-30", frags: map[string]string{"good.md": good},
+			wantErr: `"## Unreleased" section`,
+		},
+		{
+			name: "unreleased section after a tab", changelog: intro + "##\tUnreleased\n\n- Old style.\n\n" + history,
 			version: "v0.4.0", date: "2026-10-30", frags: map[string]string{"good.md": good},
 			wantErr: `"## Unreleased" section`,
 		},
@@ -250,9 +276,11 @@ func TestVerifyAssembled(t *testing.T) {
 		t.Fatalf("verifyAssembled = %v, want it to name the pending fragment", err)
 	}
 
-	root = newRepo(t, intro+"## Unreleased\n\n"+history, nil)
-	if err := verifyAssembled(root); err == nil || !strings.Contains(err.Error(), "Unreleased") {
-		t.Fatalf("verifyAssembled = %v, want an Unreleased refusal", err)
+	for _, heading := range []string{"## Unreleased\n", "## Unreleased ##\n", "##\tUnreleased\n", "Unreleased\n----------\n"} {
+		root = newRepo(t, intro+heading+"\n"+history, nil)
+		if err := verifyAssembled(root); err == nil || !strings.Contains(err.Error(), "Unreleased") {
+			t.Fatalf("verifyAssembled with %q = %v, want an Unreleased refusal", heading, err)
+		}
 	}
 
 	root = newRepo(t, intro+history, nil)

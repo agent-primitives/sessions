@@ -456,8 +456,8 @@ func TestRestoreRequiresHeldSnapshot(t *testing.T) {
 		{name: "missing URI", ref: api.SnapshotRef{Local: "s"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, volumes: true, precond: true},
 		{name: "legacy memory flag without checkpoint", ref: api.SnapshotRef{Local: "s", Memory: true}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityMemory, wantOK: true},
 		{name: "missing actor name", ref: api.SnapshotRef{ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, precond: true},
-		{name: "missing actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, uri: "held", fidelity: substrate.SnapshotFidelityVolumes},
-		{name: "missing memory actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, uri: "held", fidelity: substrate.SnapshotFidelityMemory, memory: true},
+		{name: "missing actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, precond: true},
+		{name: "missing memory actor", ref: api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, uri: "held", fidelity: substrate.SnapshotFidelityMemory, memory: true, precond: true},
 		{name: "missing held snapshot", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, fidelity: substrate.SnapshotFidelityVolumes, precond: true},
 		{name: "legacy memory flag false", ref: api.SnapshotRef{Local: "s", ExternalURI: "held"}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityMemory, wantOK: true},
 		{name: "legacy memory flag true", ref: api.SnapshotRef{Local: "s", ExternalURI: "held", Memory: true}, status: substrate.StatusSuspended, uri: "held", fidelity: substrate.SnapshotFidelityVolumes, wantOK: true},
@@ -534,10 +534,100 @@ func TestRestoreRequiresHeldSnapshot(t *testing.T) {
 					t.Fatalf("refused restore made forbidden call %q", call)
 				}
 			}
-			if strings.Contains(err.Error(), "held") || strings.Contains(err.Error(), "wrong") {
+			// "the checkpoint held" is the missing-actor refusal's prose, not the URI.
+			if msg := strings.ReplaceAll(err.Error(), "the checkpoint held", ""); strings.Contains(msg, "held") || strings.Contains(msg, "wrong") {
 				t.Fatalf("error exposes snapshot URI: %v", err)
 			}
 		})
+	}
+}
+
+// A session's actor that no longer exists (deleted, or substrate's state reset by a reinstall) took
+// the checkpoint the session's latest SUSPEND recorded with it. When the ref holds one, Restore
+// refuses with api.ErrInvalidCheckpoint (FAILED_PRECONDITION) after GetActor alone, so nothing is
+// resumed or created, and the message names the actor and, when the ref records one, the SUSPEND,
+// but never the snapshot URI. A ref with no held checkpoint keeps its previous error:
+// api.ErrMemoryStateLost alone on the memory tier, the GetActor error otherwise.
+func TestRestoreOfAMissingActorWithAHeldCheckpointIsRefused(t *testing.T) {
+	const uri = "gs://snap/held-uri"
+	stateless := func(m *mockControl) *substrate.Backend { return newBackend(m) }
+	volumes := func(m *mockControl) *substrate.Backend { return newBackend(m, substrate.WithVolumesOnly()) }
+	memory := func(m *mockControl) *substrate.Backend { return newMemoryBackend(m) }
+	const (
+		suspend     = "the checkpoint recorded by the session's latest SUSPEND cannot be restored; no actor was created"
+		computeGone = "the session's compute cannot be resumed; no actor was created"
+		execNext    = "Exec starts new compute and replays the journal; files the checkpoint held are lost"
+		ramGone     = "Its in-RAM state cannot be restored"
+		liveRAM     = "actor space/s no longer exists, so its in-RAM state cannot be restored"
+		getFailed   = "get restore actor"
+	)
+	for _, tc := range []struct {
+		name    string
+		backend func(*mockControl) *substrate.Backend
+		ref     api.SnapshotRef
+		held    bool // api.ErrInvalidCheckpoint
+		lost    bool // api.ErrMemoryStateLost
+		want    []string
+		notWant []string
+	}{
+		{name: "durable URI", backend: stateless, ref: api.SnapshotRef{Local: "s", ExternalURI: uri},
+			held: true, want: []string{"actor space/s no longer exists (deleted, or substrate state reset)", suspend, execNext}, notWant: []string{ramGone}},
+		{name: "volumes-only durable URI", backend: volumes, ref: api.SnapshotRef{Local: "s", ExternalURI: uri},
+			held: true, want: []string{"actor space/s", suspend, execNext}, notWant: []string{ramGone}},
+		// lastSuspendRef's default for a session that never suspended: no SUSPEND to name.
+		{name: "volumes-only never suspended", backend: volumes, ref: api.SnapshotRef{Local: "s"},
+			held: true, want: []string{"actor space/s no longer exists (deleted, or substrate state reset)", computeGone,
+				"Exec starts new compute and replays the journal; files the actor held are lost"},
+			notWant: []string{"SUSPEND", "checkpoint recorded", "checkpoint held", ramGone}},
+		{name: "memory checkpoint", backend: memory, ref: api.SnapshotRef{Local: "s", ExternalURI: uri, Memory: true},
+			held: true, lost: true, want: []string{"actor space/s", suspend, ramGone}, notWant: []string{execNext}},
+		{name: "memory live recovery", backend: memory, ref: api.SnapshotRef{Local: "s"},
+			lost: true, want: []string{liveRAM}, notWant: []string{suspend}},
+		{name: "stateless with no held checkpoint", backend: stateless, ref: api.SnapshotRef{Local: "s"},
+			want: []string{getFailed}, notWant: []string{suspend}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockControl{info: running("worker-a")}
+			inc, err := tc.backend(m).Restore(t.Context(), tc.ref)
+			if !reflect.DeepEqual(m.calls, []string{"get:s"}) || !reflect.DeepEqual(inc, api.Incarnation{}) {
+				t.Fatalf("restore=%+v calls=%v, want GetActor alone and no incarnation", inc, m.calls)
+			}
+			if !errors.Is(err, substrate.ErrSnapshotNotRestorable) || !errors.Is(err, substrate.ErrActorNotFound) {
+				t.Fatalf("err=%v, want ErrSnapshotNotRestorable wrapping ErrActorNotFound", err)
+			}
+			if errors.Is(err, api.ErrInvalidCheckpoint) != tc.held || errors.Is(err, api.ErrMemoryStateLost) != tc.lost {
+				t.Fatalf("err=%v: ErrInvalidCheckpoint=%t ErrMemoryStateLost=%t, want %t and %t",
+					err, errors.Is(err, api.ErrInvalidCheckpoint), errors.Is(err, api.ErrMemoryStateLost), tc.held, tc.lost)
+			}
+			if errors.Is(err, api.ErrCheckpointPending) || errors.Is(err, api.ErrComputeBusy) {
+				t.Fatalf("err=%v: a missing actor is not retryable", err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+			for _, notWant := range append(tc.notWant, uri) {
+				if strings.Contains(err.Error(), notWant) {
+					t.Errorf("error %q contains %q", err, notWant)
+				}
+			}
+		})
+	}
+}
+
+// The held-checkpoint refusal of a non-memory session is logged as snapshot_not_restorable.
+func TestRestoreOfAMissingActorKeepsDebugClassification(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	b := substrate.New(&mockControl{}, "space", substrate.ObjectRef{Name: "echo"},
+		api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, substrate.WithLogger(logger))
+	_, err := b.Restore(t.Context(), api.SnapshotRef{Local: "s", ExternalURI: "gs://snap/held-uri"})
+	if !errors.Is(err, api.ErrInvalidCheckpoint) || !strings.Contains(output.String(), `"error_kind":"snapshot_not_restorable"`) {
+		t.Fatalf("missing actor: err=%v logs=%s", err, output.String())
+	}
+	if strings.Contains(output.String(), "held-uri") {
+		t.Fatalf("debug log exposes the snapshot URI: %s", output.String())
 	}
 }
 

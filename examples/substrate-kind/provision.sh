@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Validate immutable template inputs and select the SandboxConfig for the worker class.
+# Validate immutable template inputs. The class selects the worker pool; the pool resolves the
+# class's default SandboxConfig, so the template names no config.
 source "$(dirname "$0")/common.sh"
+refuse_sandbox_config
 need jq
 timeout_command
 : "${HARNESS_IMAGE:?digest-pinned HARNESS_IMAGE is required}"
@@ -10,8 +12,7 @@ timeout_command
 [[ "${HARNESS_IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]] || die "HARNESS_IMAGE must be digest-pinned."
 [[ "${ACTOR_TEMPLATE}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || die "Invalid ACTOR_TEMPLATE name."
 case "${SANDBOX_CLASS}" in
-microvm) SANDBOX_CONFIG="${SANDBOX_CONFIG:-microvm}" ;;
-gvisor) SANDBOX_CONFIG="${SANDBOX_CONFIG:-gvisor-default}" ;;
+microvm | gvisor) ;;
 *) die "SANDBOX_CLASS must be microvm or gvisor." ;;
 esac
 
@@ -25,18 +26,19 @@ deadline=$((SECONDS + budget))
 progress "Rendering the desired ActorTemplate ${NS}/${ACTOR_TEMPLATE}"
 desired="${STATE}/actor-template.json"
 jq --arg image "${HARNESS_IMAGE}" --arg model "${MODEL_NAME}" \
-	--arg name "${ACTOR_TEMPLATE}" --arg class "${SANDBOX_CLASS}" --arg config "${SANDBOX_CONFIG}" \
+	--arg name "${ACTOR_TEMPLATE}" --arg class "${SANDBOX_CLASS}" \
 	--arg location "${SNAPSHOT_LOCATION%/}/${ACTOR_TEMPLATE}/" '
 	.metadata.name = $name |
 	.containers[0].image = $image |
 	.containers[0].env |= map(if .name == "HARNESS_MODEL" then .value = $model else . end) |
 	.workerSelector.matchLabels.workload = ("sessions-example-" + $class) |
-	.sandboxConfig = {sandboxClass: $class, configName: $config} |
 	.snapshotConfig.storageLocation = $location
 ' "${HERE}/deploy/actor-template.json" >"${desired}"
 
 # Bound each CLI call by the remaining budget and accept only an explicitly allowed RPC error.
 # Represent expected absence as null; malformed responses and ambiguous errors stop provisioning.
+# NoOutput allows a successful call with empty output: `get access-policy` reports a missing
+# policy that way rather than with NotFound.
 ate() {
 	local allowed="$1" output remaining codes
 	shift
@@ -44,6 +46,10 @@ ate() {
 	((remaining > 0)) || die "Template provisioning deadline exceeded."
 	((remaining <= 120)) || remaining=120
 	if output="$("${TIMEOUT}" --kill-after=5s "${remaining}s" "${ATE[@]}" "$@" 2>"${STATE}/ate-error")"; then
+		if [[ "${allowed}" == NoOutput && -z "${output}" ]]; then
+			echo null
+			return
+		fi
 		jq -e 'type == "object" and length > 0' <<<"${output}" >/dev/null ||
 			die "kubectl-ate returned an ambiguous resource."
 		printf '%s\n' "${output}"
@@ -72,6 +78,29 @@ if [[ "${space}" == null ]]; then
 fi
 jq -e --arg name "${NS}" '.metadata.name == $name' <<<"${space}" >/dev/null ||
 	die "kubectl-ate returned a different atespace."
+
+# Substrate enforces authorization: the daemon needs the atespace editor role (or owner) in NS.
+# Create the policy only when NS has none. An existing policy is operator-managed and update
+# replaces it whole, so one that lacks the daemon is refused with the remedy, never rewritten.
+progress "Checking the access policy of atespace ${NS} for ${DAEMON_PRINCIPAL}"
+policy="$(ate NoOutput get access-policy -a "${NS}")"
+if [[ "${policy}" == null ]]; then
+	if [[ "${1:-}" == --check-only ]]; then
+		progress "Access policy is absent; provisioning will grant ${DAEMON_PRINCIPAL} editor"
+	else
+		progress "Granting ${DAEMON_PRINCIPAL} the editor role in atespace ${NS}"
+		printf 'bindings:\n- role: editor\n  members:\n  - %s\n' "${DAEMON_PRINCIPAL}" |
+			ate AlreadyExists create access-policy -a "${NS}" -f - >/dev/null
+		# Read it back: an AlreadyExists race leaves whatever policy won it.
+		policy="$(ate NoOutput get access-policy -a "${NS}")"
+		[[ "${policy}" != null ]] || die "The access policy of atespace ${NS} disappeared after creation."
+	fi
+fi
+if [[ "${policy}" != null ]] && ! jq -e --arg member "${DAEMON_PRINCIPAL}" \
+	'any(.bindings[]?; (.role == "editor" or .role == "owner") and any(.members[]?; . == $member))' \
+	<<<"${policy}" >/dev/null; then
+	die "The access policy of atespace ${NS} does not grant ${DAEMON_PRINCIPAL} editor. Add it to an editor binding: kubectl ate get access-policy -a ${NS} -o yaml > policy.yaml, edit policy.yaml, then kubectl ate update access-policy -a ${NS} -f policy.yaml"
+fi
 
 # Create the template only when absent; an AlreadyExists race is checked by reading it back.
 progress "Checking ActorTemplate ${NS}/${ACTOR_TEMPLATE}"

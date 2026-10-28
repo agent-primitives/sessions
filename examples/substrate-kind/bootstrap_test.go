@@ -38,6 +38,7 @@ esac`,
 case "$*" in
   "run ./cmd/ate-setup "*)
     [[ " $* " == *" --kubeconfig=$KUBECONFIG "* ]]
+    [[ " $* " == *" --atenet-dataplane=agentgateway deploy ate-system "* ]]
     echo install >> "$TEST_DIR/bootstrap-calls" ;;
   "build -o "*)
     echo client-build >> "$TEST_DIR/bootstrap-calls"

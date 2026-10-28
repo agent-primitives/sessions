@@ -5,13 +5,14 @@ set -euo pipefail
 # Load the selected runtime/provider and require the images produced by local setup or CI.
 source "$(dirname "$0")/common.sh"
 progress "Checking deployment settings and image inputs"
+refuse_sandbox_config
 source "${HERE}/model.sh"
 need jq
 need kubectl
 : "${DAEMON_IMAGE:?DAEMON_IMAGE is required}"
 : "${HARNESS_IMAGE:?HARNESS_IMAGE is required}"
 : "${WORKER_IMAGE:?WORKER_IMAGE is required}"
-export SANDBOX_CLASS SANDBOX_CONFIG ACTOR_TEMPLATE HARNESS_IMAGE MODEL_NAME
+export SANDBOX_CLASS ACTOR_TEMPLATE HARNESS_IMAGE MODEL_NAME
 
 # Refuse an incompatible immutable template before changing workers or the daemon.
 progress "Checking ActorTemplate compatibility before changing the deployment"

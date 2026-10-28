@@ -6,6 +6,7 @@ set -euo pipefail
 requested="${SANDBOX_CLASS:-auto}"
 source "$(dirname "$0")/common.sh"
 progress "Checking setup prerequisites and settings"
+refuse_sandbox_config
 source "${HERE}/model.sh"
 for tool in git go docker kubectl ko jq; do need "${tool}"; done
 timeout_command
@@ -41,7 +42,7 @@ else
 		SANDBOX_CLASS=gvisor
 	fi
 fi
-export SANDBOX_CLASS SANDBOX_CONFIG ACTOR_TEMPLATE PROJECT
+export SANDBOX_CLASS ACTOR_TEMPLATE PROJECT
 progress "Sandbox: ${SANDBOX_CLASS}; images: linux/${arch}"
 
 # Prepare only managed checkouts; caller-supplied checkouts remain read-only.
@@ -124,6 +125,8 @@ fi
 
 # Install the Substrate control plane only on a newly created cluster. Keep an
 # installed cluster intact on reruns, and record completion only if its identity still matches.
+# The agentgateway dataplane serves the router's plaintext :80 listener agentsessionsd dials; the
+# default envoy router accepts only mTLS clients from v0.6.0.
 kind_command export kubeconfig --name "${CLUSTER}" --kubeconfig "${KUBECONFIG}"
 if [[ "${stage}" == created ]]; then
 	progress "Installing the Substrate control plane in cluster ${CLUSTER}"
@@ -131,7 +134,8 @@ if [[ "${stage}" == created ]]; then
 		-u MEMORYSTORE_INSTANCE -u PROJECT_ID \
 		go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}" \
 		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${arch}" \
-		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m deploy ate-system --setup-csi=none)
+		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m --atenet-dataplane=agentgateway \
+		deploy ate-system --setup-csi=none)
 	stage="$(cluster_state)"
 	[[ "${stage}" == created ]] || die "Cluster changed during installation."
 	id="$(node_id)"
@@ -141,7 +145,8 @@ else
 	progress "Reusing owned cluster ${CLUSTER}; retaining its journal."
 fi
 
-# MicroVM workers need the guest runtime assets and SandboxConfig in addition to the control plane.
+# MicroVM workers need the guest runtime assets and the class-default SandboxConfig in addition to
+# the control plane.
 if [[ "${SANDBOX_CLASS}" == microvm ]]; then
 	progress "Installing microVM runtime assets and sandbox configuration"
 	(cd "${SUBSTRATE_DIR}" && NO_DEV_ENV=true ATE_INSTALL_KIND=true BUCKET_NAME=ate-snapshots \
@@ -157,7 +162,7 @@ DAEMON_IMAGE="$(cd "${ROOT}/integrations/substrate" && ko build ./cmd/agentsessi
 progress "Building and publishing the chat harness image"
 HARNESS_IMAGE="$(cd "${ROOT}" && ko build ./cmd/harnessnode)"
 progress "Building and publishing the ${SANDBOX_CLASS} worker image"
-WORKER_IMAGE="$(cd "${SUBSTRATE_DIR}" && ko build "./cmd/ateom-${SANDBOX_CLASS}")"
+WORKER_IMAGE="$(cd "${SUBSTRATE_DIR}" && ko build "./cmd/ateworker-${SANDBOX_CLASS}")"
 export DAEMON_IMAGE HARNESS_IMAGE WORKER_IMAGE
 if [[ "${MODEL_SOURCE}" == stub ]]; then
 	progress "Building and publishing the deterministic model stub image"

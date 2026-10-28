@@ -149,7 +149,7 @@ func (s *server) handleReplay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The replay's turns reach the actor through atenet-router, which resumes a suspended actor on
-	// any routed request (substrate v0.5.0, cmd/atenet/internal/router/ingress). On a session that
+	// any routed request (substrate v0.6.0, cmd/atenet/internal/router/ingress). On a session that
 	// is not LIVE that would wake the actor outside Sessions, which would still report it suspended
 	// with no Resume journaled. This is a read before the call, not a guard: a Suspend from another
 	// client between the read and the routed turns is not caught.

@@ -41,9 +41,9 @@ setup_stage() {
 # refuse_stale_install exits when SETUP records that up.sh installed ate-system on the container ID
 # $1 from a substrate commit other than SUBSTRATE_REF, or from one it did not record (an install
 # from before up.sh kept the commit). Substrate supports no in-place upgrade between releases before
-# 1.0 (its docs/upgrade.md), and v0.5.0 reads an ActorTemplate an older install stored with no
-# sandbox class, so that template's actors cannot resume: the cluster is reinstalled, not reused. A
-# cluster up.sh did not install is not checked.
+# 1.0 (its docs/upgrade.md), and v0.6.0 changed the ActorTemplate (resources required, no sandbox
+# configuration), so an older install's templates and actors do not carry over: the cluster is
+# reinstalled, not reused. A cluster up.sh did not install is not checked.
 refuse_stale_install() {
 	local id stage ref
 	if [[ -f "${SETUP}" ]] && read -r id stage ref <"${SETUP}" && [[ "${id}" == "$1" && "${stage}" == installed ]] &&
@@ -95,6 +95,9 @@ NS=agentsuite-demo
 # is set, and how demo.sh tells which one it was deployed with.
 FAKE_MODEL_URL="http://fakemodel.${NS}.svc:8080/v1"
 ATESPACE=agentsuite-demo
+# The identity both agentsessionsd tiers call the ate-api as: the agentsessionsd ServiceAccount
+# (deploy/namespace.yaml), which up.sh grants editor on ATESPACE.
+DAEMON_PRINCIPAL="user:system:serviceaccount:${NS}:agentsessionsd"
 # The suite (a directory under this one) and the agent in it that becomes the harness. The default
 # is the demo's own fixture, which has compositions for amd64 and arm64; kaimahi's minimal suite
 # (suites/kaimahi-minimal, agent writer) has only linux/amd64.

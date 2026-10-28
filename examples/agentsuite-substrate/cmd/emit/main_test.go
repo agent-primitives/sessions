@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
@@ -224,7 +224,7 @@ func TestStableJSON(t *testing.T) {
 			Image: "img@sha256:00",
 			Env:   []*atepb.EnvVar{{Name: "K", Value: "v"}},
 		}},
-		SandboxConfig: &atepb.SandboxConfig{SandboxClass: "microvm", ConfigName: "microvm"},
+		Resources: &atepb.ResourceRequirements{Limits: &atepb.Resources{CpuMillicores: 1000, MemoryBytes: 512 << 20}},
 	}
 	got, err := stableJSON(m)
 	if err != nil {
@@ -247,9 +247,11 @@ func TestStableJSON(t *testing.T) {
       ]
     }
   ],
-  "sandboxConfig": {
-    "sandboxClass": "microvm",
-    "configName": "microvm"
+  "resources": {
+    "limits": {
+      "cpuMillicores": "1000",
+      "memoryBytes": "536870912"
+    }
   }
 }
 `

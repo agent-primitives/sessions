@@ -208,8 +208,18 @@ exec "`+python3+`" "$@"
 	if err := os.MkdirAll(filepath.Join(s.work, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// get access-policy answers per STUB_POLICY: granted (default) lists the daemon as editor, absent
+	// reports no policy until create access-policy records one, foreign lists only someone else.
 	stub(t, filepath.Join(s.work, "bin"), "kubectl-ate", log+`
+granted='{"bindings":[{"role":"editor","members":["user:system:serviceaccount:agentsuite-demo:agentsessionsd"]}]}'
 case " $* " in
+*" get access-policy "*)
+	case "${STUB_POLICY:-granted}" in
+	absent) if [ -e "$STUB_DIR/policy-created" ]; then echo "$granted"; else echo "agentsuite-demo has no access policy" >&2; fi ;;
+	foreign) echo '{"bindings":[{"role":"editor","members":["user:someone"]},{"role":"viewer","members":["user:system:serviceaccount:agentsuite-demo:agentsessionsd"]}]}' ;;
+	*) echo "$granted" ;;
+	esac ;;
+*" create access-policy "*) cat >"$STUB_DIR/policy-created" ;;
 *" -o json "*) echo '{"status": {"goldenSnapshotStatus": {"goldenTag": {"name": "golden-1"}}}}' ;;
 esac
 `)
@@ -399,7 +409,7 @@ func TestUpClusterPhase(t *testing.T) {
 			// platform Docker reports: a Mac driving a remote amd64 Docker gets amd64 images.
 			name: "the install builds for the platform Docker reports", env: []string{"STUB_DOCKER_ARCH=x86_64"},
 			wantCode:  pastClusterPhase,
-			wantCalls: []string{installCall, "--ko-default-platforms=linux/amd64", "deploy ate-system --setup-csi=none"},
+			wantCalls: []string{installCall, "--ko-default-platforms=linux/amd64", "--atenet-dataplane=agentgateway deploy ate-system --setup-csi=none"},
 			wantOwned: "node-1", wantSetup: installed(t, "node-1"),
 		},
 		{
@@ -1800,6 +1810,20 @@ func TestDemoTapeMatchesDriverWaits(t *testing.T) {
 	}
 }
 
+// smoke-microvm.sh deploys substrate's counter-microvm demo on the agentgateway dataplane, the
+// only one this checkout drives on substrate v0.6.0 (docs/substrate-conformance.md), and fails,
+// naming the step, when the deploy fails. The install-ate-kind.sh stub logs its arguments and exits 1.
+func TestDemoSmokeMicroVMDeploysOnAgentgateway(t *testing.T) {
+	s := newStubs(t)
+	code, out, calls := s.run(t, "demo/smoke-microvm.sh")
+	if code != 1 || !strings.Contains(out, "SMOKE FAILED: deploying substrate's counter-microvm demo failed") {
+		t.Fatalf("smoke-microvm.sh exited %d, want 1 with the deploy failure:\n%s", code, out)
+	}
+	if want := "install-ate-kind.sh --atenet-dataplane=agentgateway deploy demo counter-microvm\n"; !strings.Contains(calls, want) {
+		t.Fatalf("calls:\n%s\nwant %q", calls, want)
+	}
+}
+
 // present.awk holds each line's newline until the next line, so vhs's Wait+Line sees the newest
 // line, and a line starting with "@@R " overwrites the line before it.
 func TestDemoPresent(t *testing.T) {
@@ -2032,6 +2056,47 @@ exec "$@"
 			if copied := err == nil; copied != (tc.wantLine == after) {
 				t.Errorf("logs/teardown.log in DEMO_OUT: %v, want it copied only with the README's "+
 					"TEARDOWN OK line", err)
+			}
+		})
+	}
+}
+
+// up.sh grants agentsessionsd editor on the atespace only when it has no AccessPolicy, keeps a
+// policy that already grants it, and refuses one that does not rather than overwrite it.
+func TestUpEnsuresTheDaemonsAccessPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		policy, wantOut string
+		wantCode        int
+		wantCreate      bool
+	}{
+		{policy: "granted"},
+		{policy: "absent", wantCreate: true},
+		{policy: "foreign", wantCode: 1, wantOut: "AccessPolicy agentsuite-demo does not grant user:system:serviceaccount:agentsuite-demo:agentsessionsd editor"},
+	} {
+		t.Run(tc.policy, func(t *testing.T) {
+			s := newStubs(t)
+			s.node(t, "node-1")
+			s.record(t, "created-cluster", "node-1")
+			s.record(t, "setup-cluster", installed(t, "node-1"))
+			code, out, calls := s.run(t, "up.sh", "STUB_CLUSTERS="+cluster, "STUB_FULL=1", "STUB_POLICY="+tc.policy)
+			if code != tc.wantCode || !strings.Contains(out, tc.wantOut) {
+				t.Fatalf("up.sh exit %d, want %d and output containing %q\noutput:\n%s\ncalls:\n%s", code, tc.wantCode, tc.wantOut, out, calls)
+			}
+			if got := strings.Contains(calls, "create access-policy -a agentsuite-demo -f -"); got != tc.wantCreate {
+				t.Fatalf("create access-policy called=%v, want %v; calls:\n%s", got, tc.wantCreate, calls)
+			}
+			if tc.wantCode != 0 && strings.Contains(calls, "create actor-template") {
+				t.Errorf("a refused policy must stop before any template is created; calls:\n%s", calls)
+			}
+			if !tc.wantCreate {
+				return
+			}
+			b, err := os.ReadFile(filepath.Join(s.dir, "policy-created"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "bindings:\n- role: editor\n  members:\n  - user:system:serviceaccount:agentsuite-demo:agentsessionsd\n"; string(b) != want {
+				t.Errorf("created policy:\n%s\nwant:\n%s", b, want)
 			}
 		})
 	}

@@ -25,7 +25,7 @@
     { id: "bridge", label: "lifecycle-ui", sub: "loopback bridge", x: 210, y: 24 },
     { id: "daemon", label: "agentsessionsd", sub: "journal + substrate adapter", x: 420, y: 24 },
     { id: "ateapi", label: "ate-api", sub: "substrate control plane", x: 630, y: 24 },
-    { id: "worker", label: "worker pod", sub: "atelet + ateom-microvm", x: 840, y: 24 },
+    { id: "worker", label: "worker pod", sub: "ateworker-microvm", x: 840, y: 24 },
     { id: "actor", label: "actor", sub: "harness in a micro-VM", x: 1050, y: 24 },
     { id: "model", label: "model", sub: "chat completions", x: 420, y: 162 },
     { id: "router", label: "atenet-router", sub: "turn traffic", x: 630, y: 162 },

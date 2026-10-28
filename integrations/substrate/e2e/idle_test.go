@@ -16,9 +16,11 @@ import (
 )
 
 // TestHarnessStreamIdlePastRouteTimeout holds one harnesswire Connect stream open and idle through
-// the atenet-router for longer than the router's route timeout (5m by default, --route-timeout), the
-// way a turn parked on a slow model call does: the harness has sent its model call and waits for the
-// host's reply, and nothing crosses the stream until the host answers.
+// the atenet-router for as long as E2E_IDLE_GAP, the way a turn parked on a slow model call does: the
+// harness has sent its model call and waits for the host's reply, and nothing crosses the stream
+// until the host answers. The gap is meant to outlast any route timeout the router's dataplane
+// sets: the envoy dataplane's --route-timeout is 5m by default, and the agentgateway dataplane the
+// CI workflow installs sets none.
 //
 // It drives the stream with a raw harnesswire client rather than the Placer so it can keep a Recv
 // pending the whole time and timestamp the moment the stream ends. (The Placer does not read while
@@ -29,7 +31,7 @@ import (
 func TestHarnessStreamIdlePastRouteTimeout(t *testing.T) {
 	gapSetting := env("E2E_IDLE_GAP", "")
 	if gapSetting == "" {
-		t.Skip("set E2E_IDLE_GAP (e.g. 5m30s) to hold a harness stream idle across the router's route timeout")
+		t.Skip("set E2E_IDLE_GAP (e.g. 5m30s) to hold a harness stream idle through the router")
 	}
 	gap, err := time.ParseDuration(gapSetting)
 	if err != nil {

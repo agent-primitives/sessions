@@ -8,7 +8,17 @@
 # the ate-api-server Service with a projected ServiceAccount token. Running in-cluster keeps both on
 # their Service DNS names. Nothing dials a worker, so the router needs no NetworkPolicy exception;
 # ate-api-server admits the Job because namespace.yaml labels ate-agentsessions
-# ate.dev/api-access=true, which substrate v0.5.0 requires.
+# ate.dev/api-access=true, which substrate v0.6.0 requires.
+#
+# The Job runs as its own ServiceAccount, user:system:serviceaccount:ate-agentsessions:substrate-e2e
+# to substrate's authorizer. hack/provision-e2e-access.sh grants it the atespace `editor` role in
+# each of the suite's atespaces and nothing more: the role operators grant agentsessionsd.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: substrate-e2e
+  namespace: ate-agentsessions
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -23,6 +33,7 @@ spec:
         app: substrate-e2e
     spec:
       restartPolicy: Never
+      serviceAccountName: substrate-e2e
       containers:
         - name: e2e
           image: E2E_IMAGE

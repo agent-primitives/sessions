@@ -7,17 +7,26 @@ import (
 	"testing"
 )
 
-// substrateModule is the vendor module only integrations/substrate may require. runtimeSubstrate is
+// substrateModules are the vendor module prefixes only integrations/substrate may require: the
+// module's path since v0.6.0 and its earlier one. runtimeSubstrate is
 // the root module's one substrate-specific package, which reaches substrate through its own
 // ControlClient interface; the daemon must not link even that, so substrate flags and client setup
 // stay in integrations/substrate (see HarnessBackends).
-const (
-	substrateModule  = "github.com/agent-substrate/"
-	runtimeSubstrate = "github.com/agent-primitives/sessions/runtime/substrate"
-)
+const runtimeSubstrate = "github.com/agent-primitives/sessions/runtime/substrate"
+
+var substrateModules = []string{"go.ate.dev/", "github.com/agent-substrate/"}
+
+func isSubstrateModule(path string) bool {
+	for _, prefix := range substrateModules {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // TestRootModuleHasNoSubstrateDependency checks the root module's go.mod requires no
-// agent-substrate module, and that the daemon, cmd/agentsessionsd and this package, links no
+// substrate module, and that the daemon, cmd/agentsessionsd and this package, links no
 // substrate package, runtime/substrate included.
 func TestRootModuleHasNoSubstrateDependency(t *testing.T) {
 	if testing.Short() {
@@ -38,7 +47,7 @@ func TestRootModuleHasNoSubstrateDependency(t *testing.T) {
 		t.Fatalf("go.mod %s is module %q, want the root module", goMod, mod.Module.Path)
 	}
 	for _, r := range mod.Require {
-		if strings.HasPrefix(r.Path, substrateModule) {
+		if isSubstrateModule(r.Path) {
 			t.Errorf("root go.mod requires %s; only integrations/substrate may", r.Path)
 		}
 	}
@@ -47,7 +56,7 @@ func TestRootModuleHasNoSubstrateDependency(t *testing.T) {
 		"github.com/agent-primitives/sessions/cmd/agentsessionsd",
 		"github.com/agent-primitives/sessions/internal/agentsessionsd")
 	for _, pkg := range strings.Fields(deps) {
-		if strings.HasPrefix(pkg, substrateModule) || pkg == runtimeSubstrate || strings.HasPrefix(pkg, runtimeSubstrate+"/") {
+		if isSubstrateModule(pkg) || pkg == runtimeSubstrate || strings.HasPrefix(pkg, runtimeSubstrate+"/") {
 			t.Errorf("agentsessionsd links %s; a substrate harness is added by integrations/substrate/cmd/agentsessionsd through WithHarnessBackends", pkg)
 		}
 	}

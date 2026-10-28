@@ -4,9 +4,10 @@
 #
 # Only the pool is a Kubernetes object. The ActorTemplate is a substrate API resource that lives in an
 # atespace, so the conformance suite creates it through Control (integrations/substrate/e2e/
-# templates_test.go) with the harness image under test. It names the cluster-scoped `microvm`
-# SandboxConfig, which substrate's hack/install-microvm-deps.sh --install installs along with the
-# assets it stages (run-microvm-demo-kind.sh calls the same script).
+# templates_test.go) with the harness image under test. The pool names the `microvm` class without a
+# configRef, so it resolves to the class default: the cluster-scoped `microvm` SandboxConfig that
+# substrate's hack/install-microvm-deps.sh --install installs along with the assets it stages
+# (run-microvm-demo-kind.sh calls the same script).
 #
 # The `workload` label is repo-scoped on purpose: worker eligibility is the sandbox class plus a label
 # selector matched over every worker in the cluster with no namespace filter, and
@@ -24,4 +25,17 @@ spec:
   replicas: 3
   sandboxClasses:
     - name: microvm
-  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-microvm
+  workerImage: ko://go.ate.dev/substrate/cmd/ateworker-microvm
+  template:
+    # The worker advertises these limits as its scheduling capacity, and the ate-api scheduler books
+    # each ActorTemplate's spec.resources against it: the suite's templates ask for 1000m and 512Mi
+    # (integrations/substrate/e2e/templates_test.go), so each worker holds one actor. A worker with
+    # no limits advertises none and admits no sized actor. The micro-VM is sized by the template,
+    # not by these. Requests stay low so every pool fits on a single kind node next to ate-system.
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+      requests:
+        cpu: 100m
+        memory: 256Mi

@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -10,7 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
 )
 
 // ActorTemplates are substrate API resources living in an atespace, not Kubernetes objects, so the
@@ -32,10 +33,6 @@ func harnessContainer(kind string) *atepb.Container {
 			HttpGet:        &atepb.HttpGetAction{Path: "/readyz", Port: 8081},
 			TimeoutSeconds: 120,
 		},
-		Resources: &atepb.Resources{Limits: []*atepb.Limits{
-			{Name: "cpu", Quantity: "1"},
-			{Name: "memory", Quantity: "512Mi"},
-		}},
 	}
 	if kind != "" {
 		c.Env = []*atepb.EnvVar{{Name: "HARNESS_KIND", Value: kind}}
@@ -43,35 +40,36 @@ func harnessContainer(kind string) *atepb.Container {
 	return c
 }
 
-// tierSandbox is where one tier's template runs: the sandbox class ("microvm" or "gvisor", the
-// string SandboxConfig.sandbox_class takes since substrate v0.5.0), the SandboxConfig it names, and
-// the `workload` label of the WorkerPool that serves it (deploy/substrate/<tier>-<class>-workerpool.yaml).
+// templateResources is every template's compute size. substrate v0.6.0 requires both limits on a
+// template: the scheduler books them against worker capacity and boots a micro-VM at that size.
+var templateResources = &atepb.ResourceRequirements{Limits: &atepb.Resources{
+	CpuMillicores: 1000,
+	MemoryBytes:   512 << 20,
+}}
+
+// tierSandbox is where one tier's template runs: the sandbox class ("microvm" or "gvisor") and the
+// `workload` label of the WorkerPool that serves it (deploy/substrate/<tier>-<class>-workerpool.yaml).
+// substrate v0.6.0 has no per-template sandbox config: the class is whatever the selected pool's
+// worker runs, so the pool label is what pins it.
 type tierSandbox struct {
-	class  string
-	config string
-	pool   string
+	class string
+	pool  string
 }
 
 // sandboxFor resolves a tier's sandbox from <PREFIX>_SANDBOX_CLASS. Both tiers default to the
 // micro-VM class, so the suite exercises the same isolation class end to end. gvisor is an explicit
-// opt-in for hosts without KVM; it selects the tier's gVisor pool. <PREFIX>_SANDBOX_CONFIG overrides
-// the SandboxConfig name. Any other value is an error rather than a silent fallback, so a typo cannot
-// run a tier on a class the caller did not ask for.
+// opt-in for hosts without KVM; it selects the tier's gVisor pool. Any other value is an error rather
+// than a silent fallback, so a typo cannot run a tier on a class the caller did not ask for.
+// <PREFIX>_SANDBOX_CONFIG, which named the template's SandboxConfig before v0.6.0, is refused for the
+// same reason: the template cannot carry it, so the tier would run on the pool's config instead.
 func sandboxFor(prefix, tier string) (tierSandbox, error) {
+	if v := os.Getenv(prefix + "_SANDBOX_CONFIG"); v != "" {
+		return tierSandbox{}, fmt.Errorf("%s_SANDBOX_CONFIG=%q: substrate v0.6.0 templates name no SandboxConfig; unset it and set configRef on the tier's WorkerPool sandboxClasses entry instead", prefix, v)
+	}
 	key := prefix + "_SANDBOX_CLASS"
 	switch v := env(key, "microvm"); v {
-	case "microvm":
-		return tierSandbox{
-			class:  "microvm",
-			config: env(prefix+"_SANDBOX_CONFIG", "microvm"),
-			pool:   "agentsessions-" + tier + "-microvm",
-		}, nil
-	case "gvisor":
-		return tierSandbox{
-			class:  "gvisor",
-			config: env(prefix+"_SANDBOX_CONFIG", "gvisor-default"),
-			pool:   "agentsessions-" + tier + "-gvisor",
-		}, nil
+	case "microvm", "gvisor":
+		return tierSandbox{class: v, pool: "agentsessions-" + tier + "-" + v}, nil
 	default:
 		return tierSandbox{}, fmt.Errorf("%s=%q: want microvm or gvisor", key, v)
 	}
@@ -92,9 +90,11 @@ func templateSpec(t *testing.T, atespace, name, prefix, tier, harnessKind string
 		Containers:     []*atepb.Container{harnessContainer(harnessKind)},
 		SnapshotConfig: &atepb.SnapshotConfig{
 			PreferredFidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
-			StorageLocation:   env("SNAPSHOT_LOCATION", "gs://ate-snapshots/agentsessions/") + name + "/",
+			// A preview field at v0.6.0 (PerTemplateSnapshotLocation): accepted but ignored while the
+			// gate is off, so snapshots go under the cluster's --snapshot-location.
+			StorageLocation: env("SNAPSHOT_LOCATION", "gs://ate-snapshots/agentsessions/") + name + "/",
 		},
-		SandboxConfig: &atepb.SandboxConfig{SandboxClass: sb.class, ConfigName: sb.config},
+		Resources: templateResources,
 	}
 }
 
@@ -138,9 +138,7 @@ func (f *fixture) createTemplate(t *testing.T, want *atepb.ActorTemplate) string
 	ctl := atepb.NewControlClient(f.conn)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	if _, err := ctl.CreateAtespace(ctx, &atepb.CreateAtespaceRequest{
-		Atespace: &atepb.Atespace{Metadata: &atepb.ResourceMetadata{Name: f.tmplAtespace}},
-	}); err != nil && status.Code(err) != codes.AlreadyExists {
+	if err := ensureAtespace(ctx, ctl, f.tmplAtespace); err != nil {
 		return "ensure template atespace: " + err.Error()
 	}
 	ref := &atepb.ObjectRef{Atespace: f.tmplAtespace, Name: want.GetMetadata().GetName()}
@@ -158,17 +156,13 @@ func (f *fixture) createTemplate(t *testing.T, want *atepb.ActorTemplate) string
 		return "ActorTemplate " + ref.GetAtespace() + "/" + ref.GetName() + " exists with image " +
 			got.GetContainers()[0].GetImage() + ", not this run's " + want.GetContainers()[0].GetImage() +
 			"; delete it (or use a fresh ACTORTEMPLATE_ATESPACE) and rerun"
-	case got.GetSandboxConfig().GetSandboxClass() != want.GetSandboxConfig().GetSandboxClass() ||
-		got.GetSandboxConfig().GetConfigName() != want.GetSandboxConfig().GetConfigName() ||
-		got.GetWorkerSelector().GetMatchLabels()["workload"] != want.GetWorkerSelector().GetMatchLabels()["workload"]:
-		// Same reason: a template left by a run on another sandbox class or config would silently
-		// test that class or config.
-		return "ActorTemplate " + ref.GetAtespace() + "/" + ref.GetName() + " exists on sandbox class " +
-			got.GetSandboxConfig().GetSandboxClass() + " (config " + got.GetSandboxConfig().GetConfigName() +
-			", pool " + got.GetWorkerSelector().GetMatchLabels()["workload"] + "), not this run's " +
-			want.GetSandboxConfig().GetSandboxClass() + " (config " + want.GetSandboxConfig().GetConfigName() +
-			", pool " + want.GetWorkerSelector().GetMatchLabels()["workload"] +
-			"); delete it (or use a fresh ACTORTEMPLATE_ATESPACE) and rerun"
+	case got.GetWorkerSelector().GetMatchLabels()["workload"] != want.GetWorkerSelector().GetMatchLabels()["workload"]:
+		// Same reason: a template left by a run on another pool would silently test that pool's
+		// sandbox class.
+		return "ActorTemplate " + ref.GetAtespace() + "/" + ref.GetName() + " exists on pool " +
+			got.GetWorkerSelector().GetMatchLabels()["workload"] + ", not this run's " +
+			want.GetWorkerSelector().GetMatchLabels()["workload"] +
+			"; delete it (or use a fresh ACTORTEMPLATE_ATESPACE) and rerun"
 	}
 	for {
 		got, err := ctl.GetActorTemplate(ctx, &atepb.GetActorTemplateRequest{ActorTemplate: ref})
@@ -193,19 +187,20 @@ func (f *fixture) createTemplate(t *testing.T, want *atepb.ActorTemplate) string
 }
 
 // TestSandboxFor pins the tier sandbox selection without a cluster: micro-VM by default, gVisor only
-// when asked for, and an unknown class refused rather than mapped to either.
+// when asked for, and an unknown class or a SandboxConfig override refused rather than dropped.
 func TestSandboxFor(t *testing.T) {
 	for _, tc := range []struct {
 		name, class, config string
 		want                tierSandbox
 		wantErr             bool
 	}{
-		{name: "default", want: tierSandbox{"microvm", "microvm", "agentsessions-echo-microvm"}},
-		{name: "microvm", class: "microvm", want: tierSandbox{"microvm", "microvm", "agentsessions-echo-microvm"}},
-		{name: "gvisor opt-in", class: "gvisor", want: tierSandbox{"gvisor", "gvisor-default", "agentsessions-echo-gvisor"}},
-		{name: "config override", class: "gvisor", config: "custom", want: tierSandbox{"gvisor", "custom", "agentsessions-echo-gvisor"}},
+		{name: "default", want: tierSandbox{"microvm", "agentsessions-echo-microvm"}},
+		{name: "microvm", class: "microvm", want: tierSandbox{"microvm", "agentsessions-echo-microvm"}},
+		{name: "gvisor opt-in", class: "gvisor", want: tierSandbox{"gvisor", "agentsessions-echo-gvisor"}},
 		{name: "wrong case", class: "gVisor", wantErr: true},
 		{name: "unknown", class: "kata", wantErr: true},
+		{name: "config override", config: "microvm", wantErr: true},
+		{name: "config override on gvisor", class: "gvisor", config: "gvisor-default", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("ECHO_SANDBOX_CLASS", tc.class)

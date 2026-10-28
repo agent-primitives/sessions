@@ -48,11 +48,31 @@ var (
 	// htmlLink matches an HTML link or image target attribute, also when its tag opened on an
 	// earlier line. An anchor without one (<a name="x"></a>), which CHANGELOG.md uses, is allowed.
 	htmlLink = regexp.MustCompile(`(?i)\b(?:href|src|srcset)\s*=`)
+	// openEnded matches the start of HTML that, as an HTML block, ends only at its closing marker,
+	// not at a blank line: a comment (<!--), a declaration or CDATA section (<!), a processing
+	// instruction (<?) and a pre, script, style or textarea element. Left open in one fragment, it
+	// would hide every later entry and section of CHANGELOG.md.
+	openEnded = regexp.MustCompile(`(?i)<(?:!|\?|(?:pre|script|style|textarea)(?:[\s>]|$))`)
 	// footnote matches the start of a footnote reference ([^1]) or definition ([^1]: text).
 	footnote = regexp.MustCompile(`\[\^`)
 	// htmlStart matches a line that starts with an HTML tag or comment, which can open an HTML block,
 	// where backticks do not start code spans.
 	htmlStart = regexp.MustCompile(containers + `<`)
+	// containerPrefix matches the block quote and list markers and indentation a line starts with.
+	containerPrefix = regexp.MustCompile(containers)
+	// blockTag matches the start of an HTML block that a block-level tag opens (CommonMark type 6),
+	// which ends at a blank line. It lists the tags of CommonMark 0.31 and of cmark-gfm, which
+	// GitHub renders with and which adds source.
+	blockTag = regexp.MustCompile(`(?i)^</?(?:address|article|aside|base|basefont|blockquote|body|` +
+		`caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|` +
+		`footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|` +
+		`menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|source|summary|table|tbody|` +
+		`td|tfoot|th|thead|title|tr|track|ul)(?:[ \t>]|/>|$)`)
+	// autolink matches a URI autolink (<scheme:...>) or an email autolink (<user@host>) at the start
+	// of text, as CommonMark defines them; neither is an HTML tag.
+	autolink = regexp.MustCompile(`^<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\x00-\x20\x7f<>]*|` +
+		`[A-Za-z0-9.!#$%&'*+/=?^_\x60{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?` +
+		`(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>`)
 	// parentDir matches a parent directory step (../), also with dots or slash percent-encoded or
 	// written as HTML character references, or with a backslash, which browsers treat as a slash.
 	parentDir = regexp.MustCompile(`(?i)(?:\.|%2e|&#0*46;?|&#x0*2e;?|&period;){2}` +
@@ -104,12 +124,15 @@ func parseFragment(name string, data []byte) (fragment, error) {
 // rewriteLinks rewrites each relative link target in body from fragmentDir-relative to
 // root-relative, and refuses headings, which belong to the release section. It refuses the link
 // forms it cannot rewrite: an inline link in another form than linkTarget, a link reference
-// definition (whose label would also apply to every fragment and release section) and an HTML
-// link or image attribute. It refuses footnote references and definitions too: assembly puts
-// every fragment in one document, where two fragments' footnotes with the same label collide. As a backstop for any other form, it refuses a parent directory step
-// (../) left outside an inline link target and a code span: every in-repository target written
-// relative to the fragment needs one, and a rewritten target has none. A relative target without
-// one could only name a file in fragmentDir, which a release deletes.
+// definition (whose label would also apply to every fragment and release section) and an HTML link
+// or image attribute. It refuses footnote references and definitions too: assembly puts every
+// fragment in one document, where two fragments' footnotes with the same label collide. And it
+// refuses HTML that ends only at a closing marker (openEnded), which, left open, would hide the
+// rest of CHANGELOG.md; refusing it outright is simpler than proving every one closes. As a
+// backstop for any other form, it refuses a parent directory step (../) left outside an inline link
+// target and a code span: every in-repository target written relative to the fragment needs one,
+// and a rewritten target has none. A relative target without one could only name a file in
+// fragmentDir, which a release deletes.
 //
 // Fenced code blocks are left alone. A block closes as in CommonMark: on a fence of the opening
 // fence's character, at least as long, with nothing but spaces and tabs after it. A non-blank line
@@ -123,7 +146,13 @@ func parseFragment(name string, data []byte) (fragment, error) {
 // there. Where it cannot tell whether a line starts in a code span, the line is checked unmasked,
 // and a link whose target assembly would change is refused, since it may be code that assembly
 // must not rewrite. A link-shaped text in an HTML block, where Markdown renders no links, is
-// rewritten like a link: that changes text only.
+// rewritten like a link: that changes text only. The link checks treat every line from the first
+// that starts with '<' as possibly in an HTML block. The openEnded check, whose refusal would
+// otherwise reach inline code after an anchor such as <a name="x"></a>, tracks HTML blocks as
+// startsHTMLBlock finds them: there backticks are text, so each line is checked as written. It
+// refuses a fence-shaped line in such a block, since it cannot tell whether the line opens a code
+// block (a type 7 block cannot interrupt a paragraph), and a body that ends in one: assembly joins
+// fragments without a blank line, so the block would take in the next fragment's first paragraph.
 func rewriteLinks(body string) (string, error) {
 	lines := strings.Split(body, "\n")
 	var open codeFence // the opening fence of the current block; open.length == 0 outside one
@@ -131,10 +160,11 @@ func rewriteLinks(body string) (string, error) {
 	// spansKnown is false from a line that may leave a code span, HTML tag or autolink open until
 	// the paragraph ends; htmlSeen is true from a line that may open an HTML block to the end.
 	spansKnown, htmlSeen := true, false
+	inHTMLBlock := false // the line may be in an HTML block that a blank line ends
 	for i, line := range lines {
 		if open.length > 0 {
 			indent := indentWidth(line)
-			if strings.TrimSpace(line) != "" && indent < fenceIndent {
+			if !blank(line) && indent < fenceIndent {
 				return "", fmt.Errorf("line %q: indented less than the opening fence of its code block, which ends the block; indent every line of the block at least as far as the fence", line)
 			}
 			f, ok := parseFence(line)
@@ -149,11 +179,14 @@ func rewriteLinks(body string) (string, error) {
 			continue
 		}
 		if f, ok := parseFence(line); ok && (f.char != '`' || !strings.Contains(f.info, "`")) {
+			if inHTMLBlock {
+				return "", fmt.Errorf("line %q: cannot tell whether this fence opens a code block, because this line may be in an HTML block, which an earlier line starting with an HTML tag opens; put a blank line before the fence", line)
+			}
 			open, fenceIndent, spansKnown = f, indentWidth(line), true
 			continue
 		}
-		if strings.TrimSpace(line) == "" {
-			spansKnown = true
+		if blank(line) {
+			spansKnown, inHTMLBlock = true, false
 			continue
 		}
 		if atxHeading.MatchString(line) {
@@ -167,6 +200,9 @@ func rewriteLinks(body string) (string, error) {
 		}
 		if htmlStart.MatchString(line) {
 			htmlSeen = true
+		}
+		if startsHTMLBlock(line) {
+			inHTMLBlock = true
 		}
 		// spans is line with its code span contents blanked, at the same byte offsets, when
 		// startKnown; masked is spans unless the line may be in an HTML block, where backticks do
@@ -222,13 +258,51 @@ func rewriteLinks(body string) (string, error) {
 		if parentDir.MatchString(rest.String()) {
 			return "", fmt.Errorf("line %q: ../ is allowed only in an inline link target, [text](target), or in inline code; assembly rewrites only those targets, and any other relative path would resolve from CHANGELOG.md instead of the fragment", line)
 		}
+		if inHTMLBlock && openEnded.MatchString(line) && !openEnded.MatchString(spans) {
+			return "", fmt.Errorf("line %q: HTML comments, <!...> and <?...> markup and pre, script, style and textarea elements are not allowed outside code, and this line may be in an HTML block, which this or an earlier line starting with an HTML tag opens, where backticks are text; Markdown ends such HTML only at its closing marker, so one left open would hide every later entry of the release; put a blank line before this paragraph", line)
+		}
+		if openEnded.MatchString(spans) {
+			return "", fmt.Errorf("line %q: HTML comments, <!...> and <?...> markup and pre, script, style and textarea elements are not allowed outside code; Markdown ends them only at their closing marker, so one left open would hide every later entry of the release; put such text in inline code or a fenced block", line)
+		}
 		b.WriteString(line[last:])
 		lines[i] = b.String()
 	}
 	if open.length > 0 {
 		return "", errors.New("unterminated code fence")
 	}
+	if inHTMLBlock {
+		return "", errors.New("the entry may end in an HTML block, which a line starting with an HTML tag opens and only a blank line ends; assembly joins entries without a blank line, so the block would take in the next entry (a block inside the list item would not, but the tool does not track list items), where backticks are text and inline code such as `<!--` would hide the rest of CHANGELOG.md; end the entry with a line of text after a blank line")
+	}
 	return strings.Join(lines, "\n"), nil
+}
+
+// blank reports whether line is blank in Markdown, which counts only spaces and tabs: a line of
+// other white space, such as a no-break space, continues a paragraph or HTML block.
+func blank(line string) bool {
+	return strings.Trim(line, " \t") == ""
+}
+
+// startsHTMLBlock reports whether line, outside a fenced block, may start an HTML block that a
+// blank line ends: after its block quote and list markers it starts with a block-level tag
+// (CommonMark type 6), with a tag that is alone on the line or does not end on it (type 7), or with
+// <! or <?, which openEnded refuses. It errs towards a block: it ignores that a type 7 block cannot
+// interrupt a paragraph, since renderers differ on lazy continuation lines, and it takes any
+// '<' before a letter or '/' as a tag unless it starts a URI or email autolink, such as
+// <https://example.com/x> or <dev@example.com>, which is text and starts none. An inline tag
+// followed by text on its line, such as <a name="x"></a> Moved., starts none either.
+func startsHTMLBlock(line string) bool {
+	rest := line[len(containerPrefix.FindString(line)):]
+	if len(rest) < 2 || rest[0] != '<' {
+		return false
+	}
+	if blockTag.MatchString(rest) || rest[1] == '!' || rest[1] == '?' {
+		return true
+	}
+	if rest[1] != '/' && ('a' > rest[1]|0x20 || rest[1]|0x20 > 'z') || autolink.MatchString(rest) {
+		return false
+	}
+	end := tagEnd([]byte(rest), 0)
+	return end < 0 || strings.TrimSpace(rest[end+1:]) == ""
 }
 
 // maskCodeSpans returns line with the contents of each code span on it replaced by '_', and

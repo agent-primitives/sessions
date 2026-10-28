@@ -186,6 +186,22 @@ func TestAssembleRefusals(t *testing.T) {
 			wantErr: "bad.md: line \" ### Removed\": headings are not allowed",
 		},
 		{
+			// Assembled, the comment would hide good.md's entry and every older release section.
+			name: "unterminated html comment", changelog: intro + history, version: "v0.4.0", date: "2026-10-30",
+			frags:   map[string]string{"good.md": good, "a-draft.md": frag("Added", "- Entry.\n\n<!-- draft")},
+			wantErr: "a-draft.md: line \"<!-- draft\": HTML comments",
+		},
+		{
+			// Assembled, aa-details.md's HTML block would take in ab-quote.md's entry, where the
+			// inline code would be a raw comment hiding every later entry and older release.
+			name: "fragment ending in an html block", changelog: intro + history, version: "v0.4.0", date: "2026-10-30",
+			frags: map[string]string{
+				"aa-details.md": frag("Added", "- Example output is now collapsible.\n\n<details>\n<summary>Example</summary>\n\nOutput.\n\n</details>"),
+				"ab-quote.md":   frag("Added", "- Fragments may now quote `<!--` in inline code."),
+			},
+			wantErr: "aa-details.md: the entry may end in an HTML block",
+		},
+		{
 			name: "malformed fragment", changelog: intro + history, version: "v0.4.0", date: "2026-10-30",
 			frags:   map[string]string{"good.md": good, "bad.md": "- no front matter\n"},
 			wantErr: "bad.md: must start with front matter",

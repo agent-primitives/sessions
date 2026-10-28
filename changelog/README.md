@@ -52,6 +52,18 @@ category: Added
 - No footnotes, neither references (`[^1]`) nor definitions (`[^1]: note`): a release puts every
   fragment in one document, where footnotes with the same label collide. Write the note in the
   entry. Footnote-shaped text in inline code or a fenced block is fine.
+- No HTML comments (`<!-- -->`), other `<!` or `<?` markup, or `pre`, `script`, `style` or
+  `textarea` elements outside inline code and fenced blocks, even closed ones. Markdown ends such
+  HTML only at its closing marker, so one left open would hide every later entry of the release; the
+  tool refuses them all rather than check that each one closes. A line that starts with a
+  block-level tag (`<div>`, `<details>`) or with a tag alone on the line opens an HTML block up to
+  the next blank line (only spaces or tabs; a line of no-break spaces is not blank), and there
+  backticks are text, so the tool checks such lines as written. An inline tag followed by text, such
+  as `<a name="x"></a> Moved.`, opens none. In an HTML block the tool refuses a fence, since it
+  cannot tell whether the fence opens a code block; put a blank line before it. It also refuses an
+  entry that ends in an HTML block: a release joins entries without a blank line, so the block would
+  take in the next entry, whose inline code would become raw HTML. End the entry with a line of text
+  after a blank line.
 - A later pull request that changes an unreleased feature edits that feature's fragment rather than
   adding a second one.
 

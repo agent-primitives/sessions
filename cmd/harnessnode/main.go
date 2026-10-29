@@ -28,6 +28,7 @@ import (
 	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
@@ -179,9 +180,9 @@ func traceConnect(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, ha
 
 	err := handler(srv, &contextStream{ServerStream: ss, ctx: ctx})
 
-	code := status.Code(err)
+	code := connectCode(err)
 	span.SetAttributes(attribute.Int64("rpc.grpc.status_code", int64(code)))
-	if err != nil {
+	if serverError(code) {
 		// The code, never the message: a status message can quote payload data.
 		span.SetStatus(otelcodes.Error, code.String())
 	}
@@ -190,6 +191,27 @@ func traceConnect(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, ha
 	defer cancel()
 	_ = otelsetup.Flush(flushCtx)
 	return err
+}
+
+// connectCode is the code grpc-go sends for err: a host that ends a turn early makes the handler
+// return the stream context's error, which grpc-go writes as DeadlineExceeded or Canceled.
+func connectCode(err error) codes.Code {
+	st, ok := status.FromError(err)
+	if !ok {
+		st = status.FromContextError(err)
+	}
+	return st.Code()
+}
+
+// serverError reports whether code marks a server span as an error, following otelgrpc's server
+// convention: codes the caller caused, such as Canceled or InvalidArgument, leave the status unset.
+func serverError(code codes.Code) bool {
+	switch code {
+	case codes.Unknown, codes.DeadlineExceeded, codes.Unimplemented, codes.Internal,
+		codes.Unavailable, codes.DataLoss:
+		return true
+	}
+	return false
 }
 
 type contextStream struct {

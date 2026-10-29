@@ -3,14 +3,19 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
@@ -153,5 +158,105 @@ func testConnectSpanExported(t *testing.T, h api.Harness, wantErr func(error) bo
 	}
 	if !connect {
 		t.Fatalf("flushed batch %v is missing the Connect span", batch)
+	}
+}
+
+// waitingHarness runs until the host ends the turn, then returns the stream context's error, as
+// the harnesswire sink does.
+type waitingHarness struct{}
+
+func (waitingHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "waiting"}, nil
+}
+func (waitingHarness) Run(ctx context.Context, _ *api.Start, _ api.EventSink) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// timeoutHarness gives up on its own deadline, as a harness bounding a model call does.
+type timeoutHarness struct{}
+
+func (timeoutHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "timeout"}, nil
+}
+func (timeoutHarness) Run(ctx context.Context, _ *api.Start, _ api.EventSink) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+	defer cancel()
+	<-ctx.Done()
+	return fmt.Errorf("model call: %w", ctx.Err())
+}
+
+// TestConnectSpanStatusForContextErrors checks that a Connect ended by a context error records the
+// code grpc-go sends, not Unknown, and that only server-side codes mark the span as an error. A
+// host deadline is not a row: the host's timer starts first, so its stream reset usually reaches
+// the harness, as Canceled, before the harness's own copy of the deadline fires.
+func TestConnectSpanStatusForContextErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		harness    api.Harness
+		wantCode   codes.Code
+		wantStatus otelcodes.Code
+	}{
+		{name: "host cancels", harness: waitingHarness{}, wantCode: codes.Canceled, wantStatus: otelcodes.Unset},
+		{name: "harness deadline", harness: timeoutHarness{}, wantCode: codes.DeadlineExceeded, wantStatus: otelcodes.Error},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exp := tracetest.NewInMemoryExporter()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+			prevTP, prevProp := otel.GetTracerProvider(), otel.GetTextMapPropagator()
+			otel.SetTracerProvider(tp)
+			otel.SetTextMapPropagator(propagation.TraceContext{})
+			t.Cleanup(func() {
+				_ = tp.Shutdown(context.Background())
+				otel.SetTracerProvider(prevTP)
+				otel.SetTextMapPropagator(prevProp)
+			})
+
+			lis := bufconn.Listen(1 << 20)
+			srv := newServer(tc.harness)
+			go func() { _ = srv.Serve(lis) }()
+			t.Cleanup(srv.Stop)
+			conn, err := grpc.NewClient("passthrough:///harness",
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			client := harnesswire.NewClientHarness(v1.NewHarnessClient(conn))
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			time.AfterFunc(300*time.Millisecond, cancel)
+			if err := client.Run(ctx, &api.Start{ExecutionID: "e-1", SessionUID: "s"}, discardSink{}); err == nil {
+				t.Fatal("Run succeeded")
+			}
+
+			var span tracetest.SpanStub
+			deadline := time.Now().Add(5 * time.Second)
+			for span.Name == "" && time.Now().Before(deadline) {
+				for _, s := range exp.GetSpans() {
+					if s.Name == "agentsessions.v1.Harness/Connect" {
+						span = s
+					}
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if span.Name == "" {
+				t.Fatal("no Connect span was recorded")
+			}
+			want := attribute.Int64("rpc.grpc.status_code", int64(tc.wantCode))
+			var got bool
+			for _, kv := range span.Attributes {
+				got = got || kv == want
+			}
+			if !got {
+				t.Errorf("Connect span attributes %v, want %v", span.Attributes, want)
+			}
+			if span.Status.Code != tc.wantStatus {
+				t.Errorf("Connect span status %v, want %v", span.Status.Code, tc.wantStatus)
+			}
+		})
 	}
 }

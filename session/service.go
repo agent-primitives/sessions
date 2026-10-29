@@ -1043,7 +1043,8 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		children = append(children, placement.ForkChild{UID: uid, Log: log})
 	}
 	// Each child is published at its first fence during the fan-out, so its chain starts here. A
-	// failed fan-out keeps the stamps, as it keeps the children it published.
+	// failed or refused fan-out keeps every stamp, including those of children it never published;
+	// they are telemetry only and unreachable.
 	for _, child := range children {
 		s.recordTrace(ctx, child.UID)
 	}

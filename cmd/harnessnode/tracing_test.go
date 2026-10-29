@@ -66,10 +66,24 @@ func (parkingHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink)
 
 var parkRef = api.ApprovalRef{ExecutionID: "e-1", ToolCallID: "c", RequestSeq: 1}
 
+// modelHarness makes one model call, which the host fails.
+type modelHarness struct{}
+
+func (modelHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "model"}, nil
+}
+func (modelHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	_, err := sink.Model(ctx, api.ModelRequest{Model: "m"})
+	return err
+}
+
+var errProvider = errors.New("provider unavailable")
+
+// discardSink accepts everything except model calls, which fail as a provider outage would.
 type discardSink struct{}
 
 func (discardSink) Model(context.Context, api.ModelRequest) (api.ModelResponse, error) {
-	return api.ModelResponse{}, nil
+	return api.ModelResponse{}, errProvider
 }
 func (discardSink) Output(context.Context, string) error { return nil }
 func (discardSink) ToolCall(_ context.Context, tc api.ToolCall) (api.ToolResult, error) {
@@ -84,7 +98,8 @@ func (discardSink) Usage(context.Context, api.Usage) error       { return nil }
 // TestConnectSpanExportedBeforeTurnEnds checks the ordering the host relies on to suspend a harness
 // right after a turn: by the time Run returns, the harness's Connect span, the root of its side of
 // the turn, has been handed to the exporter. The exporter blocks, and Run must still be waiting.
-// A parked turn ends the same way: the host waits for the harness to close the stream.
+// A parked turn, and a turn that fails on the host side, end the same way: the host waits for the
+// harness to close the stream.
 func TestConnectSpanExportedBeforeTurnEnds(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -95,6 +110,9 @@ func TestConnectSpanExportedBeforeTurnEnds(t *testing.T) {
 		{name: "parked", harness: parkingHarness{}, wantErr: func(err error) bool {
 			var parked *api.ApprovalParkedError
 			return errors.As(err, &parked) && parked.Ref == parkRef
+		}},
+		{name: "host failed", harness: modelHarness{}, wantErr: func(err error) bool {
+			return errors.Is(err, errProvider)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) { testConnectSpanExported(t, tc.harness, tc.wantErr) })

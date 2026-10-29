@@ -1370,8 +1370,9 @@ sequenceDiagram
   other than `COMPLETED` as a failed execution. An approval park ends with `EVENT_PARKED` instead
   (§10.3). After `EVENT_END` the reference host half-closes its sending side and waits up to 2
   seconds for the harness to end the RPC before cancelling it, so the harness can flush telemetry
-  and return its own status; after `EVENT_PARKED` it already waits for the harness to close
-  (`APR-10`).
+  and return its own status. It waits the same way when a sink call fails on the host side, unless
+  the caller has already cancelled; the turn still fails with the host's error. After
+  `EVENT_PARKED` it already waits for the harness to close (`APR-10`).
 - TODO(spike): The reference host client treats a stream that closes cleanly without `EVENT_END`
   as success, and silently ignores harness-sent `EVENT_INPUT`, `EVENT_LIFECYCLE`, `EVENT_ERROR`,
   and unspecified kinds. Should these be protocol errors, as the proto comment implies?

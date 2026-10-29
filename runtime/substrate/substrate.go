@@ -614,12 +614,12 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 // the evidence is gone: a suspended actor holds no worker to compare. So whenever the checkpoint
 // must hold memory, Snapshot also requires the suspend to report the UID and CaptureLineage the
 // check saw, and refuses any other with api.ErrMemoryStateLost and no ref; the actor is left
-// suspended. That fails closed: a capture or pause by another caller followed by a resume in the
-// window is refused even when the memory survived. A single capture or pause with no resume after
-// it is the capture this suspend would have taken: the suspend reports the lineage checked and it
-// is recorded. A lineage missing from either read is a plain error, before suspending when the
-// check reports none. A crash and resume onto a worker of the same runtime keeps the lineage, so
-// that window remains; only a precondition on SuspendActor itself would close it.
+// suspended. That fails closed: a capture by another caller followed by a resume in the window is
+// refused even when the memory survived. A single capture with no resume after it is the capture
+// this suspend would have taken: the suspend reports the lineage checked and it is recorded. A
+// lineage missing from either read is a plain error, before suspending when the check reports none.
+// A crash and resume onto a worker of the same runtime keeps the lineage, so that window remains;
+// only a precondition on SuspendActor itself would close it.
 //
 // The refused capture stays on the suspended actor, and nothing on the actor marks it. The journal
 // does: Snapshot also refuses, before suspending, an actor that does not hold in.RecordedCheckpoint

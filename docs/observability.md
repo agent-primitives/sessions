@@ -129,16 +129,16 @@ their own spans by starting them from the `ctx` that `Run` receives; `harness/ch
 pattern.
 
 A harness that its runtime can suspend must export its spans before the turn ends. Spans still
-buffered when a snapshot is taken are exported only if that snapshot is restored. `harnessnode`
-ends its `Connect` server span and flushes before the handler returns, so the export finishes
-before gRPC sends the final status the host waits for. The host waits for that status when a turn
-parks, and for up to 2 seconds when a turn ends or fails on the host side, such as a model provider
-error. Only a caller's cancellation tears the stream down at once, which can lose the harness's
-spans. Ending the span in a gRPC stats handler, as
-`otelgrpc` does, is too late: grpc-go reports the end of an RPC to stats handlers only after it has
-written the status. A custom harness server that can be suspended needs the same ordering: end its
-spans and call `otelsetup.Flush` inside the handler. The flush is bounded to one second, so an
-unreachable collector costs spans rather than holding the turn open.
+buffered when a snapshot is taken are exported only if that snapshot is restored. `harnessnode` ends
+its `Connect` server span and flushes before the handler returns, so the export finishes before gRPC
+sends the final status the host waits for. The host waits for that status when a turn parks, and for
+up to 2 seconds when a turn ends or fails on the host side, such as a model provider error. A
+caller's cancellation, a protocol violation or a transport error still tears the stream down at
+once, which can lose the harness's spans. Ending the span in a gRPC stats handler, as `otelgrpc`
+does, is too late: grpc-go reports the end of an RPC to stats handlers only after it has written the
+status. A custom harness server that can be suspended needs the same ordering: end its spans and
+call `otelsetup.Flush` inside the handler. The flush is bounded to one second, so an unreachable
+collector costs spans rather than holding the turn open.
 
 Harness spans are reported by the harness, so treat them as untrusted, just as
 `IN_HARNESS_REPORTED` tool results are. They also need a network path from the sandbox to the

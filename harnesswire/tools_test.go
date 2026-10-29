@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -188,5 +189,83 @@ func TestModelCallRejectsUnknownToolChoiceFromPeer(t *testing.T) {
 	}
 	if len(host.reqs) != 0 {
 		t.Fatalf("host served %d model calls, want 0", len(host.reqs))
+	}
+}
+
+var errHostSink = errors.New("host sink failed")
+
+// failingSink fails the one sink call named by kind, as a provider outage or store fault would.
+type failingSink struct{ kind string }
+
+func (s failingSink) fail(kind string) error {
+	if s.kind == kind {
+		return errHostSink
+	}
+	return nil
+}
+func (s failingSink) Model(context.Context, api.ModelRequest) (api.ModelResponse, error) {
+	return api.ModelResponse{}, s.fail("model")
+}
+func (s failingSink) Output(context.Context, string) error { return s.fail("output") }
+func (s failingSink) ToolCall(context.Context, api.ToolCall) (api.ToolResult, error) {
+	return api.ToolResult{}, s.fail("tool_call")
+}
+func (s failingSink) Report(context.Context, api.ToolResult) error { return s.fail("report") }
+func (s failingSink) Usage(context.Context, api.Usage) error       { return s.fail("usage") }
+
+// lingeringHarness makes one sink call of its kind and then keeps the RPC open until released,
+// ignoring cancellation, as a harness still flushing its telemetry would.
+type lingeringHarness struct {
+	kind    string
+	release chan struct{}
+}
+
+func (lingeringHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "lingering"}, nil
+}
+func (h lingeringHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	switch h.kind {
+	case "model":
+		_, _ = sink.Model(ctx, api.ModelRequest{Model: "m"})
+	case "output":
+		_ = sink.Output(ctx, "out")
+	case "tool_call":
+		_, _ = sink.ToolCall(ctx, api.ToolCall{ID: "c", Tool: "t", IdempotencyKey: "k"})
+	case "report":
+		_ = sink.Report(ctx, api.ToolResult{ID: "c"})
+	case "usage":
+		_ = sink.Usage(ctx, api.Usage{Model: "m", InputTokens: 1})
+	}
+	<-h.release
+	return nil
+}
+
+// TestRunWaitsForHarnessAfterHostSinkFailure checks that a turn failed by any host sink call
+// lets the harness end the RPC, so it can flush its spans, and still returns the host's error.
+func TestRunWaitsForHarnessAfterHostSinkFailure(t *testing.T) {
+	for _, kind := range []string{"model", "output", "tool_call", "report", "usage"} {
+		t.Run(kind, func(t *testing.T) {
+			release := make(chan struct{})
+			client := dial(t, harnesswire.NewServer(lingeringHarness{kind: kind, release: release}))
+			done := make(chan error, 1)
+			go func() {
+				done <- client.Run(context.Background(), &api.Start{ExecutionID: "e-1", SessionUID: "s"}, failingSink{kind: kind})
+			}()
+			select {
+			case err := <-done:
+				close(release)
+				t.Fatalf("Run returned (%v) while the harness was still running", err)
+			case <-time.After(300 * time.Millisecond):
+			}
+			close(release)
+			select {
+			case err := <-done:
+				if !errors.Is(err, errHostSink) {
+					t.Fatalf("Run: %v, want the host sink error", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Run did not return after the harness ended the RPC")
+			}
+		})
 	}
 }

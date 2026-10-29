@@ -504,7 +504,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 				ToolChoice: choice,
 			})
 			if err != nil {
-				return err
+				return hostFailed(ctx, stream, cancel, err)
 			}
 			if err := stream.Send(&v1.ControllerFrame{
 				Session:     start.SessionUID,
@@ -520,7 +520,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 		case v1.EventKind_EVENT_OUTPUT:
 			if msg := wire.MessageFromProto(ev.GetMessage()); msg != nil {
 				if err := sink.Output(ctx, msg.Text()); err != nil {
-					return err
+					return hostFailed(ctx, stream, cancel, err)
 				}
 			}
 		case v1.EventKind_EVENT_TOOL_CALL:
@@ -546,7 +546,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 				if errors.Is(err, api.ErrApprovalParked) {
 					return errors.New("harnesswire: host park missing correlation")
 				}
-				return err
+				return hostFailed(ctx, stream, cancel, err)
 			}
 			if tc.Mediation == api.MediationRequiresApproval {
 				if err := validateApprovalReceipt(tc.ID, res.Approval, res); err != nil {
@@ -578,7 +578,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 					return err
 				}
 				if err := sink.Report(ctx, *tr); err != nil {
-					return err
+					return hostFailed(ctx, stream, cancel, err)
 				}
 			}
 		case v1.EventKind_EVENT_USAGE:
@@ -589,7 +589,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 					OutputTokens:    u.GetOutputTokens(),
 					ReasoningTokens: u.GetReasoningTokens(),
 				}); err != nil {
-					return err
+					return hostFailed(ctx, stream, cancel, err)
 				}
 			}
 		case v1.EventKind_EVENT_APPROVAL_REQUEST, v1.EventKind_EVENT_APPROVAL_RESULT, v1.EventKind_EVENT_EXECUTION_START, v1.EventKind_EVENT_PARKED:
@@ -602,7 +602,8 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 	}
 }
 
-// closeGrace bounds how long the host waits for the harness to finish the Connect RPC after END.
+// closeGrace bounds how long the host waits for the harness to finish the Connect RPC after END or
+// a host-side failure.
 const closeGrace = 2 * time.Second
 
 // awaitClose lets the harness finish the RPC after END instead of cancelling it mid-flight. The
@@ -618,6 +619,17 @@ func awaitClose(stream v1.Harness_ConnectClient, cancel context.CancelFunc) {
 			return
 		}
 	}
+}
+
+// hostFailed ends a turn whose sink call failed on the host side, such as a provider error. While
+// the caller is still waiting, the harness gets the same bounded close as after END, so it can flush
+// its spans before a suspend; its pending sink call sees the half-close as end of stream. err is
+// returned unchanged. A cancelled caller ends the turn at once.
+func hostFailed(ctx context.Context, stream v1.Harness_ConnectClient, cancel context.CancelFunc, err error) error {
+	if ctx.Err() == nil {
+		awaitClose(stream, cancel)
+	}
+	return err
 }
 
 // exchangePark accepts only the transport acknowledgement followed by actual

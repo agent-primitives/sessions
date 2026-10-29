@@ -152,7 +152,7 @@ func (s *liveSink) completeApproval(ctx context.Context, state *ApprovalState) (
 		if denied != nil {
 			result = *denied
 		} else {
-			result, err = s.c.tool(ctx, ToolCallContext{SessionUID: s.c.sessionUID}, call)
+			result, err = s.invokeTool(ctx, call)
 			s.c.liveToolCalls++
 			if err != nil {
 				// A host-caused cancellation is not an executor outcome. Leave the approved

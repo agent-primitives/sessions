@@ -368,7 +368,7 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	if s != nil {
 		sessionUID = s.SessionUID
 	}
-	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "create_compute",
+	ctx, finish := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "create_compute",
 		"session_uid", sessionUID,
 		"atespace", b.atespace,
 	)
@@ -406,11 +406,11 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 		}
 	}
 
-	createFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "create_actor",
+	callCtx, createFinished := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "create_actor",
 		"actor", ref.Name,
 		"atespace", ref.Atespace,
 	)
-	if err := b.ctl.CreateActor(ctx, ref, b.template); err != nil {
+	if err := b.ctl.CreateActor(callCtx, ref, b.template); err != nil {
 		if errors.Is(err, ErrActorExists) {
 			// Another host created the actor after this call looked. Use it as that host does; the
 			// host's compute-instance check still refuses it if it replaced a lost actor.
@@ -427,11 +427,11 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	}
 	createFinished(nil)
 
-	resumeFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "resume_actor",
+	callCtx, resumeFinished := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "resume_actor",
 		"actor", ref.Name,
 		"atespace", ref.Atespace,
 	)
-	info, err := b.ctl.ResumeActor(ctx, ref)
+	info, err := b.ctl.ResumeActor(callCtx, ref)
 	if err != nil {
 		resumeFinished(err, "error_kind", "resume_actor_failed")
 		return api.Incarnation{}, fmt.Errorf("substrate: resume actor: %w", err)
@@ -627,7 +627,7 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 // or recorded as the session's, whether the actor is still suspended on it or the router woke it.
 // A suspended actor whose newest upload is pending is refused as not ready before that check.
 func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (snapshot api.SnapshotRef, err error) {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "snapshot_compute",
+	ctx, finish := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "snapshot_compute",
 		"actor", in.ID,
 		"atespace", b.atespace,
 		"snapshot_kind", kind,
@@ -645,7 +645,7 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 			"a memory-required checkpoint; no actor was suspended",
 			api.ErrInvalidCheckpoint, b.atespace, in.ID)
 	}
-	suspendFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "suspend_actor",
+	callCtx, suspendFinished := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "suspend_actor",
 		"actor", in.ID,
 		"atespace", b.atespace,
 		"reason", "snapshot",
@@ -656,7 +656,7 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 		// recorded instance: a journal without one (written before EXECUTION_START recorded
 		// compute_instance, or before the session's first turn) is the same session after a
 		// refused cross-runtime Restore.
-		info, err := b.ctl.GetActor(ctx, b.ref(in.ID))
+		info, err := b.ctl.GetActor(callCtx, b.ref(in.ID))
 		if err != nil {
 			err = b.instanceGone(in, "get actor before snapshot", err)
 			suspendFinished(err, "error_kind", snapshotErrorKind(err, "get_actor_failed"))
@@ -706,7 +706,7 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 		}
 		checked = info
 	}
-	info, err := b.ctl.SuspendActor(ctx, b.ref(in.ID))
+	info, err := b.ctl.SuspendActor(callCtx, b.ref(in.ID))
 	if err != nil {
 		err = b.instanceGone(in, "suspend actor", err)
 		suspendFinished(err, "error_kind", snapshotErrorKind(err, "suspend_actor_failed"))
@@ -962,7 +962,7 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (api.Incarna
 // precondition on the resume itself, which v0.5.0's ResumeActorRequest (the actor reference only)
 // cannot carry.
 func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, recorded func() (string, error)) (inc api.Incarnation, err error) {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "restore_compute",
+	ctx, finish := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "restore_compute",
 		"actor", ref.Local,
 		"atespace", b.atespace,
 	)
@@ -977,11 +977,11 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 	if err := b.requireRestoreSnapshot(ctx, ref, recorded); err != nil {
 		return api.Incarnation{}, err
 	}
-	resumeFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "resume_actor",
+	callCtx, resumeFinished := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "resume_actor",
 		"actor", name,
 		"atespace", b.atespace,
 	)
-	info, err := b.ctl.ResumeActor(ctx, b.ref(name)) // restores the actor's own snapshot
+	info, err := b.ctl.ResumeActor(callCtx, b.ref(name)) // restores the actor's own snapshot
 	if err != nil {
 		resumeFinished(err, "error_kind", "resume_actor_failed")
 		if lost := b.memoryActorGone(ctx, ref, recorded, err); lost != nil {
@@ -1185,7 +1185,7 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 	if b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
 		strategy = "clone"
 	}
-	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "fork_compute",
+	ctx, finish := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "fork_compute",
 		"parent_actor", ref.Local,
 		"child_actor", opts.ChildSessionUID,
 		"atespace", b.atespace,
@@ -1480,27 +1480,27 @@ func forkTag(childUID string) string { return "fork-" + childUID }
 // never suspended still borrows the tag's snapshot. A session that was never forked simply has no
 // such tag, which is why the delete is best-effort.
 func (b *Backend) Stop(ctx context.Context, in api.Incarnation) (err error) {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "stop_compute",
+	ctx, finish := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "stop_compute",
 		"actor", in.ID,
 		"atespace", b.atespace,
 	)
 	defer func() { finish(err, "error_kind", substrateErrorKind(err)) }()
 
 	ref := b.ref(in.ID)
-	suspendFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "suspend_actor",
+	callCtx, suspendFinished := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "suspend_actor",
 		"actor", ref.Name,
 		"atespace", ref.Atespace,
 	)
-	if _, err := b.ctl.SuspendActor(ctx, ref); err != nil {
+	if _, err := b.ctl.SuspendActor(callCtx, ref); err != nil {
 		suspendFinished(err, "error_kind", "suspend_actor_failed")
 		return fmt.Errorf("substrate: suspend before delete: %w", err)
 	}
 	suspendFinished(nil)
-	deleteFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "delete_actor",
+	callCtx, deleteFinished := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "delete_actor",
 		"actor", ref.Name,
 		"atespace", ref.Atespace,
 	)
-	if err := b.ctl.DeleteActor(ctx, ref); err != nil {
+	if err := b.ctl.DeleteActor(callCtx, ref); err != nil {
 		deleteFinished(err, "error_kind", "delete_actor_failed")
 		return fmt.Errorf("substrate: delete actor: %w", err)
 	}
@@ -1514,7 +1514,7 @@ func (b *Backend) Stop(ctx context.Context, in api.Incarnation) (err error) {
 
 // Status maps the actor's substrate status onto the agentsessions compute-lifecycle axis.
 func (b *Backend) Status(ctx context.Context, in api.Incarnation) (state api.ComputeState, err error) {
-	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "get_actor_status",
+	ctx, finish := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "get_actor_status",
 		"actor", in.ID,
 		"atespace", b.atespace,
 	)

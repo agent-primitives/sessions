@@ -859,6 +859,10 @@ Consequences of the host not owning your process:
   and, when known, the exact recorded version: removing that entry or repointing it to a different
   advertised version returns `FAILED_PRECONDITION`. Empty recorded versions remain unguarded.
 
+The `ctx` passed to `Run` carries the host's trace context. Spans you start from it with the
+OpenTelemetry API join the turn's trace, under the SDK's own `harness.run` span. Keep prompts and tool
+arguments out of span attributes. See [Observability](observability.md#harness-spans).
+
 ## Capability matching
 
 When you declare `Capabilities`, the host matches them against the runtime's `RuntimeCapabilities`

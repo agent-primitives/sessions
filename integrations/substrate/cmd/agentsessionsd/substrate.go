@@ -20,6 +20,7 @@ import (
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/internal/agentsessionsd"
+	"github.com/agent-primitives/sessions/observability"
 	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/runtime/substrate"
 )
@@ -239,6 +240,8 @@ func (f *substrateFlags) Backends(logger *slog.Logger) (map[string]placement.Bac
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
 		grpc.WithConnectParams(ateapiReconnectBackoff),
 		grpc.WithUnaryInterceptor(ateapiDeadline(ateapiCallTimeout)),
+		// Carries the session operation's trace into ate-api, so actor lifecycle spans join it.
+		observability.ClientTracing(),
 	}
 	if *f.tokenFile != "" {
 		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(fileTokenCreds{path: *f.tokenFile, logger: logger}))

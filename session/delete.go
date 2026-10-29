@@ -25,7 +25,7 @@ func (s *Service) DeleteSession(ctx context.Context, req *v1.DeleteSessionReques
 		return nil, err
 	}
 	uid := req.GetUid()
-	finish := observability.Start(ctx, s.logger, "session", "delete", "session_uid", uid)
+	_, finish := observability.Begin(ctx, s.logger, "session", "delete", "session_uid", uid)
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 	if uid == "" {
 		return nil, status.Error(codes.InvalidArgument, "uid is required")

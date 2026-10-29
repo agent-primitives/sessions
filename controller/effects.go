@@ -7,6 +7,7 @@ import (
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/internal/modelcall"
+	"github.com/agent-primitives/sessions/observability"
 )
 
 // liveSink is the host-mediated EventSink for a live turn: it invokes each nondeterministic op and
@@ -65,14 +66,30 @@ func (s *liveSink) model(ctx context.Context, req api.ModelRequest) (api.ModelRe
 // completeModel invokes the model for a MODEL_CALL that is already recorded and appends the
 // completion as the OUTPUT that answers it: OUTPUT carries no call ID, so its position directly
 // after the MODEL_CALL in the execution's effect stream is the correlation. It is reused verbatim
-// when Resume re-drives a call cut before its completion was recorded.
-func (s *liveSink) completeModel(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+// when Resume re-drives a call cut before its completion was recorded, so both paths get the
+// controller.model_call span; a completion served from the journal gets none.
+func (s *liveSink) completeModel(ctx context.Context, req api.ModelRequest) (resp api.ModelResponse, err error) {
+	ctx, finish := observability.BeginDebug(ctx, s.c.logger, "controller", "model_call",
+		"session_uid", s.c.sessionUID,
+		"execution_id", s.executionID,
+		"model", req.Model,
+		"message_count", len(req.Messages),
+		"streaming", s.c.stream != nil,
+	)
+	defer func() {
+		finish(err,
+			"error_kind", controllerErrorKind(err),
+			"input_tokens", resp.Usage.InputTokens,
+			"output_tokens", resp.Usage.OutputTokens,
+			"reasoning_tokens", resp.Usage.ReasoningTokens,
+		)
+	}()
 	if err := s.validateModel(req); err != nil {
 		return api.ModelResponse{}, err
 	}
 	// The recorded invocation default, not today's policy, owns selection during recovery.
 	ctx = modelcall.WithExactModel(ctx, s.modelDefault != "")
-	resp, err := s.c.invokeModel(ctx, s.executionID, req)
+	resp, err = s.c.invokeModel(ctx, s.executionID, req)
 	if err != nil {
 		return api.ModelResponse{}, err
 	}
@@ -175,7 +192,7 @@ func (s *liveSink) execTool(ctx context.Context, call api.ToolCall) (api.ToolRes
 		}
 		return *denied, nil
 	}
-	res, err := s.c.tool(ctx, ToolCallContext{SessionUID: s.c.sessionUID}, call)
+	res, err := s.invokeTool(ctx, call)
 	if err != nil {
 		return api.ToolResult{}, err
 	}
@@ -189,6 +206,19 @@ func (s *liveSink) execTool(ctx context.Context, call api.ToolCall) (api.ToolRes
 		return api.ToolResult{}, err
 	}
 	return result, nil
+}
+
+// invokeTool runs the executor under a controller.tool_call span. Every executor invocation goes
+// through it: ordinary calls, crash recovery, and approved calls.
+func (s *liveSink) invokeTool(ctx context.Context, call api.ToolCall) (res api.ToolResult, err error) {
+	ctx, finish := observability.BeginDebug(ctx, s.c.logger, "controller", "tool_call",
+		"session_uid", s.c.sessionUID,
+		"execution_id", s.executionID,
+		"tool", call.Tool,
+		"mediation", string(call.Mediation),
+	)
+	defer func() { finish(err, "error_kind", controllerErrorKind(err), "tool_is_error", res.IsError) }()
+	return s.c.tool(ctx, ToolCallContext{SessionUID: s.c.sessionUID}, call)
 }
 
 func (s *liveSink) Report(ctx context.Context, tr api.ToolResult) error {

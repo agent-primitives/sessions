@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	v1 "github.com/agent-primitives/sessions/api/genpb"
@@ -21,26 +22,35 @@ import (
 // Build and run the actual command map: testing cmdDelete alone would miss an unregistered command.
 func deleteCLI(t *testing.T) func(...string) (string, error) {
 	t.Helper()
+	run := deleteCLIOutput(t)
+	return func(args ...string) (string, error) {
+		out, diagnostics, err := run(args...)
+		if err != nil || (len(args) > 1 && args[1] == "--help") {
+			return out + diagnostics, err
+		}
+		return out, nil
+	}
+}
+
+func deleteCLIOutput(t *testing.T) func(...string) (string, string, error) {
+	t.Helper()
 	binary := filepath.Join(t.TempDir(), "agentctl")
 	if out, err := exec.CommandContext(t.Context(), "go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build CLI: %s %v", out, err)
 	}
-	return func(args ...string) (string, error) {
+	return func(args ...string) (string, string, error) {
 		cmd := exec.CommandContext(t.Context(), binary, args...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
-		if err != nil || (len(args) > 1 && args[1] == "--help") {
-			return string(out) + stderr.String(), err
-		}
-		return string(out), nil
+		return string(out), stderr.String(), err
 	}
 }
 
 // A missing command-map entry, wrong UID request or omission of the server timestamps would hide
 // whether OK means an irreversible tombstone or actual resource release.
 func TestDeleteCommandRequestAndPendingOutput(t *testing.T) {
-	requests := make(chan *v1.DeleteSessionRequest, 2)
+	requests := make(chan *v1.DeleteSessionRequest, 3)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -49,8 +59,8 @@ func TestDeleteCommandRequestAndPendingOutput(t *testing.T) {
 	v1.RegisterSessionsServer(srv, &deleteRecorder{requests: requests})
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
-	run := deleteCLI(t)
-	out, err := run("delete", "--server", lis.Addr().String(), "--session", "delete-uid", "--project", "project", "--journal", filepath.Join(t.TempDir(), "unused.db"))
+	run := deleteCLIOutput(t)
+	out, diagnostics, err := run("delete", "--server", lis.Addr().String(), "--session", "delete-uid", "--project", "project")
 	if err != nil {
 		t.Fatalf("delete command: %s %v", out, err)
 	}
@@ -62,14 +72,28 @@ func TestDeleteCommandRequestAndPendingOutput(t *testing.T) {
 	default:
 		t.Fatal("delete command sent no RPC")
 	}
-	for _, want := range []string{"session delete-uid", "deletion=PENDING", "deletion_requested=2026-01-02T03:04:05.123456789Z", "durable intent only", "compute and fork pins retained"} {
+	for _, want := range []string{"session delete-uid", "deletion=PENDING", "deletion_requested=2026-01-02T03:04:05.123456789Z"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q: %s", want, out)
 		}
 	}
-	out, err = run("delete", "--server", lis.Addr().String(), "--session", "unknown")
-	if err == nil || !strings.Contains(out, "code = NotFound desc = session not found") {
-		t.Fatalf("unknown Delete error: %s %v", out, err)
+	if !strings.Contains(diagnostics, "durable intent only") || !strings.Contains(diagnostics, "compute and fork pins retained") || strings.Contains(out, "durable intent only") {
+		t.Fatalf("delete warning not isolated on stderr: stdout=%q stderr=%q", out, diagnostics)
+	}
+	out, diagnostics, err = run("delete", "--server", lis.Addr().String(), "--session", "delete-uid", "--json")
+	var deleted v1.Session
+	if err != nil {
+		t.Fatalf("delete JSON command: %s %v", out, err)
+	}
+	if err := protojson.Unmarshal([]byte(out), &deleted); err != nil || deleted.GetDeletionState() != v1.DeletionState_DELETION_PENDING || deletionTime(deleted.GetDeletionRequestedTime()) != "2026-01-02T03:04:05.123456789Z" {
+		t.Fatalf("delete JSON lost durable intent: %s %v", out, err)
+	}
+	if !strings.Contains(diagnostics, "durable intent only") {
+		t.Fatalf("JSON delete lost warning: stderr=%q", diagnostics)
+	}
+	out, diagnostics, err = run("delete", "--server", lis.Addr().String(), "--session", "unknown")
+	if err == nil || out != "" || !strings.Contains(diagnostics, "code = NotFound desc = session not found") {
+		t.Fatalf("unknown Delete error: stdout=%q stderr=%q err=%v", out, diagnostics, err)
 	}
 }
 
@@ -109,12 +133,12 @@ func TestDeleteHelpAndGetTimestampSemantics(t *testing.T) {
 	v1.RegisterSessionsServer(srv, &deleteRecorder{})
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
-	for _, tc := range []struct{ uid, want string }{
-		{"active", "deletion=ACTIVE deletion_requested=unset"},
-		{"pending", "deletion=PENDING deletion_requested=1970-01-01T00:00:00Z"},
+	for _, tc := range []struct{ uid, state, requested string }{
+		{"active", "ACTIVE", "unset"},
+		{"pending", "PENDING", "1970-01-01T00:00:00Z"},
 	} {
 		out, err := run("get", "--server", lis.Addr().String(), "--session", tc.uid)
-		if err != nil || !strings.Contains(out, tc.want) || strings.Contains(out, "deletion_completed") || strings.Contains(out, "deletion=COMPLETE") {
+		if err != nil || detailValue(out, "Deletion") != tc.state || detailValue(out, "Deletion requested") != tc.requested || strings.Contains(out, "deletion_completed") {
 			t.Fatalf("Get %s times: %s %v", tc.uid, out, err)
 		}
 	}
@@ -154,7 +178,7 @@ func TestEmbeddedDeleteAuditAndDescendants(t *testing.T) {
 	child := fields[1]
 	deleted := mustRun("delete", "--session", parent)
 	get := mustRun("get", "--session", parent)
-	if !strings.Contains(get, "deletion=PENDING") || !strings.Contains(get, "deletion_requested=") || strings.Contains(get, "deletion_completed") || strings.Contains(get, "deletion=COMPLETE") {
+	if detailValue(get, "Deletion") != "PENDING" || detailValue(get, "Deletion requested") == "" || strings.Contains(get, "deletion_completed") {
 		t.Fatalf("Get hides intent fields: %s", get)
 	}
 	if retry := mustRun("delete", "--session", parent); retry != deleted {
@@ -164,7 +188,7 @@ func TestEmbeddedDeleteAuditAndDescendants(t *testing.T) {
 		t.Fatalf("audit unavailable: %s", replay)
 	}
 	list := mustRun("list")
-	if strings.Contains(list, parent+"\t") || !strings.Contains(list, child+"\t") {
+	if strings.Contains(list, parent) || !strings.Contains(list, child) {
 		t.Fatalf("List hides wrong UID: %s", list)
 	}
 	for _, args := range [][]string{{"exec", "--session", parent, "--input", "after"}, {"fork", "--session", parent, "--at", "1"}, {"suspend", "--session", parent}, {"resume", "--session", parent}} {

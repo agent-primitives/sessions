@@ -36,6 +36,9 @@ import (
 //   - Replay returns stored events with their protobuf field presence through a journal's optional
 //     ReadProto method, so an audit client can detect presence-only tampering; for a journal
 //     without it, Replay converts Read's domain records, which carry no presence.
+//   - Trace links between a session's operations go through the store's optional
+//     ExchangeTraceParent and InitTraceParent methods (traceLinkStore); a store without them
+//     still serves every RPC, and its sessions' operations are traced but not linked.
 //
 // spec.md §6.7 states these obligations as requirements STORE-1 to STORE-7.
 type SessionStore interface {
@@ -100,6 +103,17 @@ var (
 	_ SessionStore = (*sqlitelog.Store)(nil)
 	_ HarnessStore = (*sqlitelog.Store)(nil)
 )
+
+// traceLinkStore is the optional SessionStore half that records each session's latest traced
+// operation, so the next one can link to it. *sqlitelog.Store has it. ExchangeTraceParent must read
+// and replace in one step, so overlapping operations never share a predecessor, and
+// InitTraceParent must not replace a recorded operation.
+type traceLinkStore interface {
+	ExchangeTraceParent(uid, traceparent string) (prev string, err error)
+	InitTraceParent(uid, traceparent string) error
+}
+
+var _ traceLinkStore = (*sqlitelog.Store)(nil)
 
 // protoReader is the optional journal method Replay prefers (*sqlitelog.Log has it): it returns
 // the stored protobuf events, keeping field presence that a domain-event round trip drops.

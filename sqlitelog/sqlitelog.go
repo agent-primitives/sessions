@@ -354,6 +354,10 @@ func Open(path string, opts ...Option) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := ensureSessionTraces(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db, defaultProject: cfg.defaultProject}, nil
 }
 

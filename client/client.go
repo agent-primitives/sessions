@@ -65,6 +65,7 @@ func Dial(target string, opts ...Option) (*Client, error) {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
 		grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
+		observability.ClientTracing(),
 	}
 	dialOpts = append(dialOpts, cfg.dialOpts...)
 

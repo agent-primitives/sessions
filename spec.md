@@ -1368,7 +1368,10 @@ sequenceDiagram
 - `WIRE-12`: A normal run MUST end with exactly one `EVENT_END`. The reference harness server sends
   `state = "COMPLETED"`, or `state = "FAILED"` with `error.description`. The host treats any state
   other than `COMPLETED` as a failed execution. An approval park ends with `EVENT_PARKED` instead
-  (§10.3).
+  (§10.3). After `EVENT_END` the reference host half-closes its sending side and waits up to 2
+  seconds for the harness to end the RPC before cancelling it, so the harness can flush telemetry
+  and return its own status; after `EVENT_PARKED` it already waits for the harness to close
+  (`APR-10`).
 - TODO(spike): The reference host client treats a stream that closes cleanly without `EVENT_END`
   as success, and silently ignores harness-sent `EVENT_INPUT`, `EVENT_LIFECYCLE`, `EVENT_ERROR`,
   and unspecified kinds. Should these be protocol errors, as the proto comment implies?
@@ -1997,7 +2000,10 @@ The reference implementation protects the integrity of the record, not access to
   - The reference SQLite store versions its schema with `PRAGMA user_version` (see
     `sqlitelog.SchemaVersion`),
     migrates forward in one transaction without rewriting events or hashes, and refuses a newer or
-    negative version. Version 4 adds the deletion state; migrated sessions are
+    negative version. Open also creates a telemetry-only `session_traces` table, holding each
+    session's latest trace context, without changing the version: it is outside the hash chain,
+    never read by replay, and ignored by builds that do not know it. A read-only Open of a journal
+    without the table skips it and reads no links. Version 4 adds the deletion state; migrated sessions are
     `DELETION_ACTIVE`. Version 5 adds exact caller ownership and an off-mode authorization marker.
     Legacy and RPC-created sessions remain unbound; these host-side contracts add no RPC enforcement.
     This host refuses required, unknown or missing authorization markers, even at version 5.

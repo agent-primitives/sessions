@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,7 +22,7 @@ func cmdVerify(args []string) error {
 		return err
 	}
 	defer cleanup()
-	ctx := context.Background()
+	ctx := cmdCtx
 	sess, err := c.GetSession(ctx, *uid)
 	if err != nil {
 		return err

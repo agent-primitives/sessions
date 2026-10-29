@@ -174,7 +174,7 @@ during migration: that session stays readable but has no actionable reference, a
 continue normally. SQL faults abort migration, and database/metadata decode failures still return
 `INTERNAL`. Journal queries are not integrity verification; strict commands and raw journal reads
 still fail on undecodable evidence. Rendering tolerance never grants admission authority. See
-[how exec_state is derived](concepts.md#how-exec_state-is-derived) for the compatibility fallback.
+[how exec_state is derived](concepts.md#how-exec_state-is-derived) for execution-state derivation.
 
 Host `APPROVAL_REQUEST` and `APPROVAL_RESULT` writes alone do not imply live compute. They preserve
 NONE/COLD; only actual execution or lifecycle evidence moves that independent durable projection.

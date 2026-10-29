@@ -142,8 +142,11 @@ Harness spans are reported by the harness, so treat them as untrusted, just as
 collector. During replay or resume, harness spans sit under `controller.replay` or
 `controller.resume`, which distinguishes re-driven work from new work.
 
-The OpenAI-compatible model client records an HTTP client span per completion. It does not send
-`traceparent` to the model endpoint, because the endpoint is usually a third party.
+With the default HTTP client, the OpenAI-compatible model client records an HTTP client span per
+completion. It does not send `traceparent` to the model endpoint, because the endpoint is usually a
+third party. With `openai.WithHTTPClient`, the caller's transport decides both: an `otelhttp`
+transport sends `traceparent` and records the full URL. See the
+[third-party instrumentation](#data-policy) paragraph below.
 
 ## Data policy
 

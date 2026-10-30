@@ -26,6 +26,12 @@ them, or the page's port, is already taken, so it never talks to another run's f
 requirements are the example's, so micro-VMs need `/dev/kvm` in the Docker host and an arm64 Mac
 cannot run them.
 
+Not supported on Substrate v0.6.0 yet: the page's replay port-forwards the router to this machine,
+and v0.6.0's envoy router admits only clients with an allowlisted pod certificate, so `ui.sh`
+refuses to start. `ui.sh check` against a page that is already running is unaffected. See
+[router clients outside the
+cluster](../../docs/substrate-conformance.md#router-clients-outside-the-cluster).
+
 ## What the page does
 
 | Control | Call | Shows |
@@ -50,11 +56,10 @@ unknown.
 
 The bridge also replays only a session that Sessions reports `COMPUTE_LIVE`, and the Replay button
 is off otherwise. The replay's turns go through atenet-router, which resumes a suspended actor on
-any routed request (agentgateway's substrate ingress, the router `up.sh` installs). Replaying a
-suspended session would wake its actor outside Sessions, which would still report it `COMPUTE_COLD`
-with no Resume in the journal. Resume the session first. The bridge reads the session with
-`GetSession` just before the replay; that read is not atomic with it, so a Suspend from another
-client in between is not caught.
+any routed request (substrate's router ingress). Replaying a suspended session would wake its actor
+outside Sessions, which would still report it `COMPUTE_COLD` with no Resume in the journal. Resume
+the session first. The bridge reads the session with `GetSession` just before the replay; that read
+is not atomic with it, so a Suspend from another client in between is not caught.
 
 ## The refusal
 
@@ -92,7 +97,7 @@ components what they saw during the call:
 | agentsessionsd | its own `operation finished` line for the call and session (`kubectl logs deploy/<daemon> --since-time`) |
 | ate-api | the `CreateActor`, `ResumeActor` or `SuspendActor` lines naming the session, else its `GetActor` line |
 | worker pod | ateworker's `RestoreWorkload`, `RunWorkload` or `CheckpointWorkload` line naming the actor |
-| atenet-router | its `Route ok` line for the actor (turns and replay); see below for the agentgateway router |
+| atenet-router | its `Route ok` line for the actor (turns and replay) |
 | actor | its state and newest snapshot, read from ate-api (`kubectl ate get actor`) |
 | model | the turn's `MODEL_CALL` records; for replay, the controller's count and the fake model's counter |
 
@@ -115,9 +120,7 @@ the atelet arrow and the arrow into the actor stay off, and the worker pod is di
 suspend, resume and fork, only the worker's restore or checkpoint line lights the arrow into the
 actor: the actor's state shows what it is now, not that this call changed it.
 
-`Route ok` is the envoy router's line (substrate `cmd/atenet/internal/router/ingress`). The
-agentgateway router that `up.sh` installs from substrate v0.6.0 is not known to log it, so expect
-the atenet-router hop, and the hops that rely on its line, to be drawn dashed.
+`Route ok` is the envoy router's line (substrate `cmd/atenet/internal/router/ingress`).
 
 A hop with no matching line is drawn dashed: no line was found, not proof that the step did not run.
 A hop with a pod whose logs could not be read (a permission denial, a timeout) is unknown, with the
@@ -136,8 +139,7 @@ its daemon.
 - The page authenticates nobody. It listens on loopback only and refuses another host name, a
   cross-origin request and a non-JSON POST, which keeps other web pages out. Anything running as you
   on this machine can still drive every session and spend the model budget.
-- It sits on the example's unauthenticated paths: the plaintext Sessions API and the agentgateway
-  router's plaintext :80, which authenticates no caller. See the example's
+- It sits on the example's unauthenticated path, the plaintext Sessions API. See the example's
   [gaps](../agentsuite-substrate/README.md#gaps-this-poc-works-around).
 - The timeline lives in the bridge's memory and is lost when it restarts; the journal and actors are
   not.

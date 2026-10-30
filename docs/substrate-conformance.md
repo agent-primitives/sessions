@@ -61,7 +61,9 @@ The substrate build of `agentsessionsd` adds these flags:
 | `-ateapi-token-file` | Bearer token file, re-read on every call, so a projected ServiceAccount token rotates. |
 | `-ateapi-ca-file`, `-ateapi-server-name` | Verify the ate-api certificate against this CA and name; the default is the system roots and the host of `-ateapi-addr`. |
 | `-ateapi-insecure-skip-verify` | Skip certificate verification (dev clusters; the conformance Job does the same). A server impersonating the ate-api then receives the `-ateapi-token-file` bearer token. Exclusive with `-ateapi-ca-file`. |
-| `-atenet-router` | Router address harnesses are reached through (default `atenet-router.ate-system.svc:80`), over plaintext h2c. On substrate v0.6.0 only the agentgateway dataplane serves it: see [the transport](#the-transport-harnesswire-through-atenet-router). |
+| `-atenet-router` | Router address harnesses are reached through, over mTLS (default `atenet-router.ate-system.svc:443`). See [the transport](#the-transport-harnesswire-through-atenet-router). |
+| `-atenet-router-cert-file`, `-atenet-router-ca-file` | Required. The host's SPIFFE certificate bundle (private key and chain, from a `podCertificate` volume for signer `podidentity.podcert.ate.dev/identity`) and the router's trust bundle (a `clusterTrustBundle` volume for signer `servicedns.podcert.ate.dev/identity`). Both are re-read on every router connection. The daemon refuses to start if either is missing, the certificate has expired or is not yet valid, or it does not carry exactly one SPIFFE ID. |
+| `-atenet-router-server-name` | DNS name the router's certificate must carry (default `atenet-router.ate-system.svc`). It does not follow `-atenet-router`: the servicedns signer issues only `<service>.<namespace>.svc` names. |
 
 The other flags only configure `-substrate-harness` entries; given without one, the daemon refuses
 to start rather than ignore them.
@@ -506,8 +508,7 @@ fails with gRPC `Unavailable` and `dial tcp <ate-api-server pod IP>:443: i/o tim
 AgentSuite example's `deploy/namespace.yaml` (`agentsuite-demo`) carry the label. Worker pods stay
 excluded in a labeled namespace, so a WorkerPool that shares it gets no API access. The label is
 not needed to reach harnesses: the same manifest's `atenet-router` policy admits any source on the
-router's data ports, and the agentgateway dataplane the transport requires adds its plaintext
-`http` port (:80) to them (substrate `manifests/ate-install/components/agentgateway`). The policies
+router's TLS ports, where the router's client allowlist decides who gets through. The policies
 only take effect where the network plugin enforces NetworkPolicy; the kind cluster CI uses does.
 The pin before v0.5.0 (`96dffb28`) installs none of them, so the label has no effect there. The
 label is not authorization: see
@@ -1020,28 +1021,46 @@ recorded compute state with the actor; neither rolls back effects from a failed 
 The harness is a `harnesswire` gRPC server on port 80 in the actor. The host reaches it the only way
 current substrate supports: through `atenet-router`, the cluster's actor ingress.
 
-**Install ate-system with the agentgateway dataplane** (`--atenet-dataplane=agentgateway`) on
-substrate v0.6.0. The adapter dials the router in plaintext h2c on :80, and from v0.6.0 the default
-envoy dataplane does not serve that: substrate #2977 removed its plaintext mode, its router accepts
-only mTLS clients whose SPIFFE ID is on `--ingress-allowed-spiffe-ids`, and its NetworkPolicy admits
-only the TLS ports. The adapter has no TLS router client, so on envoy it has no path to a harness.
-The agentgateway dataplane keeps a plaintext `http` listener (Service :80 to the pod's :8080). The
-CI workflow, both examples and the reproduce steps below install it. A native mTLS router client,
-which would run on the default envoy dataplane, is a separate change.
+**Install ate-system with substrate's default envoy dataplane, and allowlist the host.** From v0.6.0
+the envoy router serves only TLS (substrate #2977 removed its plaintext mode), and it admits a
+client whose certificate chains to the pod identity CA and carries a SPIFFE ID listed exactly in its
+`--ingress-allowed-spiffe-ids` (set with ate-setup's flag of the same name, required with envoy).
+The pod identity signer issues `spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`, so list
+the ServiceAccount `agentsessionsd` runs as. The CI workflow lists the conformance Job's
+(`.../ns/ate-agentsessions/sa/substrate-e2e`), and both examples' `up.sh` list their daemon's. The
+allowlist is fixed at install: adding a host means deploying the router again with ate-setup.
 
-- Every substrate incarnation carries the router address (`atenet-router.ate-system.svc:80` by default,
-  `substrate.WithRouter` to override) and `CallMetadata` of `ate-target-actor: <atespace>/<actor>`.
-  The Placer's dialer attaches that metadata to every call. The router ignores the host and
-  authority; the header alone selects the actor (substrate `internal/atenet/headers.go`).
-- On agentgateway, the `http` listener sends gRPC (a POST whose `content-type` is
-  `application/grpc`) through the `substrate-actors-grpc` route, which applies the substrate
-  ingress policy and forwards over HTTP/2 (substrate
-  `manifests/ate-install/components/agentgateway/configmap.yaml` at v0.6.0). The ingress policy
-  resumes a suspended actor on request, then tunnels over mTLS CONNECT to the worker's atunnel,
-  which checks the actor is assigned to it and proxies to port 80 over the actor's private veth.
-  Upstream's agentgateway e2e dials the HTTPS listener, so this suite is what checks that plaintext
-  h2c on :80 carries unary, server-streaming and bidi calls with trailers. The envoy router carried
-  them over h2c before v0.6.0 (substrate #1183; upstream e2e `TestIngressGRPC`).
+The host follows substrate's recipe for an in-cluster client (substrate
+`cmd/atenet/internal/router/README.md`, "Client in the cluster, pod identity CA"): one projected
+volume with a `podCertificate` source (signer `podidentity.podcert.ate.dev/identity`, `ECDSAP256`,
+`credentialBundlePath: credential-bundle.pem`) and a `clusterTrustBundle` source (signer
+`servicedns.podcert.ate.dev/identity`, label `podcert.ate.dev/canarying: live`). kubelet issues and
+rotates both, so the pod needs no RBAC for them; `agentsessionsd` reads them through
+`-atenet-router-cert-file` and `-atenet-router-ca-file`, and the conformance Job through
+`ATENET_ROUTER_CERT_FILE` and `ATENET_ROUTER_CA_FILE` (`deploy/substrate/e2e-job.yaml`). What each
+side verifies, and what it does not, is in [security.md](security.md).
+
+- Every substrate incarnation carries the router address (`atenet-router.ate-system.svc:443` by
+  default, `substrate.WithRouter` to override) and `CallMetadata` of
+  `ate-target-actor: <atespace>/<actor>`. The router client's dialer attaches that metadata to every
+  call. The router ignores the host and authority; the header alone selects the actor (substrate
+  `internal/atenet/headers.go`).
+- The router's HTTPS listener negotiates `h2` and routes gRPC to the actor: it resumes a suspended
+  actor on request, then tunnels over mTLS CONNECT to the worker's atunnel, which checks the actor
+  is assigned to it and proxies to port 80 over the actor's private veth (substrate
+  `cmd/atenet/internal/router/xds.go`; upstream e2e `TestIngressGRPC` makes the same call shape).
+- Measured on kind at the v0.6.0 pin, from a pod in `ate-agentsessions`: the pod's credential bundle
+  holds a `PRIVATE KEY` and the leaf `CERTIFICATE` (24h, client and server EKU), and was present
+  when the container started. The router's certificate carries only the DNS name
+  `atenet-router.ate-system.svc`. An allowlisted client completes TLS 1.3 and reaches routing: a
+  call naming an absent actor returns `Unimplemented` "actor ... not found", and one with no
+  `ate-target-actor` returns `Unimplemented` "invalid actor reference". A client whose ID is not
+  listed gets the alert `unknown certificate`, and one with no certificate `certificate required`,
+  both on the first read after the handshake, so the host sees gRPC `Unavailable` (`write: broken
+  pipe`). `agentsessionsd` probes the router once at startup and logs which of these it got.
+  `TestRouterRefusesClientWithoutCertificate` checks the refusal on every run, and
+  `TestRoutedCallWakesSuspendedActor` that a routed `Describe` with the Job's certificate wakes a
+  suspended actor without a Control `ResumeActor` from the client.
 - Substrate removed the worker pod-IP:80 ingress on purpose (substrate #559), so there is no direct
   path to fall back on, and the conformance Job needs no NetworkPolicy exception to reach a harness.
   Its Control calls to ate-api-server need its namespace's `ate.dev/api-access=true` label on
@@ -1053,31 +1072,42 @@ flowchart LR
   accTitle: Conformance traffic on agent-substrate
   accDescr {
     The in-cluster conformance Job calls ate-api-server over Control gRPC with a service-account
-    token, and opens Harness.Connect over h2c to atenet-router (agentgateway), addressed by
-    ate-target-actor. The router resumes the actor through ate-api-server if needed, then tunnels
+    token, and opens Harness.Connect over mTLS to atenet-router with its pod certificate, addressed
+    by ate-target-actor. The router resumes the actor through ate-api-server if needed, then tunnels
     over mTLS CONNECT to atunnel on the worker, which reaches the actor harness on port 80 over h2c
     on a veth pair.
   }
   job["conformance Job<br/>in-cluster `go test`"]
   api["ate-api-server"]
-  router["atenet-router<br/>(agentgateway)"]
+  router["atenet-router<br/>(envoy)"]
   tunnel["atunnel on the worker"]
   actor["actor harness :80<br/>gVisor / micro-VM"]
 
   job -->|"Control gRPC<br/>Service + SA token"| api
-  job -->|"Harness.Connect h2c<br/>ate-target-actor"| router
+  job -->|"Harness.Connect mTLS :443<br/>pod certificate, ate-target-actor"| router
   router -->|"ResumeActor if needed"| api
   router -->|"mTLS CONNECT"| tunnel
   tunnel -->|"h2c over veth"| actor
 ```
 
-Limits that come with the router, measured or read rather than assumed. The two measurements were
-taken on the envoy router (at `362637f9` and `fc0e3586`); the agentgateway router has not been
-measured yet.
+<a name="router-clients-outside-the-cluster"></a>
 
-- **Route timeout.** The agentgateway configuration in substrate v0.6.0 sets no route timeout. The
-  `idle stream` pass of the CI workflow holds a stream idle through it for 6m30s on push, nightly
-  and manual runs (not on pull requests), so those runs record its behavior. The envoy router sets
+**Router clients outside the cluster are not supported yet.** The router admits only clients with
+an allowlisted pod certificate, and a process on a laptop has none. The tools that port-forward the
+router from a laptop therefore fail on v0.6.0: the agentsuite demo's replay step (`demo.sh` and
+`cmd/replay`), `demo/driver.sh`, the session lifecycle UI's replay, and
+`examples/agentsuite-substrate/demo/smoke-microvm.sh`, which refuses before it deploys anything.
+Giving them a certificate needs PodCertificateRequest create permission, which can mint any
+ServiceAccount's ID in its namespace (substrate `internal/e2e/ingressauth.go` shows the mechanism),
+so it is a separate change. Everything that runs in the cluster, `agentsessionsd` and the
+conformance Job, is unaffected.
+
+Limits that come with the router, measured or read rather than assumed. The two measurements were
+taken on the envoy router (at `362637f9` and `fc0e3586`).
+
+- **Route timeout.** The `idle stream` pass of the CI workflow holds a stream idle through the
+  router for 6m30s on push, nightly and manual runs (not on pull requests), so those runs record its
+  behavior at the pin. The envoy router sets
   `--route-timeout` (5m by default, one global value) and a route-level stream idle timeout 30s past
   it (`routeIdleTimeout` in `cmd/atenet/internal/router/xds.go` at `fc0e3586`).
   `TestHarnessStreamIdlePastRouteTimeout` holds a Connect stream idle, as a turn parked on a slow
@@ -1100,9 +1130,8 @@ measured yet.
   any Placer of this process's `placement.Registry` drives; a turn driven outside this Registry is
   fenced by the log, but its stream stays open until it next touches the log and can still stall a
   checkpoint.
-- **No caller authentication.** The agentgateway router's plaintext :80 listener does not check who
-  is calling before it resumes an actor and proxies to it, so any pod that can reach it can drive
-  any harness. See [security.md](security.md).
+- **No per-actor authorization.** The router admits every allowlisted client to every actor, so
+  any listed host can drive any harness. See [security.md](security.md).
 
 ## The suite (`integrations/substrate/e2e`)
 
@@ -1227,7 +1256,8 @@ cloud-hypervisor asset cache and installs the cluster-scoped micro-VM SandboxCon
 default, which both pools resolve to).
 Substrate publishes no images, so its binaries are built from source at `SUBSTRATE_REF`; the
 workflow caches the Go build and module caches between runs. It installs ate-system with the
-agentgateway dataplane, so it builds no envoy-dataplane image.
+default envoy dataplane, whose `envoy-dataplane` image it builds during the install, and allowlists
+the conformance Job's SPIFFE ID ([the transport](#the-transport-harnesswire-through-atenet-router)).
 
 The durable [kind example](../examples/substrate-kind/README.md) runs independently in the
 `substrate-kind example lifecycle` job, with a fresh managed checkout and its own cluster. That job
@@ -1315,7 +1345,9 @@ git -C "${SUBSTRATE}" checkout "${SUBSTRATE_REF}"
 # Cluster, local registry and ate-system, as the workflow does.
 (cd "${SUBSTRATE}" && hack/create-kind-cluster.sh)
 (cd "${SUBSTRATE}" && ATE_CREDENTIAL_PROVIDER='{"name":"k8s.io"}' \
-  hack/install-ate-kind.sh --rollout-timeout=10m --atenet-dataplane=agentgateway deploy ate-system)
+  hack/install-ate-kind.sh --rollout-timeout=10m \
+    --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-agentsessions/sa/substrate-e2e \
+    deploy ate-system)
 
 # Images: the conformance test binary, the harness and the gVisor worker.
 E2E_IMAGE=localhost:5001/agentsessions-e2e:local

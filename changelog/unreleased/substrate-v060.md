@@ -10,13 +10,17 @@ category: Compatibility
   `ateworker-microvm`, so a WorkerPool's `workerImage` is
   `ko://go.ate.dev/substrate/cmd/ateworker-<class>`. See
   [Running on agent-substrate](../../docs/substrate-conformance.md#substrate-v060-asynchronous-suspends-suspend-durability-and-runtime-fallback).
-- Install Substrate v0.6.0 with the agentgateway dataplane (`--atenet-dataplane=agentgateway`). The
-  adapter reaches harnesses over plaintext h2c on the router's :80, which on v0.6.0 only
-  agentgateway serves: the default envoy router accepts only mTLS clients with an allowlisted
-  SPIFFE ID, and `agentsessionsd` has no TLS router client yet. The CI workflow and both examples
-  install agentgateway. Its :80 authenticates no caller; see
+- Install Substrate v0.6.0 with its default envoy router and list each `agentsessionsd`'s SPIFFE ID
+  (`spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`) in ate-setup's
+  `--ingress-allowed-spiffe-ids`. The substrate build of `agentsessionsd` now reaches harnesses
+  over mTLS on the router's :443 (`-atenet-router` and `runtime/substrate.DefaultRouterAddress`
+  default to `atenet-router.ate-system.svc:443`), and with `-substrate-harness` it refuses to start
+  without `-atenet-router-cert-file` and `-atenet-router-ca-file`: mount a `podCertificate` and a
+  `clusterTrustBundle` volume as `deploy/substrate/e2e-job.yaml` does. The plaintext h2c path to the
+  router's :80 is gone. Tools that port-forward the router from a laptop (`cmd/replay`, the
+  agentsuite `demo.sh` replay step, `demo/driver.sh`, `demo/smoke-microvm.sh` and the session
+  lifecycle UI) do not work on v0.6.0 yet; see
   [the transport](../../docs/substrate-conformance.md#the-transport-harnesswire-through-atenet-router).
-  A native mTLS router client for the default envoy dataplane is a planned separate change.
 - ActorTemplates need `spec.resources.limits` (`cpu_millicores` and `memory_bytes`, both
   nonzero) and select their sandbox through the WorkerPool, not a per-template `SandboxConfig`,
   so the substrate-kind example now refuses `SANDBOX_CONFIG` and the agentsuite renderer a

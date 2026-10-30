@@ -242,20 +242,22 @@ header has not been run against a live deployment.
   harness. The re-execution (`controller.Replay`) only exists in-process, so `cmd/replay` runs it on
   the client against the session's actor.
 - **Nothing authenticates the host to the harness.** The harness serves harnesswire on :80 with no
-  caller authentication, and `agentsessionsd` reaches it over cleartext h2c through the
-  atenet-router on :80, naming the actor only by the `ate-target-actor` header. Substrate v0.6.0
-  removed the envoy router's plaintext mode (substrate #2977): the default envoy router serves only
-  TLS clients whose SPIFFE ID is on `--ingress-allowed-spiffe-ids`, and neither `agentsessionsd`
-  nor `cmd/replay` has a TLS client for it. So `up.sh` installs the agentgateway dataplane
-  (`--atenet-dataplane=agentgateway`), whose :80 listener authenticates no caller. Anything that
-  can reach the router can act as the host for any session's actor and feed it model results.
-  `cmd/replay` relies on exactly this: it drives the session's actor from the laptop through a
-  port-forward to the router. Substrate's threat model says the router reaches the actor through
-  `atunnel` over mTLS, which accepts only the router; this demo did not test that path. What would
-  close it:
-  - router authentication: run the default envoy dataplane with the SPIFFE IDs of
-    `agentsessionsd` (and `cmd/replay`) on `--ingress-allowed-spiffe-ids`, and give both a TLS
-    client certificate for the router connection, which neither supports today;
+  caller authentication. `agentsessionsd` reaches it through the atenet-router's :443 over mTLS,
+  naming the actor only by the `ate-target-actor` header: `up.sh` installs Substrate's default
+  envoy router and allowlists the daemon's SPIFFE ID
+  (`spiffe://cluster.local/ns/agentsuite-demo/sa/agentsessionsd`, both tiers). Any allowlisted
+  client can act as the host for any session's actor and feed it model results; see
+  [security.md](../../docs/security.md). A cluster an earlier `up.sh` installed with another router
+  dataplane is refused on reuse: run `down.sh` and `up.sh` again. `cmd/replay`, the replay step of
+  `demo.sh` and `demo/driver.sh` drive the session's actor from the laptop through a port-forward
+  to the router, which the envoy router does not admit, so they fail on v0.6.0 until a follow-up
+  gives them a certificate. They do not check this up front: `demo.sh` runs steps 1 to 5, creating
+  its session, then fails at step 6 (replay) and leaves that session in place. See [router clients
+  outside the cluster](../../docs/substrate-conformance.md#router-clients-outside-the-cluster).
+  Substrate's threat model says the router reaches the actor through `atunnel` over mTLS, which
+  accepts only the router; this demo did not test that path. What would close it:
+  - per-actor authorization at the router (substrate's T-04): today any allowlisted client reaches
+    every actor;
   - host authentication on the harness: a per-session credential the host presents and the harness
     checks. The router's allowlist lets any listed client reach any actor, so it cannot keep one
     session's host from driving another session's actor.

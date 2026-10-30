@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"google.golang.org/protobuf/encoding/protojson"
-
 	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 )
@@ -23,10 +21,9 @@ func approval(args []string, approved bool) error {
 		which = "approve"
 	}
 	fs := flag.NewFlagSet(which, flag.ContinueOnError)
-	cfg := commonFlags(fs)
+	cfg := sessionFlags(fs)
 	var uid, execution, call, reason, actor, issuer, subject string
 	var requestSeq int64
-	var jsonOutput bool
 	fs.StringVar(&uid, "session", "", "session UID (or supply one positional UID)")
 	fs.StringVar(&execution, "execution", "", "execution ID; provide with --tool-call and --request-seq, otherwise discover pending approval")
 	fs.StringVar(&call, "tool-call", "", "tool call ID; requires the complete explicit tuple")
@@ -35,7 +32,6 @@ func approval(args []string, approved bool) error {
 	fs.StringVar(&actor, "actor", "", "identity principal recorded as provenance, not authorization")
 	fs.StringVar(&issuer, "identity-issuer", "", "identity issuer recorded as provenance")
 	fs.StringVar(&subject, "identity-subject", "", "identity subject recorded as provenance")
-	fs.BoolVar(&jsonOutput, "json", false, "print the original committed decision and resumed session as protobuf JSON")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(fs.Output(), "usage: agentctl %s [flags] <session UID>\nCommits a decision, then calls Resume. A recovery failure leaves the decision committed.\n", which)
 		fs.PrintDefaults()
@@ -97,14 +93,10 @@ func approval(args []string, approved bool) error {
 	if err != nil {
 		return fmt.Errorf("decision committed at seq %d for session %s; Resume failed: %w", response.GetDecision().GetSeq(), uid, err)
 	}
-	if jsonOutput {
-		data, err := protojson.Marshal(&v1.ApproveResponse{Decision: response.GetDecision(), Session: current})
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(data))
-	} else {
-		fmt.Printf("session %s decision committed seq=%d approved=%t compute=%s exec=%s last_seq=%d\n", uid, response.GetDecision().GetSeq(), approved, current.GetComputeState(), strings.TrimPrefix(current.GetExecState().String(), "EXEC_"), current.GetLastSeq())
+	if cfg.json {
+		return writeJSON(&v1.ApproveResponse{Decision: response.GetDecision(), Session: current})
 	}
-	return nil
+	return writeOutput(fmt.Sprintf("session %s decision committed seq=%d approved=%t execution=%s compute=%s last_seq=%d\n",
+		displayToken(uid), response.GetDecision().GetSeq(), approved, stateName(current.GetExecState().String(), "EXEC_"),
+		stateName(current.GetComputeState().String(), "COMPUTE_"), current.GetLastSeq()))
 }

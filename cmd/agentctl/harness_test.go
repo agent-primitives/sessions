@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -9,6 +11,8 @@ import (
 	"testing"
 
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/harness/echoagent"
@@ -18,6 +22,42 @@ import (
 	"github.com/agent-primitives/sessions/session"
 	"github.com/agent-primitives/sessions/sqlitelog"
 )
+
+type harnessJSONServer struct {
+	v1.UnimplementedHarnessRegistryServer
+}
+
+func (*harnessJSONServer) ListHarnesses(context.Context, *v1.ListHarnessesRequest) (*v1.ListHarnessesResponse, error) {
+	return &v1.ListHarnessesResponse{Harnesses: []*v1.HarnessRegistration{{SpecDigest: "digest"}}}, nil
+}
+
+func TestHarnessJSONContract(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	v1.RegisterHarnessRegistryServer(server, &harnessJSONServer{})
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	out, diagnostics, err := captureCLIOutput(t, func() error {
+		return cmdHarness([]string{"list", "--server", listener.Addr().String()})
+	})
+	if err != nil || diagnostics != "" {
+		t.Fatalf("harness list: stdout=%q stderr=%q err=%v", out, diagnostics, err)
+	}
+	var got v1.ListHarnessesResponse
+	want, _ := (&harnessJSONServer{}).ListHarnesses(t.Context(), nil)
+	if err := protojson.Unmarshal([]byte(out), &got); err != nil || !proto.Equal(&got, want) {
+		t.Fatalf("harness response: %s err=%v", out, err)
+	}
+	var fields struct {
+		Harnesses []map[string]any `json:"harnesses"`
+	}
+	if err := json.Unmarshal([]byte(out), &fields); err != nil || len(fields.Harnesses) != 1 || fields.Harnesses[0]["spec_digest"] != "digest" || fields.Harnesses[0]["specDigest"] != nil {
+		t.Fatalf("harness JSON field names: %s err=%v", out, err)
+	}
+}
 
 func TestHarnessSpecParsingRejectsUnknownAndMalformedJSON(t *testing.T) {
 	for _, body := range []string{`{`, `{"remote":{"address":"127.0.0.1:1"},"unknown":"data"}`} {

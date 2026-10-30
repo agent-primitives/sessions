@@ -120,11 +120,13 @@ type config struct {
 	server  string
 	journal string
 	project string
+	json    bool
+	flags   *flag.FlagSet
 }
 
 func commonFlags(fs *flag.FlagSet) *config {
-	c := &config{}
-	fs.StringVar(&c.server, "server", "", "remote Sessions gRPC address; empty = embedded local server")
+	c := &config{flags: fs}
+	fs.StringVar(&c.server, "server", os.Getenv("AGENTSESSIONS_SERVER"), "remote Sessions gRPC address (default: AGENTSESSIONS_SERVER); empty = embedded local server")
 	fs.StringVar(&c.journal, "journal", "agentsessions.db", "sqlite journal path (embedded mode)")
 	fs.StringVar(&c.project, "project", sqlitelog.DefaultProject, "project (tenant) to create and list sessions in")
 	return c
@@ -134,6 +136,25 @@ func commonFlags(fs *flag.FlagSet) *config {
 // embedded Sessions server over a unix socket, backed by the local sqlite journal, and dials that.
 func dial(cfg *config) (*client.Client, func(), error) {
 	if cfg.server != "" {
+		var serverExplicit, journalExplicit bool
+		if cfg.flags != nil {
+			cfg.flags.Visit(func(f *flag.Flag) {
+				switch f.Name {
+				case "server":
+					serverExplicit = true
+				case "journal":
+					journalExplicit = true
+				}
+			})
+		}
+		if journalExplicit {
+			return nil, nil, fmt.Errorf("--journal cannot be used with a remote server; omit --journal or use --server= for embedded mode")
+		}
+		if cfg.flags != nil && !serverExplicit {
+			if _, err := fmt.Fprintf(os.Stderr, "agentctl: using server %s from AGENTSESSIONS_SERVER\n", displayToken(cfg.server)); err != nil {
+				return nil, nil, fmt.Errorf("report environment-selected server: %w", err)
+			}
+		}
 		c, err := client.Dial(cfg.server, client.WithProject(cfg.project))
 		if err != nil {
 			return nil, nil, err
@@ -145,7 +166,7 @@ func dial(cfg *config) (*client.Client, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	logger := slog.Default()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	backend := local.New(echoagent.Harness{}, local.WithLogger(logger))
 	registry, err := placement.NewRegistry("echo", map[string]*placement.Placer{
 		"echo": placement.New(backend, echoagent.Model, placement.WithLogger(logger)),
@@ -218,7 +239,7 @@ func cmdVersion([]string) error {
 
 func cmdCreate(args []string) error {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
-	cfg := commonFlags(fs)
+	cfg := sessionFlags(fs)
 	var name, harness, model string
 	fs.StringVar(&name, "name", "", "human-readable session name")
 	fs.StringVar(&harness, "harness", "", "harness to run the session on (default: the host's)")
@@ -237,44 +258,52 @@ func cmdCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(sess.GetMetadata().GetUid())
-	return nil
+	if cfg.json {
+		return writeJSON(sess)
+	}
+	return writeOutput(sess.GetMetadata().GetUid() + "\n")
 }
 
 // cmdList walks every page rather than printing the first one. A CLI that stopped at the default
 // page size would quietly under-report, which is worse than being slow.
 func cmdList(args []string) error {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
-	cfg := commonFlags(fs)
+	cfg := sessionFlags(fs)
 	var pageSize int
 	fs.IntVar(&pageSize, "page-size", 0, "sessions per request; 0 uses the server default")
 	_ = fs.Parse(args)
+	if pageSize < 0 {
+		return fmt.Errorf("list: --page-size must not be negative")
+	}
+	pageSize = min(pageSize, sqlitelog.MaxPageSize)
 	c, cleanup, err := dial(cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	sessions, err := c.ListSessions(cmdCtx, cfg.project)
-	if err != nil {
-		return err
+	all := &v1.ListSessionsResponse{}
+	token := ""
+	for {
+		page, err := c.ListSessionsPage(cmdCtx, cfg.project, int32(pageSize), token)
+		if err != nil {
+			return err
+		}
+		all.Sessions = append(all.Sessions, page.GetSessions()...)
+		token = page.GetNextPageToken()
+		if token == "" {
+			break
+		}
 	}
-	for _, s := range sessions {
-		fmt.Printf("%s\tlast_seq=%d\tcompute=%s\texec=%s\tharness=%s\tname=%s\n",
-			s.GetMetadata().GetUid(),
-			s.GetLastSeq(),
-			strings.TrimPrefix(s.GetComputeState().String(), "COMPUTE_"),
-			strings.TrimPrefix(s.GetExecState().String(), "EXEC_"),
-			s.GetHarness(),
-			s.GetMetadata().GetName(),
-		)
+	if cfg.json {
+		return writeJSON(all)
 	}
-	return nil
+	return writeOutput(sessionTable(all.GetSessions()))
 }
 
 func cmdGet(args []string) error {
 	fs := flag.NewFlagSet("get", flag.ExitOnError)
-	cfg := commonFlags(fs)
+	cfg := sessionFlags(fs)
 	var uid string
 	fs.StringVar(&uid, "session", "", "session UID")
 	_ = fs.Parse(args)
@@ -287,17 +316,10 @@ func cmdGet(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("session %s project=%s name=%s harness=%s last_seq=%d compute=%s exec=%s %s\n",
-		sess.GetMetadata().GetUid(),
-		sess.GetMetadata().GetProject(),
-		sess.GetMetadata().GetName(),
-		sess.GetHarness(),
-		sess.GetLastSeq(),
-		strings.TrimPrefix(sess.GetComputeState().String(), "COMPUTE_"),
-		strings.TrimPrefix(sess.GetExecState().String(), "EXEC_"),
-		deletionFields(sess),
-	)
-	return nil
+	if cfg.json {
+		return writeJSON(sess)
+	}
+	return writeOutput(sessionDetails(sess))
 }
 
 func cmdExec(args []string) error { return runExec(args, os.Stdout) }
@@ -377,7 +399,7 @@ func (o *execOutput) endStream() {
 
 func cmdReplay(args []string) error {
 	fs := flag.NewFlagSet("replay", flag.ExitOnError)
-	cfg := commonFlags(fs)
+	cfg := sessionFlags(fs)
 	var sess string
 	var from int64
 	var verbose bool
@@ -395,7 +417,11 @@ func cmdReplay(args []string) error {
 		return err
 	}
 	for _, r := range records {
-		if verbose {
+		if cfg.json {
+			if err := writeJSON(r); err != nil {
+				return err
+			}
+		} else if verbose {
 			fmt.Println(formatRecordVerbose(r))
 		} else {
 			printRecord(r)
@@ -406,7 +432,7 @@ func cmdReplay(args []string) error {
 
 func cmdFork(args []string) error {
 	fs := flag.NewFlagSet("fork", flag.ExitOnError)
-	cfg := commonFlags(fs)
+	cfg := sessionFlags(fs)
 	var sess string
 	var at int64
 	var count int
@@ -431,10 +457,14 @@ func cmdFork(args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, ch := range children {
-		fmt.Printf("child %s parent=%s fork_seq=%d name=%s\n", ch.GetMetadata().GetUid(), ch.GetParentUid(), ch.GetForkSeq(), ch.GetMetadata().GetName())
+	if cfg.json {
+		return writeJSON(&v1.ForkResponse{Children: children})
 	}
-	return nil
+	var out strings.Builder
+	for _, ch := range children {
+		fmt.Fprintf(&out, "child %s parent=%s fork_seq=%d name=%s\n", displayToken(ch.GetMetadata().GetUid()), displayToken(ch.GetParentUid()), ch.GetForkSeq(), escapeText(ch.GetMetadata().GetName()))
+	}
+	return writeOutput(out.String())
 }
 
 func cmdSuspend(args []string) error { return lifecycle(args, "suspend") }
@@ -442,7 +472,7 @@ func cmdResume(args []string) error  { return lifecycle(args, "resume") }
 
 func lifecycle(args []string, which string) error {
 	fs := flag.NewFlagSet(which, flag.ExitOnError)
-	cfg := commonFlags(fs)
+	cfg := sessionFlags(fs)
 	var sess string
 	fs.StringVar(&sess, "session", "", "session UID")
 	_ = fs.Parse(args)
@@ -461,8 +491,12 @@ func lifecycle(args []string, which string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("session %s %s compute=%s exec=%s last_seq=%d\n", out.GetMetadata().GetUid(), which, out.GetComputeState(), strings.TrimPrefix(out.GetExecState().String(), "EXEC_"), out.GetLastSeq())
-	return nil
+	if cfg.json {
+		return writeJSON(out)
+	}
+	return writeOutput(fmt.Sprintf("session %s %s execution=%s compute=%s last_seq=%d\n",
+		displayToken(out.GetMetadata().GetUid()), which, stateName(out.GetExecState().String(), "EXEC_"),
+		stateName(out.GetComputeState().String(), "COMPUTE_"), out.GetLastSeq()))
 }
 
 func printRecord(r *v1.LogRecord) { fmt.Println(formatRecord(r)) }

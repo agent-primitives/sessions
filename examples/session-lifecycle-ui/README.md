@@ -26,6 +26,12 @@ them, or the page's port, is already taken, so it never talks to another run's f
 requirements are the example's, so micro-VMs need `/dev/kvm` in the Docker host and an arm64 Mac
 cannot run them.
 
+Not supported on Substrate v0.6.0 yet: the page's replay port-forwards the router to this machine,
+and v0.6.0's envoy router admits only clients with an allowlisted pod certificate, so `ui.sh`
+refuses to start. `ui.sh check` against a page that is already running is unaffected. See
+[router clients outside the
+cluster](../../docs/substrate-conformance.md#router-clients-outside-the-cluster).
+
 ## What the page does
 
 | Control | Call | Shows |
@@ -50,18 +56,17 @@ unknown.
 
 The bridge also replays only a session that Sessions reports `COMPUTE_LIVE`, and the Replay button
 is off otherwise. The replay's turns go through atenet-router, which resumes a suspended actor on
-any routed request (substrate `cmd/atenet/internal/router/ingress`). Replaying a suspended session
-would wake its actor outside Sessions, which would still report it `COMPUTE_COLD` with no Resume in
-the journal. Resume the session first. The bridge reads the session with `GetSession` just before
-the replay; that read is not atomic with it, so a Suspend from another client in between is not
-caught.
+any routed request (substrate's router ingress). Replaying a suspended session would wake its actor
+outside Sessions, which would still report it `COMPUTE_COLD` with no Resume in the journal. Resume
+the session first. The bridge reads the session with `GetSession` just before the replay; that read
+is not atomic with it, so a Suspend from another client in between is not caught.
 
 ## The refusal
 
 `up.sh` deploys two daemons. `ui.sh` adds a third, `agentsessionsd-volumes`, which serves the
 memory-tier harness (`REQUIRES_MEMORY_SNAPSHOT`) from a template that prefers VOLUMES snapshots.
 `lifecycle-ui inject` derives that template from the memory tier `up.sh` rendered, with three
-changes: `preferredFidelity: VOLUMES`, one `durableDir` volume (at substrate v0.5.0, ateom-microvm
+changes: `preferredFidelity: VOLUMES`, one `durableDir` volume (at substrate v0.6.0, ateworker-microvm
 refuses a VOLUMES checkpoint without one and the actor crashes), and a `-vol` name. A first turn
 passes, because the template's golden snapshot is MEMORY. The session's first suspend then completes
 a VOLUMES snapshot, and the daemon refuses it:
@@ -79,10 +84,10 @@ micro-VM only. With `AGENTSUITE_DEMO_SANDBOX=gvisor`, `ui.sh` skips it and says 
 
 The diagram is the path the example deploys.
 [`demo/diagrams.md`](../agentsuite-substrate/demo/diagrams.md) cites the code for each arrow of a
-turn. For suspend, the adapter calls `SuspendActor` (`integrations/substrate/adapter.go:112`), and
+turn. For suspend, the adapter calls `SuspendActor` (`integrations/substrate/adapter.go:113`), and
 ate-api's suspend workflow calls the node's atelet (substrate
-`cmd/ateapi/internal/controlapi/workflow_suspend.go:252`). The atelet then sends
-`CheckpointWorkload` to the worker pod's ateom (`cmd/atelet/main.go:748`).
+`cmd/ateapi/internal/controlapi/workflow_suspend.go:270`). The atelet then sends
+`CheckpointWorkload` to the worker pod's ateworker (`cmd/atelet/main.go:1057`).
 
 While a call runs, the page animates the path it expects. Once the call returns, the bridge asks the
 components what they saw during the call:
@@ -91,7 +96,7 @@ components what they saw during the call:
 |---|---|
 | agentsessionsd | its own `operation finished` line for the call and session (`kubectl logs deploy/<daemon> --since-time`) |
 | ate-api | the `CreateActor`, `ResumeActor` or `SuspendActor` lines naming the session, else its `GetActor` line |
-| worker pod | ateom's `RestoreWorkload`, `RunWorkload` or `CheckpointWorkload` line naming the actor |
+| worker pod | ateworker's `RestoreWorkload`, `RunWorkload` or `CheckpointWorkload` line naming the actor |
 | atenet-router | its `Route ok` line for the actor (turns and replay) |
 | actor | its state and newest snapshot, read from ate-api (`kubectl ate get actor`) |
 | model | the turn's `MODEL_CALL` records; for replay, the controller's count and the fake model's counter |
@@ -115,6 +120,8 @@ the atelet arrow and the arrow into the actor stay off, and the worker pod is di
 suspend, resume and fork, only the worker's restore or checkpoint line lights the arrow into the
 actor: the actor's state shows what it is now, not that this call changed it.
 
+`Route ok` is the envoy router's line (substrate `cmd/atenet/internal/router/ingress`).
+
 A hop with no matching line is drawn dashed: no line was found, not proof that the step did not run.
 A hop with a pod whose logs could not be read (a permission denial, a timeout) is unknown, with the
 error, unless a pod that was read has the call's own line; it is never drawn as not seen or skipped.
@@ -132,8 +139,7 @@ its daemon.
 - The page authenticates nobody. It listens on loopback only and refuses another host name, a
   cross-origin request and a non-JSON POST, which keeps other web pages out. Anything running as you
   on this machine can still drive every session and spend the model budget.
-- It sits on the example's unauthenticated paths: the plaintext Sessions API and the router's
-  insecure mode. See the example's
+- It sits on the example's unauthenticated path, the plaintext Sessions API. See the example's
   [gaps](../agentsuite-substrate/README.md#gaps-this-poc-works-around).
 - The timeline lives in the bridge's memory and is lost when it restarts; the journal and actors are
   not.

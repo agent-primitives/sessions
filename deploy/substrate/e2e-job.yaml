@@ -3,12 +3,28 @@
 # run, so adding a capability means adding a Go test, not another Job + another driver + another
 # block of polling shell.
 #
-# The suite reaches each harness the way a production host does: harnesswire over h2c to the
-# atenet-router Service, with the ate-target-actor metadata naming the actor. Control is reached over
-# the ate-api-server Service with a projected ServiceAccount token. Running in-cluster keeps both on
-# their Service DNS names. Nothing dials a worker, so the router needs no NetworkPolicy exception;
-# ate-api-server admits the Job because namespace.yaml labels ate-agentsessions
-# ate.dev/api-access=true, which substrate v0.5.0 requires.
+# The suite reaches each harness the way a production host does: harnesswire over mTLS to the
+# atenet-router Service's :443, with the ate-target-actor metadata naming the actor. The client
+# certificate is the Job's SPIFFE SVID,
+# spiffe://cluster.local/ns/ate-agentsessions/sa/substrate-e2e, from a podCertificate volume
+# (signer podidentity.podcert.ate.dev/identity); the router's --ingress-allowed-spiffe-ids must
+# list it (.github/workflows/substrate-e2e.yml). The router's serving CA comes from a
+# clusterTrustBundle volume (signer servicedns.podcert.ate.dev/identity), as substrate's router
+# README documents for in-cluster clients. kubelet issues and rotates both, so the Job needs no
+# RBAC for them. Control is reached over the ate-api-server Service with a projected
+# ServiceAccount token. Running in-cluster keeps both on their Service DNS names. Nothing dials a
+# worker, so the router needs no NetworkPolicy exception; ate-api-server admits the Job because
+# namespace.yaml labels ate-agentsessions ate.dev/api-access=true, which substrate v0.6.0 requires.
+#
+# The Job runs as its own ServiceAccount, user:system:serviceaccount:ate-agentsessions:substrate-e2e
+# to substrate's authorizer. hack/provision-e2e-access.sh grants it the atespace `editor` role in
+# each of the suite's atespaces and nothing more: the role operators grant agentsessionsd.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: substrate-e2e
+  namespace: ate-agentsessions
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -23,6 +39,7 @@ spec:
         app: substrate-e2e
     spec:
       restartPolicy: Never
+      serviceAccountName: substrate-e2e
       containers:
         - name: e2e
           image: E2E_IMAGE
@@ -46,7 +63,11 @@ spec:
             - name: ACTORTEMPLATE_ATESPACE # the suite creates its ActorTemplates here
               value: "agentsessions-templates"
             - name: ATENET_ROUTER_ADDR
-              value: "atenet-router.ate-system.svc:80"
+              value: "atenet-router.ate-system.svc:443"
+            - name: ATENET_ROUTER_CERT_FILE # the Job's SVID: private key and certificate chain
+              value: "/var/run/router-client/credential-bundle.pem"
+            - name: ATENET_ROUTER_CA_FILE # the router's serving CA
+              value: "/var/run/router-client/router-ca.pem"
             - name: HARNESS_IMAGE # digest-pinned harnessnode image under test
               value: "HARNESS_IMAGE_PLACEHOLDER"
             - name: ECHO_SANDBOX_CLASS # microvm (default, CI) or gvisor (hosts without KVM)
@@ -59,6 +80,9 @@ spec:
             - name: ateapi-token
               mountPath: /var/run/secrets/tokens
               readOnly: true
+            - name: router-client
+              mountPath: /var/run/router-client
+              readOnly: true
       volumes:
         - name: ateapi-token
           projected:
@@ -67,3 +91,16 @@ spec:
                   audience: api.ate-system.svc
                   expirationSeconds: 3600
                   path: ateapi-token
+        - name: router-client
+          projected:
+            sources:
+              - podCertificate:
+                  signerName: podidentity.podcert.ate.dev/identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: credential-bundle.pem
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: router-ca.pem

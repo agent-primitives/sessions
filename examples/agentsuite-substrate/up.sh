@@ -277,14 +277,17 @@ if [[ "${stage}" == created ]]; then
 	# control-plane images for linux/<its own GOARCH> unless --ko-default-platforms is given (the
 	# wrapper's KO_DEFAULTPLATFORMS is ambient and ignored), so an arm64 Mac with an amd64 Docker VM
 	# would push arm64 images to an amd64 node. The flags below are the wrapper's settings plus the
-	# platform Docker reports; the GCP variables it unsets are unset here too.
+	# platform Docker reports; the GCP variables it unsets are unset here too. The default envoy
+	# router admits only mTLS clients whose SPIFFE ID it allowlists: here the agentsessionsd
+	# ServiceAccount both daemon tiers run as (deploy/agentsessionsd.yaml).
 	(cd "${SUBSTRATE}" && env -u GCE_REGION -u CLUSTER_LOCATION -u NETWORK -u SUBNETWORK \
 		-u MEMORYSTORE_INSTANCE -u PROJECT_ID \
 		go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}" \
 		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${ARCH}" \
 		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m \
+		--ingress-allowed-spiffe-ids="${ROUTER_CLIENT_ID}" \
 		deploy ate-system --setup-csi=none)
-	echo "${id} installed ${SUBSTRATE_REF}" >"${SETUP}"
+	echo "${id} installed ${SUBSTRATE_REF} envoy" >"${SETUP}"
 else
 	step "reusing kind cluster ${CLUSTER}"
 	if [[ "${stage}" == foreign ]]; then
@@ -306,8 +309,8 @@ fi
 
 step "${SANDBOX} WorkerPool ${POOL}"
 "${K[@]}" apply -f "${HERE}/deploy/namespace.yaml"
-ATEOM_IMAGE="$(cd "${SUBSTRATE}" && ko build --base-import-paths "./cmd/ateom-${SANDBOX}")"
-sed -e "s#ATEOM_IMAGE#${ATEOM_IMAGE}#" "${HERE}/deploy/${WORKERPOOL_FILE}" | "${K[@]}" apply -f -
+ATEWORKER_IMAGE="$(cd "${SUBSTRATE}" && ko build --base-import-paths "./cmd/ateworker-${SANDBOX}")"
+sed -e "s#ATEWORKER_IMAGE#${ATEWORKER_IMAGE}#" "${HERE}/deploy/${WORKERPOOL_FILE}" | "${K[@]}" apply -f -
 "${ROOT}/hack/wait-worker-pool.sh" "${POOL}" "${NS}" 600
 if ${SUBSTRATE_ONLY}; then
 	step "substrate is up (--substrate-only); run ./up.sh again for the agent and agentsessionsd"
@@ -337,6 +340,28 @@ for tier in stateless memory; do
 done
 
 "${ATE[@]}" get atespace "${ATESPACE}" >/dev/null 2>&1 || "${ATE[@]}" create atespace "${ATESPACE}"
+
+# substrate v0.6.0 authorizes every call by the atespace's AccessPolicy. Both agentsessionsd tiers
+# run as the agentsessionsd ServiceAccount (deploy/namespace.yaml), which needs editor on the
+# atespace to create, suspend, resume and delete actors. A missing policy is created with that one
+# binding; a policy that already grants it editor or owner is left alone; any other policy is
+# refused rather than overwritten, since it may carry bindings someone else relies on.
+step "AccessPolicy ${ATESPACE}: editor for ${DAEMON_PRINCIPAL}"
+grants_daemon() {
+	python3 -c 'import json, sys
+p = json.load(sys.stdin)
+sys.exit(0 if any(b.get("role") in ("editor", "owner") and sys.argv[1] in b.get("members", []) for b in p.get("bindings") or []) else 1)' "${DAEMON_PRINCIPAL}"
+}
+policy="$("${ATE[@]}" get access-policy -a "${ATESPACE}" -o json)"
+if [[ -z "${policy}" ]]; then
+	printf 'bindings:\n- role: editor\n  members:\n  - %s\n' "${DAEMON_PRINCIPAL}" |
+		"${ATE[@]}" create access-policy -a "${ATESPACE}" -f -
+	policy="$("${ATE[@]}" get access-policy -a "${ATESPACE}" -o json)"
+fi
+if ! grants_daemon <<<"${policy}"; then
+	echo "AccessPolicy ${ATESPACE} does not grant ${DAEMON_PRINCIPAL} editor; add it with: kubectl ate get access-policy -a ${ATESPACE} -o yaml >policy.yaml, add the member to an editor binding, then kubectl ate update access-policy -a ${ATESPACE} -f policy.yaml; the policy was not changed" >&2
+	exit 1
+fi
 for out in "${STATE}/render" "${STATE}/render-memory"; do
 	TEMPLATE="$(cat "${out}/template-name")"
 	tier=stateless

@@ -41,16 +41,24 @@ setup_stage() {
 # refuse_stale_install exits when SETUP records that up.sh installed ate-system on the container ID
 # $1 from a substrate commit other than SUBSTRATE_REF, or from one it did not record (an install
 # from before up.sh kept the commit). Substrate supports no in-place upgrade between releases before
-# 1.0 (its docs/upgrade.md), and v0.5.0 reads an ActorTemplate an older install stored with no
-# sandbox class, so that template's actors cannot resume: the cluster is reinstalled, not reused. A
-# cluster up.sh did not install is not checked.
+# 1.0 (its docs/upgrade.md), and v0.6.0 changed the ActorTemplate (resources required, no sandbox
+# configuration), so an older install's templates and actors do not carry over: the cluster is
+# reinstalled, not reused. It also exits when the record names a router dataplane other than envoy,
+# or none (an install from before up.sh switched to envoy): agentsessionsd needs the envoy router's
+# mTLS listener. A cluster up.sh did not install is not checked.
 refuse_stale_install() {
-	local id stage ref
-	if [[ -f "${SETUP}" ]] && read -r id stage ref <"${SETUP}" && [[ "${id}" == "$1" && "${stage}" == installed ]] &&
-		[[ "${ref}" != "${SUBSTRATE_REF}" ]]; then
-		echo "refusing to use kind cluster ${CLUSTER}: up.sh installed agent-substrate ${ref:-from a commit it did not record} in it, and this checkout pins ${SUBSTRATE_REF}." >&2
-		echo "Substrate cannot be upgraded in place before 1.0. Run down.sh to delete the cluster and its sessions, then rerun up.sh (both in ${HERE})." >&2
-		exit 1
+	local id stage ref dataplane
+	if [[ -f "${SETUP}" ]] && read -r id stage ref dataplane <"${SETUP}" && [[ "${id}" == "$1" && "${stage}" == installed ]]; then
+		if [[ "${ref}" != "${SUBSTRATE_REF}" ]]; then
+			echo "refusing to use kind cluster ${CLUSTER}: up.sh installed agent-substrate ${ref:-from a commit it did not record} in it, and this checkout pins ${SUBSTRATE_REF}." >&2
+			echo "Substrate cannot be upgraded in place before 1.0. Run down.sh to delete the cluster and its sessions, then rerun up.sh (both in ${HERE})." >&2
+			exit 1
+		fi
+		if [[ "${dataplane}" != envoy ]]; then
+			echo "refusing to use kind cluster ${CLUSTER}: it was installed with another router dataplane (${dataplane:-not recorded}), and agentsessionsd reaches actors only through the envoy router's mTLS listener." >&2
+			echo "Run down.sh to delete the cluster and its sessions, then rerun up.sh (both in ${HERE})." >&2
+			exit 1
+		fi
 	fi
 }
 # cluster_stage prints where the demo's cluster stands, as up.sh and ui.sh read it: absent; orphaned
@@ -95,6 +103,12 @@ NS=agentsuite-demo
 # is set, and how demo.sh tells which one it was deployed with.
 FAKE_MODEL_URL="http://fakemodel.${NS}.svc:8080/v1"
 ATESPACE=agentsuite-demo
+# The identity both agentsessionsd tiers call the ate-api as: the agentsessionsd ServiceAccount
+# (deploy/namespace.yaml), which up.sh grants editor on ATESPACE.
+DAEMON_PRINCIPAL="user:system:serviceaccount:${NS}:agentsessionsd"
+# The SPIFFE ID the pod-identity signer issues that ServiceAccount: the router client up.sh
+# allowlists for both tiers.
+ROUTER_CLIENT_ID="spiffe://cluster.local/ns/${NS}/sa/agentsessionsd"
 # The suite (a directory under this one) and the agent in it that becomes the harness. The default
 # is the demo's own fixture, which has compositions for amd64 and arm64; kaimahi's minimal suite
 # (suites/kaimahi-minimal, agent writer) has only linux/amd64.

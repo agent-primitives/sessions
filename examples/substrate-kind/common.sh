@@ -29,7 +29,12 @@ NS=sessions-example
 PROJECT="${PROJECT:-example}"
 ACTOR_TEMPLATE="${ACTOR_TEMPLATE:-chat-harness}"
 SANDBOX_CLASS="${SANDBOX_CLASS:-microvm}"
-SANDBOX_CONFIG="${SANDBOX_CONFIG:-}"
+# The daemon's Substrate identity: deploy/agentsessionsd.yaml's ServiceAccount. provision.sh grants it
+# the atespace editor role in NS, which covers every Control API call the daemon makes.
+DAEMON_PRINCIPAL="user:system:serviceaccount:${NS}:agentsessions"
+# The SPIFFE ID the pod-identity signer issues that ServiceAccount: the only router client up.sh
+# allowlists. smoke.sh calls only the Sessions API, so it needs no entry.
+ROUTER_CLIENT_ID="spiffe://cluster.local/ns/${NS}/sa/agentsessions"
 SNAPSHOT_LOCATION="${SNAPSHOT_LOCATION:-gs://ate-snapshots/sessions-example/}"
 
 # Every cluster command names its context and kubeconfig instead of relying on the caller's default.
@@ -41,6 +46,14 @@ CREATE_PENDING=0
 progress() { printf '\n==> [substrate-kind/%s] %s\n' "${0##*/}" "$*" >&2; }
 die() { progress "ERROR: $*"; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
+
+# Substrate v0.6.0 templates name no SandboxConfig; the WorkerPool resolves its class's config.
+# Refuse the former per-template SANDBOX_CONFIG override before any cluster change rather than
+# deploy on the class default.
+refuse_sandbox_config() {
+	[[ -z "${SANDBOX_CONFIG:-}" ]] ||
+		die "SANDBOX_CONFIG is not supported with Substrate v0.6.0, whose templates name no SandboxConfig; nothing was changed. Unset it, and to run a custom config add configRef: {name: <config>} to the sandboxClasses entry in deploy/workerpool.yaml."
+}
 
 # GNU coreutils installs timeout as gtimeout on macOS.
 timeout_command() {

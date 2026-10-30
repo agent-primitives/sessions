@@ -3,9 +3,10 @@
 //
 // It is an ordinary Go test package, compiled into a test binary and executed as a Kubernetes Job
 // inside the cluster. The harness is reached the way a production host reaches it: harnesswire over
-// h2c to the atenet-router Service, with the ate-target-actor metadata naming the actor. Control is
-// reached over the ate-api-server Service with a mounted ServiceAccount token. Running in-cluster
-// keeps both on their Service DNS names without port-forwards.
+// mTLS to the atenet-router Service, with the Job's pod-certificate SVID as the client identity and
+// the ate-target-actor metadata naming the actor. Control is reached over the ate-api-server
+// Service with a mounted ServiceAccount token. Running in-cluster keeps both on their Service DNS
+// names without port-forwards.
 //
 // Tests SKIP unless AGENTSESSIONS_E2E=1, so `go test ./...` on a laptop or in the fast PR job still
 // compiles every line here — a driver that no longer builds fails the cheap gate, not the 17-minute
@@ -18,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,12 +29,14 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
 	ateadapter "github.com/agent-primitives/sessions/integrations/substrate"
+	"github.com/agent-primitives/sessions/integrations/substrate/internal/routertls"
 	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/runtime/substrate"
 	"github.com/agent-primitives/sessions/sqlitelog"
-	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
 )
 
 // Template names the suite creates in the template atespace (see templates_test.go).
@@ -93,14 +97,43 @@ func newFixture(t *testing.T, atespace string) *fixture {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err = atepb.NewControlClient(conn).CreateAtespace(ctx, &atepb.CreateAtespaceRequest{
-		Atespace: &atepb.Atespace{Metadata: &atepb.ResourceMetadata{Name: atespace}},
-	})
-	if err != nil && status.Code(err) != codes.AlreadyExists {
+	if err := ensureAtespace(ctx, atepb.NewControlClient(conn), atespace); err != nil {
 		t.Fatalf("ensure atespace %q: %v", atespace, err)
 	}
 	t.Logf("Control reachable at %s; atespace %q ready", addr, atespace)
 	return f
+}
+
+// provisionScript creates every fixed e2e atespace and grants the Job's principal editor in it.
+const provisionScript = "hack/provision-e2e-access.sh"
+
+// ensureAtespace looks the atespace up and creates it only when it is absent. Substrate v0.6.0 always
+// enforces authorization: the Job runs with atespace editor (the role the docs tell operators to
+// grant), which can read its atespace but not create one, since CreateAtespace needs a global owner.
+// So the atespaces come from provisionScript, and an atespace it does not list fails here with a
+// message naming it, rather than a bare PERMISSION_DENIED. The create stays for a run with an owner
+// credential.
+func ensureAtespace(ctx context.Context, ctl atepb.ControlClient, name string) error {
+	_, err := ctl.GetAtespace(ctx, &atepb.GetAtespaceRequest{Atespace: &atepb.ObjectRef{Name: name}})
+	switch status.Code(err) {
+	case codes.OK:
+		return nil
+	case codes.NotFound, codes.PermissionDenied:
+	default:
+		return fmt.Errorf("get atespace: %w", err)
+	}
+	_, cerr := ctl.CreateAtespace(ctx, &atepb.CreateAtespaceRequest{
+		Atespace: &atepb.Atespace{Metadata: &atepb.ResourceMetadata{Name: name}},
+	})
+	switch status.Code(cerr) {
+	case codes.OK, codes.AlreadyExists:
+		return nil
+	case codes.PermissionDenied:
+		return fmt.Errorf("atespace %q is not provisioned for this principal (get: %v; create: %v): add it to %s and rerun it",
+			name, err, cerr, provisionScript)
+	default:
+		return fmt.Errorf("create atespace: %w", cerr)
+	}
 }
 
 // backend builds the substrate Runtime for a harness template, creating the template on first use.
@@ -142,10 +175,37 @@ func stopQuietly(t *testing.T, b *substrate.Backend, uid string) {
 	}
 }
 
+// routerClient loads the router client once per test binary from the Job's podCertificate and
+// clusterTrustBundle volume (deploy/substrate/e2e-job.yaml), as agentsessionsd does.
+var routerClient = sync.OnceValues(func() (*routertls.Credentials, error) {
+	return routertls.Load(routertls.Config{
+		CertFile: env("ATENET_ROUTER_CERT_FILE", "/var/run/router-client/credential-bundle.pem"),
+		CAFile:   env("ATENET_ROUTER_CA_FILE", "/var/run/router-client/router-ca.pem"),
+	})
+})
+
+// routerCreds returns the suite's router client credentials, failing the test without them.
+func routerCreds(t *testing.T) *routertls.Credentials {
+	t.Helper()
+	creds, err := routerClient()
+	if err != nil {
+		t.Fatalf("router client: %v", err)
+	}
+	return creds
+}
+
+// newPlacer is placement.New with the router client's dialer, as agentsessionsd builds a Placer for
+// a substrate harness.
+func newPlacer(t *testing.T, backend placement.Backend, model controller.ModelFunc, opts ...placement.Option) *placement.Placer {
+	t.Helper()
+	return placement.New(backend, model, append(opts, placement.WithDialer(routertls.Dialer(routerCreds(t))))...)
+}
+
 // dialActor opens a harnesswire client to an incarnation's harness through the router, with the same
 // dialer and call metadata the Placer uses, for a test that needs a connection of its own.
-func dialActor(inc api.Incarnation) (api.Harness, func() error, error) {
-	return placement.DefaultDial(inc)
+func dialActor(t *testing.T, inc api.Incarnation) (api.Harness, func() error, error) {
+	t.Helper()
+	return routertls.Dialer(routerCreds(t))(inc)
 }
 
 func outputsOf(recs []eventlog.Record) []string {

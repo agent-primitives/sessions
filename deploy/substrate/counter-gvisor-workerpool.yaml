@@ -6,7 +6,7 @@
 # claim is made for.
 #
 # workerImage is a ko:// import path that the WorkerPool controller passes to its Pods unchanged:
-# build ateom-gvisor with ko and substitute its digest before applying (see the no-KVM recipe in
+# build ateworker-gvisor with ko and substitute its digest before applying (see the no-KVM recipe in
 # docs/substrate-conformance.md).
 
 apiVersion: ate.dev/v1alpha1
@@ -21,7 +21,7 @@ spec:
   replicas: 4
   sandboxClasses:
     - name: gvisor
-  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+  workerImage: ko://go.ate.dev/substrate/cmd/ateworker-gvisor
   template:
     resources:
       limits:

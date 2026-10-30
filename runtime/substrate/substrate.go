@@ -15,7 +15,9 @@
 //
 // Transport: the harness is reached through substrate's atenet-router, the only supported ingress
 // to an actor. Every incarnation addresses the router and carries the ate-target-actor metadata that
-// selects the actor; the router resumes the actor if needed and proxies the h2c gRPC stream to it.
+// selects the actor; the router resumes the actor if needed and proxies the gRPC stream to it. The
+// router serves only mTLS, so the host dials incarnations with its router client credentials
+// (placement.WithDialer), not placement.DefaultDial.
 // Capabilities report MemorySnapshot=true by default; WithVolumesOnly disables memory admission
 // for files-only templates. Snapshot reports the observed fidelity, not the configured preference.
 package substrate
@@ -607,19 +609,19 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 // is refused with api.ErrMemoryStateLost before suspending, so its RAM-less state is never
 // recorded as the session's checkpoint.
 //
-// That check and the suspend are separate calls, and substrate v0.5.0's SuspendActor takes no
-// precondition (no UID, generation or worker), so another caller can suspend the checked actor
-// and resume it on a worker that cannot restore its memory before this suspend captures it. The
-// capture then holds RAM that is not the session's, and the evidence is gone: a suspended actor
-// holds no worker to compare. So whenever the checkpoint must hold memory, Snapshot also requires
-// the suspend to report the UID and CaptureLineage the check saw, and refuses any other with
-// api.ErrMemoryStateLost and no ref; the actor is left suspended. That fails closed: a capture or
-// pause by another caller followed by a resume in the window is refused even when the memory
-// survived. A single capture or pause with no resume after it is the capture this suspend would
-// have taken: the suspend reports the lineage checked and it is recorded. A lineage missing from
-// either read is a plain error, before suspending when the check reports none. A crash and resume
-// onto a worker of the same runtime keeps the lineage, so that window remains; only a precondition
-// on SuspendActor itself would close it.
+// That check and the suspend are separate calls, and substrate's SuspendActor (through v0.6.0,
+// which added only a durability mode) takes no precondition (no UID, generation or worker), so
+// another caller can suspend the checked actor and resume it on a worker that cannot restore its
+// memory before this suspend captures it. The capture then holds RAM that is not the session's, and
+// the evidence is gone: a suspended actor holds no worker to compare. So whenever the checkpoint
+// must hold memory, Snapshot also requires the suspend to report the UID and CaptureLineage the
+// check saw, and refuses any other with api.ErrMemoryStateLost and no ref; the actor is left
+// suspended. That fails closed: a capture by another caller followed by a resume in the window is
+// refused even when the memory survived. A single capture with no resume after it is the capture
+// this suspend would have taken: the suspend reports the lineage checked and it is recorded. A
+// lineage missing from either read is a plain error, before suspending when the check reports none.
+// A crash and resume onto a worker of the same runtime keeps the lineage, so that window remains;
+// only a precondition on SuspendActor itself would close it.
 //
 // The refused capture stays on the suspended actor, and nothing on the actor marks it. The journal
 // does: Snapshot also refuses, before suspending, an actor that does not hold in.RecordedCheckpoint
@@ -959,8 +961,8 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (api.Incarna
 // runtime that capture is stamped with, so MemoryNotRestored does not catch it. A mismatch is
 // api.ErrMemoryStateLost wrapped in ErrSnapshotNotRestorable, and the actor is left running and not
 // handed out (see resumedNotHandedOut). This sees only what the response reports. It is not a
-// precondition on the resume itself, which v0.5.0's ResumeActorRequest (the actor reference only)
-// cannot carry.
+// precondition on the resume itself, which substrate's ResumeActorRequest (the actor reference only,
+// through v0.6.0) cannot carry.
 func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, recorded func() (string, error)) (inc api.Incarnation, err error) {
 	ctx, finish := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "restore_compute",
 		"actor", ref.Local,
@@ -1007,11 +1009,13 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 // a concurrent suspend/resume: only an atomic expected-snapshot precondition in Substrate can close
 // that window. SnapshotRef records memory vs non-memory, not ROOTFS vs VOLUMES.
 func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRef, recorded func() (string, error)) error {
+	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
 	info, err := b.ctl.GetActor(ctx, b.ref(ref.Local))
 	if err != nil {
-		if errors.Is(err, ErrActorNotFound) && b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
-			return fmt.Errorf("%w: %w: actor %s/%s no longer exists, so its in-RAM state cannot be restored: %w",
-				ErrSnapshotNotRestorable, ErrMemoryStateLost, b.atespace, ref.Local, err)
+		if errors.Is(err, ErrActorNotFound) {
+			if lost := b.heldCheckpointGone(ref, memory, err); lost != nil {
+				return lost
+			}
 		}
 		return fmt.Errorf("%w: get restore actor: %w", ErrSnapshotNotRestorable, err)
 	}
@@ -1020,7 +1024,6 @@ func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRe
 	}
 	// A proven replacement is permanent loss, even when its own snapshot is still uploading.
 	// Missing identity is not proof of replacement; incarnation and the host still check it.
-	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
 	if memory && recorded != nil && info.UID != "" {
 		instance, readErr := recorded()
 		if readErr != nil {
@@ -1060,7 +1063,7 @@ func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRe
 	}
 	if err == nil {
 		switch {
-		case ref.ExternalURI == "" && !b.volumesOnly && (!memory || !ref.Memory):
+		case !b.holdsCheckpoint(ref, memory):
 			return nil // no held checkpoint: default legacy refs or memory live recovery
 		case ref.ExternalURI == "":
 			err = fmt.Errorf("%w: snapshot ref missing external URI", api.ErrInvalidCheckpoint)
@@ -1073,6 +1076,47 @@ func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRe
 		}
 	}
 	return fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
+}
+
+// holdsCheckpoint reports whether ref holds a checkpoint Restore must resume from, rather than
+// allowing live recovery as-is: a recorded durable URI, any ref on a WithVolumesOnly backend, or a
+// RAM checkpoint on a REQUIRES_MEMORY_SNAPSHOT one.
+func (b *Backend) holdsCheckpoint(ref api.SnapshotRef, memory bool) bool {
+	return ref.ExternalURI != "" || b.volumesOnly || (memory && ref.Memory)
+}
+
+// heldCheckpointGone is the refusal, before any resume or create, of a Restore whose actor
+// GetActor reported missing (getErr): the actor was deleted, or substrate's state was reset (a
+// reinstall with a fresh database). Substrate keeps a snapshot only on the actor that took it, so
+// a held checkpoint went with the actor, and resuming the name would cold-create nothing useful.
+//
+// A ref that holds a checkpoint is api.ErrInvalidCheckpoint (FAILED_PRECONDITION at the Sessions
+// API), plus api.ErrMemoryStateLost on the memory tier. The message names the actor and, when the
+// ref records one (a durable URI, or a RAM checkpoint on the memory tier), the session's latest
+// SUSPEND, never the snapshot URI. A WithVolumesOnly ref with neither is the default ref of a
+// session that never suspended, so the message says only that its compute is gone. A memory-tier
+// ref without a held checkpoint (live recovery) is api.ErrMemoryStateLost alone, as before. Any
+// other ref returns nil: there is nothing to protect, and the caller keeps the GetActor error.
+func (b *Backend) heldCheckpointGone(ref api.SnapshotRef, memory bool, getErr error) error {
+	if !b.holdsCheckpoint(ref, memory) {
+		if memory {
+			return fmt.Errorf("%w: %w: actor %s/%s no longer exists, so its in-RAM state cannot be restored: %w",
+				ErrSnapshotNotRestorable, ErrMemoryStateLost, b.atespace, ref.Local, getErr)
+		}
+		return nil
+	}
+	lost, held := "the session's compute cannot be resumed", "files the actor held are lost"
+	if ref.ExternalURI != "" || (memory && ref.Memory) {
+		lost, held = "the checkpoint recorded by the session's latest SUSPEND cannot be restored", "files the checkpoint held are lost"
+	}
+	if memory {
+		return fmt.Errorf("%w: %w: %w: actor %s/%s no longer exists (deleted, or substrate state reset), so %s; "+
+			"no actor was created. Its in-RAM state cannot be restored: %w",
+			ErrSnapshotNotRestorable, api.ErrInvalidCheckpoint, ErrMemoryStateLost, b.atespace, ref.Local, lost, getErr)
+	}
+	return fmt.Errorf("%w: %w: actor %s/%s no longer exists (deleted, or substrate state reset), so %s; "+
+		"no actor was created. Exec starts new compute and replays the journal; %s: %w",
+		ErrSnapshotNotRestorable, api.ErrInvalidCheckpoint, b.atespace, ref.Local, lost, held, getErr)
 }
 
 // memoryActorGone reports, after resumeErr, that the actor holding a REQUIRES_MEMORY_SNAPSHOT
@@ -1556,10 +1600,11 @@ func (b *Backend) Capabilities() api.RuntimeCapabilities {
 // incarnation. Keep in sync with cmd/harnessnode's HARNESS_ADDR default.
 const HarnessPort = "80"
 
-// DefaultRouterAddress is the atenet-router Service a stock substrate install creates. The router
-// accepts h2c on port 80 and carries gRPC unary and bidi streams, trailers included, to the actor's
-// HarnessPort.
-const DefaultRouterAddress = "atenet-router.ate-system.svc:80"
+// DefaultRouterAddress is the TLS port of the atenet-router Service a stock substrate install
+// creates. From substrate v0.6.0 the default (envoy) router serves only mTLS there: it admits a
+// client certificate from the pod identity signer whose SPIFFE ID is on its allowlist, and carries
+// gRPC unary and bidi streams, trailers included, to the actor's HarnessPort.
+const DefaultRouterAddress = "atenet-router.ate-system.svc:443"
 
 // TargetActorHeader is the request header the atenet-router reads to pick the actor, with the value
 // "<atespace>/<actor>". The router ignores the host and authority, so without it a call reaches no

@@ -42,7 +42,7 @@ func TestMemorySnapshotSuspendResume(t *testing.T) {
 
 	session := uniqueUID("memory")
 	log := journal(t).Session(session)
-	p := placement.New(backend, echoagent.Model)
+	p := newPlacer(t, backend, echoagent.Model)
 	defer stopQuietly(t, backend, session)
 
 	const turns = 3
@@ -89,7 +89,7 @@ func TestMemorySessionWhoseActorIsLostIsRefused(t *testing.T) {
 	backend := f.backend(t, counterTemplateSpec, counterDescriptor)
 	session := uniqueUID("memory-lost")
 	log := journal(t).Session(session)
-	p := placement.New(backend, echoagent.Model)
+	p := newPlacer(t, backend, echoagent.Model)
 	defer stopQuietly(t, backend, session)
 
 	driveTurns(ctx, t, p, log, session, 1)

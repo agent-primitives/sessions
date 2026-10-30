@@ -211,18 +211,20 @@ func journalOverrideTurn(t *testing.T, store *sqlitelog.Store, sess, harness str
 	}
 }
 
-// Resume of a suspended session restores its actor's own snapshot. When the actor is gone, a
-// REQUIRES_MEMORY_SNAPSHOT session's state went with it: Resume is refused with FAILED_PRECONDITION,
-// naming the session, creates no actor and journals nothing. A STATELESS_REPLAY session keeps the
-// INTERNAL resume error it had before; this rule is only about RAM state.
+// Resume of a suspended session restores its actor's own snapshot. When the actor is gone (deleted,
+// or substrate's state reset by a reinstall), the checkpoint the latest SUSPEND recorded went with
+// it: Resume is refused with FAILED_PRECONDITION on every tier, creates no actor and journals
+// nothing. The message names the session, the actor and the SUSPEND, never the snapshot URI. A
+// REQUIRES_MEMORY_SNAPSHOT session's RAM is lost with it; a STATELESS_REPLAY one is pointed at
+// Exec, which replays the journal on new compute.
 func TestResumeAfterTheActorIsLost(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		tier api.Resumability
-		want codes.Code
+		want string
 	}{
-		{name: "memory tier is refused", tier: api.ResumabilityRequiresMemorySnapshot, want: codes.FailedPrecondition},
-		{name: "stateless tier is unchanged", tier: api.ResumabilityStatelessReplay, want: codes.Internal},
+		{name: "memory tier is refused", tier: api.ResumabilityRequiresMemorySnapshot, want: "in-RAM state cannot be restored"},
+		{name: "stateless tier is refused", tier: api.ResumabilityStatelessReplay, want: "Exec starts new compute and replays the journal"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
@@ -253,6 +255,12 @@ func TestResumeAfterTheActorIsLost(t *testing.T) {
 			if _, err := c.Suspend(ctx, &v1.SuspendRequest{Session: sess}); err != nil {
 				t.Fatalf("suspend: %v", err)
 			}
+			ctl.mu.Lock()
+			uri := ctl.snapshots[sess]
+			ctl.mu.Unlock()
+			if uri == "" {
+				t.Fatal("suspend left no snapshot")
+			}
 			if err := ctl.DeleteActor(ctx, substrate.ActorRef{Atespace: "space", Name: sess}); err != nil {
 				t.Fatal(err)
 			}
@@ -262,8 +270,8 @@ func TestResumeAfterTheActorIsLost(t *testing.T) {
 			}
 
 			_, err = c.Resume(ctx, &v1.ResumeRequest{Session: sess})
-			if status.Code(err) != tc.want {
-				t.Fatalf("resume after the actor was lost: want %v, got %v", tc.want, err)
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("resume after the actor was lost: want FailedPrecondition, got %v", err)
 			}
 			ctl.mu.Lock()
 			_, recreated := ctl.status[sess]
@@ -274,14 +282,14 @@ func TestResumeAfterTheActorIsLost(t *testing.T) {
 			if got, err := store.Session(sess).Head(); err != nil || got != head {
 				t.Errorf("journal head after the failed resume = %d (err %v), want %d: nothing may be journaled", got, err, head)
 			}
-			if tc.want != codes.FailedPrecondition {
-				return
-			}
 			msg := status.Convert(err).Message()
-			for _, want := range []string{sess, "cannot be restored"} {
+			for _, want := range []string{`session "` + sess + `"`, "actor space/" + sess + " ", "latest SUSPEND", tc.want} {
 				if !strings.Contains(msg, want) {
 					t.Errorf("error %q does not contain %q", msg, want)
 				}
+			}
+			if strings.Contains(msg, uri) {
+				t.Errorf("error %q exposes the snapshot URI %q", msg, uri)
 			}
 		})
 	}

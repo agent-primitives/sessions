@@ -64,9 +64,11 @@ type deleteAPI struct {
 	*sessionAPI
 }
 
-func newDeleteAPI(t *testing.T, runtime placement.Backend) *deleteAPI {
+// newDeleteAPI serves the delete fixture on runtime. A substrate runtime passes the router dialer
+// (newPlacer's); the offline run on runtime/local keeps the default unix-socket dialer.
+func newDeleteAPI(t *testing.T, runtime placement.Backend, opts ...placement.Option) *deleteAPI {
 	t.Helper()
-	registry, err := placement.NewRegistry("delete-harness", map[string]*placement.Placer{"delete-harness": placement.New(runtime, echoagent.Model)})
+	registry, err := placement.NewRegistry("delete-harness", map[string]*placement.Placer{"delete-harness": placement.New(runtime, echoagent.Model, opts...)})
 	if err != nil {
 		t.Fatal(err)
 	}

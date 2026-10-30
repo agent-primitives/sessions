@@ -1,7 +1,8 @@
 ## The two diagrams, checked against the code
 
-Substrate paths are at the commit the adapter's go.mod pins (v0.5.0, `SUBSTRATE_REF` in
-.github/workflows/substrate-e2e.yml); kaimahi's at 9c5c993; the rest in this repository.
+Substrate paths are at v0.5.0, the release these diagrams were traced against; v0.6.0 renamed the
+worker binaries (ateom-* to ateworker-*, the `/ateom.Ateom/` RPCs to `/ateworker.Worker/`) and these
+lines are not re-traced at v0.6.0. kaimahi's paths are at 9c5c993; the rest in this repository.
 
 Build half (build.mmd, end of chapter 2):
 

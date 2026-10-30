@@ -56,19 +56,23 @@ The substrate build of `agentsessionsd` adds these flags:
 | Flag | Meaning |
 |---|---|
 | `-substrate-harness name=atespace/template[,memory]` | Serve harness `name` from that ActorTemplate, one actor per session. `,memory` declares `REQUIRES_MEMORY_SNAPSHOT`; the default is `STATELESS_REPLAY`. At most one: a second is refused at startup (see [Substrate placement binding](#substrate-placement-binding)). Requires `-model`, like `-harness`. |
-| `-substrate-atespace` | Atespace the session actors are created in (required). It must already exist, and must not change while sessions exist: see [Substrate placement binding](#substrate-placement-binding). |
+| `-substrate-atespace` | Atespace the session actors are created in (required). It must already exist with an AccessPolicy that grants the daemon `editor`, and must not change while sessions exist: see [Substrate placement binding](#substrate-placement-binding). |
 | `-ateapi-addr` | ate-api Control address, TLS (default `api.ate-system.svc:443`). |
 | `-ateapi-token-file` | Bearer token file, re-read on every call, so a projected ServiceAccount token rotates. |
 | `-ateapi-ca-file`, `-ateapi-server-name` | Verify the ate-api certificate against this CA and name; the default is the system roots and the host of `-ateapi-addr`. |
 | `-ateapi-insecure-skip-verify` | Skip certificate verification (dev clusters; the conformance Job does the same). A server impersonating the ate-api then receives the `-ateapi-token-file` bearer token. Exclusive with `-ateapi-ca-file`. |
-| `-atenet-router` | Router address harnesses are reached through (default `atenet-router.ate-system.svc:80`). |
+| `-atenet-router` | Router address harnesses are reached through, over mTLS (default `atenet-router.ate-system.svc:443`). See [the transport](#the-transport-harnesswire-through-atenet-router). |
+| `-atenet-router-cert-file`, `-atenet-router-ca-file` | Required. The host's SPIFFE certificate bundle (private key and chain, from a `podCertificate` volume for signer `podidentity.podcert.ate.dev/identity`) and the router's trust bundle (a `clusterTrustBundle` volume for signer `servicedns.podcert.ate.dev/identity`). Both are re-read on every router connection. The daemon refuses to start if either is missing, the certificate has expired or is not yet valid, or it does not carry exactly one SPIFFE ID. |
+| `-atenet-router-server-name` | DNS name the router's certificate must carry (default `atenet-router.ate-system.svc`). It does not follow `-atenet-router`: the servicedns signer issues only `<service>.<namespace>.svc` names. |
 
 The other flags only configure `-substrate-harness` entries; given without one, the daemon refuses
 to start rather than ignore them.
 
-On Substrate v0.5.0, the namespace that runs `agentsessionsd` must carry the label
+On Substrate v0.6.0, the namespace that runs `agentsessionsd` must carry the label
 `ate.dev/api-access=true`, or its Control calls time out: see
-[namespace access to ate-api-server](#substrate-v050-namespace-access-to-ate-api-server).
+[namespace access to ate-api-server](#substrate-v060-namespace-access-to-ate-api-server). Its
+principal also needs the `editor` role in `-substrate-atespace`, or Substrate denies every Control
+call with `PERMISSION_DENIED`: see [authorization and atespace provisioning](#substrate-v060-authorization-and-atespace-provisioning).
 
 The tier is declared, not discovered: placement gates on it before an actor exists, and nothing
 checks it against the image's own `Describe`. Declaring a `REQUIRES_MEMORY_SNAPSHOT` harness as
@@ -150,10 +154,10 @@ UID breaks its contract. When `CreateActor` finds the name taken (`substrate.Err
 `Create` attaches to that actor, so two hosts racing a session's first turn share one actor. The
 loser's turn fails at worst, never the session, and a retry attaches: `ABORTED` when its append
 loses, and `ABORTED` (`api.ErrComputeBusy`) when it finds the winner's actor `RESUMING`,
-`SUSPENDING` (or pausing), or substrate refuses its resume because another operation holds the actor
-(substrate's `ABORTED`, reported as `substrate.ErrActorBusy`). An actor that is `CRASHED`,
-`DELETING`, `REVERTING` or in a state the adapter does not know is `INTERNAL`. When `Create` resumes
-a `SUSPENDED` actor and the resume reports it missing (`substrate.ErrActorNotFound`), `Create` reads
+`SUSPENDING`, or substrate refuses its resume because another operation holds the actor (substrate's
+`ABORTED`, reported as `substrate.ErrActorBusy`). An actor that is `CRASHED`, `DELETING`,
+`REVERTING` or in a state the adapter does not know is `INTERNAL`. When `Create` resumes a
+`SUSPENDED` actor and the resume reports it missing (`substrate.ErrActorNotFound`), `Create` reads
 it again: gone, it is a missing actor (a memory-tier session with started turns is
 `ErrMemoryStateLost`, anything else gets a new actor); replaced under the name, it is `ABORTED`;
 still there, the resume error stands, since substrate also answers `NOT_FOUND` for an actor whose
@@ -170,15 +174,14 @@ holding a snapshot other than the checkpoint the journal last recorded is `ErrMe
 even when that snapshot may still hold the session's RAM after a failed SUSPEND append or another
 host's suspend: the journal cannot tell those from a capture `Snapshot` refused, and a new Suspend
 is refused the same way (see
-[a refused capture stays refused](#substrate-v050-a-refused-capture-stays-refused)). After an
-admitted resume fails, the recorded actor itself
-keeps the resume error whatever snapshot it holds. When the resume reported the actor missing and
-the actor still holds the session's snapshot, it keeps the resume error without the read.
-With no UID recorded to
-compare (journals from before the field, or a caller of plain `Restore`), an actor that does not
-hold the snapshot after a `NOT_FOUND` resume is treated as a replacement, so the session's own actor
-holding a newer snapshot reads as lost there; with no snapshot either, the actor keeps the resume
-error, and so does any actor when the journal cannot be read after the failed resume.
+[a refused capture stays refused](#substrate-v060-a-refused-capture-stays-refused)). After an
+admitted resume fails, the recorded actor itself keeps the resume error whatever snapshot it holds.
+When the resume reported the actor missing and the actor still holds the session's snapshot, it
+keeps the resume error without the read. With no UID recorded to compare (journals from before the
+field, or a caller of plain `Restore`), an actor that does not hold the snapshot after a `NOT_FOUND`
+resume is treated as a replacement, so the session's own actor holding a newer snapshot reads as
+lost there; with no snapshot either, the actor keeps the resume error, and so does any actor when
+the journal cannot be read after the failed resume.
 
 Limits of these checks:
 
@@ -323,7 +326,7 @@ pinned Substrate, `CreateActor` without a source tag freezes the template's curr
 snapshot generation 1, so this exemption applies only when golden snapshots are disabled (or no
 golden exists yet). Capture itself never uses the exemption. A backend's own successful CreateActor
 → ResumeActor path does not use it either; for a memory-tier harness it checks the actor the resume
-reports ([a refused capture stays refused](#substrate-v050-a-refused-capture-stays-refused)).
+reports ([a refused capture stays refused](#substrate-v060-a-refused-capture-stays-refused)).
 These client-side checks are not atomic and do not fence traffic directly to the router.
 
 ### Held checkpoint restore and readiness
@@ -338,7 +341,7 @@ memory-tier actor, RUNNING or SUSPENDED, must also hold the checkpoint the journ
 (the held ref, or no capture of its own when there is none), or it is `api.ErrMemoryStateLost`
 wrapped in `substrate.ErrSnapshotNotRestorable` before the resume, and again on the actor a
 successful resume reports
-([a refused capture stays refused](#substrate-v050-a-refused-capture-stays-refused)).
+([a refused capture stays refused](#substrate-v060-a-refused-capture-stays-refused)).
 
 For a stateless or VOLUMES-only session only a SUSPENDED actor is checked against a held URI, and
 it must hold exactly that durable checkpoint. A stale held ref wraps
@@ -364,23 +367,135 @@ resumed or suspended, the copy is not a pending upload (below). An explicit `PEN
 (`ActorInfo.SnapshotPending`) also wraps `api.ErrCheckpointPending` and is `UNAVAILABLE`: once the
 upload completes, Suspend again to record the newest checkpoint before Resume; the older ref is
 stale. A memory-tier session cannot: the completed upload is a capture the journal did not record,
-and is refused as `api.ErrMemoryStateLost`. At v0.5.0 `SuspendActor` returns only once the upload
-completed, so a memory-tier Suspend reaches this only through a client or substrate that suspends
-asynchronously. A local-only or unrecognized durable status also wraps `api.ErrInvalidCheckpoint`
+and is refused as `api.ErrMemoryStateLost`. The adapter asks `SuspendActor` for a synchronous
+suspend, which for a `RUNNING` actor returns only once the upload completed; an actor that is
+already `SUSPENDED` is returned as it is in any mode, with its upload possibly still pending. So a
+memory-tier Suspend reaches this only through a client or substrate that suspends asynchronously.
+A local-only or unrecognized durable status also wraps `api.ErrInvalidCheckpoint`
 and is `FAILED_PRECONDITION`: it may never upload, so inspect and explicitly establish a durable
 checkpoint rather than just waiting. Snapshot returns zero ref; compute may already be released
-without a SUSPEND record. This conservatively refuses out-of-band paused (local-only) attachment
+without a SUSPEND record. This conservatively refuses attaching to a local-only record
+([hypothetical at v0.6.0](#substrate-v060-asynchronous-suspends-suspend-durability-and-runtime-fallback))
 even for default stateless backends. A memory-tier session never records a checkpoint that is not
 ready, so for it such a snapshot is a capture the journal did not record: Restore, Create's attach
 and Snapshot refuse it with `api.ErrMemoryStateLost`, as for
-[a refused capture](#substrate-v050-a-refused-capture-stays-refused). Before resuming or suspending
+[a refused capture](#substrate-v060-a-refused-capture-stays-refused). Before resuming or suspending
 a memory-tier session's actor, only a pending upload is reported as not ready.
 The client-side GetActor → ResumeActor check still races lifecycle operations; atomic expected
 snapshot/state validation must be supplied by Substrate.
 
-### Substrate v0.5.0: namespace access to ate-api-server
+### A lost actor refuses Resume
 
-Substrate v0.5.0 denies ingress to every `ate-system` pod by default (substrate #2522,
+A session's actor can be gone while its journal still records a checkpoint: an operator deleted it,
+or Substrate was reinstalled with a fresh database. Substrate keeps a snapshot only on the actor
+that took it, so the checkpoint the session's latest `SUSPEND` recorded went with the actor.
+`Restore` therefore reads the actor first, and when `GetActor` reports it missing while the ref
+holds a checkpoint (a durable URI, any ref on a `WithVolumesOnly` backend, or a RAM checkpoint on
+the memory tier) it refuses before any resume or create:
+
+- The refusal is `api.ErrInvalidCheckpoint`, `FAILED_PRECONDITION` at the Sessions API, on every
+  tier. On the memory tier it also wraps `api.ErrMemoryStateLost`, whose message says the in-RAM
+  state cannot be restored. A stateless or VOLUMES-only session's message says `Exec` starts new
+  compute and replays the journal, and that files the checkpoint held are lost. Previously
+  a stateless session got the `INTERNAL` get-actor error here.
+- The message names the actor (`<atespace>/<name>`, whose name is the session UID) and "the
+  checkpoint recorded by the session's latest SUSPEND", never the snapshot URI. A `WithVolumesOnly`
+  session that never suspended has no `SUSPEND` to name: its ref is the default `{Local: <uid>}`,
+  so the message says only that the session's compute cannot be resumed, that `Exec` replays the
+  journal on new compute, and that files the actor held are lost.
+- Only `GetActor` is called. No actor is created, nothing is resumed and nothing is journaled, so
+  the session's journal head is unchanged and a retry is refused the same way.
+- A ref that holds no checkpoint keeps its earlier outcome: `api.ErrMemoryStateLost` alone for
+  memory-tier live recovery, and the get-actor error for a default stateless backend.
+- `Exec` is the other outcome, side by side with the refused Resume: it does not reach this check.
+  For a stateless or VOLUMES-only session it creates new compute and replays the journal, without
+  the checkpoint's files. For a `REQUIRES_MEMORY_SNAPSHOT` session that has run a turn, `Create`
+  refuses to cold-create the actor (`api.SessionSpec.StartedTurns`), so the RAM state stays lost.
+
+`TestStatelessSessionWhoseActorIsLostIsRefused` drives this live: suspend, delete the actor, then
+Resume. `TestMemorySessionWhoseActorIsLostIsRefused` deletes the actor with no `SUSPEND` recorded, so
+it is the live-recovery case (`api.ErrMemoryStateLost` alone). The runtime-level cases are in
+`TestRestoreOfAMissingActorWithAHeldCheckpointIsRefused`.
+
+After a real reinstall the atespace and its AccessPolicy are gone too, so until provisioning runs
+again ([authorization](#substrate-v060-authorization-and-atespace-provisioning)) Substrate Control
+denies the restore's `GetActor` with `PERMISSION_DENIED`. That is not the refusal above: the adapter
+passes the denial through, `Restore` wraps it as an unrestorable snapshot, and Sessions currently
+surfaces the Resume as `INTERNAL` ("internal error" when authorization is enforced, which logs only
+an error category). Check the atespace's AccessPolicy when a Resume after a reinstall is `INTERNAL`.
+Once provisioning reruns, `GetActor` reports `NOT_FOUND` and Resume gets the `FAILED_PRECONDITION`
+refusal. The e2e tests delete the actor and leave the atespace in place, so they cover the
+`NOT_FOUND` refusal only.
+
+This reinstall sequence has not been verified against a live cluster yet; it is traced from the
+adapter and Sessions code. To check it on a cluster, suspend a session, reinstall Substrate with a
+fresh database and Resume the session: the Sessions API should return `INTERNAL` (the denied
+`GetActor`). Rerun provisioning and Resume again: it should now return `FAILED_PRECONDITION` with
+the refusal above.
+
+### Substrate v0.6.0: authorization and atespace provisioning
+
+Substrate v0.6.0 always enforces authorization (substrate `docs/authorization.md`). Every Control
+call is checked against the atespace's AccessPolicy, so the namespace label below is necessary but not
+enough: without a binding the call is `PERMISSION_DENIED`.
+
+- **Principal.** A projected ServiceAccount token authenticates as
+  `system:serviceaccount:<namespace>:<name>`, and an access policy names it `user:<that id>`. The
+  daemon, or the e2e Job's `substrate-e2e` ServiceAccount in `ate-agentsessions`
+  (`user:system:serviceaccount:ate-agentsessions:substrate-e2e`), needs one binding per atespace it
+  uses.
+- **Role.** `editor` covers every call the adapter makes, and the suite runs with it and nothing
+  more. Daemon ServiceAccounts are never bootstrap or global owners.
+- **Creating the atespace needs a global owner**, which the daemon's principal is not. An operator
+  creates each atespace and its policy; on the kind install that is `ate-client`, the bootstrap
+  owner (substrate warns not to keep it outside development).
+
+```yaml
+bindings:
+  - role: editor
+    members:
+      - user:system:serviceaccount:<namespace>:<serviceaccount>
+```
+
+Create it with `kubectl ate create atespace <atespace>` and
+`kubectl ate create access-policy -a <atespace> -f policy.yaml`, as an owner.
+
+CI runs `hack/provision-e2e-access.sh` after the WorkerPools, as the bootstrap owner, for each
+atespace the suite uses (the list is in the script). Per atespace it:
+
+- creates the atespace if `get atespace` finds none;
+- creates an `editor` policy for the Job's member if the atespace has no policy;
+- keeps a policy that already grants that member `editor` or `owner`;
+- refuses any other policy, naming the principal and the remedy: `get access-policy -o yaml`, add
+  the member to an editor binding, then `update access-policy -f`. It never rewrites a policy it
+  did not write, since an update replaces the whole policy.
+
+The suite's own principal can read its atespace but not create one. Its `ensureAtespace` treats
+`PERMISSION_DENIED` on `GetAtespace` as absent and fails with a message naming the script, rather
+than a bare `PERMISSION_DENIED`. A new fixed atespace in a test must be added to the script's list;
+the offline `TestProvisionScriptListsEveryFixedAtespace` checks it in the per-PR `integrations` job.
+
+### Substrate v0.6.0: templates and worker pools
+
+- **Resources are required.** An ActorTemplate's `spec.resources.limits` takes `cpu_millicores` and
+  `memory_bytes`, both nonzero. protojson writes the int64 as strings. The suite's templates ask
+  for 1000m and 512Mi.
+- **No per-template sandbox.** A template carries no `SandboxConfig`. The sandbox is the selected
+  WorkerPool's: its `configRef`, else the class's default SandboxConfig. The suite's pools name
+  `sandboxClasses: [{name: microvm}]` or `gvisor` with no `configRef`, and templates select a pool by
+  its `workload` label.
+- **Pools need pod limits.** A worker advertises its pod `resources.limits` as scheduling capacity,
+  and the scheduler books each template's resources against it. A pool with no limits admits no
+  sized actor. The suite's pools use limits `cpu: 1` and `memory: 1Gi`, so a worker holds one actor,
+  with requests `100m` and `256Mi` so every pool fits one kind node.
+- **`snapshotConfig.storageLocation` is a preview field** (gate `PerTemplateSnapshotLocation`),
+  ignored while the gate is off: snapshots go under the cluster's `--snapshot-location`.
+
+<a name="substrate-v050-namespace-access-to-ate-api-server"></a>
+
+### Substrate v0.6.0: namespace access to ate-api-server
+
+Substrate denies ingress to every `ate-system` pod by default since v0.5.0 (substrate #2522,
 `manifests/ate-install/ate-system-networkpolicies.yaml`, applied by both the `base` and the `kind`
 install kustomizations). Its `ate-api-server` policy admits TCP 443 from the control-plane
 components (`ate-controller`, `atelet`, `atenet-egress`, `atenet-router`) and from pods in
@@ -393,52 +508,96 @@ fails with gRPC `Unavailable` and `dial tcp <ate-api-server pod IP>:443: i/o tim
 AgentSuite example's `deploy/namespace.yaml` (`agentsuite-demo`) carry the label. Worker pods stay
 excluded in a labeled namespace, so a WorkerPool that shares it gets no API access. The label is
 not needed to reach harnesses: the same manifest's `atenet-router` policy admits any source on the
-router's data ports. The policies only take effect where the network plugin enforces
-NetworkPolicy; the kind cluster CI uses does. The previous pin (`96dffb28`) installs none of them,
-so the label has no effect there.
+router's TLS ports, where the router's client allowlist decides who gets through. The policies
+only take effect where the network plugin enforces NetworkPolicy; the kind cluster CI uses does.
+The pin before v0.5.0 (`96dffb28`) installs none of them, so the label has no effect there. The
+label is not authorization: see
+[authorization](#substrate-v060-authorization-and-atespace-provisioning).
 
-### Substrate v0.5.0: paused actors, suspend durability and runtime fallback
+<a name="substrate-v050-paused-actors-suspend-durability-and-runtime-fallback"></a>
 
-The adapter pins agent-substrate v0.5.0 (`SUBSTRATE_REF` in `.github/workflows/substrate-e2e.yml`,
-`e8d40c33`). v0.5.0 has no `PAUSED` or `PAUSING` actor state: a paused actor is `SUSPENDED` with a
-node-local newest snapshot generation and no durable copy, and a pause in progress is `SUSPENDING`.
-The adapter maps them as it mapped `PAUSED` and `PAUSING` (suspended and busy). A paused actor's
-newest generation is local-only, so it reports `SnapshotNotReady` without `SnapshotPending`:
-Restore and Create's attachment refuse it with `FAILED_PRECONDITION` before `ResumeActor`. For a
-stateless or VOLUMES-only session, Suspend of a paused actor uploads that generation, after which
-Restore proceeds from it. A memory-tier session's actor paused outside sessions holds a capture the
-journal did not record, so Exec (Create's attach), Resume, Suspend and Fork all refuse it with
-`api.ErrMemoryStateLost`, logged at `WARN`, and Suspend no longer makes it usable
-([a refused capture stays refused](#substrate-v050-a-refused-capture-stays-refused)).
+### Substrate v0.6.0: asynchronous suspends, suspend durability and runtime fallback
 
-Moving an existing Substrate install from the previous pin (`96dffb28`) to v0.5.0 is not an
+The adapter pins agent-substrate v0.6.0, module `go.ate.dev/substrate` (`SUBSTRATE_REF` in
+`.github/workflows/substrate-e2e.yml`, `d3f23635`). v0.6.0 has no pause: no `PauseActor` RPC and no
+`PAUSED` or `PAUSING` actor state. An actor is left `SUSPENDED` without a durable checkpoint by an
+asynchronous suspend: one the worker requests (`cmd/ateapi/internal/workerservice/suspend.go` sends
+no options) or one from a client that leaves `SuspendOptions.mode` unset. It returns once the
+capture is on the node. Every generation a suspend creates starts with a `PENDING` durable copy
+(`ensureMarkedSuspending` in `cmd/ateapi/internal/controlapi/workflow_suspend.go`), and an
+asynchronous one stays `PENDING` until atelet reports the background upload and the control plane
+marks it `COMPLETED` (`snapshot_report.go`). The adapter maps the actor to suspended (`SUSPENDING`,
+a suspend in progress, is busy) and reports the newest generation as `SnapshotNotReady` and
+`SnapshotPending`, never an older completed one. Restore and Create's attach refuse it with
+`UNAVAILABLE` (`api.ErrCheckpointPending`) before `ResumeActor`, and Suspend refuses it the same way
+and records no `SUSPEND`: `SuspendActor` returns a `SUSPENDED` actor as it is in any mode, so
+suspending again does not upload it. Retry once the upload completes. A stateless or VOLUMES-only
+session's Suspend then records that generation and Resume proceeds from it; a ref recorded before it
+is stale. For a memory-tier session the completed upload is a capture the journal did not record,
+so Exec (Create's attach), Resume, Suspend and Fork refuse it with `api.ErrMemoryStateLost`
+(`FAILED_PRECONDITION`), logged at `WARN`, and suspending again does not make it usable
+([a refused capture stays refused](#substrate-v060-a-refused-capture-stays-refused)).
+
+A local-only record, a newest generation with no durable copy or with a durable status other than
+`PENDING` or `COMPLETED`, is hypothetical at v0.6.0: its `SnapshotStorageStatus` has only
+`UNSPECIFIED`, `PENDING` and `COMPLETED`, and no suspend creates a generation without a `PENDING`
+durable copy. The adapter still reports one as `SnapshotNotReady` without `SnapshotPending`, since
+waiting will not make it ready. The backend refuses it with `FAILED_PRECONDITION`
+(`api.ErrInvalidCheckpoint`, or `api.ErrMemoryStateLost` for a memory-tier session, which never
+recorded it). Suspend does not upload it either, so inspect the actor and establish a durable
+checkpoint explicitly.
+
+Moving an existing Substrate install from the pin before v0.5.0 (`96dffb28`) to v0.5.0 was not an
 in-place upgrade. v0.5.0 turned `SandboxConfig.sandbox_class` from an enum into a string under the
 same field number and reads an ActorTemplate stored by the old pin with an empty class, so
 `ResumeActor` finds no worker for that template's actors. Reinstall Substrate with fresh state, as
 Substrate's `docs/upgrade.md` requires for a minor release before 1.0, and deploy the adapter from
 the same sessions release with it. Rolling back is a reinstall too.
 
-`SuspendActor` at v0.5.0 is synchronous and has no durability option: the server uploads the
-checkpoint and marks the newest generation `COMPLETED` before it returns. The adapter still treats
-a checkpoint as held only when the newest generation it returns is `COMPLETED`: a `PENDING` upload
-fails Suspend with `UNAVAILABLE` (`api.ErrCheckpointPending`) and records no `SUSPEND`, rather than
-returning an older completed generation. Substrate after v0.5.0 adds
-`SuspendActorRequest.options.mode` and defaults it to asynchronous; the adapter must ask for a
-synchronous suspend explicitly before it moves past v0.5.0, and
-`TestSuspendActorRequestHasNoDurabilityOption` fails on a pin that adds the field.
+v0.6.0 changes what an install and its manifests must say, beyond the module path:
+
+- The module is `go.ate.dev/substrate` (was `github.com/agent-substrate/substrate`), and the worker
+  binaries are `cmd/ateworker-gvisor` and `cmd/ateworker-microvm` (were `cmd/ateom-*`), so a
+  WorkerPool's `workerImage` is `ko://go.ate.dev/substrate/cmd/ateworker-<class>`. The worker gRPC
+  service is `/ateworker.Worker/...` (was `/ateom.Ateom/...`).
+- Every Control call is authorized: see
+  [authorization](#substrate-v060-authorization-and-atespace-provisioning).
+- ActorTemplates and WorkerPools change shape: see
+  [templates and worker pools](#substrate-v060-templates-and-worker-pools).
+
+Moving from v0.5.0 to v0.6.0 is not an in-place upgrade either. v0.6.0 renumbers proto fields with
+no migration: a v0.5.0 `Actor` decoded as v0.6.0 reads its `status` (field 7, now 5) as another
+message's bytes, with state `UNSPECIFIED` and no snapshots. Reinstall Substrate with fresh state, as
+its `docs/upgrade.md` requires for a minor release before 1.0, re-run the atespace provisioning, and
+deploy `agentsessionsd` from the same sessions release. The reinstall loses every actor and its
+checkpoints ([a lost actor refuses Resume](#a-lost-actor-refuses-resume)). An adapter and control
+plane one release apart are unsupported; the adapter reads the skewed actor as holding no snapshot,
+so it fails closed (`TestGetActorFailsClosedOnV050WireFormat`).
+
+`SuspendActor` at v0.6.0 takes `options.mode`, and an unset mode is `DURABILITY_MODE_ASYNCHRONOUS`:
+it returns once the snapshot is captured on the node and the upload continues in the background.
+The adapter sends `DURABILITY_MODE_SYNCHRONOUS` (`integrations/substrate/adapter.go`,
+`TestSuspendActorRequestsSynchronousDurability`), so the server uploads the checkpoint and marks the
+newest generation `COMPLETED` before it returns. Per the proto, the mode applies only when the call
+checkpoints a running actor; a `SUSPENDED` actor is returned with the snapshot it holds, which may
+still be on its node. The adapter still treats a checkpoint as held only when the newest generation
+it returns is `COMPLETED`: a `PENDING` upload fails Suspend with `UNAVAILABLE`
+(`api.ErrCheckpointPending`) and records no `SUSPEND`, rather than returning an older completed
+generation.
 
 **Runtime fallback is refused for memory-tier sessions.** Since v0.5.0 a snapshot records the
 sandbox runtime it was taken under (`Snapshot.sandbox_runtime`) and a worker assignment the runtime
 the actor runs under (`WorkerAssignment.sandbox_runtime`). When no worker matching the snapshot's
 runtime has room, `ResumeActor` drops the constraint, binds another worker and restores the
-snapshot at VOLUMES scope (`canRelaxRuntime` and the restore in
+snapshot at ROOTFS scope (`canRelaxRuntime` and `runtimeIncompatible` in
 `cmd/ateapi/internal/controlapi/workflow_resume.go`), then returns the actor `RUNNING` with no
 error. The adapter compares the two runtimes on every actor it reads, the way substrate matches
 them (same sandbox class and schema version, every recorded attribute equal). It compares the
-snapshot substrate restores from: the latest `COMPLETED` durable generation, even when a newer one
-is still pending, and none at all when a node-local checkpoint pins the resume to its node, since
-substrate never relaxes that one. A mismatch on a MEMORY snapshot is reported as
-`ActorInfo.MemoryNotRestored`. A template's golden snapshot holds no session state and is ignored;
+snapshot substrate restores from (`snapshotToResume`): the latest generation with a node-local copy
+or a `COMPLETED` durable copy, so a newer generation whose upload is still pending is skipped. A
+resume that may not drop the constraint (a node-pinned actor, or a source that is local only) is
+bound to a matching worker, so the comparison holds in either case. A mismatch on a MEMORY
+snapshot is reported as `ActorInfo.MemoryNotRestored`. A template's golden snapshot holds no session state and is ignored;
 a fork clone's borrowed snapshot counts. For a `REQUIRES_MEMORY_SNAPSHOT` harness the backend
 refuses that actor with `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) on Restore, on Create's
 attach or resume, and for a stateful fork's clone, which it tears down. The refusal names the
@@ -449,25 +608,24 @@ recorded a compute instance (a journal written before `compute_instance`, or a s
 yet), so the lost state is never recorded as the session's checkpoint. A suspend outside sessions
 writes a snapshot on the new runtime and clears the evidence, but the actor then holds a snapshot
 the journal did not record, which Restore, Create's attach and Snapshot all refuse
-([a refused capture stays refused](#substrate-v050-a-refused-capture-stays-refused)). Stateless
+([a refused capture stays refused](#substrate-v060-a-refused-capture-stays-refused)). Stateless
 sessions rebuild from the journal and are placed as before. A cluster whose workers all share one
 sandbox runtime, as the e2e kind cluster does, never hits the fallback.
 
-That check and the suspend are separate calls, and v0.5.0's `SuspendActorRequest` carries only the
-actor reference: no UID, generation or worker precondition. Another caller can suspend the checked
-actor and resume it on a worker that cannot restore its memory before `Snapshot`'s suspend captures
-it, and the suspended actor then holds no worker to compare. So a memory-tier `Snapshot` compares
-the capture the suspend reports with the actor it checked. The `ActorInfo.UID` must match, since
-an actor created again under the name from the same template can report the same lineage, and so
-must `ActorInfo.CaptureLineage`: the snapshot generation a suspend of that actor ends with, and the
-sandbox runtime that snapshot is stamped with. The adapter derives it from
-`last_assigned_generation`, the worker assignment's runtime and the newest snapshot, following the
-suspend workflow
-(`cmd/ateapi/internal/controlapi/workflow_suspend.go`). A capture or pause in between followed by a
-resume moves the next capture to a newer generation, and a resume onto a worker of another runtime
-changes the stamp. A single capture or pause with no resume after it takes the generation and stamp
-the check predicted, so it is recorded (see
-[outside suspends](#substrate-v050-outside-suspends-and-router-auto-resume)). Any change is
+That check and the suspend are separate calls, and v0.6.0's `SuspendActorRequest` carries only the
+actor reference and the durability mode: no UID, generation or worker precondition. Another caller
+can suspend the checked actor and resume it on a worker that cannot restore its memory before
+`Snapshot`'s suspend captures it, and the suspended actor then holds no worker to compare. So a
+memory-tier `Snapshot` compares the capture the suspend reports with the actor it checked. The
+`ActorInfo.UID` must match, since an actor created again under the name from the same template can
+report the same lineage, and so must `ActorInfo.CaptureLineage`: the snapshot generation a suspend
+of that actor ends with, and the sandbox runtime that snapshot is stamped with. The adapter derives
+it from `last_assigned_generation`, the worker assignment's runtime and the newest snapshot,
+following the suspend workflow (`cmd/ateapi/internal/controlapi/workflow_suspend.go`). A capture in
+between followed by a resume moves the next capture to a newer generation, and a resume onto a
+worker of another runtime changes the stamp. A single capture with no resume after it takes the
+generation and stamp the check predicted, so it is recorded (see
+[outside suspends](#substrate-v060-outside-suspends-and-router-auto-resume)). Any change is
 `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`), logged at `WARN`; no `SUSPEND` is recorded and the
 actor is left suspended. The check fails closed: a capture and resume onto a compatible worker in
 that window is refused too, although the memory survived. A `ControlClient` that reports no lineage
@@ -480,18 +638,22 @@ release it: Delete never contacts the runtime or calls Stop (see the
 logs the first refusal for each actor UID at `WARN` (`error_kind=memory_state_lost`, with
 `atespace`, `actor`, `actor_uid` and `worker`). Nothing in sessions brings the lost memory back, so
 operators should delete or abandon the session and then delete the substrate actor named in the
-warning to release the worker. That actor is still `RUNNING`, and pinned substrate v0.5.0 deletes
-only `SUSPENDED` or `CRASHED` actors unless the request sets `any_state`: a plain `DeleteActor`
-fails with `FAILED_PRECONDITION` and the worker stays held. Send `DeleteActorRequest` with `actor`
-set to the warning's `atespace`/`actor`, `any_state: true` and `options.uid` set to the warning's
-`actor_uid`. Substrate then refuses with `ABORTED` if that name now belongs to another actor, for
-example one created later for the same session, instead of deleting it. `kubectl ate` has no UID
-option: first check that `metadata.uid` in `kubectl ate get actor <actor> -a <atespace> -o yaml`
-still equals `actor_uid`, then run `kubectl ate delete actor <actor> -a <atespace> --any-state`.
-That check and the delete are separate calls, so prefer the API request when the actor can be
-recreated meanwhile.
+warning to release the worker. That actor is still `RUNNING`. Substrate v0.5.0 deleted only
+`SUSPENDED` or `CRASHED` actors unless the request set `any_state`. v0.6.0's `DeleteActorRequest`
+has no such field, and its delete workflow (`ensureMarkedDeleting` in
+`cmd/ateapi/internal/controlapi/workflow_delete.go`) marks the actor `DELETING` whatever its state,
+so a plain `DeleteActor` takes a `RUNNING` actor too. Send `DeleteActorRequest` with `actor` set to
+the warning's `atespace`/`actor` and `options.uid` set to the warning's `actor_uid`. Substrate then
+refuses with `ABORTED` if that name now belongs to another actor, for example one created later for
+the same session, instead of deleting it. The adapter's own `DeleteActor` sends the actor reference
+alone, with no UID. `kubectl ate` has no UID option: first check that `metadata.uid` in
+`kubectl ate get actor <actor> -a <atespace> -o yaml` still equals `actor_uid`, then run
+`kubectl ate delete actor <actor> -a <atespace>`. That check and the delete are separate calls, so
+prefer the API request when the actor can be recreated meanwhile.
 
-### Substrate v0.5.0: a refused capture stays refused
+<a name="substrate-v050-a-refused-capture-stays-refused"></a>
+
+### Substrate v0.6.0: a refused capture stays refused
 
 A capture `Snapshot` refuses stays on the actor: substrate leaves it `SUSPENDED` holding that
 snapshot, stamped with the runtime the foreign RAM ran on, and nothing on the actor marks it. The
@@ -528,9 +690,12 @@ the session stays refused:
 - a `SUSPEND` append that failed after its suspend took the snapshot;
 - another host's `Suspend` between its `SuspendActor` and its `SUSPEND` append (a retry after the
   append succeeds; within one host the session guard serializes them);
-- a suspend or pause by an operator or another client;
-- a suspend whose upload was still pending when it returned, once the upload completes (not at
-  v0.5.0, whose `SuspendActor` returns only after it completes).
+- a suspend by an operator or another client;
+- a suspend whose upload was still pending when it returned, once the upload completes. At v0.6.0
+  the adapter's synchronous mode waits for the upload only when `SuspendActor` captures a `RUNNING`
+  actor; an actor already `SUSPENDED`, for example by a worker-requested asynchronous suspend, is
+  returned as it is, its upload still `PENDING`
+  ([asynchronous suspends](#substrate-v060-asynchronous-suspends-suspend-durability-and-runtime-fallback)).
 
 Restore and Create's attach check again after a successful `ResumeActor`, on the actor its response
 reports: Restore against its held ref, and attach against `RecordedCheckpoint` read again, so a
@@ -545,7 +710,7 @@ capture's RAM. The backend leaves it running and does not hand it out, suspend i
 Placer dials no harness and journals nothing. Every later turn, Resume, Suspend and Fork refuse it
 before any mutating control call, since it still holds that capture. Recovery is the same as for
 every refusal here, below. The check sees only what the response reports; it is not a precondition
-on the resume, which v0.5.0's `ResumeActorRequest` (the actor's `ObjectRef` only) cannot carry.
+on the resume, which v0.6.0's `ResumeActorRequest` (the actor's `ObjectRef` only) cannot carry.
 
 Create checks the actor it creates the same way. Between its `CreateActor` and its `ResumeActor`
 the new actor is `SUSPENDED` under the session's name, so another host's attach or the router can
@@ -562,8 +727,8 @@ A stateful `Fork` checks the clone a successful `ResumeActor` reports against th
 checkpoint, which is none: the clone must hold no capture of its own (`ActorInfo.NoCapture`), only
 the tag snapshot `CreateActor{source_tag}` gave it. The clone is `SUSPENDED` between that create and
 the resume, so another caller (the router on a request addressed to the child's name, then any
-suspend or pause) can resume and capture it in between, and the resume then restores that capture
-with the clone's UID and `MemoryNotRestored` false. Unlike the refusals above, this one is
+suspend) can resume and capture it in between, and the resume then restores that capture with the
+clone's UID and `MemoryNotRestored` false. Unlike the refusals above, this one is
 `substrate.ErrActorBusy` (`ABORTED`), as for a clone replaced before its resume: the session at
 stake is a child that does not exist yet, and the parent is untouched. `Fork` logs it at `WARN`
 (`refused a fork clone that holds a capture of its own`, with the clone's `actor` and `actor_uid`,
@@ -575,9 +740,9 @@ writes no child journal and tears down the children it already cloned. The paren
 `SUSPEND` and snapshot, so a retry at the parent's new head clones a new child. The teardown is best
 effort: when its `SuspendActor` fails, for example because the caller that captured the clone holds
 its lease, the clone and its tag stay, and the refusal and a second `WARN` (`failed to tear down a
-refused fork clone`) name the clone's UID and the tag. Delete that actor with `options.uid` and
-`any_state: true`, and the tag, to release them. A clone another caller already deleted
-(`ErrActorNotFound`) counts as torn down, and `Fork` still releases its tag.
+refused fork clone`) name the clone's UID and the tag. Delete that actor with `options.uid`, and the
+tag, to release them. A clone another caller already deleted (`ErrActorNotFound`) counts as torn
+down, and `Fork` still releases its tag.
 
 `NoCapture` false also covers a client that cannot tell, such as this adapter reading an
 `ActorStatus` with a field it does not know (a newer substrate's). The refusal tells the two apart
@@ -596,10 +761,9 @@ that reads the actor's snapshot ownership.
 
 For the refusals here other than a fork clone's, nothing in sessions recovers the session's memory.
 Delete or abandon the session, and delete the substrate actor named in the warning to release its
-snapshot, or its worker if the router woke it or a refused resume left it running. A `SUSPENDED`
-actor takes a plain `DeleteActor` with `options.uid` set to the warning's `actor_uid`; a `RUNNING`
-one also needs `any_state: true`, as in
-[runtime fallback](#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback). The
+snapshot, or its worker if the router woke it or a refused resume left it running. A `DeleteActor` with
+`options.uid` set to the warning's `actor_uid` takes the actor in either state, as in
+[runtime fallback](#substrate-v060-asynchronous-suspends-suspend-durability-and-runtime-fallback). The
 session's next turn is then refused as a memory-tier session whose actor is gone. Deleting the
 actor is cleanup, not what makes the refusal stick.
 
@@ -610,7 +774,9 @@ precondition on `SuspendActor` (the worker assignment, generation or UID the cal
 substrate enforces under the actor's lease would make the check and the capture one operation, so
 sessions would never capture state it did not check.
 
-### Substrate v0.5.0: outside suspends and router auto-resume
+<a name="substrate-v050-outside-suspends-and-router-auto-resume"></a>
+
+### Substrate v0.6.0: outside suspends and router auto-resume
 
 Where the router resumes suspended actors on demand and a gateway suspends idle ones, another
 caller's suspend and resume are the normal path, not a narrow window. For a
@@ -619,7 +785,7 @@ caller's suspend and resume are the normal path, not a narrow window. For a
 - A router resume alone is harmless. It restores the snapshot the actor holds; when that is the
   checkpoint the latest `SUSPEND` names, the next turn attaches and Suspend, Resume and Fork work.
   A resume onto a worker of another sandbox runtime is refused as
-  [runtime fallback](#substrate-v050-paused-actors-suspend-durability-and-runtime-fallback) says.
+  [runtime fallback](#substrate-v060-asynchronous-suspends-suspend-durability-and-runtime-fallback) says.
 - Any suspend by another caller leaves the actor holding a capture no `SUSPEND` names, and the
   session is refused for good. That covers any number of suspend and resume cycles between
   `Snapshot`'s `GetActor` and its `SuspendActor`, a router resume of a suspended session in that
@@ -639,8 +805,9 @@ can be, the refusal fires routinely: the first idle suspend after a turn ends th
 session. This release does not support another caller suspending a memory-tier session's actor;
 only sessions (`Suspend`) may. Stateless sessions are not affected.
 
-v0.5.0 has nothing to fence this with: `SuspendActorRequest` and `ResumeActorRequest` carry only
-the actor's `ObjectRef` (`pkg/proto/ateapipb/ateapi.proto`). The server's `SuspendActor` takes the
+v0.6.0 has nothing to fence this with: `SuspendActorRequest` carries only the actor's `ObjectRef`
+and the durability mode, and `ResumeActorRequest` only the `ObjectRef`
+(`pkg/proto/ateapipb/ateapi.proto`). The server's `SuspendActor` takes the
 actor's lease and turns its own store version conflicts into `ABORTED`, but checks nothing the
 caller sends (`RPCService.SuspendActor` in `cmd/ateapi/internal/controlapi/actor.go`,
 `ActorWorkflow.SuspendActor` in `workflow_suspend.go`). Only `UpdateActor` (UID and version) and
@@ -649,7 +816,7 @@ A `SuspendActor` precondition would remove the window above, but an idle suspend
 still leave a capture the journal did not record.
 
 **Known limit — effective resume source can differ from durable evidence:** the adapter maps
-a paused actor to suspended but reports only durable checkpoint evidence. At the
+an asynchronously suspended actor to suspended but reports only durable checkpoint evidence. At the
 pinned Substrate, resume can restore something other than the durable checkpoint the adapter
 validated. Validation can falsely refuse recoverable local state or accept a checkpoint whose
 fidelity does not meet the backend's requirement. A newest local-only checkpoint is
@@ -657,11 +824,10 @@ conservatively refused even if recoverable (as not ready, or for a memory-tier s
 `api.ErrMemoryStateLost`); this does not identify Substrate's
 effective source. Local checkpoint preference can still differ from the durable evidence selected
 here, so a durable VOLUMES checkpoint can pass validation while resume restores local MEMORY.
-Likewise, when a durable snapshot's recorded `ActorTemplate` UID differs from the
-actor's current template UID (for example because the template was deleted and recreated under the
-same name), pinned Substrate restores at VOLUMES scope: a memory-tier session can pass durable
-MEMORY validation yet still cold-boot and lose RAM.
-Sessions does not call `PauseActor`. These effective-source cases remain open in
+Likewise, when a durable snapshot's recorded `ActorTemplate` UID differs from the actor's current
+template UID (for example because the template was deleted and recreated under the same name),
+pinned Substrate restores at VOLUMES scope: a memory-tier session can pass durable MEMORY validation
+yet still cold-boot and lose RAM. These effective-source cases remain open in
 [issue #192](https://github.com/agent-primitives/sessions/issues/192); neither the conservative
 local-only refusal nor held-URI validation solves them. These checks provide no boot-scoped
 credential authority.
@@ -755,7 +921,7 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
 - A clone the resume reports holding a capture of its own, from another caller that resumed and
   captured it while it was `SUSPENDED`, is `substrate.ErrActorBusy` (`ABORTED`) too, logged at
   `WARN` and torn down the same way; a retry clones a new child
-  ([a refused capture stays refused](#substrate-v050-a-refused-capture-stays-refused)).
+  ([a refused capture stays refused](#substrate-v060-a-refused-capture-stays-refused)).
 - A control client without the Tag APIs does not satisfy the optional `SnapshotCloner` interface; a
   stateful fork there fails loudly rather than degrading to a lossy replay-fork.
 - The child fan-out is all-or-nothing. If a child fails to provision, the ones already created are
@@ -817,8 +983,7 @@ The first green run, at the earlier substrate pin where a tag did not copy the s
 small memory image. The suite logs the fan-out time on every run.
 
 Read that as an existence proof, not a bound: it is one snapshot size on one sandbox class. How
-the cost scales with snapshot size, and whether a paused (node-local) parent changes it, has not
-been measured.
+the cost scales with snapshot size has not been measured.
 
 ## Placing an actor is idempotent
 
@@ -856,70 +1021,117 @@ recorded compute state with the actor; neither rolls back effects from a failed 
 The harness is a `harnesswire` gRPC server on port 80 in the actor. The host reaches it the only way
 current substrate supports: through `atenet-router`, the cluster's actor ingress.
 
-- Every substrate incarnation carries the router address (`atenet-router.ate-system.svc:80` by default,
-  `substrate.WithRouter` to override) and `CallMetadata` of `ate-target-actor: <atespace>/<actor>`.
-  The Placer's dialer attaches that metadata to every call. The router ignores the host and
-  authority; the header alone selects the actor (substrate `internal/atenet/headers.go`).
-- The router accepts h2c and carries gRPC unary, server-streaming and bidi calls, trailers included,
-  to the actor (substrate #1183; upstream e2e `TestIngressGRPC`). It resumes a suspended actor on
-  request, then forwards over mTLS to the worker's atunnel, which checks the actor is assigned to it
-  and proxies to port 80 over the actor's private veth.
+**Install ate-system with substrate's default envoy dataplane, and allowlist the host.** From v0.6.0
+the envoy router serves only TLS (substrate #2977 removed its plaintext mode), and it admits a
+client whose certificate chains to the pod identity CA and carries a SPIFFE ID listed exactly in its
+`--ingress-allowed-spiffe-ids` (set with ate-setup's flag of the same name, required with envoy).
+The pod identity signer issues `spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`, so list
+the ServiceAccount `agentsessionsd` runs as. The CI workflow lists the conformance Job's
+(`.../ns/ate-agentsessions/sa/substrate-e2e`), and both examples' `up.sh` list their daemon's. The
+allowlist is fixed at install: adding a host means deploying the router again with ate-setup.
+
+The host follows substrate's recipe for an in-cluster client (substrate
+`cmd/atenet/internal/router/README.md`, "Client in the cluster, pod identity CA"): one projected
+volume with a `podCertificate` source (signer `podidentity.podcert.ate.dev/identity`, `ECDSAP256`,
+`credentialBundlePath: credential-bundle.pem`) and a `clusterTrustBundle` source (signer
+`servicedns.podcert.ate.dev/identity`, label `podcert.ate.dev/canarying: live`). kubelet issues and
+rotates both, so the pod needs no RBAC for them; `agentsessionsd` reads them through
+`-atenet-router-cert-file` and `-atenet-router-ca-file`, and the conformance Job through
+`ATENET_ROUTER_CERT_FILE` and `ATENET_ROUTER_CA_FILE` (`deploy/substrate/e2e-job.yaml`). What each
+side verifies, and what it does not, is in [security.md](security.md).
+
+- Every substrate incarnation carries the router address (`atenet-router.ate-system.svc:443` by
+  default, `substrate.WithRouter` to override) and `CallMetadata` of
+  `ate-target-actor: <atespace>/<actor>`. The router client's dialer attaches that metadata to every
+  call. The router ignores the host and authority; the header alone selects the actor (substrate
+  `internal/atenet/headers.go`).
+- The router's HTTPS listener negotiates `h2` and routes gRPC to the actor: it resumes a suspended
+  actor on request, then tunnels over mTLS CONNECT to the worker's atunnel, which checks the actor
+  is assigned to it and proxies to port 80 over the actor's private veth (substrate
+  `cmd/atenet/internal/router/xds.go`; upstream e2e `TestIngressGRPC` makes the same call shape).
+- Measured on kind at the v0.6.0 pin, from a pod in `ate-agentsessions`: the pod's credential bundle
+  holds a `PRIVATE KEY` and the leaf `CERTIFICATE` (24h, client and server EKU), and was present
+  when the container started. The router's certificate carries only the DNS name
+  `atenet-router.ate-system.svc`. An allowlisted client completes TLS 1.3 and reaches routing: a
+  call naming an absent actor returns `Unimplemented` "actor ... not found", and one with no
+  `ate-target-actor` returns `Unimplemented` "invalid actor reference". A client whose ID is not
+  listed gets the alert `unknown certificate`, and one with no certificate `certificate required`,
+  both on the first read after the handshake, so the host sees gRPC `Unavailable` (`write: broken
+  pipe`). `agentsessionsd` probes the router once at startup and logs which of these it got.
+  `TestRouterRefusesClientWithoutCertificate` checks the refusal on every run, and
+  `TestRoutedCallWakesSuspendedActor` that a routed `Describe` with the Job's certificate wakes a
+  suspended actor without a Control `ResumeActor` from the client.
 - Substrate removed the worker pod-IP:80 ingress on purpose (substrate #559), so there is no direct
   path to fall back on, and the conformance Job needs no NetworkPolicy exception to reach a harness.
   Its Control calls to ate-api-server need its namespace's `ate.dev/api-access=true` label on
-  v0.5.0: see
-  [namespace access to ate-api-server](#substrate-v050-namespace-access-to-ate-api-server).
+  v0.6.0: see
+  [namespace access to ate-api-server](#substrate-v060-namespace-access-to-ate-api-server).
 
 ```mermaid
 flowchart LR
   accTitle: Conformance traffic on agent-substrate
   accDescr {
     The in-cluster conformance Job calls ate-api-server over Control gRPC with a service-account
-    token, and opens Harness.Connect over h2c to atenet-router, addressed by ate-target-actor.
-    The router resumes the actor through ate-api-server if needed, then forwards over mTLS h2 to
-    atunnel on the worker, which reaches the actor harness on port 80 over h2c on a veth pair.
+    token, and opens Harness.Connect over mTLS to atenet-router with its pod certificate, addressed
+    by ate-target-actor. The router resumes the actor through ate-api-server if needed, then tunnels
+    over mTLS CONNECT to atunnel on the worker, which reaches the actor harness on port 80 over h2c
+    on a veth pair.
   }
   job["conformance Job<br/>in-cluster `go test`"]
   api["ate-api-server"]
-  router["atenet-router<br/>(Envoy + ext_proc)"]
+  router["atenet-router<br/>(envoy)"]
   tunnel["atunnel on the worker"]
   actor["actor harness :80<br/>gVisor / micro-VM"]
 
   job -->|"Control gRPC<br/>Service + SA token"| api
-  job -->|"Harness.Connect h2c<br/>ate-target-actor"| router
+  job -->|"Harness.Connect mTLS :443<br/>pod certificate, ate-target-actor"| router
   router -->|"ResumeActor if needed"| api
-  router -->|"mTLS h2"| tunnel
+  router -->|"mTLS CONNECT"| tunnel
   tunnel -->|"h2c over veth"| actor
 ```
 
-Limits that come with the router, measured or read rather than assumed:
+<a name="router-clients-outside-the-cluster"></a>
 
-- **Route timeout.** The router sets `--route-timeout` (5m by default, one global value) and a
-  route-level stream idle timeout 30s past it (`routeIdleTimeout` in
-  `cmd/atenet/internal/router/xds.go` at `fc0e3586`). `TestHarnessStreamIdlePastRouteTimeout` holds
-  a Connect stream idle, as a turn parked on a slow model call does. On kind, with the echo harness
-  on gVisor, the router tore the stream down after **5m30s**, both at `362637f9` and at `fc0e3586`
-  (held idle for 6m30s): a pending `Recv` got `Internal` "stream terminated by RST_STREAM with error
-  code: INTERNAL_ERROR", not a 504. Through the Placer, which does not read while the host's model
-  call runs, the turn failed only when the host sent its late reply, with a bare `EOF` (measured at
-  `362637f9`). So a turn that runs longer than the route timeout fails once its stream has been idle
-  past the idle timeout (5m30s by default). Until substrate offers a per-route or streaming timeout
-  (tracked in substrate issue 1291), raise the router's `--route-timeout` above the longest turn;
-  the idle timeout follows it.
+**Router clients outside the cluster are not supported yet.** The router admits only clients with
+an allowlisted pod certificate, and a process on a laptop has none. The tools that port-forward the
+router from a laptop therefore fail on v0.6.0: the agentsuite demo's replay step (`demo.sh` and
+`cmd/replay`), `demo/driver.sh`, the session lifecycle UI's replay, and
+`examples/agentsuite-substrate/demo/smoke-microvm.sh`, which refuses before it deploys anything.
+Giving them a certificate needs PodCertificateRequest create permission, which can mint any
+ServiceAccount's ID in its namespace (substrate `internal/e2e/ingressauth.go` shows the mechanism),
+so it is a separate change. Everything that runs in the cluster, `agentsessionsd` and the
+conformance Job, is unaffected.
+
+Limits that come with the router, measured or read rather than assumed. The two measurements were
+taken on the envoy router (at `362637f9` and `fc0e3586`).
+
+- **Route timeout.** The `idle stream` pass of the CI workflow holds a stream idle through the
+  router for 6m30s on push, nightly and manual runs (not on pull requests), so those runs record its
+  behavior at the pin. The envoy router sets
+  `--route-timeout` (5m by default, one global value) and a route-level stream idle timeout 30s past
+  it (`routeIdleTimeout` in `cmd/atenet/internal/router/xds.go` at `fc0e3586`).
+  `TestHarnessStreamIdlePastRouteTimeout` holds a Connect stream idle, as a turn parked on a slow
+  model call does. On kind, with the echo harness on gVisor, the router tore the stream down after
+  **5m30s**, both at `362637f9` and at `fc0e3586` (held idle for 6m30s): a pending `Recv` got
+  `Internal` "stream terminated by RST_STREAM with error code: INTERNAL_ERROR", not a 504. Through
+  the Placer, which does not read while the host's model call runs, the turn failed only when the
+  host sent its late reply, with a bare `EOF` (measured at `362637f9`). So a turn that runs longer
+  than the route timeout fails once its stream has been idle past the idle timeout (5m30s by
+  default). Until substrate offers a per-route or streaming timeout (tracked in substrate issue
+  1291), raise the router's `--route-timeout` above the longest turn; the idle timeout follows it.
 - **Checkpoint drain.** Before it snapshots, the worker waits for the actor's in-flight requests to
-  finish, and an idle open Connect stream is one of them. On kind with the echo harness on gVisor, at
-  `362637f9`, `SuspendActor` under such a stream took **5m30s**: it waited for the router to reset
-  the stream. `Placer.Suspend`
-  therefore never checkpoints under a turn it knows of: while an `Exec` or `Resume` of the session
-  runs, it is refused with `ErrSessionBusy` (ABORTED), and once the turn has returned its stream is
-  closed. A stateful `Fork`, which supersedes the running turn instead, closes the parent's harness
-  streams before it checkpoints. `TestSuspendUnderAnIdleHarnessStream` checks the Suspend half on a
-  live cluster. Both cover turns any Placer of this process's `placement.Registry` drives; a turn
-  driven outside this Registry is fenced by the log, but its stream stays open until it next touches
-  the log and can still stall a checkpoint.
-- **No caller authentication.** The router does not check who is calling before it resumes an actor
-  and proxies to it, so any pod that can reach it can drive any harness. See
-  [security.md](security.md).
+  finish, and an idle open Connect stream is one of them. On the envoy router, on kind with the echo
+  harness on gVisor, at `362637f9`, `SuspendActor` under such a stream took **5m30s**: it waited for
+  the router to reset the stream. `Placer.Suspend` therefore never checkpoints under a turn it knows
+  of: while an `Exec` or `Resume` of the session runs, it is refused with `ErrSessionBusy`
+  (ABORTED), and once the turn has returned its stream is closed. A stateful `Fork`, which
+  supersedes the running turn instead, closes the parent's harness streams before it checkpoints.
+  `TestSuspendUnderAnIdleHarnessStream` checks the Suspend half on a live cluster. Both cover turns
+  any Placer of this process's `placement.Registry` drives; a turn driven outside this Registry is
+  fenced by the log, but its stream stays open until it next touches the log and can still stall a
+  checkpoint.
+- **No per-actor authorization.** The router admits every allowlisted client to every actor, so
+  any listed host can drive any harness. See [security.md](security.md).
 
 ## The suite (`integrations/substrate/e2e`)
 
@@ -942,6 +1154,12 @@ Places the echo harness through the `Placer`, executes a turn, calls `Placer.Sus
 `Placer.Resume`, then executes another turn. The recorded snapshot retains the actor handle required
 by Restore, and both lifecycle markers and subsequent output remain on a valid hash chain. This
 regression is selected alongside stateless replay in the stateless-tier CI pass.
+
+`TestStatelessSessionWhoseActorIsLostIsRefused` suspends a stateless session, deletes its actor and
+requires Resume to fail with `api.ErrInvalidCheckpoint` (not `api.ErrMemoryStateLost`), naming the
+actor and the latest `SUSPEND` but not the snapshot URI, with no actor created and the journal head
+unchanged ([a lost actor refuses Resume](#a-lost-actor-refuses-resume)). It is selected in the
+stateless-tier CI pass.
 
 Cold suspension is not teardown: `Snapshot(EXTERNAL)` releases the worker and keeps the actor
 SUSPENDED; `Stop` deletes it. Calling Stop after the snapshot would make explicit Resume fail with
@@ -1034,10 +1252,12 @@ affect it and nightly (heavy — kind + KVM + micro-VM assets — but the claims
 no unit test can make). A concurrency group cancels a superseded run so one push does not leave two
 clusters standing. It copies substrate's own recipe: `create-kind-cluster` + `install-ate-kind`,
 then `install-microvm-deps.sh --install` before either tier runs (stages the kata +
-cloud-hypervisor asset cache and installs the micro-VM SandboxConfig both templates name).
+cloud-hypervisor asset cache and installs the cluster-scoped micro-VM SandboxConfig as the class
+default, which both pools resolve to).
 Substrate publishes no images, so its binaries are built from source at `SUBSTRATE_REF`; the
-workflow caches the Go build and module caches and the envoy-dataplane image's buildx cache between
-runs.
+workflow caches the Go build and module caches between runs. It installs ate-system with the
+default envoy dataplane, whose `envoy-dataplane` image it builds during the install, and allowlists
+the conformance Job's SPIFFE ID ([the transport](#the-transport-harnesswire-through-atenet-router)).
 
 The durable [kind example](../examples/substrate-kind/README.md) runs independently in the
 `substrate-kind example lifecycle` job, with a fresh managed checkout and its own cluster. That job
@@ -1064,14 +1284,20 @@ required jobs the same way with the `ci` profile, skipping only markdown (other 
 Scheduled and manual runs add a canary job, `substrate-conformance (substrate main)`, that runs the
 same suite against agent-substrate's `main` head, with the adapter's client moved to that commit in
 the runner's checkout only. It surfaces upstream drift before a bump; it never runs on a pull
-request and its failure does not fail the run. It is known red until the next substrate bump: `main`
-renamed `cmd/ateom-microvm` to `cmd/ateworker-microvm` and the module to `go.ate.dev/substrate`.
+request and its failure does not fail the run. It shares the pinned run's v0.6.0 layout (`go.ate.dev/substrate`, `cmd/ateworker-microvm`), so it
+fails only on drift past v0.6.0. It has not run green yet; until a nightly canary does, read its
+result in the job list (`continue-on-error` hides it from the run's status). Once a nightly canary
+runs green, `continue-on-error` is meant to be dropped, so new drift turns the nightly run red.
 
 The conformance suite applies only the namespace and the micro-VM WorkerPools
 (`deploy/substrate/namespace.yaml`, `echo-microvm-workerpool.yaml`,
 `counter-microvm-workerpool.yaml`). The namespace carries `ate.dev/api-access=true`, which every
-tier's Job needs to reach ate-api-server on v0.5.0
-([namespace access](#substrate-v050-namespace-access-to-ate-api-server)). ActorTemplates are
+tier's Job needs to reach ate-api-server on v0.6.0
+([namespace access](#substrate-v060-namespace-access-to-ate-api-server)). The Job runs as the
+`substrate-e2e` ServiceAccount (`deploy/substrate/e2e-job.yaml`), and the step "Provision the suite's
+atespaces and access" runs `hack/provision-e2e-access.sh` after the pools, with a `kubectl-ate` built
+from the same substrate commit, so each suite atespace has an `editor` policy for that principal
+([authorization](#substrate-v060-authorization-and-atespace-provisioning)). ActorTemplates are
 substrate API resources in an atespace, so the suite creates its own through Control with the
 harness image the workflow built (`HARNESS_IMAGE`) and waits for each golden snapshot.
 
@@ -1103,8 +1329,8 @@ way CI does. `create-kind-cluster.sh` deletes any existing cluster named `KIND_C
 it creates one, so pick a name you do not use for anything else.
 
 The pool manifests name the worker image as a `ko://` import path, which the WorkerPool controller
-passes to its Pods unchanged, so the block builds `ateom-gvisor` from the same agent-substrate
-checkout and substitutes its digest, as CI does for `ateom-microvm`. Every image must match the
+passes to its Pods unchanged, so the block builds `ateworker-gvisor` from the same agent-substrate
+checkout and substitutes its digest, as CI does for `ateworker-microvm`. Every image must match the
 node's architecture: ko builds `linux/amd64` unless `KO_DEFAULTPLATFORMS` says otherwise, and an
 amd64 harness image on an arm64 node fails `runsc start`.
 
@@ -1119,7 +1345,9 @@ git -C "${SUBSTRATE}" checkout "${SUBSTRATE_REF}"
 # Cluster, local registry and ate-system, as the workflow does.
 (cd "${SUBSTRATE}" && hack/create-kind-cluster.sh)
 (cd "${SUBSTRATE}" && ATE_CREDENTIAL_PROVIDER='{"name":"k8s.io"}' \
-  hack/install-ate-kind.sh --deploy-ate-system --rollout-timeout 10m)
+  hack/install-ate-kind.sh --rollout-timeout=10m \
+    --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-agentsessions/sa/substrate-e2e \
+    deploy ate-system)
 
 # Images: the conformance test binary, the harness and the gVisor worker.
 E2E_IMAGE=localhost:5001/agentsessions-e2e:local
@@ -1128,19 +1356,21 @@ E2E_DIR="$(mktemp -d)"
   CGO_ENABLED=0 GOOS=linux GOARCH="$(go env GOARCH)" go test -c -o "${E2E_DIR}/e2e.test" ./e2e)
 cp deploy/substrate/Dockerfile.e2e "${E2E_DIR}/Dockerfile"
 docker build -t "${E2E_IMAGE}" "${E2E_DIR}" && docker push "${E2E_IMAGE}"
-ATEOM_IMG="$(cd "${SUBSTRATE}" && ko build --base-import-paths ./cmd/ateom-gvisor)"
+ATEWORKER_IMG="$(cd "${SUBSTRATE}" && ko build --base-import-paths ./cmd/ateworker-gvisor)"
 HARNESS_IMAGE="$(ko build ./cmd/harnessnode)"
 
-# The gVisor WorkerPools, then both tiers.
+# The gVisor WorkerPools, the suite's atespaces and access, then both tiers.
 kubectl --context "kind-${KIND_CLUSTER_NAME}" apply -f deploy/substrate/namespace.yaml
 for tier in echo counter; do
-  sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor#${ATEOM_IMG}#" \
+  sed -e "s#ko://go.ate.dev/substrate/cmd/ateworker-gvisor#${ATEWORKER_IMG}#" \
     "deploy/substrate/${tier}-gvisor-workerpool.yaml" |
     kubectl --context "kind-${KIND_CLUSTER_NAME}" apply -f -
   hack/wait-worker-pool.sh "${tier}-gvisor"
 done
+(cd "${SUBSTRATE}" && go build -o "${E2E_DIR}/kubectl-ate" ./cmd/kubectl-ate)
+KUBECTL_ATE="${E2E_DIR}/kubectl-ate" hack/provision-e2e-access.sh
 HARNESS_IMAGE="${HARNESS_IMAGE}" ECHO_SANDBOX_CLASS=gvisor COUNTER_SANDBOX_CLASS=gvisor \
-  hack/run-e2e-job.sh 'TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestMemorySnapshotSuspendResume|TestMemorySessionWhoseActorIsLostIsRefused|TestFork|TestConcurrentSessionsReachTheirOwnActors' \
+  hack/run-e2e-job.sh 'TestStatelessReplay|TestSessionSuspendResume|TestStatelessSessionWhoseActorIsLostIsRefused|TestSuspendUnderAnIdleHarnessStream|TestMemorySnapshotSuspendResume|TestMemorySessionWhoseActorIsLostIsRefused|TestFork|TestConcurrentSessionsReachTheirOwnActors' \
   "${E2E_IMAGE}" 1800
 ```
 

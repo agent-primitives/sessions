@@ -66,7 +66,7 @@ func TestSuspendUnderAnIdleHarnessStream(t *testing.T) {
 	session := uniqueUID("suspend-placer")
 	defer stopQuietly(t, backend, session)
 	called := make(chan struct{})
-	p := placement.New(backend, parkingModel(called))
+	p := newPlacer(t, backend, parkingModel(called))
 	log := journal(t).Session(session)
 	turnCtx, endTurn := context.WithCancel(ctx)
 	defer endTurn()
@@ -117,7 +117,7 @@ func suspendBaseline(ctx context.Context, t *testing.T, backend *substrate.Backe
 	rawSession := uniqueUID("suspend-raw")
 	rawCalled := make(chan struct{})
 	rawCtx, rawCancel := context.WithCancel(ctx)
-	rawPlacer := placement.New(backend, parkingModel(rawCalled))
+	rawPlacer := newPlacer(t, backend, parkingModel(rawCalled))
 	rawDone := make(chan error, 1)
 	go func() {
 		_, err := rawPlacer.Exec(rawCtx, journal(t).Session(rawSession), rawSession, []api.Message{*api.TextMessage("user", "idle")}, 0)

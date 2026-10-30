@@ -208,8 +208,18 @@ exec "`+python3+`" "$@"
 	if err := os.MkdirAll(filepath.Join(s.work, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// get access-policy answers per STUB_POLICY: granted (default) lists the daemon as editor, absent
+	// reports no policy until create access-policy records one, foreign lists only someone else.
 	stub(t, filepath.Join(s.work, "bin"), "kubectl-ate", log+`
+granted='{"bindings":[{"role":"editor","members":["user:system:serviceaccount:agentsuite-demo:agentsessionsd"]}]}'
 case " $* " in
+*" get access-policy "*)
+	case "${STUB_POLICY:-granted}" in
+	absent) if [ -e "$STUB_DIR/policy-created" ]; then echo "$granted"; else echo "agentsuite-demo has no access policy" >&2; fi ;;
+	foreign) echo '{"bindings":[{"role":"editor","members":["user:someone"]},{"role":"viewer","members":["user:system:serviceaccount:agentsuite-demo:agentsessionsd"]}]}' ;;
+	*) echo "$granted" ;;
+	esac ;;
+*" create access-policy "*) cat >"$STUB_DIR/policy-created" ;;
 *" -o json "*) echo '{"status": {"goldenSnapshotStatus": {"goldenTag": {"name": "golden-1"}}}}' ;;
 esac
 `)
@@ -334,8 +344,9 @@ func (s *stubs) runArgs(t *testing.T, script string, args []string, env ...strin
 // installCall is how the go stub logs up.sh's ate-system install.
 const installCall = "go run ./cmd/ate-setup --kind"
 
-// installed is the setup record up.sh writes once it installed ate-system on node: the node and the
-// substrate commit it installed, which common.sh reads from the substrate e2e workflow.
+// installed is the setup record up.sh writes once it installed ate-system on node: the node, the
+// substrate commit it installed, which common.sh reads from the substrate e2e workflow, and the
+// router dataplane (envoy).
 func installed(t *testing.T, node string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "substrate-e2e.yml"))
@@ -346,7 +357,7 @@ func installed(t *testing.T, node string) string {
 	if m == nil {
 		t.Fatal("substrate-e2e.yml sets no SUBSTRATE_REF")
 	}
-	return node + " installed " + string(m[1])
+	return node + " installed " + string(m[1]) + " envoy"
 }
 
 // staleRef is a substrate commit other than the one the example pins: the pin before v0.5.0, as
@@ -399,7 +410,7 @@ func TestUpClusterPhase(t *testing.T) {
 			// platform Docker reports: a Mac driving a remote amd64 Docker gets amd64 images.
 			name: "the install builds for the platform Docker reports", env: []string{"STUB_DOCKER_ARCH=x86_64"},
 			wantCode:  pastClusterPhase,
-			wantCalls: []string{installCall, "--ko-default-platforms=linux/amd64", "deploy ate-system --setup-csi=none"},
+			wantCalls: []string{installCall, "--ko-default-platforms=linux/amd64", "--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/agentsuite-demo/sa/agentsessionsd deploy ate-system --setup-csi=none"},
 			wantOwned: "node-1", wantSetup: installed(t, "node-1"),
 		},
 		{
@@ -510,6 +521,22 @@ func TestUpClusterPhase(t *testing.T) {
 			wantCode: 1, wantOut: "from a commit it did not record",
 			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl"},
 			wantOwned: "node-1", wantSetup: "node-1 installed",
+		},
+		{
+			// agentsessionsd needs the envoy router's mTLS listener: a cluster an earlier up.sh
+			// installed with agentgateway, or whose record names no dataplane, is not reused.
+			name: "an owned cluster installed with the agentgateway dataplane is refused", env: []string{"STUB_CLUSTERS=" + cluster},
+			node: "node-1", owned: "node-1", setup: strings.TrimSuffix(installed(t, "node-1"), " envoy") + " agentgateway",
+			wantCode: 1, wantOut: "installed with another router dataplane (agentgateway)",
+			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl"},
+			wantOwned: "node-1", wantSetup: strings.TrimSuffix(installed(t, "node-1"), " envoy") + " agentgateway",
+		},
+		{
+			name: "an owned cluster whose record names no dataplane is refused", env: []string{"STUB_CLUSTERS=" + cluster},
+			node: "node-1", owned: "node-1", setup: strings.TrimSuffix(installed(t, "node-1"), " envoy"),
+			wantCode: 1, wantOut: "installed with another router dataplane (not recorded)",
+			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl"},
+			wantOwned: "node-1", wantSetup: strings.TrimSuffix(installed(t, "node-1"), " envoy"),
 		},
 		{
 			// A same-named cluster recreated by someone else has another container ID, so the old
@@ -1800,6 +1827,20 @@ func TestDemoTapeMatchesDriverWaits(t *testing.T) {
 	}
 }
 
+// smoke-microvm.sh reaches the actor through a port-forward of the router from this machine, which
+// substrate v0.6.0's envoy router does not admit, so it refuses before it deploys anything.
+func TestDemoSmokeMicroVMRefusesBeforeDeploying(t *testing.T) {
+	s := newStubs(t)
+	code, out, calls := s.run(t, "demo/smoke-microvm.sh")
+	if code != 1 || !strings.Contains(out, "SMOKE FAILED: the smoke test reaches the actor from outside the cluster") ||
+		!strings.Contains(out, "docs/substrate-conformance.md#router-clients-outside-the-cluster") {
+		t.Fatalf("smoke-microvm.sh exited %d, want 1 with the refusal:\n%s", code, out)
+	}
+	if strings.Contains(calls, "install-ate-kind.sh") || strings.Contains(calls, "kubectl") {
+		t.Fatalf("smoke-microvm.sh changed the cluster before refusing; calls:\n%s", calls)
+	}
+}
+
 // present.awk holds each line's newline until the next line, so vhs's Wait+Line sees the newest
 // line, and a line starting with "@@R " overwrites the line before it.
 func TestDemoPresent(t *testing.T) {
@@ -2032,6 +2073,47 @@ exec "$@"
 			if copied := err == nil; copied != (tc.wantLine == after) {
 				t.Errorf("logs/teardown.log in DEMO_OUT: %v, want it copied only with the README's "+
 					"TEARDOWN OK line", err)
+			}
+		})
+	}
+}
+
+// up.sh grants agentsessionsd editor on the atespace only when it has no AccessPolicy, keeps a
+// policy that already grants it, and refuses one that does not rather than overwrite it.
+func TestUpEnsuresTheDaemonsAccessPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		policy, wantOut string
+		wantCode        int
+		wantCreate      bool
+	}{
+		{policy: "granted"},
+		{policy: "absent", wantCreate: true},
+		{policy: "foreign", wantCode: 1, wantOut: "AccessPolicy agentsuite-demo does not grant user:system:serviceaccount:agentsuite-demo:agentsessionsd editor"},
+	} {
+		t.Run(tc.policy, func(t *testing.T) {
+			s := newStubs(t)
+			s.node(t, "node-1")
+			s.record(t, "created-cluster", "node-1")
+			s.record(t, "setup-cluster", installed(t, "node-1"))
+			code, out, calls := s.run(t, "up.sh", "STUB_CLUSTERS="+cluster, "STUB_FULL=1", "STUB_POLICY="+tc.policy)
+			if code != tc.wantCode || !strings.Contains(out, tc.wantOut) {
+				t.Fatalf("up.sh exit %d, want %d and output containing %q\noutput:\n%s\ncalls:\n%s", code, tc.wantCode, tc.wantOut, out, calls)
+			}
+			if got := strings.Contains(calls, "create access-policy -a agentsuite-demo -f -"); got != tc.wantCreate {
+				t.Fatalf("create access-policy called=%v, want %v; calls:\n%s", got, tc.wantCreate, calls)
+			}
+			if tc.wantCode != 0 && strings.Contains(calls, "create actor-template") {
+				t.Errorf("a refused policy must stop before any template is created; calls:\n%s", calls)
+			}
+			if !tc.wantCreate {
+				return
+			}
+			b, err := os.ReadFile(filepath.Join(s.dir, "policy-created"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "bindings:\n- role: editor\n  members:\n  - user:system:serviceaccount:agentsuite-demo:agentsessionsd\n"; string(b) != want {
+				t.Errorf("created policy:\n%s\nwant:\n%s", b, want)
 			}
 		})
 	}

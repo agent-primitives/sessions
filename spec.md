@@ -1671,25 +1671,29 @@ and never downgrade the migrated journal to v0.3.0 or older.
   released without a SUSPEND record, so once it completes, Suspend again to record the new ref
   before Resume; the older ref is stale. Local-only state wraps `api.ErrInvalidCheckpoint`
   (`FAILED_PRECONDITION`): it may never upload, so inspect and explicitly establish a durable
-  checkpoint instead of waiting. At v0.5.0 `SuspendActor` returns only once its upload completed, so
-  it does not leave one pending. This conservatively refuses out-of-band paused/local-only default
-  attachment. Readiness is not effective restore-source evidence.
-  These client checks can race lifecycle operations or router ingress; only Substrate can atomically
-  bind expected snapshot/state to resume. Known limit: the effective resume source can differ from
-  the durable checkpoint the adapter validated. Actors paused outside sessions may hold an
-  actor-local checkpoint that Substrate prefers on resume, while the adapter reports only durable
-  checkpoint evidence. Validation can falsely refuse recoverable local state or accept a fidelity
-  that does not meet the backend's requirement. A newest local-only checkpoint is conservatively
-  refused; local preference can still make durable VOLUMES pass validation while resume restores
-  local MEMORY. Likewise, when a durable snapshot's recorded `ActorTemplate` UID differs from
-  the actor's current template UID (for
-  example because the template was deleted and recreated under the same name), pinned Substrate
+  checkpoint instead of waiting. The adapter requests a synchronous suspend (an unset mode is
+  asynchronous at v0.6.0), so `SuspendActor` capturing a `RUNNING` actor returns only once its
+  upload completed. An actor already `SUSPENDED`, for example by a worker-requested asynchronous
+  suspend, is returned as it is in any mode, its upload still `PENDING` until the background upload
+  completes: Suspend refuses it as pending, and suspending again does not upload it. This
+  conservatively refuses default attachment to an out-of-band pending or local-only capture.
+  Readiness is not effective restore-source evidence. These client checks can race lifecycle
+  operations or router ingress; only Substrate can atomically bind expected snapshot/state to
+  resume. Known limit: the effective resume source can differ from the durable checkpoint the
+  adapter validated. Actors suspended outside sessions may hold an actor-local checkpoint that
+  Substrate prefers on resume, while the adapter reports only durable checkpoint evidence.
+  Validation can falsely refuse recoverable local state or accept a fidelity that does not meet the
+  backend's requirement. A newest local-only checkpoint is conservatively refused; local preference
+  can still make durable VOLUMES pass validation while resume restores local MEMORY. Likewise, when
+  a durable snapshot's recorded `ActorTemplate` UID differs from the actor's current template UID
+  (for example because the template was deleted and recreated under the same name), pinned Substrate
   restores at VOLUMES scope: a memory-tier session can pass durable MEMORY validation yet still
   cold-boot and lose RAM. Both cases remain open in
   [issue #192](https://github.com/agent-primitives/sessions/issues/192); held-URI/readiness checks
-  do not solve effective-source validation. Sessions does not call `PauseActor`. A resume that
-  Substrate v0.5.0 binds to a worker whose sandbox runtime cannot restore the recorded runtime of
-  the MEMORY snapshot it restores from restores its volumes only; the adapter reports it as
+  do not solve effective-source validation. A resume that Substrate (since v0.5.0) binds to a worker
+  whose sandbox runtime cannot restore the recorded runtime of the MEMORY snapshot it restores from
+  does not restore that memory: v0.5.0 restores the snapshot's volumes only and v0.6.0 its root
+  filesystem, and in both cases the actor loses RAM. The adapter reports it as
   `ActorInfo.MemoryNotRestored`, and for a `REQUIRES_MEMORY_SNAPSHOT` harness the backend refuses
   that actor with `api.ErrMemoryStateLost` wherever it would hand it out (Create, Restore, a
   stateful Fork's clone) and before `Snapshot` suspends it, recorded compute instance or not.
@@ -1697,54 +1701,58 @@ and never downgrade the migrated journal to v0.3.0 or older.
   other checks, as Restore does, since the operation moving it may still record its capture.
   `SuspendActor` takes no precondition, so `Snapshot` also refuses, with `api.ErrMemoryStateLost`, a
   suspend whose `ActorInfo.UID` or `ActorInfo.CaptureLineage` differs from the actor it checked (a
-  replacement, a capture or pause followed by a resume, or a resume onto another runtime, in
-  between); the refused capture stays on the suspended actor. The refusal sticks through the journal
-  (`RT-4i`): for a `REQUIRES_MEMORY_SNAPSHOT` harness, Create's attach, Restore and `Snapshot`
-  (Suspend, and a stateful fork's capture of the parent) refuse with `api.ErrMemoryStateLost`,
-  before `ResumeActor` or `SuspendActor`, an actor, SUSPENDED or RUNNING, whose newest snapshot is
-  not the one the latest recorded `SUSPEND` names or, with none recorded, that holds a capture of
-  its own (`ActorInfo.NoCapture` false). Restore and Create, on an attach or on the actor it just
-  created, check the actor a successful `ResumeActor` reports the same way (Create reads the
-  recorded checkpoint again), since a capture can land between the check, or the create, and the
-  resume; a refused actor is left running and not handed out.
-  A stateful `Fork` checks the clone its `ResumeActor` reports against the child's empty
-  checkpoint, so a clone another caller resumed and captured before that resume is refused with
-  `substrate.ErrActorBusy` (`ABORTED`) and logged at `WARN`; the clone is torn down best effort
-  (a failed teardown is logged at `WARN` naming what it leaves), no child is recorded, and a retry
-  clones a new child.
-  This sees only what the response reports; it is no precondition on the resume. It fails closed: a
-  capture whose `SUSPEND` append failed, another host's capture before its append, or a suspend or
-  pause outside sessions is refused too, and nothing in sessions recovers the session after it. One
-  window remains: a crash, revert and resume onto a worker of the same runtime between the check and
-  the suspend keeps the lineage and the newest snapshot, so the capture lacks the turns since the
-  last checkpoint. Only a precondition on `SuspendActor` that substrate enforces (the worker
-  assignment, generation or UID checked) closes it; v0.5.0 has none on `SuspendActor` or
+  replacement, a capture followed by a resume, or a resume onto another runtime, in between); the
+  refused capture stays on the suspended actor. The refusal sticks through the journal (`RT-4i`):
+  for a `REQUIRES_MEMORY_SNAPSHOT` harness, Create's attach, Restore and `Snapshot` (Suspend, and a
+  stateful fork's capture of the parent) refuse with `api.ErrMemoryStateLost`, before `ResumeActor`
+  or `SuspendActor`, an actor, SUSPENDED or RUNNING, whose newest snapshot is not the one the latest
+  recorded `SUSPEND` names or, with none recorded, that holds a capture of its own
+  (`ActorInfo.NoCapture` false). Restore and Create, on an attach or on the actor it just created,
+  check the actor a successful `ResumeActor` reports the same way (Create reads the recorded
+  checkpoint again), since a capture can land between the check, or the create, and the resume; a
+  refused actor is left running and not handed out. A stateful `Fork` checks the clone its
+  `ResumeActor` reports against the child's empty checkpoint, so a clone another caller resumed and
+  captured before that resume is refused with `substrate.ErrActorBusy` (`ABORTED`) and logged at
+  `WARN`; the clone is torn down best effort (a failed teardown is logged at `WARN` naming what it
+  leaves), no child is recorded, and a retry clones a new child. This sees only what the response
+  reports; it is no precondition on the resume. It fails closed: a capture whose `SUSPEND` append
+  failed, another host's capture before its append, or a suspend outside sessions is refused too,
+  and nothing in sessions recovers the session after it. One window remains: a crash, revert and
+  resume onto a worker of the same runtime between the check and the suspend keeps the lineage and
+  the newest snapshot, so the capture lacks the turns since the last checkpoint. Only a precondition
+  on `SuspendActor` that substrate enforces (the worker assignment, generation or UID checked)
+  closes it; v0.6.0 has none on `SuspendActor` (which takes only a durability mode) or
   `ResumeActor`. A router resume alone keeps the recorded checkpoint, but a suspend by any other
   caller, such as a gateway's idle suspend, leaves a capture no `SUSPEND` names, so the host must be
   the only caller that suspends a `REQUIRES_MEMORY_SNAPSHOT` harness's actor. One outside suspend
   inside the window with no resume after it is the capture `Snapshot` would have taken, and is
-  recorded.
-  `Snapshot` and `Restore` do not create missing actors. When no actor exists (for example a fresh
-  session before any `Create` reached `CreateActor`, and not a fork child, or an actor deleted
-  outside the host) both fail with the control API's `NOT_FOUND` (substrate module pinned in
-  `integrations/substrate/go.mod`, `cmd/ateapi/internal/controlapi/actor.go`), reported as
-  `api.ErrMemoryStateLost` for a `REQUIRES_MEMORY_SNAPSHOT` harness. For such a harness it sets
-  `ComputeInstance` to the actor's UID (`RT-4h`), refuses to create an actor for a session with
-  started turns (`RT-4e`), refuses before resuming an actor whose nonempty UID differs from the
-  nonempty recorded one, and after a failed restore reports lost state only when `GetActor` finds
-  no actor or one whose UID is not the recorded one; with no UID recorded, only an actor that does
-  not hold the session's snapshot after a `NOT_FOUND` resume. An actor that another operation holds
-  is `api.ErrComputeBusy` (`ABORTED`).
+  recorded. `Snapshot` and `Restore` do not create missing actors. When no actor exists (for example
+  a fresh session before any `Create` reached `CreateActor`, and not a fork child, or an actor
+  deleted outside the host) both fail with the control API's `NOT_FOUND` (substrate module pinned in
+  `integrations/substrate/go.mod`, `cmd/ateapi/internal/controlapi/actor.go`). A `Restore` of a ref
+  that holds a checkpoint (a durable URI, any VOLUMES-only ref, or a RAM checkpoint) whose actor is
+  gone, deleted or lost to a substrate reinstall, is refused before any resume or create with
+  `api.ErrInvalidCheckpoint` (`FAILED_PRECONDITION`), plus `api.ErrMemoryStateLost` for a
+  `REQUIRES_MEMORY_SNAPSHOT` harness; nothing is created or journaled. The message names the actor,
+  never the snapshot URI. A ref that records a checkpoint (a durable URI, or a RAM checkpoint) also
+  names the session's latest `SUSPEND`; a VOLUMES-only default ref of a session that never suspended
+  has no `SUSPEND`, so its message says only that the session's compute cannot be resumed. Any other
+  ref keeps the `NOT_FOUND`, reported as `api.ErrMemoryStateLost` for a `REQUIRES_MEMORY_SNAPSHOT`
+  harness. For such a harness it sets `ComputeInstance` to the actor's UID (`RT-4h`), refuses to
+  create an actor for a session with started turns (`RT-4e`), refuses before resuming an actor whose
+  nonempty UID differs from the nonempty recorded one, and after a failed restore reports lost state
+  only when `GetActor` finds no actor or one whose UID is not the recorded one; with no UID
+  recorded, only an actor that does not hold the session's snapshot after a `NOT_FOUND` resume. An
+  actor that another operation holds is `api.ErrComputeBusy` (`ABORTED`).
   [`docs/substrate-conformance.md`](docs/substrate-conformance.md) has the details. A failed
   `Create` can still leave an actor: `CreateActor` succeeded and the `ResumeActor` after it failed.
   In the pinned module a `SuspendActor` on a suspended actor and a `ResumeActor` on a running one
-  succeed without doing anything, so a repeated `Suspend` and a `Resume` of a running actor, with
-  or without a held ref, both succeed. `Fork` clones the parent's snapshot for a
-  `REQUIRES_MEMORY_SNAPSHOT` descriptor and creates a fresh actor otherwise. The adapter that
-  talks to agent-substrate is the
-  separate Go module [`integrations/substrate`](integrations/substrate/), an example of the runtime
-  contract. The core module does not import it; CI asserts `go list -deps ./...` contains no
-  `agent-substrate` import.
+  succeed without doing anything, so a repeated `Suspend` and a `Resume` of a running actor, with or
+  without a held ref, both succeed. `Fork` clones the parent's snapshot for a
+  `REQUIRES_MEMORY_SNAPSHOT` descriptor and creates a fresh actor otherwise. The adapter that talks
+  to agent-substrate is the separate Go module [`integrations/substrate`](integrations/substrate/),
+  an example of the runtime contract. The core module does not import it; CI asserts `go list -deps
+  ./...` contains no `agent-substrate` import.
 
 ## 14. Harness registry
 

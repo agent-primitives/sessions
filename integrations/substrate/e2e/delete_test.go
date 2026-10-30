@@ -6,13 +6,15 @@ import (
 	"testing"
 	"time"
 
-	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/agent-primitives/sessions/api"
 	ateadapter "github.com/agent-primitives/sessions/integrations/substrate"
+	"github.com/agent-primitives/sessions/integrations/substrate/internal/routertls"
+	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/runtime/substrate"
 )
 
@@ -76,7 +78,7 @@ func runDeleteHierarchy(t *testing.T, f *fixture, template string, desc api.Desc
 	observed := &deleteControl{ClientConnInterface: f.conn, tags: map[string]*atepb.Tag{}}
 	backend := substrate.New(ateadapter.New(observed), f.atespace, substrate.ObjectRef{Atespace: f.tmplAtespace, Name: template}, desc, substrate.WithRouter(f.router))
 	b := &deleteRuntime{Backend: backend}
-	a := newDeleteAPI(t, b)
+	a := newDeleteAPI(t, b, placement.WithDialer(routertls.Dialer(routerCreds(t))))
 	ctl := atepb.NewControlClient(f.conn)
 	owned := []string{}
 	// Cleanup is test-owned Control work AFTER assertions, never product Delete or a change to Stop.

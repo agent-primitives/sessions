@@ -76,45 +76,74 @@ controls event ordering and effect recovery, not who is entitled to decide.
 **`project` is not a tenancy boundary.** It is an exact-match filter on listing. A caller that names
 another project gets that project's sessions. Do not treat it as isolation.
 
-**There is no transport security.** This repo sets up no TLS anywhere, including between the host
-and a harness. Traffic is readable and modifiable in flight by anything on the path. The one
-exception is outside this repo: on substrate, the router-to-worker hop is mTLS (below), but the
-host-to-router hop is not.
+**There is no transport security in this repo's own listeners.** The daemon's listeners and the
+`runtime/local` and `runtime/remote` harness transports are plaintext: traffic on them is readable
+and modifiable in flight by anything on the path. The substrate backend is the exception: it
+reaches harnesses through substrate's `atenet-router` over mTLS (below), and the router-to-worker
+hop is mTLS too.
 
-**On substrate, anything in the cluster can drive any session's harness.** The substrate backend
-reaches each harness through substrate's `atenet-router`, over plaintext h2c, naming the actor in an
-`ate-target-actor: <atespace>/<actor>` header. The router does not authenticate or authorize callers:
-it resumes whichever actor the header names and proxies the call to it (substrate's threat model
-tracks this as T-04, "check client permissions before resuming actors", not yet implemented), and
-the NetworkPolicy a v0.5.0 install puts on it admits any source on its data ports (substrate
-`manifests/ate-install/ate-system-networkpolicies.yaml`). So any pod that can reach
-`atenet-router.ate-system.svc:80` can wake any actor and open a `Harness.Connect` stream to it, and
-the harness accepts the stream, because it does not authenticate the host either. Such a caller can
-feed a harness forged model results or tool results, read what the harness emits, and keep an actor
-from suspending: substrate drains open streams before it snapshots, and `Placer.Suspend` only
-refuses to overlap operations of its own Registry, so it neither sees nor ends a stream another
-caller holds open. The hash chain stays intact, because only the real host writes the journal, but
-anything the harness emits afterwards, including what the real host then records, can reflect the
-forged input. For a `REQUIRES_MEMORY_SNAPSHOT` harness the forged input lands in RAM and persists
-through suspend, resume and fork, so a verified chain is not evidence that its content is
-unpoisoned. Only the router-to-worker hop is protected
-(mTLS with the router's SPIFFE identity, and the worker checks the actor is assigned to it).
+**On substrate, the host reaches the router over mTLS, and any allowlisted client can drive any
+session's harness.** The substrate backend dials `atenet-router.ate-system.svc:443`, substrate
+v0.6.0's default envoy router, naming the actor in an `ate-target-actor: <atespace>/<actor>` header
+([the transport](substrate-conformance.md#the-transport-harnesswire-through-atenet-router)). What
+each side checks:
 
-Until this is closed, run the substrate backend only in a cluster where every workload that can
-reach the router is trusted, or restrict the router to the `agentsessions` host. NetworkPolicies are
-additive, so a narrower policy next to the install's `atenet-router` policy restricts nothing: the
-install's policy itself has to change, and every Substrate install applies it again.
+- The router checks the host. The host presents its pod's SPIFFE certificate, issued by substrate's
+  pod identity signer (`podidentity.podcert.ate.dev/identity`) through a `podCertificate` volume.
+  The router requires a certificate that chains to that signer's CA and carries a SPIFFE ID listed
+  exactly in its `--ingress-allowed-spiffe-ids`; it refuses any other client during the TLS
+  handshake, before it reads the header or wakes an actor.
+- The host checks the router. `agentsessionsd` requires the router's serving certificate to chain to
+  the servicedns signer's ClusterTrustBundle (`servicedns.podcert.ate.dev/identity`) and to carry
+  the DNS name `atenet-router.ate-system.svc` (`-atenet-router-server-name`). It never skips
+  verification, and it re-reads its certificate and the trust bundle on every connection, so
+  kubelet's rotations apply without a restart.
 
-The `ate.dev/api-access=true` label that v0.5.0 requires on the `agentsessionsd` namespace
-([namespace access](substrate-conformance.md#substrate-v050-namespace-access-to-ate-api-server))
+What is not verified:
+
+- The router's identity is a DNS name, not a SPIFFE ID: its servicedns certificate carries DNS names
+  only. The servicedns signer issues that name to any pod in `ate-system` that the `atenet-router`
+  Service selects (substrate `cmd/podcertcontroller/internal/servicednssigner`). So anyone with
+  write access to pods, Services or PodCertificateRequests in `ate-system` can present the router's
+  certificate: by creating or relabeling a pod the Service selects, by editing the Service's
+  selector, or by requesting a certificate for a pod it selects. Treat that access as able to
+  impersonate the router to every host.
+- The router authorizes no caller per actor or per atespace. Any allowlisted ID reaches every actor:
+  it can wake any actor and open a `Harness.Connect` stream to it (substrate's threat model tracks
+  this as T-04, "check client permissions before resuming actors", not yet implemented), and the
+  harness accepts the stream, because it does not authenticate the host either. List only the hosts
+  that serve sessions.
+- Anyone who can create PodCertificateRequests in the host's namespace can mint the host's SPIFFE
+  ID: the pod identity signer issues the ID of any ServiceAccount the request names in its
+  namespace (substrate `cmd/podcertcontroller/internal/podidentitysigner`). Keep that permission
+  out of the namespace `agentsessionsd` runs in.
+
+A caller that gets through, an allowlisted client or a router impersonator, can feed a harness
+forged model results or tool results, read what the harness emits, and keep an actor from
+suspending: substrate drains open streams before it snapshots, and `Placer.Suspend` only refuses to
+overlap operations of its own Registry, so it neither sees nor ends a stream another caller holds
+open. The hash chain stays intact, because only the real host writes the journal, but anything the
+harness emits afterwards, including what the real host then records, can reflect the forged input.
+For a `REQUIRES_MEMORY_SNAPSHOT` harness the forged input lands in RAM and persists through suspend,
+resume and fork, so a verified chain is not evidence that its content is unpoisoned.
+
+The supported router clients are in-cluster pods that mount a pod certificate. Clients on a laptop
+that port-forward the router (the agentsuite demo's replay, `driver.sh`, `smoke-microvm.sh` and the
+session lifecycle UI) are not supported yet
+([router clients outside the cluster](substrate-conformance.md#router-clients-outside-the-cluster)).
+
+The `ate.dev/api-access=true` label that v0.6.0 requires on the `agentsessionsd` namespace
+([namespace access](substrate-conformance.md#substrate-v060-namespace-access-to-ate-api-server))
 admits every pod in that namespace except worker pods to ate-api-server at the network level.
 ate-api-server still authenticates and authorizes each request (as the policy's comment in substrate
-`manifests/ate-install/ate-system-networkpolicies.yaml` notes), so the label widens reachability,
-not permissions. Keep untrusted workloads out of a labeled namespace.
+`manifests/ate-install/ate-system-networkpolicies.yaml` notes): v0.6.0 checks every call against the
+atespace's AccessPolicy, and the daemon needs only `editor` in its atespace
+([authorization](substrate-conformance.md#substrate-v060-authorization-and-atespace-provisioning)).
+So the label widens reachability, not permissions. Keep untrusted workloads out of a labeled namespace.
 
 Not yet implemented: the harness does not authenticate the host. A planned fix delivers a per-session
 credential at actor creation and has `harnessnode` check it on every Connect, so a harness talks only
-to its own session's host whatever the ingress allows. Router-side caller authorization (T-04)
+to its own session's host whatever the router admits. Router-side caller authorization (T-04)
 belongs upstream in substrate and would complement it, not replace it.
 
 **The harness is trusted code.** The host mediates model calls and host-executed tools, which is what

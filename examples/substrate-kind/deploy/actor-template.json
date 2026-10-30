@@ -24,18 +24,11 @@
     }
   ],
   "resources": {
-    "limits": [
-      {"name": "cpu", "quantity": "1"},
-      {"name": "memory", "quantity": "768Mi"}
-    ]
+    "limits": {"cpuMillicores": "1000", "memoryBytes": "805306368"}
   },
   "snapshotConfig": {
     "preferredFidelity": "SNAPSHOT_FIDELITY_MEMORY",
     "storageLocation": "gs://ate-snapshots/sessions-example/chat-harness/",
     "goldenSnapshotConfig": {"mode": "GOLDEN_SNAPSHOT_MODE_ENABLED"}
-  },
-  "sandboxConfig": {
-    "sandboxClass": "microvm",
-    "configName": "microvm"
   }
 }

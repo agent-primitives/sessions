@@ -38,6 +38,8 @@ esac`,
 case "$*" in
   "run ./cmd/ate-setup "*)
     [[ " $* " == *" --kubeconfig=$KUBECONFIG "* ]]
+    [[ " $* " != *" --atenet-dataplane"* ]]
+    [[ " $* " == *" --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/sessions-example/sa/agentsessions deploy ate-system "* ]]
     echo install >> "$TEST_DIR/bootstrap-calls" ;;
   "build -o "*)
     echo client-build >> "$TEST_DIR/bootstrap-calls"
@@ -118,7 +120,7 @@ func TestSetupBootstrapsManagedCheckoutWithoutSystemKind(t *testing.T) {
 		t.Fatalf("unexpected bootstrap ordering: %v\n%s\n%s", err, calls, out)
 	}
 	owner, err := os.ReadFile(filepath.Join(state, "owner"))
-	if err != nil || !strings.HasPrefix(string(owner), "node installed ") {
+	if err != nil || !strings.HasPrefix(string(owner), "node installed ") || !strings.HasSuffix(string(owner), " envoy\n") {
 		t.Fatalf("bootstrap did not record installation: %v\n%s", err, owner)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "substrate-bootstrap-incomplete")); !os.IsNotExist(err) {

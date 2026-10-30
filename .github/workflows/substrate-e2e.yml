@@ -1,11 +1,16 @@
 # Real-substrate conformance in kind. Heavy (kind + KVM + ate-system + micro-VM assets); it gates
 # every PR as well as running nightly. It copies agent-substrate's own pr-workflow.yaml recipe
-# (/dev/kvm udev rule, kind bring-up, the envoy-dataplane build cache).
+# (/dev/kvm udev rule, kind bring-up).
 #
 # The suite is an ordinary Go test package (integrations/substrate/e2e), compiled with `go test -c`
 # and run as an in-cluster Job. It reaches each harness the way a production host does: harnesswire
-# over h2c to the atenet-router Service, with the ate-target-actor metadata naming the actor. A new
+# over mTLS to the atenet-router Service, with the ate-target-actor metadata naming the actor. A new
 # capability is a new Test function, not another driver binary, Job manifest, or polling shell.
+#
+# ate-system is installed with substrate's default envoy dataplane, which serves only mTLS clients
+# whose SPIFFE ID is on --ingress-allowed-spiffe-ids. The only router client in this cluster is the
+# suite's Job, which presents the SVID of its ServiceAccount (deploy/substrate/e2e-job.yaml), so the
+# allowlist names that one ID.
 #
 # ActorTemplates are substrate API resources, not Kubernetes objects, so the suite creates its own
 # through Control with the harness image built here; the workflow only applies the WorkerPools.
@@ -15,7 +20,7 @@
 # install-microvm-deps.sh) before any tier runs. The suite then runs in passes against one
 # cluster so the cheap tier fails first:
 #   1. stateless tier: the echo harness + byte-identical replay, and a suspend under an idle stream.
-#   2. idle stream: one harness stream held idle past the router's 5m route timeout.
+#   2. idle stream: one harness stream held idle through the router for 6m30s.
 #   3. stateful tier + fork: the in-RAM counter driven to N, suspended to a memory snapshot and
 #      continued at N+1, which no journal replay could reconstruct, then forked k ways, with every
 #      child required to continue at N+1 independently.
@@ -31,8 +36,8 @@
 # the nightly schedule and manual runs always run the full suite.
 #
 # Substrate's binaries are built from source at SUBSTRATE_REF (it publishes no images), so the Go
-# build and module caches and the envoy-dataplane image's build cache are kept between runs, and a
-# warm run reuses them instead of compiling from scratch.
+# build and module caches are kept between runs, and a warm run reuses them instead of compiling
+# from scratch.
 # The durable example has a separate runner and cluster, exercising up.sh, reuse, smoke.sh and
 # down.sh without conformance setup hiding bootstrap bugs. The existing required check combines
 # the pinned conformance suite and the example lifecycle.
@@ -58,12 +63,12 @@ concurrency:
   group: substrate-e2e-${{ github.ref }}
   cancel-in-progress: true
 
-# The agent-substrate commit our adapter's go.mod pins (tag v0.5.0); keep them in lockstep so the
+# The agent-substrate commit our adapter's go.mod pins (tag v0.6.0); keep them in lockstep so the
 # cluster's ate-api and our generated client agree. The client decodes Actors by field number, and
 # upstream has renumbered fields before without a wire error, so a mismatch corrupts silently rather
 # than failing.
 env:
-  SUBSTRATE_REF: e8d40c33f96f4b7a4984bfea7334a36ab5b45b7b
+  SUBSTRATE_REF: d3f2363590a11b2f50489971985ba033b4c9eff7
   KO_DOCKER_REPO: localhost:5001
   E2E_IMAGE: localhost:5001/agentsessions-e2e:${{ github.sha }}
   # ate-setup requires an image credential provider; the kind recipe uses the k8s.io one.
@@ -124,12 +129,12 @@ jobs:
     # The canary (main) exists only on scheduled and manual runs; continue-on-error keeps its
     # failure out of the run's result.
     #
-    # The canary is known red until the substrate bump: at main's head (603e0062) ateom-microvm is
-    # cmd/ateworker-microvm and the module path is go.ate.dev/substrate, so it fails at "Apply the
-    # echo micro-VM WorkerPool" and would next fail building the adapter. Read its result in the
-    # job list until then; continue-on-error hides it from the run's status and notifications.
-    # TODO(canary): drop continue-on-error once the canary is green after the bump, so new drift
-    # turns the nightly run red (it still never runs on a pull request).
+    # The pinned entry and the canary now share the v0.6.0 layout (go.ate.dev/substrate,
+    # cmd/ateworker-microvm), so the canary fails only on drift past v0.6.0. It has not run green
+    # yet; until it does, read its result in the job list. continue-on-error hides it from the
+    # run's status and notifications.
+    # TODO(canary): drop continue-on-error once a nightly canary is green, so new drift turns the
+    # nightly run red (it still never runs on a pull request).
     name: ${{ matrix.substrate == 'main' && 'substrate-conformance (substrate main)' || 'substrate-conformance suite' }}
     needs: changes
     # Runs even when the changes job fails, so a filter failure cannot silently skip coverage.
@@ -238,30 +243,6 @@ jobs:
           path: _substrate/bin/microvm-assets/amd64
           key: microvm-assets-amd64-${{ hashFiles('_substrate/hack/microvm-assets/assemble.sh') }}
 
-      - name: Restore the envoy-dataplane image build cache
-        # ate-setup builds the egress gateway's envoy image (a Rust dynamic module) with docker
-        # buildx, about two minutes cold. Keyed on the build context, which is all the build reads.
-        # Saved right after the install below, so a later failure does not discard a cold build.
-        if: needs.changes.outputs.decision != 'skip'
-        id: envoy-cache
-        uses: actions/cache/restore@v6
-        with:
-          path: _envoy-dataplane-cache
-          key: envoy-dataplane-${{ runner.os }}-${{ hashFiles('_substrate/cmd/dataplane/envoy/**') }}
-
-      - name: Set up a buildx builder for the envoy-dataplane image
-        # The default docker driver cannot export a build cache; a docker-container builder can.
-        # Host networking and plain HTTP let it push to the kind registry. It is not made the
-        # default, so every other docker build here keeps loading into the local image store.
-        if: needs.changes.outputs.decision != 'skip'
-        run: |
-          cat > "${RUNNER_TEMP}/buildkitd.toml" <<'EOF'
-          [registry."localhost:5001"]
-            http = true
-          EOF
-          docker buildx create --name envoy-dataplane --driver docker-container \
-            --driver-opt network=host --buildkitd-config "${RUNNER_TEMP}/buildkitd.toml" --bootstrap
-
       - name: Enable KVM
         # Grant /dev/kvm via the udev rule substrate's CI uses: both tiers run on micro-VMs (kata +
         # cloud-hypervisor), which need it, and create-kind-cluster.sh mounts it into the node.
@@ -273,34 +254,19 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Create kind cluster + install ate-system
-        # ate-setup waits for the api-server before its database has converged on a cold runner, so
-        # give the rollouts more than the default budget. `rollout status` returns as soon as a
-        # rollout is ready, so this costs nothing on a healthy cluster. DOCKER_BUILD_FLAGS is
-        # ate-setup's hook for its buildx builds: route the envoy-dataplane build to the builder
-        # above, reuse the restored cache, and write one only when the cache missed.
+        # install-ate-kind.sh passes its arguments to ate-setup, so global flags come before the
+        # `deploy ate-system` command. ate-setup waits for the api-server before its database has
+        # converged on a cold runner, so give the rollouts more than the default budget. `rollout
+        # status` returns as soon as a rollout is ready, so this costs nothing on a healthy cluster.
+        # The default envoy router admits only the allowlisted SPIFFE IDs: here the suite's Job
+        # (deploy/substrate/e2e-job.yaml), the only router client this cluster runs.
         if: needs.changes.outputs.decision != 'skip'
         working-directory: _substrate
-        env:
-          DOCKER_BUILD_FLAGS: >-
-            --builder=envoy-dataplane
-            --cache-from=type=local,src=${{ github.workspace }}/_envoy-dataplane-cache
-            ${{ steps.envoy-cache.outputs.cache-hit != 'true' && format('--cache-to=type=local,dest={0}/_envoy-dataplane-cache,mode=min', github.workspace) || '' }}
         run: |
           hack/create-kind-cluster.sh
-          hack/install-ate-kind.sh --deploy-ate-system --rollout-timeout 10m
-
-      - name: Save the envoy-dataplane image build cache
-        # Only when the restore missed and the build wrote a cache (buildx writes index.json once
-        # the export completes), and even if the install failed after the envoy build finished.
-        if: >-
-          needs.changes.outputs.decision != 'skip'
-          && !cancelled()
-          && steps.envoy-cache.outputs.cache-hit != 'true'
-          && hashFiles('_envoy-dataplane-cache/index.json') != ''
-        uses: actions/cache/save@v6
-        with:
-          path: _envoy-dataplane-cache
-          key: ${{ steps.envoy-cache.outputs.cache-primary-key }}
+          hack/install-ate-kind.sh --rollout-timeout=10m \
+            --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-agentsessions/sa/substrate-e2e \
+            deploy ate-system
 
       - name: Wait for the disk cleanup
         if: needs.changes.outputs.decision != 'skip'
@@ -323,7 +289,8 @@ jobs:
       - name: Deploy the micro-VM sandbox class
         # Before any tier: both run on it. install-microvm-deps.sh is the step of substrate's
         # run-microvm-demo-kind.sh that stages the (cached) kata assets into the in-cluster object
-        # store and installs the cluster-scoped `microvm` SandboxConfig our templates use. The env
+        # store and installs the cluster-scoped `microvm` SandboxConfig as the class default, which
+        # our pools (sandboxClasses: [{name: microvm}], no configRef) resolve to. The env
         # mirrors what that wrapper exports, with ARCH naming the cached asset set. The rest of the
         # wrapper (a second ate-system apply and substrate's own counter demo) is not needed here.
         if: needs.changes.outputs.decision != 'skip'
@@ -337,17 +304,27 @@ jobs:
         run: hack/install-microvm-deps.sh --install
 
       - name: Apply the echo micro-VM WorkerPool
-        # Resolve substrate's ateom-microvm in its own module once; the counter pool below reuses it.
-        # Only for the node's platform: substrate's .ko.yaml also lists linux/arm64, which would
+        # Resolve substrate's ateworker-microvm in its own module once; the counter pool below reuses
+        # it. Only for the node's platform: substrate's .ko.yaml also lists linux/arm64, which would
         # cross-compile a second, unused image.
         if: needs.changes.outputs.decision != 'skip'
         run: |
-          ATEOM_MV_IMG="$(cd _substrate && ko build --platform=linux/amd64 ./cmd/ateom-microvm)"
-          echo "ATEOM_MV_IMG=${ATEOM_MV_IMG}" >> "$GITHUB_ENV"
+          ATEWORKER_MV_IMG="$(cd _substrate && ko build --platform=linux/amd64 ./cmd/ateworker-microvm)"
+          echo "ATEWORKER_MV_IMG=${ATEWORKER_MV_IMG}" >> "$GITHUB_ENV"
           kubectl --context kind-kind apply -f deploy/substrate/namespace.yaml
-          sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-microvm#${ATEOM_MV_IMG}#" \
+          sed -e "s#ko://go.ate.dev/substrate/cmd/ateworker-microvm#${ATEWORKER_MV_IMG}#" \
               deploy/substrate/echo-microvm-workerpool.yaml | kubectl --context kind-kind apply -f -
           hack/wait-worker-pool.sh echo-microvm
+
+      - name: Provision the suite's atespaces and access
+        # Substrate v0.6.0 always enforces authorization. The suite's Job runs as the substrate-e2e
+        # ServiceAccount with only the atespace editor role, the role operators grant agentsessionsd,
+        # so this creates its atespaces and grants that role as kubectl-ate's bootstrap owner
+        # (ate-client). kubectl-ate is built from the same substrate commit as the cluster.
+        if: needs.changes.outputs.decision != 'skip'
+        run: |
+          (cd _substrate && go build -o "${RUNNER_TEMP}/kubectl-ate" ./cmd/kubectl-ate)
+          KUBECTL_ATE="${RUNNER_TEMP}/kubectl-ate" hack/provision-e2e-access.sh
 
       - name: Build the adapter against substrate main (canary only)
         # The lockstep rule above applies to the canary too: the cluster runs main's head, so the
@@ -357,7 +334,7 @@ jobs:
         env:
           SUBSTRATE_COMMIT: ${{ steps.substrate.outputs.commit }}
         run: |
-          go get "github.com/agent-substrate/substrate@${SUBSTRATE_COMMIT}"
+          go get "go.ate.dev/substrate@${SUBSTRATE_COMMIT}"
           go mod tidy
 
       - name: Build the conformance test binary image
@@ -389,18 +366,20 @@ jobs:
       - name: Stateless-tier conformance (in-cluster Job)
         # Runs before the stateful tier, so a break in the cheap tier fails first. The idle-stream
         # suspend test holds a turn's harness stream open through the router: Suspend must refuse the
-        # session while the turn runs and succeed promptly once it returns.
+        # session while the turn runs and succeed promptly once it returns. A suspended stateless
+        # session whose actor was deleted must be refused, not cold-created. The router must refuse
+        # a client that presents no certificate, and must wake a suspended actor for a routed call.
         if: needs.changes.outputs.decision != 'skip'
         env:
           ECHO_SANDBOX_CLASS: microvm
-        run: hack/run-e2e-job.sh '^(TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestSessionDeletePending|TestExecutionState.*)$' "${E2E_IMAGE}" 1200
+        run: hack/run-e2e-job.sh '^(TestRouterRefusesClientWithoutCertificate|TestRoutedCallWakesSuspendedActor|TestStatelessReplay|TestSessionSuspendResume|TestStatelessSessionWhoseActorIsLostIsRefused|TestSuspendUnderAnIdleHarnessStream|TestSessionDeletePending|TestExecutionState.*)$' "${E2E_IMAGE}" 1200
 
-      - name: Idle harness stream across the router's route timeout (in-cluster Job)
-        # A turn parked on a slow model call holds its Connect stream idle. The router bounds streams
-        # by --route-timeout (5m default) plus a 30s idle timeout; on kind the idle stream was reset
-        # at 5m30s. The gap stays well past that so the outcome is not a race. The step records the
-        # router's behavior rather than gating a change, and costs about 6 minutes, so it runs on
-        # push, nightly and manual runs only, not on every pull request.
+      - name: Idle harness stream through the router (in-cluster Job)
+        # A turn parked on a slow model call holds its Connect stream idle. The envoy router bounds
+        # streams by --route-timeout (5m default) plus a 30s idle timeout, and reset the idle stream
+        # at 5m30s on kind. The gap stays well past that bound so the outcome is not a race. The
+        # step records the router's behavior rather than gating a change, and costs about 6
+        # minutes, so it runs on push, nightly and manual runs only, not on every pull request.
         if: needs.changes.outputs.decision != 'skip' && github.event_name != 'pull_request'
         env:
           ECHO_SANDBOX_CLASS: microvm
@@ -410,7 +389,7 @@ jobs:
       - name: Apply the counter micro-VM WorkerPool
         if: needs.changes.outputs.decision != 'skip'
         run: |
-          sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-microvm#${ATEOM_MV_IMG}#" \
+          sed -e "s#ko://go.ate.dev/substrate/cmd/ateworker-microvm#${ATEWORKER_MV_IMG}#" \
               deploy/substrate/counter-microvm-workerpool.yaml | kubectl --context kind-kind apply -f -
           hack/wait-worker-pool.sh counter-microvm
 

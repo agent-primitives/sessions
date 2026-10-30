@@ -100,7 +100,12 @@ spec:
             - --ateapi-server-name=api.ate-system.svc
             - --ateapi-token-file=/var/run/ate/token/token
             - --ateapi-ca-file=/var/run/ate/ca/ca.pem
-            - --atenet-router=atenet-router.ate-system.svc:80
+            - --atenet-router=atenet-router.ate-system.svc:443
+            # The router admits this pod's SVID,
+            # spiffe://cluster.local/ns/sessions-example/sa/agentsessions, because up.sh lists it
+            # in the router's --ingress-allowed-spiffe-ids.
+            - --atenet-router-cert-file=/var/run/ate/router-client/credential-bundle.pem
+            - --atenet-router-ca-file=/var/run/ate/router-client/router-ca.pem
           envFrom:
             - configMapRef:
                 name: model
@@ -128,6 +133,9 @@ spec:
             - name: ate-ca
               mountPath: /var/run/ate/ca
               readOnly: true
+            - name: router-client
+              mountPath: /var/run/ate/router-client
+              readOnly: true
       volumes:
         - name: journal
           persistentVolumeClaim:
@@ -148,6 +156,21 @@ spec:
                     matchLabels:
                       podcert.ate.dev/canarying: live
                   path: ca.pem
+        # kubelet issues and rotates this pod's SVID; agentsessionsd re-reads both files on every
+        # router connection.
+        - name: router-client
+          projected:
+            sources:
+              - podCertificate:
+                  signerName: podidentity.podcert.ate.dev/identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: credential-bundle.pem
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: router-ca.pem
 ---
 apiVersion: v1
 kind: Service

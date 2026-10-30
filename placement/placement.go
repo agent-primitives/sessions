@@ -10,23 +10,19 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/agent-primitives/sessions/api"
-	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
-	"github.com/agent-primitives/sessions/harnesswire"
+	"github.com/agent-primitives/sessions/internal/harnessdial"
 	"github.com/agent-primitives/sessions/observability"
 )
 
@@ -648,72 +644,12 @@ func describeError(ctx context.Context, err error, timedOut bool) error {
 	}
 }
 
-// DefaultDial reaches a harnesswire server by address form: runtime/local passes a unix-socket
-// address (unix://…); substrate passes the atenet-router's host:port. Both ride the same harnesswire
-// gRPC client with the incarnation's CallMetadata attached to every call; only the transport
-// differs. One dial path, two address forms.
+// DefaultDial reaches a harnesswire server by address form over plaintext: runtime/local passes a
+// unix-socket address (unix://…), and runtime/remote a host:port. It attaches the incarnation's
+// CallMetadata to every call. A backend whose harnesses need transport security (substrate's
+// atenet-router serves only mTLS) passes its own Dialer with WithDialer.
 func DefaultDial(inc api.Incarnation) (api.Harness, func() error, error) {
-	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
-		grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
-		observability.ClientTracing(),
-	}
-	if len(inc.CallMetadata) > 0 {
-		md := metadata.New(inc.CallMetadata)
-		opts = append(opts,
-			grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, callOpts ...grpc.CallOption) error {
-				return invoker(withCallMetadata(ctx, md), method, req, reply, cc, callOpts...)
-			}),
-			grpc.WithChainStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, callOpts ...grpc.CallOption) (grpc.ClientStream, error) {
-				return streamer(withCallMetadata(ctx, md), desc, cc, method, callOpts...)
-			}),
-		)
-	}
-	if sock, ok := strings.CutPrefix(inc.Address, "unix://"); ok {
-		return unixDial(sock, opts)
-	}
-	return tcpDial(inc.Address, opts)
-}
-
-// withCallMetadata attaches the incarnation's routing metadata to an outgoing call, replacing any
-// value the caller set for the same keys: the incarnation, not the call site, decides which sandbox
-// a call reaches.
-func withCallMetadata(ctx context.Context, md metadata.MD) context.Context {
-	out, _ := metadata.FromOutgoingContext(ctx)
-	out = out.Copy()
-	for k, v := range md {
-		out[k] = v
-	}
-	return metadata.NewOutgoingContext(ctx, out)
-}
-
-// unixDial connects to a harnesswire server on a unix socket (runtime/local).
-func unixDial(sock string, opts []grpc.DialOption) (api.Harness, func() error, error) {
-	conn, err := grpc.NewClient(
-		"passthrough:///agentlocal",
-		append(opts, grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", sock)
-		}))...,
-	)
-	if err != nil {
-		return nil, nil, fmt.Errorf("placement: dial unix %s: %w", sock, err)
-	}
-	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
-}
-
-// tcpDial connects to a harnesswire server at a TCP host:port over h2c (cleartext HTTP/2). For
-// substrate that is the atenet-router, which selects the actor from the call metadata and carries
-// the gRPC stream to the actor over mTLS between router and worker. The leg from this process to the
-// router is plaintext and the router does not authenticate callers, so this path belongs on a
-// trusted network only (see docs/security.md).
-func tcpDial(address string, opts []grpc.DialOption) (api.Harness, func() error, error) {
-	conn, err := grpc.NewClient(address, opts...)
-	if err != nil {
-		return nil, nil, fmt.Errorf("placement: dial %s: %w", address, err)
-	}
-	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
+	return harnessdial.Dial(inc, insecure.NewCredentials())
 }
 
 // ErrCheckpointing is returned when another operation holds the session's checkpoint mark,

@@ -649,10 +649,10 @@ func describeError(ctx context.Context, err error, timedOut bool) error {
 	}
 }
 
-// DefaultDial reaches a harnesswire server by address form: runtime/local passes a unix-socket
-// address (unix://…); substrate passes the atenet-router's host:port. Both ride the same harnesswire
-// gRPC client with the incarnation's CallMetadata attached to every call; only the transport
-// differs. One dial path, two address forms.
+// DefaultDial reaches a harnesswire server by address form over plaintext: a unix-socket address
+// (unix://…, runtime/local) or a TCP host:port. It attaches the incarnation's CallMetadata to every
+// call. A backend whose harnesses need transport security (substrate's atenet-router serves only
+// mTLS) replaces the credentials with DefaultDialWith and passes the result to WithDialer.
 func DefaultDial(inc api.Incarnation) (api.Harness, func() error, error) {
 	return dialHarness(inc, nil)
 }
@@ -731,11 +731,10 @@ func unixDial(sock string, opts []grpc.DialOption) (api.Harness, func() error, e
 	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
 }
 
-// tcpDial connects to a harnesswire server at a TCP host:port over h2c (cleartext HTTP/2). For
-// substrate that is the atenet-router, which selects the actor from the call metadata and carries
-// the gRPC stream to the actor over mTLS between router and worker. The leg from this process to the
-// router is plaintext and the router does not authenticate callers, so this path belongs on a
-// trusted network only (see docs/security.md).
+// tcpDial connects to a harnesswire server at a TCP host:port with the transport credentials in
+// opts: cleartext HTTP/2 for DefaultDial, or what a DefaultDialWith caller set.
+// integrations/substrate sets mTLS credentials to reach the atenet-router, which selects the actor
+// from the call metadata.
 func tcpDial(address string, opts []grpc.DialOption) (api.Harness, func() error, error) {
 	conn, err := grpc.NewClient(address, opts...)
 	if err != nil {

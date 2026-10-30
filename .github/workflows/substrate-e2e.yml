@@ -4,13 +4,13 @@
 #
 # The suite is an ordinary Go test package (integrations/substrate/e2e), compiled with `go test -c`
 # and run as an in-cluster Job. It reaches each harness the way a production host does: harnesswire
-# over h2c to the atenet-router Service, with the ate-target-actor metadata naming the actor. A new
+# over mTLS to the atenet-router Service, with the ate-target-actor metadata naming the actor. A new
 # capability is a new Test function, not another driver binary, Job manifest, or polling shell.
 #
-# ate-system is installed with the agentgateway dataplane (--atenet-dataplane=agentgateway): from
-# v0.6.0 the default envoy router serves only mTLS clients with an allowlisted SPIFFE ID, and the
-# agentsessions router client dials plaintext h2c on :80, which only agentgateway still serves. A
-# native mTLS router client, which would run this suite on envoy, is a separate change.
+# ate-system is installed with substrate's default envoy dataplane, which serves only mTLS clients
+# whose SPIFFE ID is on --ingress-allowed-spiffe-ids. The only router client in this cluster is the
+# suite's Job, which presents the SVID of its ServiceAccount (deploy/substrate/e2e-job.yaml), so the
+# allowlist names that one ID.
 #
 # ActorTemplates are substrate API resources, not Kubernetes objects, so the suite creates its own
 # through Control with the harness image built here; the workflow only applies the WorkerPools.
@@ -258,13 +258,15 @@ jobs:
         # `deploy ate-system` command. ate-setup waits for the api-server before its database has
         # converged on a cold runner, so give the rollouts more than the default budget. `rollout
         # status` returns as soon as a rollout is ready, so this costs nothing on a healthy cluster.
-        # The agentgateway dataplane keeps the router's plaintext :80 listener the suite dials (see
-        # the header); it takes no SPIFFE allowlist, and no envoy-dataplane image is built.
+        # The default envoy router admits only the allowlisted SPIFFE IDs: here the suite's Job
+        # (deploy/substrate/e2e-job.yaml), the only router client this cluster runs.
         if: needs.changes.outputs.decision != 'skip'
         working-directory: _substrate
         run: |
           hack/create-kind-cluster.sh
-          hack/install-ate-kind.sh --rollout-timeout=10m --atenet-dataplane=agentgateway deploy ate-system
+          hack/install-ate-kind.sh --rollout-timeout=10m \
+            --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-agentsessions/sa/substrate-e2e \
+            deploy ate-system
 
       - name: Wait for the disk cleanup
         if: needs.changes.outputs.decision != 'skip'
@@ -365,19 +367,19 @@ jobs:
         # Runs before the stateful tier, so a break in the cheap tier fails first. The idle-stream
         # suspend test holds a turn's harness stream open through the router: Suspend must refuse the
         # session while the turn runs and succeed promptly once it returns. A suspended stateless
-        # session whose actor was deleted must be refused, not cold-created.
+        # session whose actor was deleted must be refused, not cold-created. The router must refuse
+        # a client that presents no certificate, and must wake a suspended actor for a routed call.
         if: needs.changes.outputs.decision != 'skip'
         env:
           ECHO_SANDBOX_CLASS: microvm
-        run: hack/run-e2e-job.sh '^(TestStatelessReplay|TestSessionSuspendResume|TestStatelessSessionWhoseActorIsLostIsRefused|TestSuspendUnderAnIdleHarnessStream|TestSessionDeletePending|TestExecutionState.*)$' "${E2E_IMAGE}" 1200
+        run: hack/run-e2e-job.sh '^(TestRouterRefusesClientWithoutCertificate|TestRoutedCallWakesSuspendedActor|TestStatelessReplay|TestSessionSuspendResume|TestStatelessSessionWhoseActorIsLostIsRefused|TestSuspendUnderAnIdleHarnessStream|TestSessionDeletePending|TestExecutionState.*)$' "${E2E_IMAGE}" 1200
 
       - name: Idle harness stream through the router (in-cluster Job)
-        # A turn parked on a slow model call holds its Connect stream idle. The envoy router bounded
+        # A turn parked on a slow model call holds its Connect stream idle. The envoy router bounds
         # streams by --route-timeout (5m default) plus a 30s idle timeout, and reset the idle stream
-        # at 5m30s on kind; the agentgateway config this suite installs sets no route timeout. The
-        # gap stays well past the envoy bound so the outcome is not a race. The step records the
-        # router's behavior rather than gating a change, and costs about 6 minutes, so it runs on
-        # push, nightly and manual runs only, not on every pull request.
+        # at 5m30s on kind. The gap stays well past that bound so the outcome is not a race. The
+        # step records the router's behavior rather than gating a change, and costs about 6
+        # minutes, so it runs on push, nightly and manual runs only, not on every pull request.
         if: needs.changes.outputs.decision != 'skip' && github.event_name != 'pull_request'
         env:
           ECHO_SANDBOX_CLASS: microvm

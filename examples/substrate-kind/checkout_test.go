@@ -76,6 +76,9 @@ func TestSetupRefusesStaleInstallBeforeChangingCheckout(t *testing.T) {
 						recordedRevision = substratePin(t)
 					}
 					owner := "node " + stage + " " + recordedRevision + "\n"
+					if stage == "installed" {
+						owner = "node " + stage + " " + recordedRevision + " envoy\n"
+					}
 					if err := os.WriteFile(filepath.Join(state, "owner"), []byte(owner), 0o600); err != nil {
 						t.Fatal(err)
 					}
@@ -106,5 +109,53 @@ func TestSetupRefusesStaleInstallBeforeChangingCheckout(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// An installed cluster is reused only when its stamp records the envoy dataplane, which serves the
+// mTLS listener agentsessionsd dials. A stamp from an earlier version of up.sh (no dataplane, or
+// agentgateway) is refused before the checkout is touched, and the stamp is kept for down.sh.
+func TestSetupRefusesClusterInstalledWithAnotherDataplane(t *testing.T) {
+	for _, tc := range []struct {
+		name, dataplane string
+		reuse           bool
+	}{
+		{name: "unrecorded", dataplane: ""},
+		{name: "agentgateway", dataplane: " agentgateway"},
+		{name: "envoy", dataplane: " envoy", reuse: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prerequisites(t)
+			dir, state := fixture(t, map[string]string{
+				"docker":  `case "$1" in info) echo x86_64 ;; ps) echo node ;; *) exit 1 ;; esac`,
+				"kind":    `[[ "$*" == "get clusters" ]]; echo recipe-test`,
+				"git":     `touch "$TEST_DIR/checkout-inspected"; exit 1`,
+				"ko":      `exit 1`,
+				"kubectl": `exit 1`,
+			})
+			owner := "node installed " + substratePin(t) + tc.dataplane + "\n"
+			if err := os.WriteFile(filepath.Join(state, "owner"), []byte(owner), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("SANDBOX_CLASS", "gvisor")
+			t.Setenv("MODEL_SOURCE", "stub")
+			out, err := exec.CommandContext(t.Context(), "bash", "up.sh").CombinedOutput()
+			if err == nil {
+				t.Fatalf("setup unexpectedly succeeded:\n%s", out)
+			}
+			_, inspected := os.Stat(filepath.Join(dir, "checkout-inspected"))
+			refused := strings.Contains(string(out), "installed with another router dataplane")
+			if tc.reuse {
+				if refused || inspected != nil {
+					t.Fatalf("an envoy install was not reused: %v\n%s", inspected, out)
+				}
+			} else if !refused || !os.IsNotExist(inspected) {
+				t.Fatalf("a %s install was not refused before the checkout: %v\n%s", tc.name, inspected, out)
+			}
+			got, err := os.ReadFile(filepath.Join(state, "owner"))
+			if err != nil || string(got) != owner {
+				t.Fatalf("setup changed ownership on refusal: %v\n%s", err, got)
+			}
+		})
 	}
 }

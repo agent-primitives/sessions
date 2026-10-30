@@ -344,8 +344,9 @@ func (s *stubs) runArgs(t *testing.T, script string, args []string, env ...strin
 // installCall is how the go stub logs up.sh's ate-system install.
 const installCall = "go run ./cmd/ate-setup --kind"
 
-// installed is the setup record up.sh writes once it installed ate-system on node: the node and the
-// substrate commit it installed, which common.sh reads from the substrate e2e workflow.
+// installed is the setup record up.sh writes once it installed ate-system on node: the node, the
+// substrate commit it installed, which common.sh reads from the substrate e2e workflow, and the
+// router dataplane (envoy).
 func installed(t *testing.T, node string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "substrate-e2e.yml"))
@@ -356,7 +357,7 @@ func installed(t *testing.T, node string) string {
 	if m == nil {
 		t.Fatal("substrate-e2e.yml sets no SUBSTRATE_REF")
 	}
-	return node + " installed " + string(m[1])
+	return node + " installed " + string(m[1]) + " envoy"
 }
 
 // staleRef is a substrate commit other than the one the example pins: the pin before v0.5.0, as
@@ -409,7 +410,7 @@ func TestUpClusterPhase(t *testing.T) {
 			// platform Docker reports: a Mac driving a remote amd64 Docker gets amd64 images.
 			name: "the install builds for the platform Docker reports", env: []string{"STUB_DOCKER_ARCH=x86_64"},
 			wantCode:  pastClusterPhase,
-			wantCalls: []string{installCall, "--ko-default-platforms=linux/amd64", "--atenet-dataplane=agentgateway deploy ate-system --setup-csi=none"},
+			wantCalls: []string{installCall, "--ko-default-platforms=linux/amd64", "--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/agentsuite-demo/sa/agentsessionsd deploy ate-system --setup-csi=none"},
 			wantOwned: "node-1", wantSetup: installed(t, "node-1"),
 		},
 		{
@@ -520,6 +521,22 @@ func TestUpClusterPhase(t *testing.T) {
 			wantCode: 1, wantOut: "from a commit it did not record",
 			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl"},
 			wantOwned: "node-1", wantSetup: "node-1 installed",
+		},
+		{
+			// agentsessionsd needs the envoy router's mTLS listener: a cluster an earlier up.sh
+			// installed with agentgateway, or whose record names no dataplane, is not reused.
+			name: "an owned cluster installed with the agentgateway dataplane is refused", env: []string{"STUB_CLUSTERS=" + cluster},
+			node: "node-1", owned: "node-1", setup: strings.TrimSuffix(installed(t, "node-1"), " envoy") + " agentgateway",
+			wantCode: 1, wantOut: "installed with another router dataplane (agentgateway)",
+			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl"},
+			wantOwned: "node-1", wantSetup: strings.TrimSuffix(installed(t, "node-1"), " envoy") + " agentgateway",
+		},
+		{
+			name: "an owned cluster whose record names no dataplane is refused", env: []string{"STUB_CLUSTERS=" + cluster},
+			node: "node-1", owned: "node-1", setup: strings.TrimSuffix(installed(t, "node-1"), " envoy"),
+			wantCode: 1, wantOut: "installed with another router dataplane (not recorded)",
+			noCalls:   []string{"create-kind-cluster.sh", installCall, "kind delete", "kind export", "kubectl"},
+			wantOwned: "node-1", wantSetup: strings.TrimSuffix(installed(t, "node-1"), " envoy"),
 		},
 		{
 			// A same-named cluster recreated by someone else has another container ID, so the old
@@ -1810,17 +1827,17 @@ func TestDemoTapeMatchesDriverWaits(t *testing.T) {
 	}
 }
 
-// smoke-microvm.sh deploys substrate's counter-microvm demo on the agentgateway dataplane, the
-// only one this checkout drives on substrate v0.6.0 (docs/substrate-conformance.md), and fails,
-// naming the step, when the deploy fails. The install-ate-kind.sh stub logs its arguments and exits 1.
-func TestDemoSmokeMicroVMDeploysOnAgentgateway(t *testing.T) {
+// smoke-microvm.sh reaches the actor through a port-forward of the router from this machine, which
+// substrate v0.6.0's envoy router does not admit, so it refuses before it deploys anything.
+func TestDemoSmokeMicroVMRefusesBeforeDeploying(t *testing.T) {
 	s := newStubs(t)
 	code, out, calls := s.run(t, "demo/smoke-microvm.sh")
-	if code != 1 || !strings.Contains(out, "SMOKE FAILED: deploying substrate's counter-microvm demo failed") {
-		t.Fatalf("smoke-microvm.sh exited %d, want 1 with the deploy failure:\n%s", code, out)
+	if code != 1 || !strings.Contains(out, "SMOKE FAILED: the smoke test reaches the actor from outside the cluster") ||
+		!strings.Contains(out, "docs/substrate-conformance.md#router-clients-outside-the-cluster") {
+		t.Fatalf("smoke-microvm.sh exited %d, want 1 with the refusal:\n%s", code, out)
 	}
-	if want := "install-ate-kind.sh --atenet-dataplane=agentgateway deploy demo counter-microvm\n"; !strings.Contains(calls, want) {
-		t.Fatalf("calls:\n%s\nwant %q", calls, want)
+	if strings.Contains(calls, "install-ate-kind.sh") || strings.Contains(calls, "kubectl") {
+		t.Fatalf("smoke-microvm.sh changed the cluster before refusing; calls:\n%s", calls)
 	}
 }
 

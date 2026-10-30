@@ -150,7 +150,7 @@ echo node > "$TEST_DIR/node"
 				}
 			}
 			if tc.reuse {
-				if err := os.WriteFile(filepath.Join(state, "owner"), []byte("node installed "+os.Getenv("TEST_PIN")+"\n"), 0o600); err != nil {
+				if err := os.WriteFile(filepath.Join(state, "owner"), []byte("node installed "+os.Getenv("TEST_PIN")+" envoy\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}

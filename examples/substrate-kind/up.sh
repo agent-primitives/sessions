@@ -80,9 +80,14 @@ progress "Checking ownership and setup state for cluster ${CLUSTER}"
 stage="$(cluster_state)"
 [[ "${stage}" != creating ]] || die "Incomplete creation; run down.sh before retrying. Storage will not be recreated automatically."
 if [[ "${stage}" == created || "${stage}" == installed ]]; then
-	read -r _ _ installed_ref <"${OWNER}" || die "Cannot read the cluster's recorded Substrate revision."
+	read -r _ _ installed_ref installed_dataplane <"${OWNER}" || die "Cannot read the cluster's recorded Substrate revision."
 	[[ "${installed_ref}" == "${SUBSTRATE_REF}" ]] ||
 		die "Cluster Substrate revision is older or unrecorded; Substrate cannot be upgraded in place. Use a new CLUSTER, or run down.sh to delete this cluster and its journal before recreating it."
+	# agentsessionsd reaches actors only through the envoy router's mTLS listener. A cluster an
+	# earlier version of this script installed with another dataplane (its stamp records none, or
+	# another) would serve no listener the daemon can use.
+	[[ "${stage}" == created || "${installed_dataplane}" == envoy ]] ||
+		die "Cluster was installed with another router dataplane; agentsessionsd needs the envoy router. Run down.sh to delete this cluster and its journal before recreating it."
 fi
 
 # Pin the managed Substrate checkout to the CI revision. A caller-supplied checkout
@@ -125,8 +130,8 @@ fi
 
 # Install the Substrate control plane only on a newly created cluster. Keep an
 # installed cluster intact on reruns, and record completion only if its identity still matches.
-# The agentgateway dataplane serves the router's plaintext :80 listener agentsessionsd dials; the
-# default envoy router accepts only mTLS clients from v0.6.0.
+# The default envoy router admits only mTLS clients whose SPIFFE ID it allowlists: here the
+# daemon's ServiceAccount (deploy/agentsessionsd.yaml).
 kind_command export kubeconfig --name "${CLUSTER}" --kubeconfig "${KUBECONFIG}"
 if [[ "${stage}" == created ]]; then
 	progress "Installing the Substrate control plane in cluster ${CLUSTER}"
@@ -134,13 +139,14 @@ if [[ "${stage}" == created ]]; then
 		-u MEMORYSTORE_INSTANCE -u PROJECT_ID \
 		go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}" \
 		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${arch}" \
-		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m --atenet-dataplane=agentgateway \
+		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m \
+		--ingress-allowed-spiffe-ids="${ROUTER_CLIENT_ID}" \
 		deploy ate-system --setup-csi=none)
 	stage="$(cluster_state)"
 	[[ "${stage}" == created ]] || die "Cluster changed during installation."
 	id="$(node_id)"
 	[[ -n "${id}" ]] || die "Cluster disappeared during installation."
-	printf '%s installed %s\n' "${id}" "${SUBSTRATE_REF}" >"${OWNER}"
+	printf '%s installed %s envoy\n' "${id}" "${SUBSTRATE_REF}" >"${OWNER}"
 else
 	progress "Reusing owned cluster ${CLUSTER}; retaining its journal."
 fi

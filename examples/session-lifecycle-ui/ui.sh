@@ -64,6 +64,10 @@ if [[ "${1:-}" == check ]]; then
 	exec "${BIN}" check -url "${URL}" -fake-model="${FAKE}"
 fi
 [[ -z "${1:-}" ]] || fail "usage: ui.sh [check]"
+# The page's replay reaches actors through a port-forward of the router from this machine. Substrate
+# v0.6.0's envoy router admits only mTLS clients with an allowlisted SPIFFE ID, and the bridge has
+# no certificate, so the page stops here, before it changes anything.
+fail "the page's replay reaches the router from outside the cluster, which substrate v0.6.0's envoy router does not admit yet; see docs/substrate-conformance.md#router-clients-outside-the-cluster"
 
 # The volumes lane: the memory-tier harness on a template that only gives VOLUMES fidelity, served
 # by a third daemon, agentsessionsd-volumes. It is derived from up.sh's rendered memory tier, which

@@ -3,9 +3,10 @@
 //
 // It is an ordinary Go test package, compiled into a test binary and executed as a Kubernetes Job
 // inside the cluster. The harness is reached the way a production host reaches it: harnesswire over
-// h2c to the atenet-router Service, with the ate-target-actor metadata naming the actor. Control is
-// reached over the ate-api-server Service with a mounted ServiceAccount token. Running in-cluster
-// keeps both on their Service DNS names without port-forwards.
+// mTLS to the atenet-router Service, with the Job's pod-certificate SVID as the client identity and
+// the ate-target-actor metadata naming the actor. Control is reached over the ate-api-server
+// Service with a mounted ServiceAccount token. Running in-cluster keeps both on their Service DNS
+// names without port-forwards.
 //
 // Tests SKIP unless AGENTSESSIONS_E2E=1, so `go test ./...` on a laptop or in the fast PR job still
 // compiles every line here — a driver that no longer builds fails the cheap gate, not the 17-minute
@@ -18,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,8 +29,10 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
 	ateadapter "github.com/agent-primitives/sessions/integrations/substrate"
+	"github.com/agent-primitives/sessions/integrations/substrate/internal/routertls"
 	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/runtime/substrate"
 	"github.com/agent-primitives/sessions/sqlitelog"
@@ -171,10 +175,37 @@ func stopQuietly(t *testing.T, b *substrate.Backend, uid string) {
 	}
 }
 
+// routerClient loads the router client once per test binary from the Job's podCertificate and
+// clusterTrustBundle volume (deploy/substrate/e2e-job.yaml), as agentsessionsd does.
+var routerClient = sync.OnceValues(func() (*routertls.Credentials, error) {
+	return routertls.Load(routertls.Config{
+		CertFile: env("ATENET_ROUTER_CERT_FILE", "/var/run/router-client/credential-bundle.pem"),
+		CAFile:   env("ATENET_ROUTER_CA_FILE", "/var/run/router-client/router-ca.pem"),
+	})
+})
+
+// routerCreds returns the suite's router client credentials, failing the test without them.
+func routerCreds(t *testing.T) *routertls.Credentials {
+	t.Helper()
+	creds, err := routerClient()
+	if err != nil {
+		t.Fatalf("router client: %v", err)
+	}
+	return creds
+}
+
+// newPlacer is placement.New with the router client's dialer, as agentsessionsd builds a Placer for
+// a substrate harness.
+func newPlacer(t *testing.T, backend placement.Backend, model controller.ModelFunc, opts ...placement.Option) *placement.Placer {
+	t.Helper()
+	return placement.New(backend, model, append(opts, placement.WithDialer(routertls.Dialer(routerCreds(t))))...)
+}
+
 // dialActor opens a harnesswire client to an incarnation's harness through the router, with the same
 // dialer and call metadata the Placer uses, for a test that needs a connection of its own.
-func dialActor(inc api.Incarnation) (api.Harness, func() error, error) {
-	return placement.DefaultDial(inc)
+func dialActor(t *testing.T, inc api.Incarnation) (api.Harness, func() error, error) {
+	t.Helper()
+	return routertls.Dialer(routerCreds(t))(inc)
 }
 
 func outputsOf(recs []eventlog.Record) []string {

@@ -277,16 +277,17 @@ if [[ "${stage}" == created ]]; then
 	# control-plane images for linux/<its own GOARCH> unless --ko-default-platforms is given (the
 	# wrapper's KO_DEFAULTPLATFORMS is ambient and ignored), so an arm64 Mac with an amd64 Docker VM
 	# would push arm64 images to an amd64 node. The flags below are the wrapper's settings plus the
-	# platform Docker reports; the GCP variables it unsets are unset here too. The agentgateway
-	# dataplane serves the router's plaintext :80 listener agentsessionsd and cmd/replay dial; the
-	# default envoy router accepts only mTLS clients from v0.6.0.
+	# platform Docker reports; the GCP variables it unsets are unset here too. The default envoy
+	# router admits only mTLS clients whose SPIFFE ID it allowlists: here the agentsessionsd
+	# ServiceAccount both daemon tiers run as (deploy/agentsessionsd.yaml).
 	(cd "${SUBSTRATE}" && env -u GCE_REGION -u CLUSTER_LOCATION -u NETWORK -u SUBNETWORK \
 		-u MEMORYSTORE_INSTANCE -u PROJECT_ID \
 		go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}" \
 		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${ARCH}" \
-		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m --atenet-dataplane=agentgateway \
+		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m \
+		--ingress-allowed-spiffe-ids="${ROUTER_CLIENT_ID}" \
 		deploy ate-system --setup-csi=none)
-	echo "${id} installed ${SUBSTRATE_REF}" >"${SETUP}"
+	echo "${id} installed ${SUBSTRATE_REF} envoy" >"${SETUP}"
 else
 	step "reusing kind cluster ${CLUSTER}"
 	if [[ "${stage}" == foreign ]]; then

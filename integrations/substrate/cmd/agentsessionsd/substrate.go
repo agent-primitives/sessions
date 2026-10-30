@@ -23,6 +23,8 @@ import (
 	"github.com/agent-primitives/sessions/observability"
 	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/runtime/substrate"
+
+	"github.com/agent-primitives/sessions/integrations/substrate/internal/routertls"
 )
 
 // controlFunc turns a connection to the agent-substrate ate-api into the substrate backend's
@@ -93,8 +95,9 @@ func isShortName(s string) bool {
 }
 
 // substrateFlags is this build's agentsessionsd.HarnessBackends: the -substrate-harness, -ateapi-*
-// and -atenet-router flags, and the ate-api connection they configure. The neutral agentsessionsd
-// does not register them, so its -help does not offer a backend it cannot serve.
+// and -atenet-router* flags, and the ate-api connection and router client they configure. The
+// neutral agentsessionsd does not register them, so its -help does not offer a backend it cannot
+// serve.
 type substrateFlags struct {
 	newControl controlFunc
 	// fs is the flag set RegisterFlags added the flags to; Harnesses reads which of them were set.
@@ -108,6 +111,12 @@ type substrateFlags struct {
 	insecureVerify *bool
 	tokenFile      *string
 	router         *string
+	routerCert     *string
+	routerCA       *string
+	routerName     *string
+	// routerCreds is the router client Harnesses loaded from -atenet-router-cert-file and
+	// -atenet-router-ca-file.
+	routerCreds *routertls.Credentials
 	// only names the flags RegisterFlags adds besides -substrate-harness. Harnesses refuses them
 	// without a -substrate-harness. It is derived at registration, so a flag added later is
 	// covered without a second list to keep in sync.
@@ -137,7 +146,10 @@ func (f *substrateFlags) RegisterFlags(fs *flag.FlagSet) {
 	f.caFile = fs.String("ateapi-ca-file", "", "PEM CA bundle that signs the ate-api serving certificate; empty uses the system roots")
 	f.insecureVerify = fs.Bool("ateapi-insecure-skip-verify", false, "do not verify the ate-api serving certificate, so a server impersonating the ate-api receives the -ateapi-token-file bearer token; for a dev cluster only")
 	f.tokenFile = fs.String("ateapi-token-file", "", "file holding the bearer token for the ate-api, re-read on every call so a rotated projected token is picked up")
-	f.router = fs.String("atenet-router", substrate.DefaultRouterAddress, "host:port of the atenet-router that reaches session actors over h2c")
+	f.router = fs.String("atenet-router", substrate.DefaultRouterAddress, "host:port of the atenet-router's TLS listener that reaches session actors")
+	f.routerCert = fs.String("atenet-router-cert-file", "", "PEM credential bundle (private key and certificate chain) of this host's SPIFFE ID, from a podCertificate volume for signer podidentity.podcert.ate.dev/identity; required with -substrate-harness. Re-read on every connection, so a rotated certificate is picked up. The router's --ingress-allowed-spiffe-ids must list the ID")
+	f.routerCA = fs.String("atenet-router-ca-file", "", "PEM trust bundle the router's serving certificate must chain to, from a clusterTrustBundle volume for signer servicedns.podcert.ate.dev/identity; required with -substrate-harness. Re-read on every connection")
+	f.routerName = fs.String("atenet-router-server-name", routertls.DefaultServerName, "DNS name the router's serving certificate must carry. It does not follow -atenet-router: the servicedns signer issues only <service>.<namespace>.svc names")
 }
 
 // Harnesses runs every substrate flag check that needs no side effect, so agentsessionsd refuses a
@@ -165,10 +177,20 @@ func (f *substrateFlags) Harnesses() ([]string, error) {
 	if err := agentsessionsd.CheckDialAddress(*f.ateapi); err != nil {
 		return nil, fmt.Errorf("-ateapi-addr: %w", err)
 	}
-	// The router is dialed the way placement dials every incarnation, over cleartext h2c.
 	if err := agentsessionsd.CheckDialAddress(*f.router); err != nil {
 		return nil, fmt.Errorf("-atenet-router: %w", err)
 	}
+	// The router serves only mTLS clients. Both files are mounted before the container starts, so a
+	// missing, unreadable, expired or wrong-kind certificate is a deployment mistake: refuse it here,
+	// before the journal opens, rather than on the first session.
+	if *f.routerCert == "" || *f.routerCA == "" {
+		return nil, errors.New("-atenet-router-cert-file and -atenet-router-ca-file are required with -substrate-harness: the atenet-router admits only mTLS clients with an allowlisted SPIFFE ID")
+	}
+	creds, err := routertls.Load(routertls.Config{CertFile: *f.routerCert, CAFile: *f.routerCA, ServerName: *f.routerName})
+	if err != nil {
+		return nil, fmt.Errorf("-atenet-router-cert-file, -atenet-router-ca-file: %w", err)
+	}
+	f.routerCreds = creds
 	if *f.caFile != "" && *f.insecureVerify {
 		return nil, errors.New("-ateapi-ca-file and -ateapi-insecure-skip-verify are mutually exclusive")
 	}
@@ -216,10 +238,14 @@ func ateapiDeadline(timeout time.Duration) grpc.UnaryClientInterceptor {
 	}
 }
 
-// Backends dials the ate-api once and builds the substrate backend for the -substrate-harness. The
-// returned close function releases the connection. grpc.NewClient does not connect, so nothing is
-// sent before the first session is placed.
-func (f *substrateFlags) Backends(logger *slog.Logger) (map[string]placement.Backend, func(), error) {
+// Backends dials the ate-api once and builds the substrate backend for the -substrate-harness, and
+// the router client's dialer for its incarnations. The returned close function releases the
+// connection. grpc.NewClient does not connect, so nothing is sent before the first session is
+// placed; the router probe runs in the background and only logs.
+func (f *substrateFlags) Backends(logger *slog.Logger) (map[string]placement.Backend, placement.Dialer, func(), error) {
+	if f.routerCreds == nil {
+		return nil, nil, nil, errors.New("substrate router client not loaded: Harnesses must succeed first")
+	}
 	tlsConfig := &tls.Config{
 		MinVersion:         tls.VersionTLS12,
 		ServerName:         *f.serverName,
@@ -228,11 +254,11 @@ func (f *substrateFlags) Backends(logger *slog.Logger) (map[string]placement.Bac
 	if *f.caFile != "" {
 		pem, err := os.ReadFile(*f.caFile)
 		if err != nil {
-			return nil, nil, fmt.Errorf("-ateapi-ca-file: %w", err)
+			return nil, nil, nil, fmt.Errorf("-ateapi-ca-file: %w", err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pem) {
-			return nil, nil, fmt.Errorf("-ateapi-ca-file %s: no PEM certificates", *f.caFile)
+			return nil, nil, nil, fmt.Errorf("-ateapi-ca-file %s: no PEM certificates", *f.caFile)
 		}
 		tlsConfig.RootCAs = pool
 	}
@@ -248,7 +274,7 @@ func (f *substrateFlags) Backends(logger *slog.Logger) (map[string]placement.Bac
 	}
 	conn, err := grpc.NewClient(*f.ateapi, dialOpts...)
 	if err != nil {
-		return nil, nil, fmt.Errorf("dial ate-api %s: %w", *f.ateapi, err)
+		return nil, nil, nil, fmt.Errorf("dial ate-api %s: %w", *f.ateapi, err)
 	}
 	ctl := f.newControl(conn)
 	backends := make(map[string]placement.Backend, len(f.harnesses))
@@ -265,7 +291,11 @@ func (f *substrateFlags) Backends(logger *slog.Logger) (map[string]placement.Bac
 			substrate.WithLogger(logger), substrate.WithRouter(*f.router))
 	}
 	f.logConfig(logger)
-	return backends, func() { _ = conn.Close() }, nil
+	stopProbe := f.startRouterProbe(logger)
+	return backends, routertls.Dialer(f.routerCreds.WithLogger(logger)), func() {
+		stopProbe()
+		_ = conn.Close()
+	}, nil
 }
 
 // logConfig records where substrate sessions go, without the token.
@@ -282,6 +312,8 @@ func (f *substrateFlags) logConfig(logger *slog.Logger) {
 			"actor_atespace", *f.atespace,
 			"ateapi", *f.ateapi,
 			"atenet_router", *f.router,
+			"atenet_router_client_id", f.routerCreds.SPIFFEID(),
+			"atenet_router_server_name", f.routerCreds.ServerName(),
 			"ateapi_token_file", *f.tokenFile,
 			"ateapi_insecure_skip_verify", *f.insecureVerify,
 		)

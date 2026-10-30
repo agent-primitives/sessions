@@ -10,9 +10,11 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/client"
 	"github.com/agent-primitives/sessions/harness/echoagent"
 	"github.com/agent-primitives/sessions/placement"
@@ -27,6 +29,9 @@ type fakeBackends struct {
 	extraBuilt  string // a name Backends builds that Harnesses did not return
 	backendsErr error
 	nilClose    bool // Backends returns a nil close func
+	// dialed counts the incarnations the dialer Backends returns was asked to reach.
+	// It is a pointer so the table tests can copy a fakeBackends.
+	dialed *atomic.Int32
 
 	built  int
 	closed int
@@ -42,11 +47,11 @@ func (f *fakeBackends) RegisterFlags(fs *flag.FlagSet) {
 
 func (f *fakeBackends) Harnesses() ([]string, error) { return f.names, f.harnessErr }
 
-func (f *fakeBackends) Backends(logger *slog.Logger) (map[string]placement.Backend, func(), error) {
+func (f *fakeBackends) Backends(logger *slog.Logger) (map[string]placement.Backend, placement.Dialer, func(), error) {
 	f.built++
 	f.logger = logger
 	if f.backendsErr != nil {
-		return nil, nil, f.backendsErr
+		return nil, nil, nil, f.backendsErr
 	}
 	var locals []*local.Backend
 	backends := map[string]placement.Backend{}
@@ -59,10 +64,17 @@ func (f *fakeBackends) Backends(logger *slog.Logger) (map[string]placement.Backe
 		locals = append(locals, b)
 		backends[name] = b
 	}
-	if f.nilClose {
-		return backends, nil, nil
+	if f.dialed == nil {
+		f.dialed = new(atomic.Int32)
 	}
-	return backends, func() {
+	dial := func(inc api.Incarnation) (api.Harness, func() error, error) {
+		f.dialed.Add(1)
+		return placement.DefaultDial(inc)
+	}
+	if f.nilClose {
+		return backends, dial, nil, nil
+	}
+	return backends, dial, func() {
 		f.closed++
 		for _, b := range locals {
 			_ = b.Close()
@@ -71,7 +83,8 @@ func (f *fakeBackends) Backends(logger *slog.Logger) (map[string]placement.Backe
 }
 
 // A HarnessBackends harness is served through Run like any static harness: Run builds its backend
-// once, with the daemon's logger, routes turns to it by name and closes it when the server stops.
+// once, with the daemon's logger, routes turns to it by name through the dialer Backends returned,
+// and closes it when the server stops. Other harnesses keep the default dialer.
 func TestRunServesHarnessBackends(t *testing.T) {
 	fake := &fakeBackends{}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -101,6 +114,17 @@ func TestRunServesHarnessBackends(t *testing.T) {
 	}
 	if turn.Output != "reply:hi" {
 		t.Fatalf("output = %q, want reply:hi", turn.Output)
+	}
+	if n := fake.dialed.Load(); n == 0 {
+		t.Fatal("the turn on the HarnessBackends harness did not use the dialer Backends returned")
+	}
+	dialed := fake.dialed.Load()
+	// The echo turn fails at its model call (-model m has no server), after placement dialed it.
+	if _, err := c.Exec(tctx, client.ExecOptions{Harness: "echo", Inputs: []string{"hi"}}); err == nil || !strings.Contains(err.Error(), "openai") {
+		t.Fatalf("exec on echo: %v, want the model call to fail after placement", err)
+	}
+	if n := fake.dialed.Load(); n != dialed {
+		t.Fatalf("a turn on the built-in echo harness used the HarnessBackends dialer (%d dials, want %d)", n, dialed)
 	}
 	if fake.built != 1 || fake.logger == nil {
 		t.Fatalf("Backends called %d times with logger %v, want once with the daemon's logger", fake.built, fake.logger)

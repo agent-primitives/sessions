@@ -186,12 +186,14 @@ This is **production-shaped, not production-ready**:
   holds editor on `sessions-example` only; that is not a tenant boundary between sessions. The
   namespace carries `ate.dev/api-access=true` for
   Substrate v0.6.0's ate-api ingress policy; worker pods are excluded from that allowance.
-- Harness traffic is plaintext h2c to atenet-router on :80, so `up.sh` installs Substrate with
-  the agentgateway dataplane (`--atenet-dataplane=agentgateway`). From v0.6.0 the default envoy
-  router serves only mTLS clients with an allowlisted SPIFFE ID, and `agentsessionsd` has no TLS
-  client for the router yet. agentgateway's :80 listener authenticates no caller: any pod that can
-  reach it can drive any actor, and routing metadata is not authorization. Long model calls can
-  exceed the router's stream/idle timeouts.
+- Harness traffic goes to atenet-router's :443 over mTLS. `up.sh` installs Substrate's default
+  envoy router with one allowlisted client, the daemon's SPIFFE ID
+  `spiffe://cluster.local/ns/sessions-example/sa/agentsessions`; the daemon presents it from a
+  `podCertificate` volume and verifies the router by its DNS name. Any allowlisted client can drive
+  any actor, and routing metadata is not authorization; see
+  [security.md](../../docs/security.md). A cluster an earlier `up.sh` installed with another router
+  dataplane is refused on reuse: run `down.sh` and `up.sh` again. Long model calls can exceed the
+  router's stream/idle timeouts.
 - The actor runs the reference chat context policy, which sends the full recorded conversation
   on every turn, not a production context-window strategy.
 

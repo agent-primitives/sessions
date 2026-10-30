@@ -15,7 +15,9 @@
 //
 // Transport: the harness is reached through substrate's atenet-router, the only supported ingress
 // to an actor. Every incarnation addresses the router and carries the ate-target-actor metadata that
-// selects the actor; the router resumes the actor if needed and proxies the h2c gRPC stream to it.
+// selects the actor; the router resumes the actor if needed and proxies the gRPC stream to it. The
+// router serves only mTLS, so the host dials incarnations with its router client credentials
+// (placement.WithDialer), not placement.DefaultDial.
 // Capabilities report MemorySnapshot=true by default; WithVolumesOnly disables memory admission
 // for files-only templates. Snapshot reports the observed fidelity, not the configured preference.
 package substrate
@@ -1598,10 +1600,11 @@ func (b *Backend) Capabilities() api.RuntimeCapabilities {
 // incarnation. Keep in sync with cmd/harnessnode's HARNESS_ADDR default.
 const HarnessPort = "80"
 
-// DefaultRouterAddress is the atenet-router Service a stock substrate install creates. The router
-// accepts h2c on port 80 and carries gRPC unary and bidi streams, trailers included, to the actor's
-// HarnessPort.
-const DefaultRouterAddress = "atenet-router.ate-system.svc:80"
+// DefaultRouterAddress is the TLS port of the atenet-router Service a stock substrate install
+// creates. From substrate v0.6.0 the default (envoy) router serves only mTLS there: it admits a
+// client certificate from the pod identity signer whose SPIFFE ID is on its allowlist, and carries
+// gRPC unary and bidi streams, trailers included, to the actor's HarnessPort.
+const DefaultRouterAddress = "atenet-router.ate-system.svc:443"
 
 // TargetActorHeader is the request header the atenet-router reads to pick the actor, with the value
 // "<atespace>/<actor>". The router ignores the host and authority, so without it a call reaches no

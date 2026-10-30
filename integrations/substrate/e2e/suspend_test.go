@@ -11,7 +11,6 @@ import (
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/harness/echoagent"
 	ateadapter "github.com/agent-primitives/sessions/integrations/substrate"
-	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/runtime/substrate"
 )
 
@@ -27,7 +26,7 @@ func TestSessionSuspendResume(t *testing.T) {
 	session := uniqueUID("suspend")
 	defer stopQuietly(t, backend, session)
 	log := journal(t).Session(session)
-	p := placement.New(backend, echoagent.Model)
+	p := newPlacer(t, backend, echoagent.Model)
 
 	inc, err := p.Exec(ctx, log, session, []api.Message{*api.TextMessage("user", "before")}, 0)
 	if err != nil {
@@ -127,7 +126,7 @@ func TestStatelessSessionWhoseActorIsLostIsRefused(t *testing.T) {
 	session := uniqueUID("stateless-lost")
 	defer stopQuietly(t, backend, session)
 	log := journal(t).Session(session)
-	p := placement.New(backend, echoagent.Model)
+	p := newPlacer(t, backend, echoagent.Model)
 
 	if _, err := p.Exec(ctx, log, session, []api.Message{*api.TextMessage("user", "before")}, 0); err != nil {
 		t.Fatalf("pre-suspend exec: %v", err)

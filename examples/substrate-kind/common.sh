@@ -32,6 +32,9 @@ SANDBOX_CLASS="${SANDBOX_CLASS:-microvm}"
 # The daemon's Substrate identity: deploy/agentsessionsd.yaml's ServiceAccount. provision.sh grants it
 # the atespace editor role in NS, which covers every Control API call the daemon makes.
 DAEMON_PRINCIPAL="user:system:serviceaccount:${NS}:agentsessions"
+# The SPIFFE ID the pod-identity signer issues that ServiceAccount: the only router client up.sh
+# allowlists. smoke.sh calls only the Sessions API, so it needs no entry.
+ROUTER_CLIENT_ID="spiffe://cluster.local/ns/${NS}/sa/agentsessions"
 SNAPSHOT_LOCATION="${SNAPSHOT_LOCATION:-gs://ate-snapshots/sessions-example/}"
 
 # Every cluster command names its context and kubeconfig instead of relying on the caller's default.

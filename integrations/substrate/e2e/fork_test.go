@@ -33,7 +33,7 @@ func TestForkFanOutFromMemorySnapshot(t *testing.T) {
 	store := journal(t)
 	parent := uniqueUID("fork-parent")
 	parentLog := store.Session(parent)
-	p := placement.New(backend, echoagent.Model)
+	p := newPlacer(t, backend, echoagent.Model)
 	defer stopQuietly(t, backend, parent)
 
 	const (
@@ -134,7 +134,7 @@ func TestForkOfMemoryHarnessAtHistoricalSeqIsRefused(t *testing.T) {
 	store := journal(t)
 	parent := uniqueUID("fork-historical")
 	parentLog := store.Session(parent)
-	p := placement.New(backend, echoagent.Model)
+	p := newPlacer(t, backend, echoagent.Model)
 	defer stopQuietly(t, backend, parent)
 
 	driveTurns(ctx, t, p, parentLog, parent, 2)

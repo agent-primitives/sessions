@@ -10,7 +10,6 @@ import (
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/harness/echoagent"
-	"github.com/agent-primitives/sessions/placement"
 )
 
 // TestConcurrentSessionsReachTheirOwnActors runs two sessions' calls through the router at once and
@@ -29,7 +28,7 @@ func TestConcurrentSessionsReachTheirOwnActors(t *testing.T) {
 
 	backend := f.backend(t, counterTemplateSpec, counterDescriptor)
 	store := journal(t)
-	p := placement.New(backend, echoagent.Model)
+	p := newPlacer(t, backend, echoagent.Model)
 
 	sessions := []struct {
 		uid   string
@@ -62,7 +61,7 @@ func TestConcurrentSessionsReachTheirOwnActors(t *testing.T) {
 	// side by side, as they are in a host serving both sessions.
 	harnesses := make([]api.Harness, len(sessions))
 	for i, s := range sessions {
-		har, closeHar, err := dialActor(s.inc)
+		har, closeHar, err := dialActor(t, s.inc)
 		if err != nil {
 			t.Fatalf("dial session %s's actor: %v", s.uid, err)
 		}

@@ -24,6 +24,7 @@ import (
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/canon"
 	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/internal/computestate"
 	"github.com/agent-primitives/sessions/wire"
 )
 
@@ -611,7 +612,7 @@ func appendRecord(ctx context.Context, tx *sql.Tx, session string, head, fence i
 // project and created_at are filled only when still unset, so an explicit PutSession is never
 // overwritten by later log activity.
 func touchSession(tx *sql.Tx, session, defaultProject string, ev api.Event) error {
-	state, moves := eventComputeState(ev)
+	state, moves := computestate.Event(ev)
 	if !moves {
 		state = api.ComputeNone
 	}

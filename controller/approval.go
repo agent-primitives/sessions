@@ -296,11 +296,16 @@ func approvalContinuationError(executionID string) error {
 	return fmt.Errorf("%w: execution %q continued past an unresolved approval call", ErrInvalidExecutionLog, executionID)
 }
 
+// validateApprovalReceipt checks a receipt's status against its decision. A denial allows
+// APPROVAL_DENIED, or NOT_EXECUTED from CloseApproval; an approval allows success,
+// EXECUTOR_ERROR, POLICY_DENIED, or OUTCOME_UNKNOWN from CloseApproval. Every failure code needs
+// is_error. The harnesswire and sqlitelog copies of this rule must agree with it.
 func validateApprovalReceipt(decision *api.ApprovalResult, result *api.ToolResult) error {
-	valid := result.IsError && result.Code == api.ToolResultCodeApprovalDenied
+	valid := result.IsError && (result.Code == api.ToolResultCodeApprovalDenied || result.Code == api.ToolResultCodeNotExecuted)
 	if decision.Approved {
 		valid = !result.IsError && result.Code == api.ToolResultCodeUnspecified ||
-			result.IsError && (result.Code == api.ToolResultCodeExecutorError || result.Code == api.ToolResultCodePolicyDenied)
+			result.IsError && (result.Code == api.ToolResultCodeExecutorError || result.Code == api.ToolResultCodePolicyDenied ||
+				result.Code == api.ToolResultCodeOutcomeUnknown)
 	}
 	if !valid {
 		return fmt.Errorf("%w: receipt status contradicts approval decision", ErrReplayDiverged)

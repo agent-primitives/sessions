@@ -111,7 +111,7 @@ func TestAuthorizationEveryGeneratedRPC(t *testing.T) {
 	defer expire()
 	actions := map[string][]api.Action{
 		"CreateSession": {api.ActionCreate}, "GetSession": {api.ActionRead}, "ListSessions": {api.ActionList}, "DeleteSession": {api.ActionDelete},
-		"Exec": {api.ActionExec}, "Replay": {api.ActionRead}, "Approve": {api.ActionRead, api.ActionApprove}, "Cancel": {api.ActionCancel},
+		"Exec": {api.ActionExec}, "Replay": {api.ActionRead}, "Approve": {api.ActionRead, api.ActionApprove}, "CloseApproval": {api.ActionRead, api.ActionApprovalClose}, "Cancel": {api.ActionCancel},
 		"Suspend": {api.ActionSuspend}, "Resume": {api.ActionResume, api.ActionExec}, "Fork": {api.ActionFork, api.ActionCreate},
 		"RegisterHarness": {api.ActionRegistryRegister}, "CreateHarness": {api.ActionRegistryRegister}, "GetHarness": {api.ActionRegistryRead}, "ListHarnesses": {api.ActionRegistryList}, "RetireHarness": {api.ActionRegistryRetire},
 	}

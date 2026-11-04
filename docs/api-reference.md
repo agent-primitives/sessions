@@ -649,6 +649,8 @@ Mediation controls how a tool call is executed / who enforces record-before-effe
 | APPROVAL_DENIED | 1 | A denied approval: is_error=true and the executor MUST NOT have been invoked. |
 | EXECUTOR_ERROR | 2 | An attempted executor call failed: is_error=true; error describes the failure. This is a durable handled receipt, not an unrecorded effect or an approval denial. |
 | POLICY_DENIED | 3 | The host&#39;s pre-dispatch tool policy refused the call definitively: is_error=true and the executor MUST NOT have been invoked. Only the host writes it, for an ordinary host-executed call or an approved call. Peers that predate this value reject it rather than serve it. |
+| NOT_EXECUTED | 4 | A gate closed by CloseApproval whose decision is a denial, including the host-written denial for an undecided gate: is_error=true and the executor was not invoked. Only the host writes it. Peers that predate this value reject it rather than serve it. |
+| OUTCOME_UNKNOWN | 5 | A gate closed by CloseApproval whose decision is an approval with no receipt: is_error=true and the executor may or may not have run, so the outcome is unknown. The receipt revokes the approval for any later recovery. Only the host writes it. Peers that predate this value reject it rather than serve it. |
 
 
  
@@ -728,10 +730,12 @@ Cancel and does not record a completed, failed, or canceled execution.
 On decided recovery or replay the host sends approval BEFORE tool, even if a receipt already
 exists. The harness must correlate approval.tool_call_id/request_seq with the waiting call and
 receipt.id/approval_request_seq; the receipt&#39;s approval_decision_seq must identify the committed
-decision in that session&#39;s journal, which the host validates. Denial requires APPROVAL_DENIED
-and is_error=true without an executor call. Approval permits a success (CODE_UNSPECIFIED with
-is_error=false), EXECUTOR_ERROR with is_error=true, or POLICY_DENIED with is_error=true when the
-host&#39;s pre-dispatch policy refused the call without an executor call. Conflicting decisions or
+decision in that session&#39;s journal, which the host validates. Denial requires APPROVAL_DENIED,
+or NOT_EXECUTED for a gate closed by CloseApproval, with is_error=true and no executor call.
+Approval permits a success (CODE_UNSPECIFIED with is_error=false), EXECUTOR_ERROR with
+is_error=true, POLICY_DENIED with is_error=true when the host&#39;s pre-dispatch policy refused the
+call without an executor call, or OUTCOME_UNKNOWN with is_error=true for a gate closed by
+CloseApproval, whose executor call may or may not have happened. Conflicting decisions or
 receipt tuples fail closed rather than being served to a different call. The harness may not
 manufacture durable APPROVAL_REQUEST/APPROVAL_RESULT events. A memory-snapshot harness restored
 at a decided gate re-issues the gated call as its first sink call (spec APR-16) and then gets
@@ -1257,6 +1261,48 @@ an exact retry returns that same record, not a new decision or receipt.
 
 
 
+<a name="agentsessions-v1-CloseApprovalRequest"></a>
+
+### CloseApprovalRequest
+CloseApproval closes one approval gate in this session with a host receipt, so a session whose
+harness can no longer re-issue the gated call can take a new turn. All tuple fields are required
+and request_seq must be positive; the tuple names a request owned by this session, as for
+Approve. No request field supplies identity: a host that authenticates the caller records it as
+verified_approver on the denial it writes for an undecided gate.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| session | [string](#string) |  |  |
+| execution_id | [string](#string) |  |  |
+| tool_call_id | [string](#string) |  |  |
+| request_seq | [int64](#int64) |  |  |
+
+
+
+
+
+
+<a name="agentsessions-v1-CloseApprovalResponse"></a>
+
+### CloseApprovalResponse
+decision is the gate&#39;s APPROVAL_RESULT and receipt its TOOL_RESULT, each either already in the
+journal or written by this call. An undecided gate gets a host denial with reason &#34;approval
+closed&#34; and a NOT_EXECUTED receipt; a denied gate a NOT_EXECUTED receipt; an approved gate with
+no receipt an OUTCOME_UNKNOWN receipt. A gate that already has a receipt returns it unchanged.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| session | [Session](#agentsessions-v1-Session) |  |  |
+| decision | [LogRecord](#agentsessions-v1-LogRecord) |  |  |
+| receipt | [LogRecord](#agentsessions-v1-LogRecord) |  |  |
+
+
+
+
+
+
 <a name="agentsessions-v1-ComputeRef"></a>
 
 ### ComputeRef
@@ -1734,6 +1780,7 @@ provide required-mode deployment or transport assembly.
 | Exec | [ExecRequest](#agentsessions-v1-ExecRequest) | [ExecUpdate](#agentsessions-v1-ExecUpdate) stream | Exec runs one execution/turn. The live stream carries committed LogRecords plus ephemeral Deltas; Replay re-delivers committed records only (read-only). |
 | Replay | [ReplayRequest](#agentsessions-v1-ReplayRequest) | [LogRecord](#agentsessions-v1-LogRecord) stream | Raw read-only audit: remains available for tombstoned UIDs, including LIFECYCLE_DELETE records. Unlike controller replay, this does not reconstruct or run the harness. |
 | Approve | [ApproveRequest](#agentsessions-v1-ApproveRequest) | [ApproveResponse](#agentsessions-v1-ApproveResponse) | Implemented durable approval decisions for STATELESS_REPLAY and REQUIRES_MEMORY_SNAPSHOT executions. OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple, approved value, reason, identity and verified approver returns the existing decision, even after resolution. A changed decision/reason/identity, or a different verified approver, for that request is FAILED_PRECONDITION, never an overwrite. INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created for a harness that declares any other tier (spec APR-1); Approve does not Describe or resolve a harness. ABORTED: local contention, append-CAS conflict or superseded fence; retry after reading the session. Identity is unverified provenance, ignored by an enforcing Go host. Independent read&#43;approve permission checks are opt-in. This method does not run a host&#39;s pre-dispatch tool policy hook (it runs when recovery dispatches the approved call) and implies no expiry, implicit Resume, or Cancel behavior. |
+| CloseApproval | [CloseApprovalRequest](#agentsessions-v1-CloseApprovalRequest) | [CloseApprovalResponse](#agentsessions-v1-CloseApprovalResponse) | Closes an approval gate the harness cannot re-issue, writing only journal records: no harness, executor or compute runs. OK returns the gate&#39;s decision and receipt; after it Exec admits a new turn. A retry, or a close of a gate that already has a receipt from any writer, returns the existing records without writing. The closed execution gets no END: Resume re-drives it and serves the receipt to a harness that re-issues the call. A REQUIRES_MEMORY_SNAPSHOT harness restored at the gate cannot continue there unless the gate is the execution&#39;s first effect (spec APR-19); Exec is that session&#39;s route. Closing an approved gate revokes the approval for later recovery but cannot stop an executor call another host already dispatched, so its receipt is OUTCOME_UNKNOWN. INVALID_ARGUMENT: missing session/execution/tool-call tuple or non-positive request_seq. NOT_FOUND: unknown session. FAILED_PRECONDITION: deleted session; wrong, inherited or superseded request tuple, or one whose request was never journaled; or invalid recorded approval evidence. DATA_LOSS: the journal fails hash-chain verification. ABORTED: local contention (including a live Resume or a stateful Fork), append-CAS conflict or superseded fence; retry after reading the session. Independent read&#43;approval.close permission checks are opt-in. |
 | Cancel | [CancelRequest](#agentsessions-v1-CancelRequest) | [Session](#agentsessions-v1-Session) | In-flight control: cancel the running execution. Not implemented: the server returns UNIMPLEMENTED. |
 | Suspend | [SuspendRequest](#agentsessions-v1-SuspendRequest) | [Session](#agentsessions-v1-Session) | Compute-layer durability. There is no warm Pause: no Runtime backend implements a node-local warm checkpoint, so a session goes straight from live to a cold snapshot. Suspend routes an owned unreceipted approval to its recorded harness; inherited approvals and ordinary sessions use their stored default. An unserved recorded name is FAILED_PRECONDITION, with no fallback. cold, free worker |
 | Resume | [ResumeRequest](#agentsessions-v1-ResumeRequest) | [Session](#agentsessions-v1-Session) | A recorded override where either harness is REQUIRES_MEMORY_SNAPSHOT is FAILED_PRECONDITION before compute changes or journal repair, as for Exec admission. Otherwise an unresolved owned approval returns its current paused Session without runtime IO. A call-only cut repairs the request; neither outcome proves cold compute. After a decision, recovery uses the recorded invocation and SnapshotRef. It may park at another gate (without RESUME), or finish and commit RESUME. A missing executor is FAILED_PRECONDITION and leaves the decision recoverable, and so does a transient refusal from the host&#39;s optional tool policy. Approved executor failures are durable EXECUTOR_ERROR receipts and definitive policy refusals durable POLICY_DENIED receipts, available to the harness for continuation, not transport failures. Snapshots and unresolved requests are retained indefinitely; there is no approval expiry or automatic decision. |

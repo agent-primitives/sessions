@@ -41,6 +41,10 @@ const (
 	ActionRegistryList     Action = "registry.list"
 	ActionRegistryRegister Action = "registry.register"
 	ActionRegistryRetire   Action = "registry.retire"
+	// ActionApprovalClose closes an approval gate with a host receipt (CloseApproval). It can
+	// deny an undecided gate or revoke an approval that has no receipt, so it only stops effects;
+	// it never grants one.
+	ActionApprovalClose Action = "approval.close"
 )
 
 // AuthorizationRequest carries the verified caller and trusted stored owner of
@@ -79,6 +83,8 @@ var ErrPermissionDenied = errors.New("api: permission denied")
 // OwnerAuthorizer is the first owner/grants policy implementation. It supports
 // owner checks only; no grants are interpreted. Approval decisions, audience
 // minting and creation require separate policy and are denied even to owners.
+// Closing an approval gate (ActionApprovalClose) is an owner action: it can deny
+// or revoke, never approve.
 // ActionFork authorizes the parent only; it does not assign child ownership.
 // The current fork path creates unbound children. Enforcing hosts need a separate
 // owned-child reservation/publication primitive before exposing owned forks.
@@ -124,7 +130,7 @@ func (OwnerAuthorizer) Authorize(ctx context.Context, r AuthorizationRequest) er
 		return ErrPermissionDenied
 	}
 	switch r.Action {
-	case ActionRead, ActionExec, ActionFork, ActionSuspend, ActionResume, ActionDelete, ActionCancel:
+	case ActionRead, ActionExec, ActionFork, ActionSuspend, ActionResume, ActionDelete, ActionCancel, ActionApprovalClose:
 		return nil
 	default:
 		return ErrPermissionDenied

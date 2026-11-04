@@ -20,6 +20,7 @@ type approvalSDKServer struct {
 	v1.UnimplementedSessionsServer
 	records, fail bool
 	request       *v1.ApproveRequest
+	close         *v1.CloseApprovalRequest
 	resumes       int
 }
 
@@ -44,6 +45,10 @@ func (s *approvalSDKServer) Exec(_ *v1.ExecRequest, stream v1.Sessions_ExecServe
 func (s *approvalSDKServer) Approve(_ context.Context, q *v1.ApproveRequest) (*v1.ApproveResponse, error) {
 	s.request = q
 	return &v1.ApproveResponse{Decision: &v1.LogRecord{Seq: 14}}, nil
+}
+func (s *approvalSDKServer) CloseApproval(_ context.Context, q *v1.CloseApprovalRequest) (*v1.CloseApprovalResponse, error) {
+	s.close = q
+	return &v1.CloseApprovalResponse{Decision: &v1.LogRecord{Seq: 13}, Receipt: &v1.LogRecord{Seq: 14}}, nil
 }
 func (s *approvalSDKServer) Resume(context.Context, *v1.ResumeRequest) (*v1.Session, error) {
 	s.resumes++
@@ -96,6 +101,11 @@ func TestApprovalSDK(t *testing.T) {
 			claimed := api.ApprovalDecision{ExecutionID: "e", ToolCallID: "c", RequestSeq: 12, Approved: true, VerifiedApprover: api.CallerIdentity{Issuer: "issuer", Subject: "approver"}}
 			if _, err := c.Approve(t.Context(), "known", claimed); !errors.Is(err, client.ErrVerifiedApproverNotSendable) || server.request != nil {
 				t.Fatalf("client-set approver = %v, request %v; want ErrVerifiedApproverNotSendable before any RPC", err, server.request)
+			}
+			closed, err := c.CloseApproval(t.Context(), "known", api.ApprovalRef{ExecutionID: "e", ToolCallID: "c", RequestSeq: 12})
+			want := &v1.CloseApprovalRequest{Session: "known", ExecutionId: "e", ToolCallId: "c", RequestSeq: 12}
+			if err != nil || !proto.Equal(server.close, want) || closed.GetDecision().GetSeq() != 13 || closed.GetReceipt().GetSeq() != 14 || server.resumes != 0 {
+				t.Fatalf("CloseApproval forwarding/implicit resume: %v %v %v", server.close, closed, err)
 			}
 		})
 	}

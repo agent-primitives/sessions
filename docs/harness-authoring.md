@@ -452,6 +452,14 @@ after Resume was cancelled, or a deadline error after Resume's deadline passed, 
 pending with no receipt even if your per-call deadline expired first. Any other error is still an
 `EXECUTOR_ERROR` receipt.
 
+If the owner closed the gate with `CloseApproval`, recovery instead delivers a denial followed by a
+`NOT_EXECUTED` receipt, or an approval followed by an `OUTCOME_UNKNOWN` receipt (whether the tool
+ran is unknown), each with `IsError=true` and fixed text in `Content`. Render them like any other
+receipt. Only the host writes these codes: never report them with `sink.Report`. A memory-snapshot
+harness restored at a closed gate is not served there: unless the gate is the turn's first effect,
+the re-issued call fails with `ErrApprovalUnavailable` (spec `APR-19`), and the session continues
+with a new turn.
+
 The gate serializes sink operations across decision/effect/receipt handling. Observer/model/executor
 callbacks must not re-enter the same sink: re-entry can deadlock the serialized operation. Recorded
 prefix identity, argument, mediation, key and receipt-correlation mismatches remain sticky divergence;

@@ -217,6 +217,15 @@ message ToolResult {
     // executor MUST NOT have been invoked. Only the host writes it, for an ordinary host-executed
     // call or an approved call. Peers that predate this value reject it rather than serve it.
     POLICY_DENIED = 3;
+    // A gate closed by CloseApproval whose decision is a denial, including the host-written denial
+    // for an undecided gate: is_error=true and the executor was not invoked. Only the host writes
+    // it. Peers that predate this value reject it rather than serve it.
+    NOT_EXECUTED = 4;
+    // A gate closed by CloseApproval whose decision is an approval with no receipt: is_error=true
+    // and the executor may or may not have run, so the outcome is unknown. The receipt revokes the
+    // approval for any later recovery. Only the host writes it. Peers that predate this value
+    // reject it rather than serve it.
+    OUTCOME_UNKNOWN = 5;
   }
   string id = 1;
   google.protobuf.Struct output = 2;

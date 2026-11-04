@@ -67,6 +67,9 @@ func deleteRaceMutation(ctx context.Context, c v1.SessionsClient, op, uid, overr
 	case "Approve":
 		_, err := c.Approve(ctx, publicDecision(uid))
 		return err
+	case "CloseApproval":
+		_, err := c.CloseApproval(ctx, publicClose(uid))
+		return err
 	case "Delete":
 		_, err := c.DeleteSession(ctx, &v1.DeleteSessionRequest{Uid: uid})
 		return err
@@ -349,13 +352,13 @@ func TestDeleteSameServiceBusyBeforeMetadataLookup(t *testing.T) {
 				op  string
 				err error
 			}
-			ops := []string{"Exec", "Fork", "Suspend", "Resume", "Approve", "Delete"}
+			ops := []string{"Exec", "Fork", "Suspend", "Resume", "Approve", "CloseApproval", "Delete"}
 			results := make(chan result, len(ops))
 			for _, op := range ops {
 				go func() { results <- result{op, deleteRaceMutation(ctx, client, op, uid, "")} }()
 			}
-			// This deadline only bounds a failed test; success is receipt of all six
-			// Aborted replies while the independent writer lock is still held.
+			// This deadline only bounds a failed test; success is receipt of an
+			// Aborted reply from every operation while the independent writer lock is still held.
 			wait, stopWait := context.WithTimeout(ctx, 2*time.Second)
 			defer stopWait()
 			received := 0

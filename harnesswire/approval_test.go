@@ -601,6 +601,17 @@ func TestApprovalClientRejectsInvalidHostReplies(t *testing.T) {
 		{"executor code without error", func(h *gateHost) { h.result.Code = api.ToolResultCodeExecutorError }, "status"},
 		{"unknown code", func(h *gateHost) { h.result.Code = api.ToolResultCode(99) }, "status"},
 		{"policy code without error", func(h *gateHost) { h.result.Code = api.ToolResultCodePolicyDenied }, "status"},
+		{"approved not executed", func(h *gateHost) { h.result.Code = api.ToolResultCodeNotExecuted; h.result.IsError = true }, "status"},
+		{"denied outcome unknown", func(h *gateHost) {
+			h.result.Approval.Approved = false
+			h.result.Code = api.ToolResultCodeOutcomeUnknown
+			h.result.IsError = true
+		}, "status"},
+		{"denied not executed without error", func(h *gateHost) {
+			h.result.Approval.Approved = false
+			h.result.Code = api.ToolResultCodeNotExecuted
+		}, "status"},
+		{"outcome unknown without error", func(h *gateHost) { h.result.Code = api.ToolResultCodeOutcomeUnknown }, "status"},
 		{"denied policy denial", func(h *gateHost) {
 			h.result.Approval.Approved = false
 			h.result.Code = api.ToolResultCodePolicyDenied
@@ -663,6 +674,8 @@ func TestApprovalServerReportForgeryIsSticky(t *testing.T) {
 		{"denial", api.ToolResult{Code: api.ToolResultCodeApprovalDenied, IsError: true}},
 		{"unknown code", api.ToolResult{Code: api.ToolResultCode(7)}},
 		{"policy denial", api.ToolResult{Code: api.ToolResultCodePolicyDenied, IsError: true}},
+		{"not executed", api.ToolResult{Code: api.ToolResultCodeNotExecuted, IsError: true}},
+		{"outcome unknown", api.ToolResult{Code: api.ToolResultCodeOutcomeUnknown, IsError: true}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			observed := make(chan []error, 1)
@@ -709,7 +722,7 @@ func TestPolicyDeniedReceiptHarnessSide(t *testing.T) {
 		{"approved policy denial", gateCall, []*v1.ControllerFrame{decisionFrame(true), approved}, ""},
 		{"ordinary policy code without error", ordinaryCall, ordinary(v1.ToolResult_POLICY_DENIED, false), "host-owned"},
 		{"ordinary approval denial", ordinaryCall, ordinary(v1.ToolResult_APPROVAL_DENIED, true), "host-owned"},
-		{"ordinary code newer than this build", ordinaryCall, ordinary(v1.ToolResult_Code(4), true), "host-owned"},
+		{"ordinary code newer than this build", ordinaryCall, ordinary(v1.ToolResult_Code(99), true), "host-owned"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			type outcome struct {
@@ -751,7 +764,7 @@ func TestPolicyDeniedReceiptHostSide(t *testing.T) {
 		ok     bool
 	}{
 		{"policy denial", api.ToolResult{ID: "call", Code: api.ToolResultCodePolicyDenied, IsError: true}, true},
-		{"unknown code", api.ToolResult{ID: "call", Code: api.ToolResultCode(4), IsError: true}, false},
+		{"unknown code", api.ToolResult{ID: "call", Code: api.ToolResultCode(99), IsError: true}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			frames := make(chan *v1.ControllerFrame, 1)
@@ -780,6 +793,92 @@ func TestPolicyDeniedReceiptHostSide(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), "host-owned") || f != nil {
 				t.Fatalf("unknown code relay = %v, frame %v", err, f)
+			}
+		})
+	}
+}
+
+// A harness accepts the host's CloseApproval receipts only after the matching decision: NOT_EXECUTED
+// after a denial, OUTCOME_UNKNOWN after an approval, each with is_error. As a reply to an ordinary
+// call either code is refused, as a harness built before them refuses any unknown code.
+func TestCloseReceiptHarnessSide(t *testing.T) {
+	ordinary := func(code v1.ToolResult_Code) []*v1.ControllerFrame {
+		return []*v1.ControllerFrame{{Session: "session", ExecutionId: "exec", Frame: &v1.ControllerFrame_Tool{Tool: &v1.ToolResult{Id: "call", Code: code, IsError: true}}}}
+	}
+	gated := func(approved bool, code v1.ToolResult_Code, isError bool) []*v1.ControllerFrame {
+		receipt := receiptFrame()
+		receipt.GetTool().Code = code
+		receipt.GetTool().IsError = isError
+		return []*v1.ControllerFrame{decisionFrame(approved), receipt}
+	}
+	for _, test := range []struct {
+		name   string
+		call   api.ToolCall
+		frames []*v1.ControllerFrame
+		want   api.ToolResultCode
+		refuse string // empty: accepted
+	}{
+		{"denied not executed", gateCall, gated(false, v1.ToolResult_NOT_EXECUTED, true), api.ToolResultCodeNotExecuted, ""},
+		{"approved outcome unknown", gateCall, gated(true, v1.ToolResult_OUTCOME_UNKNOWN, true), api.ToolResultCodeOutcomeUnknown, ""},
+		{"approved not executed", gateCall, gated(true, v1.ToolResult_NOT_EXECUTED, true), 0, "status"},
+		{"denied outcome unknown", gateCall, gated(false, v1.ToolResult_OUTCOME_UNKNOWN, true), 0, "status"},
+		{"denied not executed without error", gateCall, gated(false, v1.ToolResult_NOT_EXECUTED, false), 0, "status"},
+		{"approved outcome unknown without error", gateCall, gated(true, v1.ToolResult_OUTCOME_UNKNOWN, false), 0, "status"},
+		{"ordinary not executed", ordinaryCall, ordinary(v1.ToolResult_NOT_EXECUTED), 0, "host-owned"},
+		{"ordinary outcome unknown", ordinaryCall, ordinary(v1.ToolResult_OUTCOME_UNKNOWN), 0, "host-owned"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			type outcome struct {
+				result api.ToolResult
+				err    error
+			}
+			observed := make(chan outcome, 1)
+			server := NewServer(gateHarness{run: func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+				result, err := sink.ToolCall(ctx, test.call)
+				observed <- outcome{result, err}
+				return err
+			}})
+			stream := openGate(t, approvalClient(t, server), "session")
+			for _, frame := range test.frames {
+				if err := stream.Send(frame); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := <-observed
+			if test.refuse != "" {
+				if got.err == nil || !strings.Contains(got.err.Error(), test.refuse) {
+					t.Fatalf("ToolCall = %+v, %v; want %s refusal", got.result, got.err, test.refuse)
+				}
+				return
+			}
+			if got.err != nil || got.result.Code != test.want || !got.result.IsError {
+				t.Fatalf("ToolCall = %+v, %v; want the %v receipt", got.result, got.err, test.want)
+			}
+		})
+	}
+}
+
+// The host side refuses to relay either close code as the reply to an ordinary call: only a
+// CloseApproval receipt for an approval gate carries one.
+func TestCloseReceiptHostSideOrdinaryReply(t *testing.T) {
+	for _, code := range []api.ToolResultCode{api.ToolResultCodeNotExecuted, api.ToolResultCodeOutcomeUnknown} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			frames := make(chan *v1.ControllerFrame, 1)
+			peer := connectPeer{run: func(s v1.Harness_ConnectServer) error {
+				if _, err := s.Recv(); err != nil {
+					return err
+				}
+				if err := s.Send(&v1.Event{ExecutionId: "exec", Kind: v1.EventKind_EVENT_TOOL_CALL, Body: &v1.Event_Tool{Tool: &v1.ToolCall{Id: "call", Tool: "charge", Mediation: v1.Mediation_MEDIATION_CONTROLLER_MEDIATED, IdempotencyKey: "k"}}}); err != nil {
+					return err
+				}
+				f, err := s.Recv()
+				frames <- f
+				return err
+			}}
+			host := &gateHost{result: api.ToolResult{ID: "call", Code: code, IsError: true}}
+			err := NewClientHarness(approvalClient(t, peer)).Run(approvalContext(t), &api.Start{SessionUID: "session", ExecutionID: "exec"}, host)
+			if f := <-frames; err == nil || !strings.Contains(err.Error(), "host-owned") || f != nil {
+				t.Fatalf("close code relay = %v, frame %v", err, f)
 			}
 		})
 	}

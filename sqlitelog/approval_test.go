@@ -36,6 +36,10 @@ func TestApprovalPrefixes(t *testing.T) {
 	latest := api.ApprovalRef{ExecutionID: "latest", ToolCallID: "call", RequestSeq: 6}
 	second := api.Event{ExecutionID: "e", Kind: api.EventToolCall, ToolCall: &api.ToolCall{ID: "second", IdempotencyKey: "second-key", Mediation: api.MediationRequiresApproval}}
 	secondRequest := api.Event{ExecutionID: "e", Kind: api.EventApprovalRequest, Approval: &api.ApprovalRequest{ToolCallID: "second"}}
+	denial := api.Event{ExecutionID: "e", Kind: api.EventApprovalResult, ApprovalResult: &api.ApprovalResult{ToolCallID: "call", RequestSeq: 3}}
+	closeReceipt := func(code api.ToolResultCode) api.Event {
+		return api.Event{ExecutionID: "e", Kind: api.EventToolResult, Result: &api.ToolResult{ID: "call", IsError: true, Code: code, ApprovalRequestSeq: 3, ApprovalDecisionSeq: 4}}
+	}
 	for _, tc := range []struct {
 		name   string
 		events []api.Event
@@ -49,6 +53,10 @@ func TestApprovalPrefixes(t *testing.T) {
 		{"denial contradictory receipt", []api.Event{s, c, r, {ExecutionID: "e", Kind: api.EventApprovalResult, ApprovalResult: &api.ApprovalResult{ToolCallID: "call", RequestSeq: 3}}, receipt, second, secondRequest}, []api.ApprovalRef{none, none, pending, none, none, none, none}},
 		{"approved policy denial receipt second call", []api.Event{s, c, r, d, {ExecutionID: "e", Kind: api.EventToolResult, Result: &api.ToolResult{ID: "call", IsError: true, Code: api.ToolResultCodePolicyDenied, ApprovalRequestSeq: 3, ApprovalDecisionSeq: 4}}, second, secondRequest}, []api.ApprovalRef{none, none, pending, none, none, none, {ExecutionID: "e", ToolCallID: "second", RequestSeq: 7}}},
 		{"denial with policy denial receipt", []api.Event{s, c, r, {ExecutionID: "e", Kind: api.EventApprovalResult, ApprovalResult: &api.ApprovalResult{ToolCallID: "call", RequestSeq: 3}}, {ExecutionID: "e", Kind: api.EventToolResult, Result: &api.ToolResult{ID: "call", IsError: true, Code: api.ToolResultCodePolicyDenied, ApprovalRequestSeq: 3, ApprovalDecisionSeq: 4}}, second, secondRequest}, []api.ApprovalRef{none, none, pending, none, none, none, none}},
+		{"denial with not executed receipt second call", []api.Event{s, c, r, denial, closeReceipt(api.ToolResultCodeNotExecuted), second, secondRequest}, []api.ApprovalRef{none, none, pending, none, none, none, {ExecutionID: "e", ToolCallID: "second", RequestSeq: 7}}},
+		{"approval with outcome unknown receipt second call", []api.Event{s, c, r, d, closeReceipt(api.ToolResultCodeOutcomeUnknown), second, secondRequest}, []api.ApprovalRef{none, none, pending, none, none, none, {ExecutionID: "e", ToolCallID: "second", RequestSeq: 7}}},
+		{"approval with not executed receipt", []api.Event{s, c, r, d, closeReceipt(api.ToolResultCodeNotExecuted), second, secondRequest}, []api.ApprovalRef{none, none, pending, none, none, none, none}},
+		{"denial with outcome unknown receipt", []api.Event{s, c, r, denial, closeReceipt(api.ToolResultCodeOutcomeUnknown), second, secondRequest}, []api.ApprovalRef{none, none, pending, none, none, none, none}},
 		{"verified approver", []api.Event{s, c, r, {ExecutionID: "e", Kind: api.EventApprovalResult, ApprovalResult: &api.ApprovalResult{ToolCallID: "call", RequestSeq: 3, Approved: true, VerifiedApprover: api.CallerIdentity{Issuer: "i", Subject: "s"}}}, receipt, second, secondRequest}, []api.ApprovalRef{none, none, pending, none, none, none, {ExecutionID: "e", ToolCallID: "second", RequestSeq: 7}}},
 		{"incomplete verified approver", []api.Event{s, c, r, {ExecutionID: "e", Kind: api.EventApprovalResult, ApprovalResult: &api.ApprovalResult{ToolCallID: "call", RequestSeq: 3, Approved: true, VerifiedApprover: api.CallerIdentity{Issuer: "i"}}}, receipt, second, secondRequest}, []api.ApprovalRef{none, none, pending, none, none, none, none}},
 		{"bad receipt sequence", []api.Event{s, c, r, d, {ExecutionID: "e", Kind: api.EventToolResult, Result: &api.ToolResult{ID: "call", ApprovalRequestSeq: 2, ApprovalDecisionSeq: 4}}, second, secondRequest}, []api.ApprovalRef{none, none, pending, none, none, none, none}},

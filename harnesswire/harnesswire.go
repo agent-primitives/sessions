@@ -670,19 +670,23 @@ func validateApprovalReceipt(callID string, decision *api.ApprovalResult, receip
 	if receipt.ApprovalRequestSeq != decision.RequestSeq || receipt.ApprovalDecisionSeq <= 0 {
 		return errors.New("harnesswire: invalid approval receipt sequences")
 	}
+	// Keep in step with controller.validateApprovalReceipt: NOT_EXECUTED and OUTCOME_UNKNOWN are
+	// the host's receipts for a gate closed by CloseApproval.
 	if !decision.Approved {
-		if receipt.Code == api.ToolResultCodeApprovalDenied && receipt.IsError {
+		if (receipt.Code == api.ToolResultCodeApprovalDenied || receipt.Code == api.ToolResultCodeNotExecuted) && receipt.IsError {
 			return nil
 		}
 	} else if receipt.Code == api.ToolResultCodeUnspecified && !receipt.IsError ||
-		(receipt.Code == api.ToolResultCodeExecutorError || receipt.Code == api.ToolResultCodePolicyDenied) && receipt.IsError {
+		(receipt.Code == api.ToolResultCodeExecutorError || receipt.Code == api.ToolResultCodePolicyDenied ||
+			receipt.Code == api.ToolResultCodeOutcomeUnknown) && receipt.IsError {
 		return nil
 	}
 	return errors.New("harnesswire: approval receipt status conflicts with decision")
 }
 
 // rejectApprovalReport refuses a harness report that carries host-owned receipt fields or a code
-// only the host writes (APPROVAL_DENIED, POLICY_DENIED, or one this build does not know).
+// only the host writes (APPROVAL_DENIED, POLICY_DENIED, NOT_EXECUTED, OUTCOME_UNKNOWN, or one this
+// build does not know).
 func rejectApprovalReport(receipt api.ToolResult) error {
 	if receipt.Approval != nil || receipt.ApprovalRequestSeq != 0 || receipt.ApprovalDecisionSeq != 0 || (receipt.Code != api.ToolResultCodeUnspecified && receipt.Code != api.ToolResultCodeExecutorError) {
 		return errors.New("harnesswire: harness report or ordinary reply contains host-owned approval receipt")

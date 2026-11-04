@@ -33,8 +33,14 @@ var ErrApprovalReceiptReport = errors.New("controller: approval receipts are hos
 var ErrMissingToolExecutor = errors.New("controller: no tool executor configured")
 
 // executorFailure is the model-facing Content of an approved call's EXECUTOR_ERROR receipt when
-// the executor returned a Go error. The error text is kept in ToolResult.Error only.
+// the executor returned a Go error, or a close code in a result that claimed success. The error
+// text is kept in ToolResult.Error only.
 const executorFailure = "Tool execution failed."
+
+// executorHostOwnedCode is the Error of an approved call's EXECUTOR_ERROR receipt when the
+// executor claimed success with a close code and gave no error text. It is journaled, so it is
+// stable once released; the model never sees it.
+const executorHostOwnedCode = "tool executor returned a result code only the host writes"
 
 // hostEnded returns the error that ended the host's turn when the executor's err is that ending,
 // and nil for an executor outcome. Only the state of the context Exec or Resume received, when the
@@ -184,6 +190,16 @@ func (s *liveSink) completeApproval(ctx context.Context, state *ApprovalState) (
 				// executor again under the same key.
 				s.guard.stop = ErrApprovalReceiptReport
 				return api.ToolResult{}, s.guard.stop
+			}
+			if (result.Code == api.ToolResultCodeNotExecuted || result.Code == api.ToolResultCodeOutcomeUnknown) && !result.IsError {
+				// Only CloseApproval writes the close codes (APR-12): from the executor either one
+				// is a failure, whatever its is_error. A result that claimed success carries no
+				// failure content, so it is discarded as a Go error's partial result is.
+				errText := result.Error
+				if errText == "" {
+					errText = executorHostOwnedCode
+				}
+				result = api.ToolResult{IsError: true, Error: errText, Content: api.TextMessage("tool", executorFailure).Parts}
 			}
 			result.Code = api.ToolResultCodeUnspecified
 			if result.IsError {

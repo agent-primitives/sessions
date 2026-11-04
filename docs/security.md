@@ -211,6 +211,32 @@ Configured executor errors instead become durable `EXECUTOR_ERROR` receipts: the
 committed before the response was lost, and recovery does not retry a receipted failure. Neither path
 prevents a trusted harness from doing unmediated work outside the sink.
 
+`CloseApproval` ends a gate the harness can no longer re-issue, so the session can take a new turn.
+It writes host records only and calls no executor, policy hook, harness or runtime. An undecided
+gate gets a host denial (reason "approval closed") and a `NOT_EXECUTED` receipt; a denied gate gets
+`NOT_EXECUTED`; an approved gate without a receipt gets `OUTCOME_UNKNOWN`, because the journal
+cannot prove the executor never ran. A close revokes the approval for later recovery, but it cannot
+stop a call another host already dispatched; that host's receipt append then fails its fence. A
+gate that already has a receipt is returned unchanged. Only the host writes the two codes: a
+harness report or ordinary executor result carrying one is rejected without a receipt, and an
+approved call's executor result carrying one is recorded as `EXECUTOR_ERROR`. Closing can only stop
+an effect, never grant one, so it uses its own `approval.close` action rather than `approve`
+(below). The journal attributes a close only partly: the undecided case's denial carries the
+verified approver when the caller was authenticated, but a denied or approved gate's close writes
+only a `TOOL_RESULT`, which has no identity field, so the journal does not record who closed it. The
+fixed reason marks a host close, but an `Approve` denial that supplies the same reason looks the
+same. A host that needs attribution keeps it in its own ledger. See
+[spec §10.5](../spec.md#105-close).
+
+`NOT_EXECUTED` and `OUTCOME_UNKNOWN` need no SQLite schema change. A build without them that already
+opens this release's journal (an unreleased schema v9 build) still serves every session without a
+close. For a session holding a close receipt, its hash-chain verification fails: `VerifyJournal`
+and its controller `Exec`, `Resume` and `controller.Replay` refuse the session (`DATA_LOSS`), its
+Exec and Resume RPCs fail `INTERNAL` with a replay divergence, and its `Sessions.Replay` RPC streams
+the record unverified with the code as the number 4 or 5. An older harness rejects the receipt.
+Upgrade every host sharing a journal and every harness before calling `CloseApproval`. See
+[§18](../spec.md#18-versioning-and-compatibility).
+
 ## Pre-dispatch tool policy
 
 A custom Go host can install `placement.WithToolPolicy` (or `controller.WithToolPolicy`) to check a
@@ -381,6 +407,7 @@ inputless Exec approval recovery checks `resume` with the Exec method, not the R
 | Resume | `resume` and `exec` |
 | DeleteSession | `delete` |
 | Approve | `read` and independently `approve` |
+| CloseApproval | `read` and independently `approval.close` |
 | Cancel | `cancel`, then `UNIMPLEMENTED` |
 | Fork | `fork` on parent and global `create`, then `FAILED_PRECONDITION` (owned publication unavailable) |
 | ListSessions | global `list`, then exact verified-owner SQL filtering before keyset pagination |
@@ -409,13 +436,13 @@ diagnostic-only exception to the [operational log data policy](observability.md#
 permission to put sensitive data in errors. Custom policies own any additional sharing rules;
 listing remains owner-only, not a list of arbitrary grants.
 
-Mutation owner lookups for Exec, Suspend, Resume, Fork, Approve and DeleteSession first probe
-shared deletion admission after authentication. The probe acquires and immediately releases
-admission before owner SQL or policy evaluation; it never leases SQL. An exclusive Delete already
-in progress at the probe returns `ABORTED` before lookup or policy, even for a verified non-owner
-who knows the UID. This narrow disclosure grants no access. The tiny shared probe can also race
-an owner's Delete, briefly returning `ABORTED` to Delete; this is not an owner-query SQL hold. The
-probe can race a later Delete; the mutation's later guards remain authoritative. An owner query,
+Mutation owner lookups for Exec, Suspend, Resume, Fork, Approve, CloseApproval and DeleteSession
+first probe shared deletion admission after authentication. The probe acquires and immediately
+releases admission before owner SQL or policy evaluation; it never leases SQL. An exclusive Delete
+already in progress at the probe returns `ABORTED` before lookup or policy, even for a verified
+non-owner who knows the UID. This narrow disclosure grants no access. The tiny shared probe can also
+race an owner's Delete, briefly returning `ABORTED` to Delete; this is not an owner-query SQL hold.
+The probe can race a later Delete; the mutation's later guards remain authoritative. An owner query,
 including one later denied by policy, holds no admission while waiting for SQL and cannot keep
 Delete out that way. Outside probe contention, inaccessible sessions return `PERMISSION_DENIED`.
 GetSession and Replay remain unguarded audit reads; Cancel is unchanged.
@@ -426,6 +453,13 @@ list, approve and registry actions. Unknown actions and mint stay denied even if
 An owner alone cannot approve: this policy requires an owner who is also on the approve allowlist.
 A separate non-owner approver needs a custom read policy. Configure policies before serving; do not
 mutate their allowlists concurrently.
+
+`approval.close` is an ordinary owner action: `OwnerAuthorizer` allows it for the owner, and
+`OwnerAllowlistAuthorizer` delegates it unchanged, so an owner who cannot approve can still deny an
+undecided gate or revoke an approval that has no receipt. Neither policy lets a non-owner close,
+and `approve` does not imply `approval.close`. Because the caller must be the owner, a close of an
+undecided gate under either policy journals the owner as `verified_approver`. A host that wants
+only approvers to close needs a custom policy.
 
 Enforced Approve ignores request identity and clears the actor before decision/retry comparison.
 Historical decisions with a nonempty actor are not identical retries after this normalization.

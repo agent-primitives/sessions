@@ -40,9 +40,10 @@ const (
 	Mediation_MEDIATION_UNSPECIFIED         Mediation = 0
 	Mediation_MEDIATION_IN_HARNESS_REPORTED Mediation = 1 // harness runs it, reports for audit (cooperative WAL)
 	Mediation_MEDIATION_CONTROLLER_MEDIATED Mediation = 2 // host/gateway executes (host-enforced WAL; trustless)
-	// Host-owned durable approval gate for STATELESS_REPLAY only. The harness emits a tool call,
-	// then awaits a decision/receipt or park control frame; it never executes the effect itself.
-	// REQUIRES_MEMORY_SNAPSHOT is unsupported for this gate and fails closed before the effect.
+	// Host-owned durable approval gate for STATELESS_REPLAY and REQUIRES_MEMORY_SNAPSHOT
+	// harnesses. The harness emits a tool call, then awaits a decision/receipt or park control
+	// frame; it never executes the effect itself. A harness declaring no tier fails closed before
+	// the effect.
 	Mediation_MEDIATION_REQUIRES_APPROVAL Mediation = 3
 )
 
@@ -1670,9 +1671,9 @@ func (x *ToolResult) GetApprovalDecisionSeq() int64 {
 // only the host may commit the request or its later APPROVAL_RESULT. The harness cannot mint
 // requests or decisions by emitting these events. Identity on a decision's Event.actor is
 // recorded provenance only, not authorization; ApprovalResult.verified_approver is the
-// authenticated approver. This gate supports STATELESS_REPLAY only; it defines no expiry,
-// automatic decision, or Cancel behavior. A host's optional pre-dispatch tool policy hook runs
-// only when recovery dispatches an approved call (spec §9.4).
+// authenticated approver. This gate supports STATELESS_REPLAY and REQUIRES_MEMORY_SNAPSHOT
+// harnesses; it defines no expiry, automatic decision, or Cancel behavior. A host's optional
+// pre-dispatch tool policy hook runs only when recovery dispatches an approved call (spec §9.4).
 type ApprovalRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ToolCallId    string                 `protobuf:"bytes,1,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`

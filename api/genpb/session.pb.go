@@ -1061,15 +1061,15 @@ func (x *ReplayRequest) GetToSeq() int64 {
 	return 0
 }
 
-// Approve supplies an explicit decision for one unresolved request in a stateless execution.
-// All tuple fields are required and request_seq must be positive. A decision resolves only a
-// request owned by this session, not an inherited parent request. By default identity is recorded
-// on the decision's Event.actor as unverified provenance. An opt-in enforcing Go host ignores it,
-// normalizing the actor to empty before append/retry comparison. A host that authenticates the
-// caller records it as ApprovalResult.verified_approver; no request field sets it.
-// Approve does not run a host's pre-dispatch tool policy hook, which runs when recovery
-// dispatches the approved call (spec §9.4). No expiry, automatic decision, or Cancel
-// semantics are implied.
+// Approve supplies an explicit decision for one unresolved request in a STATELESS_REPLAY or
+// REQUIRES_MEMORY_SNAPSHOT execution. All tuple fields are required and request_seq must be
+// positive. A decision resolves only a request owned by this session, not an inherited parent
+// request. By default identity is recorded on the decision's Event.actor as unverified provenance.
+// An opt-in enforcing Go host ignores it, normalizing the actor to empty before append/retry
+// comparison. A host that authenticates the caller records it as ApprovalResult.verified_approver;
+// no request field sets it. Approve does not run a host's pre-dispatch tool policy hook, which
+// runs when recovery dispatches the approved call (spec §9.4). No expiry, automatic decision, or
+// Cancel semantics are implied.
 type ApproveRequest struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	Session     string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`

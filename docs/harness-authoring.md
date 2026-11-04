@@ -386,9 +386,10 @@ restarts; an in-memory cache is insufficient. Direct controller users must confi
 `controller.WithSessionUID(uid)` with a nonempty UID; `controller.New` returns
 `controller.ErrMissingSessionUID` for an unscoped non-nil executor without advancing the log's fence.
 Journaling alone does not provide exactly-once external delivery. `REQUIRES_APPROVAL` uses the same
-executor after a durable decision, for `STATELESS_REPLAY` only. The stock daemon can optionally
-configure [Unix-socket tool executors](tool-executors.md) for CLI `-harness` entries; without that
-configuration approval does not supply an executor or complete general tool/provider integration.
+executor after a durable decision, for `STATELESS_REPLAY` and `REQUIRES_MEMORY_SNAPSHOT` harnesses.
+The stock daemon can optionally configure [Unix-socket tool executors](tool-executors.md) for CLI
+`-harness` entries; without that configuration approval does not supply an executor or complete
+general tool/provider integration.
 
 For the same recorded call, re-emit the same `ToolCall.ID`, tool name, arguments, mediation and key.
 Replay and recorded-prefix recovery compare that identity before serving a result or re-driving an
@@ -416,8 +417,9 @@ like an executor error.
 #### Approval-gated calls
 
 Set `MediationRequiresApproval` and a nonempty call ID/idempotency key before `sink.ToolCall`. Never run
-the gated effect inside the harness. The stateless host owns `TOOL_CALL`, `APPROVAL_REQUEST`, the later
-`APPROVAL_RESULT`, and the receipt. Memory-snapshot harnesses are refused before the effect. An
+the gated effect inside the harness. The host owns `TOOL_CALL`, `APPROVAL_REQUEST`, the later
+`APPROVAL_RESULT`, and the receipt for `STATELESS_REPLAY` and `REQUIRES_MEMORY_SNAPSHOT` harnesses; a
+harness that declares no tier is refused before the effect. An
 unresolved call returns a typed `*api.ApprovalParkedError`: stop Run and propagate it, with no END or
 later model/tool/sink operation. The Go bridge validates the host's session/execution/call/request
 control tuple, sends exactly one correlated `EVENT_PARKED` acknowledgement, and closes without END;
@@ -425,7 +427,11 @@ raw peers must implement that exchange. The host requires actual ACK/EOF and con
 before an external snapshot and durable `SUSPEND` make the live pause successful. Transport/snapshot/
 append failures leave the request recoverable and retain the actual error, not a fake successful park.
 
-On decided Resume, rebuild the same call from the original inputs/config and keep its identity/key.
+On decided Resume, a stateless harness rebuilds the same call from the original inputs/config and
+keeps its identity/key. A memory-snapshot harness restored at the gate continues from memory: its
+first sink call must be that gated call, with the same identity, key, arguments and mediation. Do
+not re-emit the turn's earlier output, reports or tool calls; any other first call fails with
+`ErrReplayDiverged` and leaves the decision recoverable.
 The bridge delivers the committed decision before the correlated receipt, even when that receipt is
 already journaled. A denial supplies `APPROVAL_DENIED` with `IsError=true` and never invokes the
 executor. An approved call can return success, a durable `EXECUTOR_ERROR` receipt, or a durable

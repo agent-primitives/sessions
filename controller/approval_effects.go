@@ -13,9 +13,12 @@ import (
 // ErrApprovalBlocked rejects a new turn while this session owns an approval intent without receipt.
 var ErrApprovalBlocked = errors.New("controller: unresolved approval blocks a new execution")
 
-// ErrApprovalUnavailable is returned by Exec, Resume and Replay for approval on a
-// non-STATELESS_REPLAY harness, or when replay/recovery reproduces a historical
-// pre-intent approval rejection without consuming a different call's evidence.
+// ErrApprovalUnavailable is returned by Exec, Resume and Replay for approval on a harness whose
+// resumability tier is neither STATELESS_REPLAY nor REQUIRES_MEMORY_SNAPSHOT (an empty or unknown
+// tier, APR-1), or when replay/recovery reproduces a historical pre-intent approval rejection
+// without consuming a different call's evidence. Its text predates memory-tier approval and is
+// frozen: Replay and Resume hand it back to a harness that handled the refusal, which may have
+// journaled the text (in OUTPUT or a model request), so a changed message would diverge.
 var ErrApprovalUnavailable = errors.New("controller: approval requires STATELESS_REPLAY")
 
 // ErrInvalidApprovalCall rejects missing or reused gated call identities before intent is written.
@@ -76,10 +79,16 @@ func (s *liveSink) approvalDescriptor(ctx context.Context) error {
 		}
 		s.desc = &desc
 	}
-	if s.desc.Capabilities.Resumability != api.ResumabilityStatelessReplay {
+	if !approvalTier(s.desc.Capabilities.Resumability) {
 		return ErrApprovalUnavailable
 	}
 	return nil
+}
+
+// approvalTier reports whether a harness of this resumability tier can hold a durable approval
+// gate (APR-1). Any other value, including the empty Go value, fails closed.
+func approvalTier(r api.Resumability) bool {
+	return r == api.ResumabilityStatelessReplay || r == api.ResumabilityRequiresMemorySnapshot
 }
 
 func (s *liveSink) parkTool(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {

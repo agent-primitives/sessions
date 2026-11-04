@@ -79,7 +79,7 @@ The `Sessions` service. You implement none of it.
 | `Replay` | re-deliver the committed log, read only | available |
 | `Fork` | branch a session into one or more children | available |
 | `Suspend` / `Resume` | free and restore compute, or recover an approval-bearing turn | available |
-| `Approve` | commit an explicit approval or denial; no implicit Resume | available, stateless replay only |
+| `Approve` | commit an explicit approval or denial; no implicit Resume | available, stateless replay and memory snapshot |
 | `DeleteSession` | permanently tombstone a UID while retaining metadata and journal audit access | available; returns **PENDING**, durable intent only, without stopping resources |
 | `Cancel` | — | declared, **not implemented** |
 
@@ -154,7 +154,8 @@ so the journal is identical whether or not anyone watched the turn.
 
 ### Approval decisions and recovery
 
-A `STATELESS_REPLAY` harness can request `REQUIRES_APPROVAL` through `sink.ToolCall`. The host journals
+A `STATELESS_REPLAY` or `REQUIRES_MEMORY_SNAPSHOT` harness can request `REQUIRES_APPROVAL` through
+`sink.ToolCall`; a harness that declares no tier is refused before the effect. The host journals
 `TOOL_CALL` then `APPROVAL_REQUEST`; after a correlated park acknowledgement and actual stream closure,
 it snapshots externally and commits `SUSPEND`. The Exec stream ends successfully with a final
 `EXEC_AWAITING` Session and `pending_approval`. It does not invent `END`, `ERROR`, or a tool result.
@@ -246,7 +247,9 @@ optional [pre-dispatch tool policy hook](security.md#pre-dispatch-tool-policy) c
 approved call: a transient refusal is `FAILED_PRECONDITION` and leaves the decision recoverable, and
 a definitive refusal records `POLICY_DENIED` without executing the tool.
 
-This gate is stateless only. Identity is provenance, not authorization. Custom Go hosts can install
+The gate covers `STATELESS_REPLAY` and `REQUIRES_MEMORY_SNAPSHOT` harnesses. A memory-snapshot
+harness restored at a decided gate continues from memory: its first sink call must be the gated call,
+or recovery fails with `ErrReplayDiverged` (spec `APR-16`). Identity is provenance, not authorization. Custom Go hosts can install
 [optional RPC authorization](security.md#optional-go-rpc-authorization), including independent
 approve permission; the default daemon remains unenforced. The pre-dispatch policy hook is a Go
 host option, not a decision: there is no automatic decision, approval timeout or expiry. Snapshots

@@ -1022,7 +1022,11 @@ against an in-process router with both turns held inside their model calls.
 `TestDefaultDialCallMetadataOverridesTheCaller` pins that a caller's own `ate-target-actor` value,
 in any letter case or number, never reaches the harness call, and
 `TestDefaultDialWithCallMetadataOverridesHostInterceptors` pins the same for an interceptor a host
-passes to `DefaultDialWith`.
+passes to `DefaultDialWith`, which sets the value in the outgoing context.
+`TestDefaultDialWithDoesNotReplaceMetadataAddedAfterInterceptors` pins the limit: gRPC adds per-RPC
+credentials metadata and runs a stats handler's `TagRPC` after that replacement, so an
+`ate-target-actor` that credentials set reaches the harness as a second value, and one that a
+`TagRPC` sets can replace the incarnation's. Neither may set routing keys.
 
 The counter's I4 contract is harness-side and unit-tested: it is increment-only and never reads
 `Start.History` (the full prior log, also on a memory-restored sandbox). The neutrality contrast

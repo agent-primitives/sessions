@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
 
 	"github.com/agent-primitives/sessions/api"
@@ -83,9 +84,9 @@ func TestDefaultDialWithRaisesTheReceiveLimit(t *testing.T) {
 	}
 }
 
-// A host's own options cannot pick the sandbox: an interceptor it passes to DefaultDialWith, in any
-// form, runs before the incarnation's, so every call still carries only the incarnation's
-// ate-target-actor.
+// A host's interceptor cannot pick the sandbox through the outgoing context: one it passes to
+// DefaultDialWith, in any form, runs before the incarnation's, so every call still carries only the
+// incarnation's ate-target-actor.
 func TestDefaultDialWithCallMetadataOverridesHostInterceptors(t *testing.T) {
 	const mine, other = "space/mine", "space/someone-else"
 	unary := func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn,
@@ -131,6 +132,108 @@ func TestDefaultDialWithCallMetadataOverridesHostInterceptors(t *testing.T) {
 			}
 			if got := hs.seenTargets(); !slices.Equal(got, []string{mine}) {
 				t.Errorf("Connect stream carried ate-target-actor=%v, want only %s", got, mine)
+			}
+		})
+	}
+}
+
+// routingCreds is per-RPC credentials that set ate-target-actor, which DefaultDialWith's godoc says
+// credentials must not do.
+type routingCreds struct{ target string }
+
+func (c routingCreds) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{"ate-target-actor": c.target}, nil
+}
+
+func (routingCreds) RequireTransportSecurity() bool { return false }
+
+// routingStats is a stats handler whose TagRPC sets ate-target-actor in the outgoing context, which
+// DefaultDialWith's godoc says a stats handler must not do. replace sets the key instead of
+// appending a value.
+type routingStats struct {
+	target  string
+	replace bool
+}
+
+func (s routingStats) TagRPC(ctx context.Context, _ *stats.RPCTagInfo) context.Context {
+	if !s.replace {
+		return metadata.AppendToOutgoingContext(ctx, "ate-target-actor", s.target)
+	}
+	md, _ := metadata.FromOutgoingContext(ctx)
+	md = md.Copy()
+	md.Set("ate-target-actor", s.target)
+	return metadata.NewOutgoingContext(ctx, md)
+}
+
+func (routingStats) HandleRPC(context.Context, stats.RPCStats) {}
+
+func (routingStats) TagConn(ctx context.Context, _ *stats.ConnTagInfo) context.Context {
+	return ctx
+}
+
+func (routingStats) HandleConn(context.Context, stats.ConnStats) {}
+
+// The documented limit of the replacement: gRPC adds per-RPC credentials metadata in the transport
+// and runs a stats handler's TagRPC after the incarnation's interceptor has rewritten the outgoing
+// context, so a routing key either sets is not replaced. Credentials put a second ate-target-actor
+// value on the wire; a TagRPC can add one or replace the incarnation's outright.
+func TestDefaultDialWithDoesNotReplaceMetadataAddedAfterInterceptors(t *testing.T) {
+	const mine, other = "space/mine", "space/someone-else"
+	creds := routingCreds{target: other}
+	// A host interceptor that hands the credentials to the invoker as a call option.
+	unary := func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn,
+		invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		return invoker(ctx, method, req, reply, cc, append(opts, grpc.PerRPCCredentials(creds))...)
+	}
+	stream := func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string,
+		streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return streamer(ctx, desc, cc, method, append(opts, grpc.PerRPCCredentials(creds))...)
+	}
+	for _, tt := range []struct {
+		name string
+		opts []grpc.DialOption
+		want []string
+	}{
+		{"credentials dial option", []grpc.DialOption{
+			grpc.WithPerRPCCredentials(creds),
+		}, []string{mine, other}},
+		{"credentials call option", []grpc.DialOption{
+			grpc.WithDefaultCallOptions(grpc.PerRPCCredentials(creds)),
+		}, []string{mine, other}},
+		{"credentials from an interceptor", []grpc.DialOption{
+			grpc.WithChainUnaryInterceptor(unary), grpc.WithChainStreamInterceptor(stream),
+		}, []string{mine, other}},
+		{"stats handler appends", []grpc.DialOption{
+			grpc.WithStatsHandler(routingStats{target: other}),
+		}, []string{mine, other}},
+		{"stats handler replaces", []grpc.DialOption{
+			grpc.WithStatsHandler(routingStats{target: other, replace: true}),
+		}, []string{other}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			hs := startHarnessServer(t, echoagent.Harness{})
+			har, closeHarness, err := placement.DefaultDialWith(tt.opts...)(api.Incarnation{
+				Address:      hs.addr,
+				CallMetadata: map[string]string{"ate-target-actor": mine},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = closeHarness() }()
+			if _, err := har.Describe(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			start := &api.Start{ExecutionID: "e1", Inputs: []api.Message{*api.TextMessage("user", "hi")}}
+			if err := har.Run(t.Context(), start, echoSink{}); err != nil {
+				t.Fatal(err)
+			}
+			// The values' order is gRPC's header order, not part of the documented limit.
+			unary := hs.seenUnaryTargets()
+			if len(unary) != 1 || !slices.Equal(slices.Sorted(slices.Values(unary[0])), tt.want) {
+				t.Errorf("Describe carried ate-target-actor=%v, want %v", unary, tt.want)
+			}
+			if got := slices.Sorted(slices.Values(hs.seenTargets())); !slices.Equal(got, tt.want) {
+				t.Errorf("Connect stream carried ate-target-actor=%v, want %v", got, tt.want)
 			}
 		})
 	}

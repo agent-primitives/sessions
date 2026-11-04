@@ -661,10 +661,14 @@ func DefaultDial(inc api.Incarnation) (api.Harness, func() error, error) {
 // change the connection without reimplementing the dial, for example to accept harness frames
 // larger than gRPC's 4 MiB default with
 // grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(n)). opts apply after DefaultDial's own
-// options, so they replace a conflicting one such as the insecure transport credentials. Two
-// things they cannot change: the incarnation's CallMetadata is still attached last, replacing any
-// value an interceptor in opts sets for the same keys, and a unix:// incarnation still dials its
-// socket.
+// options, so they replace a conflicting one such as the insecure transport credentials, but a
+// unix:// incarnation still dials its socket. The incarnation's CallMetadata is set in each call's
+// outgoing context after the interceptors in opts run, replacing any value they set there for the
+// same keys. gRPC does not re-apply it after that, so nothing it runs later may set routing keys
+// such as ate-target-actor: per-RPC credentials (grpc.WithPerRPCCredentials or the
+// grpc.PerRPCCredentials call option) and a load balancer's pick metadata are sent alongside the
+// incarnation's value, and a stats handler (grpc.WithStatsHandler), whose TagRPC can rewrite the
+// outgoing context, can replace it.
 func DefaultDialWith(opts ...grpc.DialOption) Dialer {
 	extra := slices.Clone(opts)
 	return func(inc api.Incarnation) (api.Harness, func() error, error) {
@@ -699,9 +703,10 @@ func dialHarness(inc api.Incarnation, extra []grpc.DialOption) (api.Harness, fun
 	return tcpDial(inc.Address, opts)
 }
 
-// withCallMetadata attaches the incarnation's routing metadata to an outgoing call, replacing any
-// value the caller set for the same keys: the incarnation, not the call site, decides which sandbox
-// a call reaches.
+// withCallMetadata attaches the incarnation's routing metadata to an outgoing call's context,
+// replacing any value the caller set there for the same keys: the incarnation, not the call site,
+// decides which sandbox a call reaches. Metadata gRPC adds after the interceptors (per-RPC
+// credentials, a stats handler's TagRPC, a load balancer's pick) is not replaced.
 func withCallMetadata(ctx context.Context, md metadata.MD) context.Context {
 	out, _ := metadata.FromOutgoingContext(ctx)
 	out = out.Copy()

@@ -734,9 +734,13 @@ the host and harnessnode may apply its own.
 The host's side has the same 4 MiB default for harness-to-host frames, such as a large `Output`
 delta or `Report` result. A host built on `placement` raises it without rewriting the dial by
 passing `placement.DefaultDialWith(grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(n)))` to
-`placement.WithDialer`. `DefaultDialWith` applies the host's options after the defaults, but the
-incarnation's call metadata still replaces any value an interceptor among them sets, and a
-`unix://` address still dials its socket.
+`placement.WithDialer`. `DefaultDialWith` applies the host's options after the defaults, but a
+`unix://` address still dials its socket, and the incarnation's call metadata replaces any value an
+interceptor among those options sets in the outgoing context. Nothing gRPC runs after the
+interceptors may set routing keys such as `ate-target-actor`, because the incarnation's value is not
+re-applied there: per-RPC credentials (`grpc.WithPerRPCCredentials` or the `grpc.PerRPCCredentials`
+call option) and a load balancer's pick metadata reach the harness alongside it, and a stats handler
+(`grpc.WithStatsHandler`), whose `TagRPC` can rewrite the outgoing context, can replace it.
 
 Only the model ID belongs in the harness environment. Keep provider URLs and credentials on the
 host. Repository-owned hosts can reuse `internal/modelconfig.New` with an explicit `Config`

@@ -239,6 +239,15 @@ const (
 	// refused definitively. The executor was not called. Only the host writes it; executors and
 	// harness reports must not.
 	ToolResultCodePolicyDenied ToolResultCode = 3
+	// ToolResultCodeNotExecuted is the host receipt for a gate closed by CloseApproval whose
+	// decision is a denial (an undecided gate gets a host-written denial first). The executor was
+	// not called. Only the host writes it; executors and harness reports must not.
+	ToolResultCodeNotExecuted ToolResultCode = 4
+	// ToolResultCodeOutcomeUnknown is the host receipt for a gate closed by CloseApproval whose
+	// decision is an approval with no receipt. The executor may have run, so the outcome is
+	// unknown; the receipt revokes the approval for later recovery. Only the host writes it;
+	// executors and harness reports must not.
+	ToolResultCodeOutcomeUnknown ToolResultCode = 5
 )
 
 // ToolResult is the outcome of a ToolCall.

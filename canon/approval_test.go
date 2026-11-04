@@ -85,7 +85,7 @@ func TestApprovalCanonicalVectors(t *testing.T) {
 
 // POLICY_DENIED hashes by name (CHAIN-1). A build that predates it reads the stored value as an
 // unknown enum number and canonicalizes it as that number, so its hash of the same record differs
-// and its chain verification fails closed instead of accepting the receipt. Code 4 stands in for
+// and its chain verification fails closed instead of accepting the receipt. Code 99 stands in for
 // a value newer than this build.
 func TestPolicyDeniedCanonicalVector(t *testing.T) {
 	event := api.Event{ExecutionID: "e1", Kind: api.EventToolResult, Result: &api.ToolResult{ID: "c1", IsError: true, Code: api.ToolResultCodePolicyDenied, ApprovalRequestSeq: 3, ApprovalDecisionSeq: 4}}
@@ -100,12 +100,38 @@ func TestPolicyDeniedCanonicalVector(t *testing.T) {
 	}
 	newer := event
 	result := *event.Result
-	result.Code = 4
+	result.Code = 99
 	newer.Result = &result
 	b, err = canon.Record("", 1, newer)
-	const wantNewer = `{"event":{"execution_id":"e1","kind":"EVENT_TOOL_RESULT","result":{"approval_decision_seq":"4","approval_request_seq":"3","code":4,"id":"c1","is_error":true}},"prev_hash":"","seq":"1"}`
+	const wantNewer = `{"event":{"execution_id":"e1","kind":"EVENT_TOOL_RESULT","result":{"approval_decision_seq":"4","approval_request_seq":"3","code":99,"id":"c1","is_error":true}},"prev_hash":"","seq":"1"}`
 	if err != nil || string(b) != wantNewer {
 		t.Fatalf("unknown code bytes = %s, %v; want %s", b, err, wantNewer)
+	}
+}
+
+// NOT_EXECUTED and OUTCOME_UNKNOWN, the CloseApproval receipt codes, hash by name (CHAIN-1). A
+// build that predates them canonicalizes the stored numbers 4 and 5 instead, so its chain
+// verification of a close receipt fails closed.
+func TestCloseReceiptCanonicalVectors(t *testing.T) {
+	for _, tc := range []struct {
+		code       api.ToolResultCode
+		name, hash string
+	}{
+		{api.ToolResultCodeNotExecuted, "NOT_EXECUTED", "d1b3e704c821f7f2af19d0d456e9606744571819e1214e334d31369353421c10"},
+		{api.ToolResultCodeOutcomeUnknown, "OUTCOME_UNKNOWN", "cbfaeddec43da4482875bfb1e38fa1acdcda82b9a5cba98560fe0a71e324fafa"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := api.Event{ExecutionID: "e1", Kind: api.EventToolResult, Result: &api.ToolResult{ID: "c1", IsError: true, Code: tc.code, ApprovalRequestSeq: 3, ApprovalDecisionSeq: 4}}
+			want := `{"event":{"execution_id":"e1","kind":"EVENT_TOOL_RESULT","result":{"approval_decision_seq":"4","approval_request_seq":"3","code":"` + tc.name + `","id":"c1","is_error":true}},"prev_hash":"","seq":"1"}`
+			b, err := canon.Record("", 1, event)
+			if err != nil || string(b) != want {
+				t.Fatalf("canonical bytes = %s, %v; want %s", b, err, want)
+			}
+			h, err := canon.HashRecord("", 1, event)
+			if err != nil || h != tc.hash {
+				t.Fatalf("hash = %s, %v; want %s", h, err, tc.hash)
+			}
+		})
 	}
 }
 

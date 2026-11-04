@@ -241,6 +241,15 @@ const (
 	// executor MUST NOT have been invoked. Only the host writes it, for an ordinary host-executed
 	// call or an approved call. Peers that predate this value reject it rather than serve it.
 	ToolResult_POLICY_DENIED ToolResult_Code = 3
+	// A gate closed by CloseApproval whose decision is a denial, including the host-written denial
+	// for an undecided gate: is_error=true and the executor was not invoked. Only the host writes
+	// it. Peers that predate this value reject it rather than serve it.
+	ToolResult_NOT_EXECUTED ToolResult_Code = 4
+	// A gate closed by CloseApproval whose decision is an approval with no receipt: is_error=true
+	// and the executor may or may not have run, so the outcome is unknown. The receipt revokes the
+	// approval for any later recovery. Only the host writes it. Peers that predate this value
+	// reject it rather than serve it.
+	ToolResult_OUTCOME_UNKNOWN ToolResult_Code = 5
 )
 
 // Enum value maps for ToolResult_Code.
@@ -250,12 +259,16 @@ var (
 		1: "APPROVAL_DENIED",
 		2: "EXECUTOR_ERROR",
 		3: "POLICY_DENIED",
+		4: "NOT_EXECUTED",
+		5: "OUTCOME_UNKNOWN",
 	}
 	ToolResult_Code_value = map[string]int32{
 		"CODE_UNSPECIFIED": 0,
 		"APPROVAL_DENIED":  1,
 		"EXECUTOR_ERROR":   2,
 		"POLICY_DENIED":    3,
+		"NOT_EXECUTED":     4,
+		"OUTCOME_UNKNOWN":  5,
 	}
 )
 
@@ -2675,7 +2688,7 @@ const file_common_proto_rawDesc = "" +
 	"\x04tool\x18\x02 \x01(\tR\x04tool\x12+\n" +
 	"\x04args\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x04args\x129\n" +
 	"\tmediation\x18\x04 \x01(\x0e2\x1b.agentsessions.v1.MediationR\tmediation\x12'\n" +
-	"\x0fidempotency_key\x18\x05 \x01(\tR\x0eidempotencyKey\"\xeb\x03\n" +
+	"\x0fidempotency_key\x18\x05 \x01(\tR\x0eidempotencyKey\"\x92\x04\n" +
 	"\n" +
 	"ToolResult\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12/\n" +
@@ -2689,12 +2702,14 @@ const file_common_proto_rawDesc = "" +
 	"\x04code\x18\b \x01(\x0e2!.agentsessions.v1.ToolResult.CodeR\x04code\x120\n" +
 	"\x14approval_request_seq\x18\t \x01(\x03R\x12approvalRequestSeq\x122\n" +
 	"\x15approval_decision_seq\x18\n" +
-	" \x01(\x03R\x13approvalDecisionSeq\"X\n" +
+	" \x01(\x03R\x13approvalDecisionSeq\"\x7f\n" +
 	"\x04Code\x12\x14\n" +
 	"\x10CODE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fAPPROVAL_DENIED\x10\x01\x12\x12\n" +
 	"\x0eEXECUTOR_ERROR\x10\x02\x12\x11\n" +
-	"\rPOLICY_DENIED\x10\x03\"K\n" +
+	"\rPOLICY_DENIED\x10\x03\x12\x10\n" +
+	"\fNOT_EXECUTED\x10\x04\x12\x13\n" +
+	"\x0fOUTCOME_UNKNOWN\x10\x05\"K\n" +
 	"\x0fApprovalRequest\x12 \n" +
 	"\ftool_call_id\x18\x01 \x01(\tR\n" +
 	"toolCallId\x12\x16\n" +

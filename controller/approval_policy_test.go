@@ -191,7 +191,7 @@ func TestValidateApprovalReceiptPolicyDenied(t *testing.T) {
 		{"approved policy denial", approved, api.ToolResult{IsError: true, Code: api.ToolResultCodePolicyDenied}, true},
 		{"approved policy denial without is_error", approved, api.ToolResult{Code: api.ToolResultCodePolicyDenied}, false},
 		{"denied decision", denied, api.ToolResult{IsError: true, Code: api.ToolResultCodePolicyDenied}, false},
-		{"approved unknown code", approved, api.ToolResult{IsError: true, Code: 4}, false},
+		{"approved unknown code", approved, api.ToolResult{IsError: true, Code: 99}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateApprovalReceipt(tc.decision, &tc.result)

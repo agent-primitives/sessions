@@ -101,10 +101,12 @@ message Cancel {
 // On decided recovery or replay the host sends approval BEFORE tool, even if a receipt already
 // exists. The harness must correlate approval.tool_call_id/request_seq with the waiting call and
 // receipt.id/approval_request_seq; the receipt's approval_decision_seq must identify the committed
-// decision in that session's journal, which the host validates. Denial requires APPROVAL_DENIED
-// and is_error=true without an executor call. Approval permits a success (CODE_UNSPECIFIED with
-// is_error=false), EXECUTOR_ERROR with is_error=true, or POLICY_DENIED with is_error=true when the
-// host's pre-dispatch policy refused the call without an executor call. Conflicting decisions or
+// decision in that session's journal, which the host validates. Denial requires APPROVAL_DENIED,
+// or NOT_EXECUTED for a gate closed by CloseApproval, with is_error=true and no executor call.
+// Approval permits a success (CODE_UNSPECIFIED with is_error=false), EXECUTOR_ERROR with
+// is_error=true, POLICY_DENIED with is_error=true when the host's pre-dispatch policy refused the
+// call without an executor call, or OUTCOME_UNKNOWN with is_error=true for a gate closed by
+// CloseApproval, whose executor call may or may not have happened. Conflicting decisions or
 // receipt tuples fail closed rather than being served to a different call. The harness may not
 // manufacture durable APPROVAL_REQUEST/APPROVAL_RESULT events. A memory-snapshot harness restored
 // at a decided gate re-issues the gated call as its first sink call (spec APR-16) and then gets

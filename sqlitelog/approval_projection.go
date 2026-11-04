@@ -252,10 +252,12 @@ func (s *approvalExecution) reduce(tx *sql.Tx, uid string, seq int64, ev api.Eve
 				s.invalid = true
 				break
 			}
-			valid := result.IsError && result.Code == api.ToolResultCodeApprovalDenied
+			// Same rule as controller.validateApprovalReceipt, close receipts included.
+			valid := result.IsError && (result.Code == api.ToolResultCodeApprovalDenied || result.Code == api.ToolResultCodeNotExecuted)
 			if s.approved {
 				valid = !result.IsError && result.Code == api.ToolResultCodeUnspecified ||
-					result.IsError && (result.Code == api.ToolResultCodeExecutorError || result.Code == api.ToolResultCodePolicyDenied)
+					result.IsError && (result.Code == api.ToolResultCodeExecutorError || result.Code == api.ToolResultCodePolicyDenied ||
+						result.Code == api.ToolResultCodeOutcomeUnknown)
 			}
 			if result.ID != s.callID || result.ApprovalRequestSeq != s.requestSeq || result.ApprovalDecisionSeq != s.decisionSeq || !valid {
 				s.invalid = true

@@ -649,6 +649,8 @@ Mediation controls how a tool call is executed / who enforces record-before-effe
 | APPROVAL_DENIED | 1 | A denied approval: is_error=true and the executor MUST NOT have been invoked. |
 | EXECUTOR_ERROR | 2 | An attempted executor call failed: is_error=true; error describes the failure. This is a durable handled receipt, not an unrecorded effect or an approval denial. |
 | POLICY_DENIED | 3 | The host&#39;s pre-dispatch tool policy refused the call definitively: is_error=true and the executor MUST NOT have been invoked. Only the host writes it, for an ordinary host-executed call or an approved call. Peers that predate this value reject it rather than serve it. |
+| NOT_EXECUTED | 4 | A gate closed by CloseApproval whose decision is a denial, including the host-written denial for an undecided gate: is_error=true and the executor was not invoked. Only the host writes it. Peers that predate this value reject it rather than serve it. |
+| OUTCOME_UNKNOWN | 5 | A gate closed by CloseApproval whose decision is an approval with no receipt: is_error=true and the executor may or may not have run, so the outcome is unknown. The receipt revokes the approval for any later recovery. Only the host writes it. Peers that predate this value reject it rather than serve it. |
 
 
  
@@ -728,10 +730,12 @@ Cancel and does not record a completed, failed, or canceled execution.
 On decided recovery or replay the host sends approval BEFORE tool, even if a receipt already
 exists. The harness must correlate approval.tool_call_id/request_seq with the waiting call and
 receipt.id/approval_request_seq; the receipt&#39;s approval_decision_seq must identify the committed
-decision in that session&#39;s journal, which the host validates. Denial requires APPROVAL_DENIED
-and is_error=true without an executor call. Approval permits a success (CODE_UNSPECIFIED with
-is_error=false), EXECUTOR_ERROR with is_error=true, or POLICY_DENIED with is_error=true when the
-host&#39;s pre-dispatch policy refused the call without an executor call. Conflicting decisions or
+decision in that session&#39;s journal, which the host validates. Denial requires APPROVAL_DENIED,
+or NOT_EXECUTED for a gate closed by CloseApproval, with is_error=true and no executor call.
+Approval permits a success (CODE_UNSPECIFIED with is_error=false), EXECUTOR_ERROR with
+is_error=true, POLICY_DENIED with is_error=true when the host&#39;s pre-dispatch policy refused the
+call without an executor call, or OUTCOME_UNKNOWN with is_error=true for a gate closed by
+CloseApproval, whose executor call may or may not have happened. Conflicting decisions or
 receipt tuples fail closed rather than being served to a different call. The harness may not
 manufacture durable APPROVAL_REQUEST/APPROVAL_RESULT events. A memory-snapshot harness restored
 at a decided gate re-issues the gated call as its first sink call (spec APR-16) and then gets

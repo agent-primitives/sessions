@@ -456,6 +456,20 @@ func TestForkRejectsUnboundedChildCount(t *testing.T) {
 	if _, err := c.Fork(ctx, &v1.ForkRequest{Session: sess, Count: session.MaxForkChildren}); err != nil {
 		t.Fatalf("fork at the documented maximum must be accepted: %v", err)
 	}
+	// Zero or negative is not an error: it forks one child, and child_names is checked against that
+	// effective count.
+	for _, count := range []int32{0, -1} {
+		fr, err := c.Fork(ctx, &v1.ForkRequest{Session: sess, Count: count, ChildNames: []string{"only"}})
+		if err != nil {
+			t.Fatalf("fork count=%d: %v", count, err)
+		}
+		if n := len(fr.GetChildren()); n != 1 {
+			t.Fatalf("fork count=%d: got %d children, want 1", count, n)
+		}
+		if got := fr.GetChildren()[0].GetMetadata().GetName(); got != "only" {
+			t.Fatalf("fork count=%d: child name %q, want %q", count, got, "only")
+		}
+	}
 }
 
 // mustCreate registers a session and returns its uid. Exec resolves the harness from the session's

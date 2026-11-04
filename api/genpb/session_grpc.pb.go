@@ -163,9 +163,13 @@ type SessionsClient interface {
 	// transport failures. Snapshots and unresolved requests are retained indefinitely; there is no
 	// approval expiry or automatic decision.
 	Resume(ctx context.Context, in *ResumeRequest, opts ...grpc.CallOption) (*Session, error)
-	// The differentiator: branch a session at a sequence into one or more children. Forking a
-	// REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event
-	// lands on its chain) because the children are cloned from that snapshot; resume brings it back.
+	// The differentiator: branch a session at a sequence into 1..128 children (ForkRequest.count).
+	// A STATELESS_REPLAY fork leaves the parent untouched. Forking a REQUIRES_MEMORY_SNAPSHOT
+	// harness, which only forks at the head, first checkpoints the parent once for the whole fan-out
+	// (it suspends, and a SUSPEND event lands on its chain) and clones every child from that
+	// snapshot. The checkpoint stays committed if the fan-out then fails: the parent stays suspended
+	// (its next Exec or Resume restores it), and a retry must fork at the new head (at_seq <= 0, or
+	// the new head's seq).
 	Fork(ctx context.Context, in *ForkRequest, opts ...grpc.CallOption) (*ForkResponse, error)
 }
 
@@ -440,9 +444,13 @@ type SessionsServer interface {
 	// transport failures. Snapshots and unresolved requests are retained indefinitely; there is no
 	// approval expiry or automatic decision.
 	Resume(context.Context, *ResumeRequest) (*Session, error)
-	// The differentiator: branch a session at a sequence into one or more children. Forking a
-	// REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event
-	// lands on its chain) because the children are cloned from that snapshot; resume brings it back.
+	// The differentiator: branch a session at a sequence into 1..128 children (ForkRequest.count).
+	// A STATELESS_REPLAY fork leaves the parent untouched. Forking a REQUIRES_MEMORY_SNAPSHOT
+	// harness, which only forks at the head, first checkpoints the parent once for the whole fan-out
+	// (it suspends, and a SUSPEND event lands on its chain) and clones every child from that
+	// snapshot. The checkpoint stays committed if the fan-out then fails: the parent stays suspended
+	// (its next Exec or Resume restores it), and a retry must fork at the new head (at_seq <= 0, or
+	// the new head's seq).
 	Fork(context.Context, *ForkRequest) (*ForkResponse, error)
 	mustEmbedUnimplementedSessionsServer()
 }

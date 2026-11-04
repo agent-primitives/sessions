@@ -134,7 +134,7 @@ func testConnectSpanExported(t *testing.T, h api.Harness, wantErr func(error) bo
 	})
 
 	lis := bufconn.Listen(1 << 20)
-	srv := newServer(h)
+	srv := newServer(h, 0)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 	conn, err := grpc.NewClient("passthrough:///harness",
@@ -231,7 +231,7 @@ func TestConnectSpanStatusForContextErrors(t *testing.T) {
 			})
 
 			lis := bufconn.Listen(1 << 20)
-			srv := newServer(tc.harness)
+			srv := newServer(tc.harness, 0)
 			go func() { _ = srv.Serve(lis) }()
 			t.Cleanup(srv.Stop)
 			conn, err := grpc.NewClient("passthrough:///harness",

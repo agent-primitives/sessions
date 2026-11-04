@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -57,6 +58,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("harnessnode: configure harness: %v", err)
 	}
+	maxRecv, err := maxRecvMsgSize()
+	if err != nil {
+		log.Fatalf("harnessnode: configure server: %v", err)
+	}
 	grpcAddr := env("HARNESS_ADDR", ":"+substrate.HarnessPort) // harnesswire gRPC; atenet-router forwards here
 	readyzAddr := env("HARNESS_READYZ", ":8081")               // HTTP readyz for the ActorTemplate wakeup probe
 
@@ -92,7 +97,7 @@ func main() {
 	} else if lis, err = net.Listen("tcp", grpcAddr); err != nil {
 		log.Fatalf("harnessnode: listen %s: %v", grpcAddr, err)
 	}
-	srv := newServer(harness)
+	srv := newServer(harness, maxRecv)
 
 	// readyz on a side port so the actor is reported live once the gRPC server is accepting.
 	readyz := &http.Server{
@@ -111,7 +116,12 @@ func main() {
 		_ = readyz.Close()
 	}()
 
-	log.Printf("harnessnode: %q harness serving harnesswire on %s, readyz on %s", env("HARNESS_KIND", "echo"), grpcAddr, readyzAddr)
+	recvLimit := "gRPC default"
+	if maxRecv > 0 {
+		recvLimit = strconv.Itoa(maxRecv) + " bytes"
+	}
+	log.Printf("harnessnode: %q harness serving harnesswire on %s (max receive message size: %s), "+
+		"readyz on %s", env("HARNESS_KIND", "echo"), grpcAddr, recvLimit, readyzAddr)
 	if err := srv.Serve(lis); err != nil {
 		log.Fatalf("harnessnode: serve: %v", err)
 	}
@@ -139,17 +149,38 @@ func selectHarness() (api.Harness, error) {
 	}
 }
 
+// maxRecvMsgSize reads HARNESS_MAX_RECV_MSG_SIZE: the largest message, in bytes, the harnesswire
+// server accepts from the host. It bounds every host-to-harness frame on Connect, Start included,
+// and Start carries the session's whole prior journal (History). Unset or empty returns 0, which
+// keeps gRPC's default (4 MiB). Any other value must be a positive decimal integer.
+func maxRecvMsgSize() (int, error) {
+	v := os.Getenv("HARNESS_MAX_RECV_MSG_SIZE")
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("HARNESS_MAX_RECV_MSG_SIZE=%q: want a positive number of bytes", v)
+	}
+	return n, nil
+}
+
 // newServer builds the harnesswire gRPC server. otelgrpc traces everything but Connect; Connect gets
-// its span from traceConnect, which can end and export it before the turn completes.
-func newServer(harness api.Harness) *grpc.Server {
-	srv := grpc.NewServer(
+// its span from traceConnect, which can end and export it before the turn completes. A positive
+// maxRecvMsgSize replaces gRPC's default receive limit; 0 keeps it.
+func newServer(harness api.Harness, maxRecvMsgSize int) *grpc.Server {
+	opts := []grpc.ServerOption{
 		grpc.StatsHandler(otelgrpc.NewServerHandler(
 			otelgrpc.WithTracerProvider(observability.ThirdPartyTracerProvider()),
 			otelgrpc.WithFilter(func(info *stats.RPCTagInfo) bool { return info.FullMethodName != v1.Harness_Connect_FullMethodName }),
 		)),
 		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(slog.Default())),
 		grpc.ChainStreamInterceptor(traceConnect, observability.StreamServerInterceptor(slog.Default())),
-	)
+	}
+	if maxRecvMsgSize > 0 {
+		opts = append(opts, grpc.MaxRecvMsgSize(maxRecvMsgSize))
+	}
+	srv := grpc.NewServer(opts...)
 	v1.RegisterHarnessServer(srv, harnesswire.NewServer(harness))
 	return srv
 }

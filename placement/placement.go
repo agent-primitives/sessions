@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -653,12 +654,34 @@ func describeError(ctx context.Context, err error, timedOut bool) error {
 // gRPC client with the incarnation's CallMetadata attached to every call; only the transport
 // differs. One dial path, two address forms.
 func DefaultDial(inc api.Incarnation) (api.Harness, func() error, error) {
+	return dialHarness(inc, nil)
+}
+
+// DefaultDialWith returns a Dialer that dials as DefaultDial does, plus opts. A host uses it to
+// change the connection without reimplementing the dial, for example to accept harness frames
+// larger than gRPC's 4 MiB default with
+// grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(n)). opts apply after DefaultDial's own
+// options, so they replace a conflicting one such as the insecure transport credentials. Two
+// things they cannot change: the incarnation's CallMetadata is still attached last, replacing any
+// value an interceptor in opts sets for the same keys, and a unix:// incarnation still dials its
+// socket.
+func DefaultDialWith(opts ...grpc.DialOption) Dialer {
+	extra := slices.Clone(opts)
+	return func(inc api.Incarnation) (api.Harness, func() error, error) {
+		return dialHarness(inc, extra)
+	}
+}
+
+// dialHarness is DefaultDial with extra options applied after the defaults and before the
+// incarnation's call metadata and unix-socket dialer.
+func dialHarness(inc api.Incarnation, extra []grpc.DialOption) (api.Harness, func() error, error) {
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
 		grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
 		observability.ClientTracing(),
 	}
+	opts = append(opts, extra...)
 	if len(inc.CallMetadata) > 0 {
 		md := metadata.New(inc.CallMetadata)
 		opts = append(opts,

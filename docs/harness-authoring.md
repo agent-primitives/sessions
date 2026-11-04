@@ -721,6 +721,23 @@ for chat and tool and is validated before listeners open. Echo remains the defau
 the memory-snapshot example. `HARNESS_KIND=tool` serves `harness/toolagent`, which offers the model
 an approval-gated `publish` tool; see the [approval-gated tool example](approval-gated-tool.md).
 
+`HARNESS_MAX_RECV_MSG_SIZE` sets the largest message, in bytes, that harnessnode accepts from the
+host. Unset, gRPC's default of 4 MiB applies. The limit bounds every host-to-harness frame on the
+`Connect` stream, and `Start` carries the session's whole prior journal, so harnessnode refuses the
+`Start` of a session whose history outgrew the limit with gRPC `RESOURCE_EXHAUSTED`, before the
+harness runs. Raise it for long transcripts, for example `HARNESS_MAX_RECV_MSG_SIZE=67108864`
+(64 MiB). A value that is not a positive decimal integer stops harnessnode before its listeners
+open. The TCP listener is unauthenticated, so the limit is also how large a message any peer that
+reaches it can make harnessnode buffer, per stream. It is harnessnode's own limit: a proxy between
+the host and harnessnode may apply its own.
+
+The host's side has the same 4 MiB default for harness-to-host frames, such as a large `Output`
+delta or `Report` result. A host built on `placement` raises it without rewriting the dial by
+passing `placement.DefaultDialWith(grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(n)))` to
+`placement.WithDialer`. `DefaultDialWith` applies the host's options after the defaults, but the
+incarnation's call metadata still replaces any value an interceptor among them sets, and a
+`unix://` address still dials its socket.
+
 Only the model ID belongs in the harness environment. Keep provider URLs and credentials on the
 host. Repository-owned hosts can reuse `internal/modelconfig.New` with an explicit `Config`
 (`Model`, `BaseURL`, `Path`, `AuthHeader`, `APIKey`), then pass the returned client's `Model` and

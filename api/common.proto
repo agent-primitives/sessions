@@ -128,9 +128,10 @@ enum Mediation {
   MEDIATION_UNSPECIFIED = 0;
   MEDIATION_IN_HARNESS_REPORTED = 1; // harness runs it, reports for audit (cooperative WAL)
   MEDIATION_CONTROLLER_MEDIATED = 2; // host/gateway executes (host-enforced WAL; trustless)
-  // Host-owned durable approval gate for STATELESS_REPLAY only. The harness emits a tool call,
-  // then awaits a decision/receipt or park control frame; it never executes the effect itself.
-  // REQUIRES_MEMORY_SNAPSHOT is unsupported for this gate and fails closed before the effect.
+  // Host-owned durable approval gate for STATELESS_REPLAY and REQUIRES_MEMORY_SNAPSHOT
+  // harnesses. The harness emits a tool call, then awaits a decision/receipt or park control
+  // frame; it never executes the effect itself. A harness declaring no tier fails closed before
+  // the effect.
   MEDIATION_REQUIRES_APPROVAL = 3;
 }
 
@@ -241,9 +242,9 @@ message ToolResult {
 // only the host may commit the request or its later APPROVAL_RESULT. The harness cannot mint
 // requests or decisions by emitting these events. Identity on a decision's Event.actor is
 // recorded provenance only, not authorization; ApprovalResult.verified_approver is the
-// authenticated approver. This gate supports STATELESS_REPLAY only; it defines no expiry,
-// automatic decision, or Cancel behavior. A host's optional pre-dispatch tool policy hook runs
-// only when recovery dispatches an approved call (spec §9.4).
+// authenticated approver. This gate supports STATELESS_REPLAY and REQUIRES_MEMORY_SNAPSHOT
+// harnesses; it defines no expiry, automatic decision, or Cancel behavior. A host's optional
+// pre-dispatch tool policy hook runs only when recovery dispatches an approved call (spec §9.4).
 message ApprovalRequest {
   string tool_call_id = 1;
   string reason = 2;

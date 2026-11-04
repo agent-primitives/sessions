@@ -75,7 +75,8 @@ This draft specifies:
 - the canonical encoding and the provenance hash chain, including fork lineage (§7);
 - executions, the determinism invariants, reconstruction replay, and crash recovery (§8);
 - tool execution modes, receipts, and at-most-once re-drive (§9);
-- the durable approval gate for `STATELESS_REPLAY` harnesses (§10);
+- the durable approval gate for `STATELESS_REPLAY` and `REQUIRES_MEMORY_SNAPSHOT` harnesses
+  (§10);
 - the Sessions lifecycle operations, including permanent soft deletion, and their status codes
   (§11);
 - the `Harness.Connect` wire protocol (§12);
@@ -96,7 +97,7 @@ This draft does not specify:
 - in-flight cancellation (`Cancel` is declared and returns `UNIMPLEMENTED`);
 - an HTTP/JSON mapping of the API; the only transport is gRPC;
 - a warm (resident) pause; `COMPUTE_WARM` is declared but never reported;
-- approval policy, expiry, automatic decisions, or approval for memory-snapshot harnesses;
+- approval policy, expiry, or automatic decisions;
 - a policy language for the pre-dispatch tool policy hook (§9.4);
 - any compute, sandbox, cloud, or vendor technology. Backends such as agent-substrate are examples
   of the runtime contract (§13.4), not requirements;
@@ -669,14 +670,18 @@ These are named in the reference controller. The numbering is the code's.
 - `I0`: On reconstruction replay, each model call the harness re-issues MUST have the same
   `input_hash` as the recorded `MODEL_CALL` at that position, its output text MUST equal the
   recorded `OUTPUT` text, and reported usage MUST equal the recorded `USAGE` (except in the legacy
-  execution, `EXE-32`). Any mismatch is divergence (`ErrReplayDiverged`).
+  execution, `EXE-32`). Any mismatch is divergence (`ErrReplayDiverged`). Recovery checks served
+  effects the same way, except that a `REQUIRES_MEMORY_SNAPSHOT` recovery at a decided approval
+  gate starts serving at the gate and does not check the prefix before it (`APR-16`).
 - `I1`: Reconstruction replay MUST NOT invoke the model provider or the tool executor. Recorded
   completions and receipts are served from the log.
 - `I3`: A host-executed tool intent recorded without a receipt is re-driven on recovery under the
   same recorded call and idempotency key when its executor declares durable dedup for the tool,
   and refused otherwise (§9.3).
 - `EXE-13`: A harness MUST be deterministic given its `Start` (config, history, inputs, cursor) and
-  the served model and tool results. A harness MUST replay `ReasoningPart` content verbatim.
+  the served model and tool results. A harness MUST replay `ReasoningPart` content verbatim. A
+  `REQUIRES_MEMORY_SNAPSHOT` harness restored at a decided approval gate continues from its
+  restored memory instead and MUST emit the gated call first (`APR-16`).
 - `EXE-14`: Divergence MUST be sticky: once detected, every later sink operation in that execution
   fails with the same error, and the execution fails even if the harness swallowed the error.
 - `EXE-15`: A reconstruction that consumes fewer recorded effects than the execution recorded MUST
@@ -705,7 +710,8 @@ These are named in the reference controller. The numbering is the code's.
   harness identity check and no `Describe` of its own. `Resume`'s admission (`RT-1`) still runs
   before recovery.
 - `EXE-21`: Recovery serves recorded effects as in §8.5 until they are exhausted, then switches to
-  the live path for new effects only.
+  the live path for new effects only. The exception is a `REQUIRES_MEMORY_SNAPSHOT` execution whose
+  latest gate is decided without a receipt: recovery serves from that gate (`APR-16`).
 - `EXE-22`: Model cut rule, outside legacy recovery (`EXE-30`): if the trailing effect is a
   `MODEL_CALL` with no `OUTPUT` and the re-issued `input_hash` matches, recovery MUST invoke the
   provider once and append the `OUTPUT` after the existing `MODEL_CALL`. A hash mismatch is
@@ -939,8 +945,10 @@ invokes no harness and stays a no-op without one.
 
 ### 10.1 Gate
 
-- `APR-1`: The approval gate applies only to `STATELESS_REPLAY` harnesses. A `REQUIRES_APPROVAL`
-  call from any other harness MUST be refused before an effect (`ErrApprovalUnavailable`).
+- `APR-1`: The approval gate applies to `STATELESS_REPLAY` and `REQUIRES_MEMORY_SNAPSHOT`
+  harnesses. A `REQUIRES_APPROVAL` call from a harness that declares any other tier, including
+  none, MUST be refused before an effect (`ErrApprovalUnavailable`), and so MUST recovery or
+  reconstruction of an execution holding an approval record.
 - `APR-2`: A live `REQUIRES_APPROVAL` call MUST have a non-empty, unused call id and a non-empty
   `idempotency_key`. The host MUST append `TOOL_CALL`, then `APPROVAL_REQUEST{tool_call_id}`, then
   park the execution. Every later sink call in that execution returns the park.
@@ -1041,6 +1049,23 @@ invokes no harness and stays a no-op without one.
   executor (`TOOL-16`).
 - `APR-15`: An inherited unresolved gate (copied by a fork) MUST be refused with
   `FAILED_PRECONDITION`. A reference inherited through fork cannot authorize an effect in the child.
+- `APR-16`: A `REQUIRES_MEMORY_SNAPSHOT` harness restored at a decided gate continues from memory
+  and does not re-emit the execution's prefix. When the latest execution's selected gate is
+  decided without a receipt, recovery of such a harness MUST serve from that gate's `TOOL_CALL`,
+  not from the execution's first effect (`EXE-21`), and is otherwise unchanged:
+  - The gate's `TOOL_CALL`, `APPROVAL_REQUEST` and `APPROVAL_RESULT` MUST be the last effects of
+    the execution (`ERROR` is not an effect); otherwise the log is invalid and recovery fails
+    before the harness runs.
+  - The harness's first sink call MUST be the gated call, matched as in `TOOL-8` (id, name, args,
+    mediation, key). Any other first call, or a run that succeeds without one, is divergence
+    (`ErrReplayDiverged`, `EXE-14`): no receipt is written, one `ERROR` is appended, and the
+    decision stays recoverable. A run that fails before any sink call keeps its own error.
+  - A denial returns the `APPROVAL_DENIED` receipt without calling the executor; an approval is
+    host executed (`APR-14`). Later effects take the live path.
+  - Call ids recorded before the gate stay used (`APR-2`, `TOOL-3`) although they are not served.
+  - Legacy executions, a gate that already has its receipt, and reconstruction replay serve from
+    the first effect as before; a memory-tier harness has no recovery path for a receipted gate
+    whose execution has no `END`.
 - Requests and snapshots are retained indefinitely.
 
 ## 11. Session lifecycle operations
@@ -1830,6 +1855,11 @@ involved, and `TestApprovalRawProtocol` uses neither controller nor journal.
 | `TestWireToolRequestChangesFailReplayAndRecovery` | Changed id, name, args, mediation, or key diverges with 0 executor calls | `TOOL-8` |
 | `TestWireExecutionStartReopenResumeReplayAndFork` | Resume, replay, and fork deliver the original `Start` | `EXE-19`, `OPS-15` |
 | `TestApprovalRawProtocol` | Protobuf-only peer: approval before receipt, park ack and close | `APR-10` to `APR-12` |
+| `TestWireMemoryTierApproval/park` | A memory-tier gated call journals `TOOL_CALL` and `APPROVAL_REQUEST` and parks; 0 executor calls | `APR-1`, `APR-2` |
+| `TestWireMemoryTierApproval/approve` | After a decision and reopen, the gated call first (no prefix) runs the executor once; receipt, then `END` | `APR-14`, `APR-16` |
+| `TestWireMemoryTierApproval/deny` | A denial returns the `APPROVAL_DENIED` receipt with 0 executor calls | `APR-12`, `APR-16` |
+| `TestWireMemoryTierApproval/wrong_first_call` | A first call other than the gated call diverges with one `ERROR` and no receipt; a later compliant recovery completes | `APR-16`, `EXE-14` |
+| `TestWireMemoryTierApproval/stateless_unchanged` | `STATELESS_REPLAY` recovery still serves the prefix first | `EXE-21` |
 
 CI also runs `python3 hack/verify_chain.py --golden` and `hack/verify_chain.sh` (`CHAIN-9` to
 `CHAIN-11`).

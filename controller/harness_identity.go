@@ -54,7 +54,7 @@ func (c *Controller) checkHarness(ctx context.Context, har api.Harness, executio
 		if execution.harnessVersion != "" && execution.harnessVersion != desc.Version {
 			return nil, fmt.Errorf("%w: execution %q recorded %q, supplied %q", ErrHarnessVersionMismatch, execution.id, execution.harnessVersion, desc.Version)
 		}
-		if execution.hasApproval() && desc.Capabilities.Resumability != api.ResumabilityStatelessReplay {
+		if execution.hasApproval() && !approvalTier(desc.Capabilities.Resumability) {
 			return nil, ErrApprovalUnavailable
 		}
 	}

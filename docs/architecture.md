@@ -90,7 +90,10 @@ companion determinism contract, exercised by `conformance/`):
 - **I4 — memory-restore is not replay.** When a memory snapshot is restored the harness already holds its state
   in RAM, so the journal is **not** replayed into it (replaying would double-apply). The host still
   sends the full prior log as `Start.History`; the `REQUIRES_MEMORY_SNAPSHOT` harness carries this
-  rule on its side by never reconstructing state from `History`.
+  rule on its side by never reconstructing state from `History`. Recovery of an interrupted turn
+  still serves the turn's recorded effects from its first one, with one exception: restored at a
+  decided approval gate, the harness continues from memory, so recovery serves from the gate and the
+  harness's first call must be the gated call (spec `APR-16`).
 - **I5 — byte-identical replay.** Replay reproduces the recorded events byte-for-byte (checked against the
   canonical hash), not merely equivalent output.
 

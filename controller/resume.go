@@ -55,6 +55,10 @@ func ResumeInvocation(log eventlog.Store) (*api.ExecutionStart, error) {
 // An owned unanswered approval returns (true, *api.ApprovalParkedError) without Describe or Run.
 // A call-only cut repairs its request exactly once using the captured head and current fence;
 // repair failure returns (true, operational error). A decided call resumes under the original key.
+// A REQUIRES_MEMORY_SNAPSHOT harness restored at a decided gate continues from memory: recovery
+// serves from the gate's TOOL_CALL, so the harness's first sink call must be the gated call
+// (APR-16); a gate that is not the execution's recorded tail returns ErrInvalidExecutionLog before
+// Run or any append.
 //
 // Outside a legacy ID-less prefix, ERROR events, including those left by earlier failed Resume
 // attempts, are not effects: they stay in the journal as an audit trail, are skipped when the
@@ -173,6 +177,11 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		stream:    execution.stream,
 		approvals: approvalEvidence(scan, execution.id),
 	}
+	if desc != nil && desc.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot && !legacy {
+		if err := sink.continueAtGate(scan.selected, execution.id); err != nil {
+			return false, err
+		}
+	}
 	recordedEffectCount = len(execution.stream)
 	start := &api.Start{
 		ExecutionID:   invocationID,
@@ -232,6 +241,47 @@ type resumeSink struct {
 	i         int
 	failure   error // Rejecting a recorded tool prefix must never unlock the live path.
 	approvals map[string]*ApprovalState
+	// awaitingGate is set by continueAtGate until the first sink call: only the gated ToolCall
+	// may come first (APR-16).
+	awaitingGate bool
+}
+
+// continueAtGate positions a memory-tier recovery at its decided, unreceipted approval gate
+// (APR-16). A restored harness continues from memory and does not re-emit the execution's
+// recorded prefix, so serving starts at the gate's TOOL_CALL. The gate must be the stream's tail
+// (TOOL_CALL, APPROVAL_REQUEST, APPROVAL_RESULT); otherwise a recorded effect past the gate would
+// be served after its live completion. The call-ID bookkeeping that serving the prefix would have
+// filled is seeded from it, so a reused call ID is still refused before any append.
+func (s *resumeSink) continueAtGate(state *ApprovalState, executionID string) error {
+	if state == nil || state.ExecutionID != executionID || state.Decision == nil || state.Receipt != nil {
+		return nil
+	}
+	gate := -1
+	for i, ev := range s.stream {
+		if ev.Kind == api.EventToolCall && ev.ToolCall != nil && ev.ToolCall.ID == state.Call.ID && ev.ToolCall.Mediation == api.MediationRequiresApproval {
+			gate = i
+		}
+	}
+	if gate < 0 || gate+3 != len(s.stream) || s.stream[gate+1].Kind != api.EventApprovalRequest || s.stream[gate+2].Kind != api.EventApprovalResult {
+		return fmt.Errorf("%w: execution %q approval gate %q is not the recorded tail", ErrInvalidExecutionLog, executionID, state.Call.ID)
+	}
+	for _, ev := range s.stream[:gate] {
+		if ev.Kind == api.EventToolCall && ev.ToolCall != nil {
+			s.live.calls[ev.ToolCall.ID] = ev.ToolCall.Mediation == api.MediationRequiresApproval
+		}
+	}
+	s.i = gate
+	s.awaitingGate = true
+	return nil
+}
+
+// gateFirst returns a sticky divergence when a continuation's first sink call is not the gated
+// ToolCall (APR-16).
+func (s *resumeSink) gateFirst(effect string) error {
+	if !s.awaitingGate {
+		return nil
+	}
+	return s.diverged(fmt.Errorf("resume: memory-tier continuation got %s before the gated tool call", effect))
 }
 
 var _ api.EventSink = (*resumeSink)(nil)
@@ -262,6 +312,9 @@ func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 		return api.ModelResponse{}, s.failure
 	}
 	if err := ctx.Err(); err != nil {
+		return api.ModelResponse{}, err
+	}
+	if err := s.gateFirst("a model call"); err != nil {
 		return api.ModelResponse{}, err
 	}
 	req = modelRequest(req, s.live.modelDefault)
@@ -319,6 +372,9 @@ func (s *resumeSink) Output(ctx context.Context, delta string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := s.gateFirst("output"); err != nil {
+		return err
+	}
 	if s.i < len(s.stream) {
 		out, ok := s.recordedNext(api.EventOutput)
 		if !ok {
@@ -350,9 +406,13 @@ func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolRes
 	if err := ctx.Err(); err != nil {
 		return api.ToolResult{}, err
 	}
+	// A continuation's first call is matched against the gate below (TOOL-8), so a keyless or
+	// different call is a divergence there, not a historical rejection.
+	continuation := s.awaitingGate
+	s.awaitingGate = false
 	// Preserve historical keyless ordinary rejections without consuming fallback evidence.
 	// A same-ID gated intent must still validate identity before recovery can execute it.
-	if tc.Mediation == api.MediationControllerMediated && tc.IdempotencyKey == "" {
+	if !continuation && tc.Mediation == api.MediationControllerMediated && tc.IdempotencyKey == "" {
 		if s.i >= len(s.stream) || s.stream[s.i].Kind != api.EventToolCall || s.stream[s.i].ToolCall == nil ||
 			s.stream[s.i].ToolCall.ID != tc.ID || s.stream[s.i].ToolCall.Mediation != api.MediationRequiresApproval {
 			return api.ToolResult{}, ErrMissingIdempotencyKey
@@ -432,6 +492,9 @@ func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := s.gateFirst("a tool result report"); err != nil {
+		return err
+	}
 	if s.live.calls[tr.ID] {
 		if s.i < len(s.stream) {
 			return s.diverged(ErrApprovalReceiptReport)
@@ -467,6 +530,9 @@ func (s *resumeSink) Usage(ctx context.Context, u api.Usage) error {
 		return s.failure
 	}
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.gateFirst("usage"); err != nil {
 		return err
 	}
 	if s.live.legacyRecovery {

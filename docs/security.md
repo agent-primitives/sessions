@@ -186,14 +186,15 @@ See [deletion semantics](concepts.md#permanent-soft-deletion).
 
 ## Approval is not a security policy
 
-`REQUIRES_APPROVAL` is supported only for stateless replay. The RPC/SDK commits a decision without
-compute or an executor call; explicit Resume performs recovery. CLI approve/deny do both, and a
-recovery failure leaves the decision committed. The default Sessions service has no caller
-enforcement; custom hosts can require an independent approve permission (below). Sessions ships no
-tool/resource policy evaluator, approval timeout, expiry, automatic decision or implemented Cancel
-path; a custom host can supply its own check through the [pre-dispatch tool policy
-hook](#pre-dispatch-tool-policy). Unresolved requests and suspended snapshots/handles are retained
-indefinitely; operators must manage retained resources outside these APIs.
+`REQUIRES_APPROVAL` is supported for `STATELESS_REPLAY` and `REQUIRES_MEMORY_SNAPSHOT` harnesses.
+The RPC/SDK commits a decision without compute or an executor call; explicit Resume performs
+recovery. CLI approve/deny do both, and a recovery failure leaves the decision committed. The
+default Sessions service has no caller enforcement; custom hosts can require an independent approve
+permission (below). Sessions ships no tool/resource policy evaluator, approval timeout, expiry,
+automatic decision or implemented Cancel path; a custom host can supply its own check through the
+[pre-dispatch tool policy hook](#pre-dispatch-tool-policy). Unresolved requests and suspended
+snapshots/handles are retained indefinitely; operators must manage retained resources outside these
+APIs.
 
 A custom host executor must authorize tools/resources itself and durably deduplicate by **session UID
 plus idempotency key**, storing the original receipt across host restarts. Resume re-drives an

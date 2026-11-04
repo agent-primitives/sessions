@@ -199,15 +199,15 @@ message ReplayRequest {
   int64 to_seq = 3; // 0 = to head
 }
 
-// Approve supplies an explicit decision for one unresolved request in a stateless execution.
-// All tuple fields are required and request_seq must be positive. A decision resolves only a
-// request owned by this session, not an inherited parent request. By default identity is recorded
-// on the decision's Event.actor as unverified provenance. An opt-in enforcing Go host ignores it,
-// normalizing the actor to empty before append/retry comparison. A host that authenticates the
-// caller records it as ApprovalResult.verified_approver; no request field sets it.
-// Approve does not run a host's pre-dispatch tool policy hook, which runs when recovery
-// dispatches the approved call (spec §9.4). No expiry, automatic decision, or Cancel
-// semantics are implied.
+// Approve supplies an explicit decision for one unresolved request in a STATELESS_REPLAY or
+// REQUIRES_MEMORY_SNAPSHOT execution. All tuple fields are required and request_seq must be
+// positive. A decision resolves only a request owned by this session, not an inherited parent
+// request. By default identity is recorded on the decision's Event.actor as unverified provenance.
+// An opt-in enforcing Go host ignores it, normalizing the actor to empty before append/retry
+// comparison. A host that authenticates the caller records it as ApprovalResult.verified_approver;
+// no request field sets it. Approve does not run a host's pre-dispatch tool policy hook, which
+// runs when recovery dispatches the approved call (spec §9.4). No expiry, automatic decision, or
+// Cancel semantics are implied.
 message ApproveRequest {
   string session = 1;
   string execution_id = 2;
@@ -383,7 +383,8 @@ service Sessions {
   // Unlike controller replay, this does not reconstruct or run the harness.
   rpc Replay(ReplayRequest) returns (stream LogRecord);
 
-  // Implemented durable approval decisions for STATELESS_REPLAY executions.
+  // Implemented durable approval decisions for STATELESS_REPLAY and REQUIRES_MEMORY_SNAPSHOT
+  // executions.
   // OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple,
   // approved value, reason, identity and verified approver returns the existing decision, even
   // after resolution. A changed decision/reason/identity, or a different verified approver, for
@@ -391,9 +392,9 @@ service Sessions {
   // INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent
   // approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request
   // tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created
-  // for a non-stateless execution; Approve does not Describe or resolve a harness.
-  // ABORTED: local contention, append-CAS conflict or superseded fence; retry
-  // after reading the session. Identity is unverified provenance, ignored by an enforcing Go host.
+  // for a harness that declares any other tier (spec APR-1); Approve does not Describe or resolve
+  // a harness. ABORTED: local contention, append-CAS conflict or superseded fence; retry after
+  // reading the session. Identity is unverified provenance, ignored by an enforcing Go host.
   // Independent read+approve permission checks are opt-in. This method does not run a host's
   // pre-dispatch tool policy hook (it runs when recovery dispatches the approved call) and implies
   // no expiry, implicit Resume, or Cancel behavior.

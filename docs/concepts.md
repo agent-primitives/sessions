@@ -274,7 +274,7 @@ cost, audit, and tool approval are first-class rather than parsed out of text af
 | `MODEL_CALL` | A call to a model was made (records the model, params, and an input hash for the replay check). |
 | `OUTPUT` | Assistant output (a delta or a full message). |
 | `TOOL_CALL` / `TOOL_RESULT` | A tool invocation and its outcome. Aligned with an MCP tool call. |
-| `APPROVAL_REQUEST` / `APPROVAL_RESULT` | A host-owned request and explicit caller decision around a stateless tool call. |
+| `APPROVAL_REQUEST` / `APPROVAL_RESULT` | A host-owned request and explicit caller decision around a tool call. |
 | `USAGE` | Per-call token and cost accounting. |
 | `LIFECYCLE` | A compute or session transition (`SUSPEND`, `RESUME`, `FORK`, `BASELINE`, `CANCEL`, `DELETE`). |
 | `END` | The terminal state of one execution (`COMPLETED` / `FAILED` / `CANCELED`). |
@@ -483,7 +483,8 @@ replay-conformance suite (`conformance/`) enforces a numbered contract. The load
 - **I4: memory-restore is not replay.** After a memory restore the harness already holds its state in
   RAM. The host still sends the full prior log as `Start.History`, and it must not be replayed into
   that state: a `REQUIRES_MEMORY_SNAPSHOT` harness never reconstructs state from `History` (see
-  [`harness-authoring.md`](harness-authoring.md)).
+  [`harness-authoring.md`](harness-authoring.md)). Restored at a decided approval gate, it does
+  not re-emit the turn's earlier effects either: its first call must be the gated call.
 - **I5: byte-identical replay.** Replay reproduces the recorded events byte-for-byte (checked against the
   canonical hash), not merely output that looks equivalent.
 

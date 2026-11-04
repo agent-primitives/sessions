@@ -108,7 +108,8 @@ type SessionsClient interface {
 	// Raw read-only audit: remains available for tombstoned UIDs, including LIFECYCLE_DELETE records.
 	// Unlike controller replay, this does not reconstruct or run the harness.
 	Replay(ctx context.Context, in *ReplayRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogRecord], error)
-	// Implemented durable approval decisions for STATELESS_REPLAY executions.
+	// Implemented durable approval decisions for STATELESS_REPLAY and REQUIRES_MEMORY_SNAPSHOT
+	// executions.
 	// OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple,
 	// approved value, reason, identity and verified approver returns the existing decision, even
 	// after resolution. A changed decision/reason/identity, or a different verified approver, for
@@ -116,9 +117,9 @@ type SessionsClient interface {
 	// INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent
 	// approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request
 	// tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created
-	// for a non-stateless execution; Approve does not Describe or resolve a harness.
-	// ABORTED: local contention, append-CAS conflict or superseded fence; retry
-	// after reading the session. Identity is unverified provenance, ignored by an enforcing Go host.
+	// for a harness that declares any other tier (spec APR-1); Approve does not Describe or resolve
+	// a harness. ABORTED: local contention, append-CAS conflict or superseded fence; retry after
+	// reading the session. Identity is unverified provenance, ignored by an enforcing Go host.
 	// Independent read+approve permission checks are opt-in. This method does not run a host's
 	// pre-dispatch tool policy hook (it runs when recovery dispatches the approved call) and implies
 	// no expiry, implicit Resume, or Cancel behavior.
@@ -357,7 +358,8 @@ type SessionsServer interface {
 	// Raw read-only audit: remains available for tombstoned UIDs, including LIFECYCLE_DELETE records.
 	// Unlike controller replay, this does not reconstruct or run the harness.
 	Replay(*ReplayRequest, grpc.ServerStreamingServer[LogRecord]) error
-	// Implemented durable approval decisions for STATELESS_REPLAY executions.
+	// Implemented durable approval decisions for STATELESS_REPLAY and REQUIRES_MEMORY_SNAPSHOT
+	// executions.
 	// OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple,
 	// approved value, reason, identity and verified approver returns the existing decision, even
 	// after resolution. A changed decision/reason/identity, or a different verified approver, for
@@ -365,9 +367,9 @@ type SessionsServer interface {
 	// INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent
 	// approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request
 	// tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created
-	// for a non-stateless execution; Approve does not Describe or resolve a harness.
-	// ABORTED: local contention, append-CAS conflict or superseded fence; retry
-	// after reading the session. Identity is unverified provenance, ignored by an enforcing Go host.
+	// for a harness that declares any other tier (spec APR-1); Approve does not Describe or resolve
+	// a harness. ABORTED: local contention, append-CAS conflict or superseded fence; retry after
+	// reading the session. Identity is unverified provenance, ignored by an enforcing Go host.
 	// Independent read+approve permission checks are opt-in. This method does not run a host's
 	// pre-dispatch tool policy hook (it runs when recovery dispatches the approved call) and implies
 	// no expiry, implicit Resume, or Cancel behavior.

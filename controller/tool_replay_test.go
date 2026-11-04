@@ -959,22 +959,33 @@ func TestRecoveryContinuesAfterHandledExecutorFailure(t *testing.T) {
 
 type handlesMediationRejectionHarness struct {
 	call       api.ToolCall
+	tier       api.Resumability
 	emitOutput bool
+	output     string // emitted instead of "handled" when set
+	echoError  bool   // emit the refusal's err.Error() instead
 	interrupt  bool
 	toolError  error
 }
 
-func (*handlesMediationRejectionHarness) Describe(ctx context.Context) (api.Descriptor, error) {
+func (h *handlesMediationRejectionHarness) Describe(ctx context.Context) (api.Descriptor, error) {
 	desc, err := (&callHarness{}).Describe(ctx)
-	// Unsupported approval is still a handleable pre-intent refusal.
-	desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
+	// The recording run uses the empty tier, where unsupported approval (APR-1) is a handleable
+	// pre-intent refusal; the recovery run sets tier to replay that journal under each tier.
+	desc.Capabilities.Resumability = h.tier
 	return desc, err
 }
 
 func (h *handlesMediationRejectionHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
 	_, h.toolError = sink.ToolCall(ctx, h.call)
 	if h.emitOutput {
-		if err := sink.Output(ctx, "handled"); err != nil {
+		text := "handled"
+		if h.output != "" {
+			text = h.output
+		}
+		if h.echoError && h.toolError != nil {
+			text = h.toolError.Error()
+		}
+		if err := sink.Output(ctx, text); err != nil {
 			return err
 		}
 	}
@@ -986,91 +997,178 @@ func (h *handlesMediationRejectionHarness) Run(ctx context.Context, _ *api.Start
 
 // Latching a pre-intent mediation rejection or consuming its OUTPUT would prevent the same
 // harness that handled the live rejection from successfully replaying or completing recovery.
+// The fixture always runs with an empty tier, the only one that still refuses approval live. A
+// REQUIRES_MEMORY_SNAPSHOT recovery stands for a journal written before the memory tier could
+// hold a gate: its recorded pre-intent ErrApprovalUnavailable must replay and resume unchanged.
 func TestHandledMediationRejectionPreservesContinuation(t *testing.T) {
 	for _, mediation := range []api.Mediation{
 		api.MediationRequiresApproval, api.MediationInHarnessReported, "",
 	} {
 		for _, path := range []string{"replay output", "replay exhausted", "resume output", "resume live tail"} {
-			t.Run(fmt.Sprintf("%s/%s", mediation, path), func(t *testing.T) {
+			for _, tier := range []api.Resumability{"", api.ResumabilityRequiresMemorySnapshot} {
+				t.Run(fmt.Sprintf("%s/%s/tier=%q", mediation, path, tier), func(t *testing.T) {
+					log := memStore(t)
+					call := recordedToolCall()
+					call.Mediation = mediation
+					attempts := 0
+					executor := func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+						attempts++
+						return api.ToolResult{}, errors.New("unexpected tool execution")
+					}
+					original, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(executor))
+					if err != nil {
+						t.Fatal(err)
+					}
+					recovery := path == "resume output" || path == "resume live tail"
+					h := &handlesMediationRejectionHarness{
+						call: call, emitOutput: path == "replay output" || path == "resume output", interrupt: recovery,
+					}
+					err = original.Exec(t.Context(), h, []api.Message{msg("read")}, 0)
+					if recovery && !errors.Is(err, errToolInterrupted) || !recovery && err != nil {
+						t.Fatalf("fixture execution: %v", err)
+					}
+					assertMediationRejection(t, h.toolError, mediation)
+					before, err := log.Read(1)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, rec := range before {
+						if rec.Event.Kind == api.EventToolCall || rec.Event.Kind == api.EventToolResult {
+							t.Fatalf("live rejection recorded a tool effect: %s", rec.Event.Kind)
+						}
+					}
+					fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(executor))
+					if err != nil {
+						t.Fatal(err)
+					}
+					h = &handlesMediationRejectionHarness{call: call, tier: tier, emitOutput: path != "replay exhausted"}
+					if recovery && path == "resume live tail" && tier != "" && mediation == api.MediationRequiresApproval {
+						// Past the recorded prefix the re-issued call is live, and a memory-tier host
+						// now parks it rather than reproducing the historical refusal.
+						var parked *api.ApprovalParkedError
+						if resumed, err := fresh.Resume(t.Context(), h); !resumed || !errors.As(err, &parked) || parked.Ref.ToolCallID != call.ID {
+							t.Fatalf("live gated call after the recorded prefix did not park: resumed=%v err=%v", resumed, err)
+						}
+						if attempts != 0 {
+							t.Fatalf("parked call executed: tools=%d", attempts)
+						}
+						if err := log.Verify(); err != nil {
+							t.Fatal(err)
+						}
+						return
+					}
+					if recovery {
+						if resumed, err := fresh.Resume(t.Context(), h); !resumed || err != nil {
+							t.Fatalf("handled mediation rejection prevented recovery: resumed=%v err=%v", resumed, err)
+						}
+					} else {
+						outputs, err := fresh.Replay(t.Context(), h)
+						if err != nil {
+							t.Fatalf("handled mediation rejection prevented replay: %v", err)
+						}
+						if path == "replay output" && !reflect.DeepEqual(outputs, []string{"handled"}) || path == "replay exhausted" && len(outputs) != 0 {
+							t.Fatalf("wrong replay output: %v", outputs)
+						}
+					}
+					assertMediationRejection(t, h.toolError, mediation)
+					if attempts != 0 || original.ModelInvocations() != 0 || fresh.ModelInvocations() != 0 {
+						t.Fatalf("mediation rejection invoked live effects: tools=%d", attempts)
+					}
+					after, err := log.Read(1)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !recovery {
+						if !reflect.DeepEqual(before, after) {
+							t.Fatal("replay changed journal")
+						}
+					} else {
+						wantTail := []api.EventKind{api.EventEnd}
+						if path == "resume live tail" {
+							wantTail = []api.EventKind{api.EventOutput, api.EventEnd}
+						}
+						tail := after[len(before):]
+						if len(tail) != len(wantTail) {
+							t.Fatalf("resume appended unexpected events: %+v", tail)
+						}
+						for i, kind := range wantTail {
+							if tail[i].Event.Kind != kind {
+								t.Fatalf("resume event %d = %s, want %s", i, tail[i].Event.Kind, kind)
+							}
+						}
+						outputs, err := fresh.Replay(t.Context(), &handlesMediationRejectionHarness{call: call, tier: tier, emitOutput: true})
+						if err != nil || !reflect.DeepEqual(outputs, []string{"handled"}) {
+							t.Fatalf("recovered turn did not replay: outputs=%v err=%v", outputs, err)
+						}
+					}
+					if err := log.Verify(); err != nil {
+						t.Fatal(err)
+					}
+				})
+			}
+		}
+	}
+}
+
+// baseApprovalUnavailableText is ErrApprovalUnavailable's message in releases before memory-tier
+// approval. A harness may have journaled it, so it must not change.
+const baseApprovalUnavailableText = "controller: approval requires STATELESS_REPLAY"
+
+// A journal written by an earlier release holds the refusal text a harness embedded in its
+// OUTPUT. Replay and Resume hand the same refusal back, under either tier, and the harness that
+// embeds err.Error() must reproduce the recorded bytes rather than diverge.
+func TestHandledApprovalRefusalTextReplaysBaseJournal(t *testing.T) {
+	for _, path := range []string{"replay", "resume"} {
+		for _, tier := range []api.Resumability{"", api.ResumabilityRequiresMemorySnapshot} {
+			t.Run(fmt.Sprintf("%s/tier=%q", path, tier), func(t *testing.T) {
 				log := memStore(t)
 				call := recordedToolCall()
-				call.Mediation = mediation
-				attempts := 0
+				call.Mediation = api.MediationRequiresApproval
 				executor := func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
-					attempts++
 					return api.ToolResult{}, errors.New("unexpected tool execution")
 				}
-				original, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(executor))
-				if err != nil {
-					t.Fatal(err)
+				newController := func() *controller.Controller {
+					c, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(executor))
+					if err != nil {
+						t.Fatal(err)
+					}
+					return c
 				}
-				recovery := path == "resume output" || path == "resume live tail"
-				h := &handlesMediationRejectionHarness{
-					call: call, emitOutput: path == "replay output" || path == "resume output", interrupt: recovery,
+				// Write the journal as an earlier release would have: the OUTPUT holds the base
+				// text verbatim, not whatever this build's sentinel says.
+				recovery := path == "resume"
+				recorder := &handlesMediationRejectionHarness{
+					call: call, emitOutput: true, output: baseApprovalUnavailableText, interrupt: recovery,
 				}
-				err = original.Exec(t.Context(), h, []api.Message{msg("read")}, 0)
+				err := newController().Exec(t.Context(), recorder, []api.Message{msg("read")}, 0)
 				if recovery && !errors.Is(err, errToolInterrupted) || !recovery && err != nil {
 					t.Fatalf("fixture execution: %v", err)
 				}
-				assertMediationRejection(t, h.toolError, mediation)
+				assertMediationRejection(t, recorder.toolError, call.Mediation)
 				before, err := log.Read(1)
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, rec := range before {
-					if rec.Event.Kind == api.EventToolCall || rec.Event.Kind == api.EventToolResult {
-						t.Fatalf("live rejection recorded a tool effect: %s", rec.Event.Kind)
-					}
-				}
-				fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), dedupAll, controller.WithToolExecutor(executor))
-				if err != nil {
-					t.Fatal(err)
-				}
-				h = &handlesMediationRejectionHarness{call: call, emitOutput: path != "replay exhausted"}
+				fresh := newController()
+				h := &handlesMediationRejectionHarness{call: call, tier: tier, emitOutput: true, echoError: true}
 				if recovery {
 					if resumed, err := fresh.Resume(t.Context(), h); !resumed || err != nil {
-						t.Fatalf("handled mediation rejection prevented recovery: resumed=%v err=%v", resumed, err)
+						t.Fatalf("base-written refusal text prevented recovery: resumed=%v err=%v", resumed, err)
 					}
-				} else {
-					outputs, err := fresh.Replay(t.Context(), h)
+					after, err := log.Read(1)
 					if err != nil {
-						t.Fatalf("handled mediation rejection prevented replay: %v", err)
+						t.Fatal(err)
 					}
-					if path == "replay output" && !reflect.DeepEqual(outputs, []string{"handled"}) || path == "replay exhausted" && len(outputs) != 0 {
-						t.Fatalf("wrong replay output: %v", outputs)
+					if tail := after[len(before):]; len(tail) != 1 || tail[0].Event.Kind != api.EventEnd {
+						t.Fatalf("resume should append only END: %+v", tail)
 					}
+					h = &handlesMediationRejectionHarness{call: call, tier: tier, emitOutput: true, echoError: true}
 				}
-				assertMediationRejection(t, h.toolError, mediation)
-				if attempts != 0 || original.ModelInvocations() != 0 || fresh.ModelInvocations() != 0 {
-					t.Fatalf("mediation rejection invoked live effects: tools=%d", attempts)
+				outputs, err := fresh.Replay(t.Context(), h)
+				if err != nil || !reflect.DeepEqual(outputs, []string{baseApprovalUnavailableText}) {
+					t.Fatalf("base-written refusal text did not replay: outputs=%v err=%v", outputs, err)
 				}
-				after, err := log.Read(1)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !recovery {
-					if !reflect.DeepEqual(before, after) {
-						t.Fatal("replay changed journal")
-					}
-				} else {
-					wantTail := []api.EventKind{api.EventEnd}
-					if path == "resume live tail" {
-						wantTail = []api.EventKind{api.EventOutput, api.EventEnd}
-					}
-					tail := after[len(before):]
-					if len(tail) != len(wantTail) {
-						t.Fatalf("resume appended unexpected events: %+v", tail)
-					}
-					for i, kind := range wantTail {
-						if tail[i].Event.Kind != kind {
-							t.Fatalf("resume event %d = %s, want %s", i, tail[i].Event.Kind, kind)
-						}
-					}
-					outputs, err := fresh.Replay(t.Context(), &handlesMediationRejectionHarness{call: call, emitOutput: true})
-					if err != nil || !reflect.DeepEqual(outputs, []string{"handled"}) {
-						t.Fatalf("recovered turn did not replay: outputs=%v err=%v", outputs, err)
-					}
-				}
+				assertMediationRejection(t, h.toolError, call.Mediation)
 				if err := log.Verify(); err != nil {
 					t.Fatal(err)
 				}
@@ -1103,7 +1201,7 @@ type mediationFallbackHarness struct {
 
 func (*mediationFallbackHarness) Describe(ctx context.Context) (api.Descriptor, error) {
 	desc, err := (&callHarness{}).Describe(ctx)
-	desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
+	desc.Capabilities.Resumability = "" // APR-1 refuses approval for an empty tier
 	return desc, err
 }
 

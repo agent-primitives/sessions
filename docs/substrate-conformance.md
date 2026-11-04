@@ -1018,9 +1018,11 @@ flight through the router together. Asserts: A answers 3 and B answers 2. A call
 other session's actor would answer with the other count.
 
 `placement`'s `TestConcurrentSessionsThroughOneRouterReachTheirOwnActors` makes the same claim
-against an in-process router with both turns held inside their model calls, and
+against an in-process router with both turns held inside their model calls.
 `TestDefaultDialCallMetadataOverridesTheCaller` pins that a caller's own `ate-target-actor` value,
-in any letter case or number, never reaches the harness call.
+in any letter case or number, never reaches the harness call, and
+`TestDefaultDialWithCallMetadataOverridesHostInterceptors` pins the same for an interceptor a host
+passes to `DefaultDialWith`.
 
 The counter's I4 contract is harness-side and unit-tested: it is increment-only and never reads
 `Start.History` (the full prior log, also on a memory-restored sandbox). The neutrality contrast

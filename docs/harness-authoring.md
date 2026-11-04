@@ -731,6 +731,13 @@ open. The TCP listener is unauthenticated, so the limit is also how large a mess
 reaches it can make harnessnode buffer, per stream. It is harnessnode's own limit: a proxy between
 the host and harnessnode may apply its own.
 
+The host's side has the same 4 MiB default for harness-to-host frames, such as a large `Output`
+delta or `Report` result. A host built on `placement` raises it without rewriting the dial by
+passing `placement.DefaultDialWith(grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(n)))` to
+`placement.WithDialer`. `DefaultDialWith` applies the host's options after the defaults, but the
+incarnation's call metadata still replaces any value an interceptor among them sets, and a
+`unix://` address still dials its socket.
+
 Only the model ID belongs in the harness environment. Keep provider URLs and credentials on the
 host. Repository-owned hosts can reuse `internal/modelconfig.New` with an explicit `Config`
 (`Model`, `BaseURL`, `Path`, `AuthHeader`, `APIKey`), then pass the returned client's `Model` and

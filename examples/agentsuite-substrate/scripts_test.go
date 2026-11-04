@@ -183,6 +183,9 @@ fi
 	stub(t, bin, "kubectl", log+`
 case " $* " in
 *" -f - "*) cat >>"$STUB_DIR/kubectl-stdin" ;;
+# up.sh pipes the API key into create secret: drain it without keeping it, or printf gets SIGPIPE
+# and pipefail reports exit 141.
+*" create secret "*) cat >/dev/null ;;
 *" get secret "*) echo "${STUB_SECRET_VERSION:-}" ;;
 *" get deploy agentsessionsd "*)
 	[ "${STUB_DEPLOYED_URL:-}" != missing ] || exit 1

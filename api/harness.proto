@@ -6,8 +6,10 @@
 // park, which ends with a correlated EVENT_PARKED acknowledgement and stream closure, not END.
 // Beyond plain streaming, it adds tool-call / approval mediation, per-call usage, and capabilities.
 // The host and bridge implement durable approval/park for STATELESS_REPLAY and
-// REQUIRES_MEMORY_SNAPSHOT harnesses. Unsupported peers and harnesses declaring no tier must not
-// execute REQUIRES_APPROVAL effects. A memory-snapshot harness restored at a decided gate sends
+// REQUIRES_MEMORY_SNAPSHOT harnesses. Unsupported peers must not execute REQUIRES_APPROVAL
+// effects. The host reads an omitted or unknown Capabilities.resumability as STATELESS_REPLAY, so
+// such a harness gets the stateless gate; only an in-process harness with an empty or unknown tier
+// fails closed before the effect. A memory-snapshot harness restored at a decided gate sends
 // the gated call first and does not re-emit the execution's earlier effects.
 syntax = "proto3";
 
@@ -110,8 +112,9 @@ message Cancel {
 // receipt tuples fail closed rather than being served to a different call. The harness may not
 // manufacture durable APPROVAL_REQUEST/APPROVAL_RESULT events. A memory-snapshot harness restored
 // at a decided gate re-issues the gated call as its first sink call (spec APR-16) and then gets
-// approval and tool as above. A harness that declares no or an unknown tier must reject the gate
-// before executing an effect rather than pretending a park is a snapshot.
+// approval and tool as above. The host reads an omitted or unknown tier as STATELESS_REPLAY and
+// recovers such a harness by replay, so a harness that keeps in-memory state across a park must
+// declare REQUIRES_MEMORY_SNAPSHOT rather than pretend a park is a snapshot.
 // Host sink operations for an execution are serialized; callbacks must not re-enter that sink.
 // Once a recorded-prefix identity/correlation mismatch occurs, the execution remains divergent:
 // catching the error cannot authorize a later model/tool effect or mark recovery complete.

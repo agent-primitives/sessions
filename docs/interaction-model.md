@@ -155,12 +155,14 @@ so the journal is identical whether or not anyone watched the turn.
 ### Approval decisions and recovery
 
 A `STATELESS_REPLAY` or `REQUIRES_MEMORY_SNAPSHOT` harness can request `REQUIRES_APPROVAL` through
-`sink.ToolCall`; a harness that declares no tier is refused before the effect. The host journals
-`TOOL_CALL` then `APPROVAL_REQUEST`; after a correlated park acknowledgement and actual stream closure,
-it snapshots externally and commits `SUSPEND`. The Exec stream ends successfully with a final
-`EXEC_AWAITING` Session and `pending_approval`. It does not invent `END`, `ERROR`, or a tool result.
-A handoff/snapshot/append failure remains an RPC error with the durable request available for recovery;
-use `Suspend` to retry the recorded route's cold transition when needed.
+`sink.ToolCall`. An in-process harness with an empty or unknown tier is refused before the effect; a
+wire harness that omits its tier or sends an unknown one is read as `STATELESS_REPLAY`, the proto
+default, and gets the gate. The host journals `TOOL_CALL` then `APPROVAL_REQUEST`; after a
+correlated park acknowledgement and actual stream closure, it snapshots externally and commits
+`SUSPEND`. The Exec stream ends successfully with a final `EXEC_AWAITING` Session and
+`pending_approval`. It does not invent `END`, `ERROR`, or a tool result. A handoff/snapshot/append
+failure remains an RPC error with the durable request available for recovery; use `Suspend` to retry
+the recorded route's cold transition when needed.
 
 All Session replies use the same durable append-transaction projection, read atomically with
 metadata and `last_seq`; no query decodes journal events. An owned unanswered request in the latest

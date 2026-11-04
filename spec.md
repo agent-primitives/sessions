@@ -946,9 +946,11 @@ invokes no harness and stays a no-op without one.
 ### 10.1 Gate
 
 - `APR-1`: The approval gate applies to `STATELESS_REPLAY` and `REQUIRES_MEMORY_SNAPSHOT`
-  harnesses. A `REQUIRES_APPROVAL` call from a harness that declares any other tier, including
-  none, MUST be refused before an effect (`ErrApprovalUnavailable`), and so MUST recovery or
-  reconstruction of an execution holding an approval record.
+  harnesses. A `REQUIRES_APPROVAL` call from an in-process harness that declares any other tier,
+  including none (the empty Go value), MUST be refused before an effect (`ErrApprovalUnavailable`),
+  and so MUST recovery or reconstruction of an execution holding an approval record. A wire harness
+  that omits its tier or sends an unknown one is read as `STATELESS_REPLAY` (`WIRE-3`), so its call
+  gets the gate.
 - `APR-2`: A live `REQUIRES_APPROVAL` call MUST have a non-empty, unused call id and a non-empty
   `idempotency_key`. The host MUST append `TOOL_CALL`, then `APPROVAL_REQUEST{tool_call_id}`, then
   park the execution. Every later sink call in that execution returns the park.

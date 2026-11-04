@@ -1,12 +1,15 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
 	"github.com/agent-primitives/sessions/placement"
 )
@@ -27,5 +30,29 @@ func TestOrdinaryLifecycleJournalContentionIsAborted(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCloseApprovalErrorMapping(t *testing.T) {
+	for _, tc := range []struct {
+		cause error
+		want  codes.Code
+	}{
+		{placement.ErrSessionBusy, codes.Aborted},
+		{placement.ErrCheckpointing, codes.Aborted},
+		{eventlog.ErrConflict, codes.Aborted},
+		{eventlog.ErrFenced, codes.Aborted},
+		{eventlog.ErrTampered, codes.DataLoss},
+		{controller.ErrInvalidApprovalDecision, codes.FailedPrecondition},
+		{controller.ErrInvalidExecutionLog, codes.FailedPrecondition},
+		{eventlog.ErrDeleted, codes.FailedPrecondition},
+		{api.ErrInvalidCallerIdentity, codes.Internal},
+		{errors.New("storage"), codes.Internal},
+	} {
+		t.Run(tc.cause.Error(), func(t *testing.T) {
+			if err := closeApprovalError(fmt.Errorf("close: %w", tc.cause)); status.Code(err) != tc.want {
+				t.Fatalf("closeApprovalError = %v, want %v", err, tc.want)
+			}
+		})
 	}
 }

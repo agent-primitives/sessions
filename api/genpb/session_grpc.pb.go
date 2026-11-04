@@ -31,6 +31,7 @@ const (
 	Sessions_Exec_FullMethodName          = "/agentsessions.v1.Sessions/Exec"
 	Sessions_Replay_FullMethodName        = "/agentsessions.v1.Sessions/Replay"
 	Sessions_Approve_FullMethodName       = "/agentsessions.v1.Sessions/Approve"
+	Sessions_CloseApproval_FullMethodName = "/agentsessions.v1.Sessions/CloseApproval"
 	Sessions_Cancel_FullMethodName        = "/agentsessions.v1.Sessions/Cancel"
 	Sessions_Suspend_FullMethodName       = "/agentsessions.v1.Sessions/Suspend"
 	Sessions_Resume_FullMethodName        = "/agentsessions.v1.Sessions/Resume"
@@ -124,6 +125,23 @@ type SessionsClient interface {
 	// pre-dispatch tool policy hook (it runs when recovery dispatches the approved call) and implies
 	// no expiry, implicit Resume, or Cancel behavior.
 	Approve(ctx context.Context, in *ApproveRequest, opts ...grpc.CallOption) (*ApproveResponse, error)
+	// Closes an approval gate the harness cannot re-issue, writing only journal records: no harness,
+	// executor or compute runs. OK returns the gate's decision and receipt; after it Exec admits a
+	// new turn. A retry, or a close of a gate that already has a receipt from any writer, returns
+	// the existing records without writing. The closed execution gets no END: Resume re-drives it
+	// and serves the receipt to a harness that re-issues the call. A REQUIRES_MEMORY_SNAPSHOT
+	// harness restored at the gate cannot continue there unless the gate is the execution's first
+	// effect (spec APR-19); Exec is that session's route. Closing an approved gate revokes
+	// the approval for later recovery but cannot stop an executor call another host already
+	// dispatched, so its receipt is OUTCOME_UNKNOWN.
+	// INVALID_ARGUMENT: missing session/execution/tool-call tuple or non-positive request_seq.
+	// NOT_FOUND: unknown session. FAILED_PRECONDITION: deleted session; wrong, inherited or
+	// superseded request tuple, or one whose request was never journaled; or invalid recorded
+	// approval evidence. DATA_LOSS: the journal fails hash-chain verification. ABORTED: local
+	// contention (including a live Resume or a stateful Fork), append-CAS conflict or superseded
+	// fence; retry after reading the session. Independent read+approval.close permission checks are
+	// opt-in.
+	CloseApproval(ctx context.Context, in *CloseApprovalRequest, opts ...grpc.CallOption) (*CloseApprovalResponse, error)
 	// In-flight control: cancel the running execution. Not implemented: the server returns
 	// UNIMPLEMENTED.
 	Cancel(ctx context.Context, in *CancelRequest, opts ...grpc.CallOption) (*Session, error)
@@ -241,6 +259,16 @@ func (c *sessionsClient) Approve(ctx context.Context, in *ApproveRequest, opts .
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ApproveResponse)
 	err := c.cc.Invoke(ctx, Sessions_Approve_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionsClient) CloseApproval(ctx context.Context, in *CloseApprovalRequest, opts ...grpc.CallOption) (*CloseApprovalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CloseApprovalResponse)
+	err := c.cc.Invoke(ctx, Sessions_CloseApproval_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -374,6 +402,23 @@ type SessionsServer interface {
 	// pre-dispatch tool policy hook (it runs when recovery dispatches the approved call) and implies
 	// no expiry, implicit Resume, or Cancel behavior.
 	Approve(context.Context, *ApproveRequest) (*ApproveResponse, error)
+	// Closes an approval gate the harness cannot re-issue, writing only journal records: no harness,
+	// executor or compute runs. OK returns the gate's decision and receipt; after it Exec admits a
+	// new turn. A retry, or a close of a gate that already has a receipt from any writer, returns
+	// the existing records without writing. The closed execution gets no END: Resume re-drives it
+	// and serves the receipt to a harness that re-issues the call. A REQUIRES_MEMORY_SNAPSHOT
+	// harness restored at the gate cannot continue there unless the gate is the execution's first
+	// effect (spec APR-19); Exec is that session's route. Closing an approved gate revokes
+	// the approval for later recovery but cannot stop an executor call another host already
+	// dispatched, so its receipt is OUTCOME_UNKNOWN.
+	// INVALID_ARGUMENT: missing session/execution/tool-call tuple or non-positive request_seq.
+	// NOT_FOUND: unknown session. FAILED_PRECONDITION: deleted session; wrong, inherited or
+	// superseded request tuple, or one whose request was never journaled; or invalid recorded
+	// approval evidence. DATA_LOSS: the journal fails hash-chain verification. ABORTED: local
+	// contention (including a live Resume or a stateful Fork), append-CAS conflict or superseded
+	// fence; retry after reading the session. Independent read+approval.close permission checks are
+	// opt-in.
+	CloseApproval(context.Context, *CloseApprovalRequest) (*CloseApprovalResponse, error)
 	// In-flight control: cancel the running execution. Not implemented: the server returns
 	// UNIMPLEMENTED.
 	Cancel(context.Context, *CancelRequest) (*Session, error)
@@ -429,6 +474,9 @@ func (UnimplementedSessionsServer) Replay(*ReplayRequest, grpc.ServerStreamingSe
 }
 func (UnimplementedSessionsServer) Approve(context.Context, *ApproveRequest) (*ApproveResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Approve not implemented")
+}
+func (UnimplementedSessionsServer) CloseApproval(context.Context, *CloseApprovalRequest) (*CloseApprovalResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CloseApproval not implemented")
 }
 func (UnimplementedSessionsServer) Cancel(context.Context, *CancelRequest) (*Session, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Cancel not implemented")
@@ -575,6 +623,24 @@ func _Sessions_Approve_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Sessions_CloseApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CloseApprovalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionsServer).CloseApproval(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Sessions_CloseApproval_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionsServer).CloseApproval(ctx, req.(*CloseApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Sessions_Cancel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CancelRequest)
 	if err := dec(in); err != nil {
@@ -673,6 +739,10 @@ var Sessions_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Approve",
 			Handler:    _Sessions_Approve_Handler,
+		},
+		{
+			MethodName: "CloseApproval",
+			Handler:    _Sessions_CloseApproval_Handler,
 		},
 		{
 			MethodName: "Cancel",

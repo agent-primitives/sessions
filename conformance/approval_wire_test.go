@@ -81,11 +81,18 @@ func (p *approvalWirePeer) Connect(s v1.Harness_ConnectServer) error {
 	if receipt.GetSession() != start.GetSession() || receipt.GetExecutionId() != exec || tr == nil || tr.GetId() != "call" || tr.GetApprovalRequestSeq() != decision.GetRequestSeq() || tr.GetApprovalDecisionSeq() <= 0 {
 		return errors.New("invalid receipt tuple")
 	}
-	if !decision.GetApproved() {
-		if tr.GetCode() != v1.ToolResult_APPROVAL_DENIED || !tr.GetIsError() {
+	// A host-closed gate's receipt carries NOT_EXECUTED after a denial or OUTCOME_UNKNOWN after an
+	// approval; every failure code sets is_error.
+	switch code := tr.GetCode(); {
+	case !decision.GetApproved():
+		if code != v1.ToolResult_APPROVAL_DENIED && code != v1.ToolResult_NOT_EXECUTED || !tr.GetIsError() {
 			return errors.New("invalid denial status")
 		}
-	} else if (tr.GetCode() != v1.ToolResult_CODE_UNSPECIFIED || tr.GetIsError()) && (tr.GetCode() != v1.ToolResult_EXECUTOR_ERROR || !tr.GetIsError()) {
+	case code == v1.ToolResult_CODE_UNSPECIFIED:
+		if tr.GetIsError() {
+			return errors.New("invalid approval status")
+		}
+	case code != v1.ToolResult_EXECUTOR_ERROR && code != v1.ToolResult_OUTCOME_UNKNOWN || !tr.GetIsError():
 		return errors.New("invalid approval status")
 	}
 	p.frames <- []*v1.ControllerFrame{control, receipt}

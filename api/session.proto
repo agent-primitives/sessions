@@ -228,6 +228,28 @@ message ApproveResponse {
   LogRecord decision = 2;
 }
 
+// CloseApproval closes one approval gate in this session with a host receipt, so a session whose
+// harness can no longer re-issue the gated call can take a new turn. All tuple fields are required
+// and request_seq must be positive; the tuple names a request owned by this session, as for
+// Approve. No request field supplies identity: a host that authenticates the caller records it as
+// verified_approver on the denial it writes for an undecided gate.
+message CloseApprovalRequest {
+  string session = 1;
+  string execution_id = 2;
+  string tool_call_id = 3;
+  int64 request_seq = 4;
+}
+
+// decision is the gate's APPROVAL_RESULT and receipt its TOOL_RESULT, each either already in the
+// journal or written by this call. An undecided gate gets a host denial with reason "approval
+// closed" and a NOT_EXECUTED receipt; a denied gate a NOT_EXECUTED receipt; an approved gate with
+// no receipt an OUTCOME_UNKNOWN receipt. A gate that already has a receipt returns it unchanged.
+message CloseApprovalResponse {
+  Session session = 1;
+  LogRecord decision = 2;
+  LogRecord receipt = 3;
+}
+
 message SuspendRequest { string session = 1; }
 
 message ResumeRequest {
@@ -399,6 +421,24 @@ service Sessions {
   // pre-dispatch tool policy hook (it runs when recovery dispatches the approved call) and implies
   // no expiry, implicit Resume, or Cancel behavior.
   rpc Approve(ApproveRequest) returns (ApproveResponse);
+
+  // Closes an approval gate the harness cannot re-issue, writing only journal records: no harness,
+  // executor or compute runs. OK returns the gate's decision and receipt; after it Exec admits a
+  // new turn. A retry, or a close of a gate that already has a receipt from any writer, returns
+  // the existing records without writing. The closed execution gets no END: Resume re-drives it
+  // and serves the receipt to a harness that re-issues the call. A REQUIRES_MEMORY_SNAPSHOT
+  // harness restored at the gate cannot continue there unless the gate is the execution's first
+  // effect (spec APR-19); Exec is that session's route. Closing an approved gate revokes
+  // the approval for later recovery but cannot stop an executor call another host already
+  // dispatched, so its receipt is OUTCOME_UNKNOWN.
+  // INVALID_ARGUMENT: missing session/execution/tool-call tuple or non-positive request_seq.
+  // NOT_FOUND: unknown session. FAILED_PRECONDITION: deleted session; wrong, inherited or
+  // superseded request tuple, or one whose request was never journaled; or invalid recorded
+  // approval evidence. DATA_LOSS: the journal fails hash-chain verification. ABORTED: local
+  // contention (including a live Resume or a stateful Fork), append-CAS conflict or superseded
+  // fence; retry after reading the session. Independent read+approval.close permission checks are
+  // opt-in.
+  rpc CloseApproval(CloseApprovalRequest) returns (CloseApprovalResponse);
 
   // In-flight control: cancel the running execution. Not implemented: the server returns
   // UNIMPLEMENTED.

@@ -1219,6 +1219,143 @@ func (x *ApproveResponse) GetDecision() *LogRecord {
 	return nil
 }
 
+// CloseApproval closes one approval gate in this session with a host receipt, so a session whose
+// harness can no longer re-issue the gated call can take a new turn. All tuple fields are required
+// and request_seq must be positive; the tuple names a request owned by this session, as for
+// Approve. No request field supplies identity: a host that authenticates the caller records it as
+// verified_approver on the denial it writes for an undecided gate.
+type CloseApprovalRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Session       string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
+	ExecutionId   string                 `protobuf:"bytes,2,opt,name=execution_id,json=executionId,proto3" json:"execution_id,omitempty"`
+	ToolCallId    string                 `protobuf:"bytes,3,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
+	RequestSeq    int64                  `protobuf:"varint,4,opt,name=request_seq,json=requestSeq,proto3" json:"request_seq,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CloseApprovalRequest) Reset() {
+	*x = CloseApprovalRequest{}
+	mi := &file_session_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CloseApprovalRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CloseApprovalRequest) ProtoMessage() {}
+
+func (x *CloseApprovalRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_session_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CloseApprovalRequest.ProtoReflect.Descriptor instead.
+func (*CloseApprovalRequest) Descriptor() ([]byte, []int) {
+	return file_session_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *CloseApprovalRequest) GetSession() string {
+	if x != nil {
+		return x.Session
+	}
+	return ""
+}
+
+func (x *CloseApprovalRequest) GetExecutionId() string {
+	if x != nil {
+		return x.ExecutionId
+	}
+	return ""
+}
+
+func (x *CloseApprovalRequest) GetToolCallId() string {
+	if x != nil {
+		return x.ToolCallId
+	}
+	return ""
+}
+
+func (x *CloseApprovalRequest) GetRequestSeq() int64 {
+	if x != nil {
+		return x.RequestSeq
+	}
+	return 0
+}
+
+// decision is the gate's APPROVAL_RESULT and receipt its TOOL_RESULT, each either already in the
+// journal or written by this call. An undecided gate gets a host denial with reason "approval
+// closed" and a NOT_EXECUTED receipt; a denied gate a NOT_EXECUTED receipt; an approved gate with
+// no receipt an OUTCOME_UNKNOWN receipt. A gate that already has a receipt returns it unchanged.
+type CloseApprovalResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Session       *Session               `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
+	Decision      *LogRecord             `protobuf:"bytes,2,opt,name=decision,proto3" json:"decision,omitempty"`
+	Receipt       *LogRecord             `protobuf:"bytes,3,opt,name=receipt,proto3" json:"receipt,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CloseApprovalResponse) Reset() {
+	*x = CloseApprovalResponse{}
+	mi := &file_session_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CloseApprovalResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CloseApprovalResponse) ProtoMessage() {}
+
+func (x *CloseApprovalResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_session_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CloseApprovalResponse.ProtoReflect.Descriptor instead.
+func (*CloseApprovalResponse) Descriptor() ([]byte, []int) {
+	return file_session_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *CloseApprovalResponse) GetSession() *Session {
+	if x != nil {
+		return x.Session
+	}
+	return nil
+}
+
+func (x *CloseApprovalResponse) GetDecision() *LogRecord {
+	if x != nil {
+		return x.Decision
+	}
+	return nil
+}
+
+func (x *CloseApprovalResponse) GetReceipt() *LogRecord {
+	if x != nil {
+		return x.Receipt
+	}
+	return nil
+}
+
 type SuspendRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Session       string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
@@ -1228,7 +1365,7 @@ type SuspendRequest struct {
 
 func (x *SuspendRequest) Reset() {
 	*x = SuspendRequest{}
-	mi := &file_session_proto_msgTypes[13]
+	mi := &file_session_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1240,7 +1377,7 @@ func (x *SuspendRequest) String() string {
 func (*SuspendRequest) ProtoMessage() {}
 
 func (x *SuspendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[13]
+	mi := &file_session_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1253,7 +1390,7 @@ func (x *SuspendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SuspendRequest.ProtoReflect.Descriptor instead.
 func (*SuspendRequest) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{13}
+	return file_session_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *SuspendRequest) GetSession() string {
@@ -1291,7 +1428,7 @@ type ResumeRequest struct {
 
 func (x *ResumeRequest) Reset() {
 	*x = ResumeRequest{}
-	mi := &file_session_proto_msgTypes[14]
+	mi := &file_session_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1303,7 +1440,7 @@ func (x *ResumeRequest) String() string {
 func (*ResumeRequest) ProtoMessage() {}
 
 func (x *ResumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[14]
+	mi := &file_session_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1316,7 +1453,7 @@ func (x *ResumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResumeRequest.ProtoReflect.Descriptor instead.
 func (*ResumeRequest) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{14}
+	return file_session_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ResumeRequest) GetSession() string {
@@ -1372,7 +1509,7 @@ type ForkRequest struct {
 
 func (x *ForkRequest) Reset() {
 	*x = ForkRequest{}
-	mi := &file_session_proto_msgTypes[15]
+	mi := &file_session_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1384,7 +1521,7 @@ func (x *ForkRequest) String() string {
 func (*ForkRequest) ProtoMessage() {}
 
 func (x *ForkRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[15]
+	mi := &file_session_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1397,7 +1534,7 @@ func (x *ForkRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForkRequest.ProtoReflect.Descriptor instead.
 func (*ForkRequest) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{15}
+	return file_session_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ForkRequest) GetSession() string {
@@ -1451,7 +1588,7 @@ type ForkResponse struct {
 
 func (x *ForkResponse) Reset() {
 	*x = ForkResponse{}
-	mi := &file_session_proto_msgTypes[16]
+	mi := &file_session_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1463,7 +1600,7 @@ func (x *ForkResponse) String() string {
 func (*ForkResponse) ProtoMessage() {}
 
 func (x *ForkResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[16]
+	mi := &file_session_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1476,7 +1613,7 @@ func (x *ForkResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForkResponse.ProtoReflect.Descriptor instead.
 func (*ForkResponse) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{16}
+	return file_session_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ForkResponse) GetChildren() []*Session {
@@ -1497,7 +1634,7 @@ type CancelRequest struct {
 
 func (x *CancelRequest) Reset() {
 	*x = CancelRequest{}
-	mi := &file_session_proto_msgTypes[17]
+	mi := &file_session_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1509,7 +1646,7 @@ func (x *CancelRequest) String() string {
 func (*CancelRequest) ProtoMessage() {}
 
 func (x *CancelRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[17]
+	mi := &file_session_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1522,7 +1659,7 @@ func (x *CancelRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelRequest.ProtoReflect.Descriptor instead.
 func (*CancelRequest) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{17}
+	return file_session_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *CancelRequest) GetSession() string {
@@ -1562,7 +1699,7 @@ type ExecUpdate struct {
 
 func (x *ExecUpdate) Reset() {
 	*x = ExecUpdate{}
-	mi := &file_session_proto_msgTypes[18]
+	mi := &file_session_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1574,7 +1711,7 @@ func (x *ExecUpdate) String() string {
 func (*ExecUpdate) ProtoMessage() {}
 
 func (x *ExecUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[18]
+	mi := &file_session_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1587,7 +1724,7 @@ func (x *ExecUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecUpdate.ProtoReflect.Descriptor instead.
 func (*ExecUpdate) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{18}
+	return file_session_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ExecUpdate) GetUpdate() isExecUpdate_Update {
@@ -1671,7 +1808,7 @@ type Delta struct {
 
 func (x *Delta) Reset() {
 	*x = Delta{}
-	mi := &file_session_proto_msgTypes[19]
+	mi := &file_session_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1683,7 +1820,7 @@ func (x *Delta) String() string {
 func (*Delta) ProtoMessage() {}
 
 func (x *Delta) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[19]
+	mi := &file_session_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1696,7 +1833,7 @@ func (x *Delta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Delta.ProtoReflect.Descriptor instead.
 func (*Delta) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{19}
+	return file_session_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Delta) GetExecutionId() string {
@@ -1822,7 +1959,18 @@ const file_session_proto_rawDesc = "" +
 	"\t_approved\"\x7f\n" +
 	"\x0fApproveResponse\x123\n" +
 	"\asession\x18\x01 \x01(\v2\x19.agentsessions.v1.SessionR\asession\x127\n" +
-	"\bdecision\x18\x02 \x01(\v2\x1b.agentsessions.v1.LogRecordR\bdecision\"*\n" +
+	"\bdecision\x18\x02 \x01(\v2\x1b.agentsessions.v1.LogRecordR\bdecision\"\x96\x01\n" +
+	"\x14CloseApprovalRequest\x12\x18\n" +
+	"\asession\x18\x01 \x01(\tR\asession\x12!\n" +
+	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12 \n" +
+	"\ftool_call_id\x18\x03 \x01(\tR\n" +
+	"toolCallId\x12\x1f\n" +
+	"\vrequest_seq\x18\x04 \x01(\x03R\n" +
+	"requestSeq\"\xbc\x01\n" +
+	"\x15CloseApprovalResponse\x123\n" +
+	"\asession\x18\x01 \x01(\v2\x19.agentsessions.v1.SessionR\asession\x127\n" +
+	"\bdecision\x18\x02 \x01(\v2\x1b.agentsessions.v1.LogRecordR\bdecision\x125\n" +
+	"\areceipt\x18\x03 \x01(\v2\x1b.agentsessions.v1.LogRecordR\areceipt\"*\n" +
 	"\x0eSuspendRequest\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\"\x88\x01\n" +
 	"\rResumeRequest\x12\x18\n" +
@@ -1877,7 +2025,7 @@ const file_session_proto_rawDesc = "" +
 	"\rDeletionState\x12\x1e\n" +
 	"\x1aDELETION_STATE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fDELETION_ACTIVE\x10\x01\x12\x14\n" +
-	"\x10DELETION_PENDING\x10\x022\xdb\x06\n" +
+	"\x10DELETION_PENDING\x10\x022\xbd\a\n" +
 	"\bSessions\x12R\n" +
 	"\rCreateSession\x12&.agentsessions.v1.CreateSessionRequest\x1a\x19.agentsessions.v1.Session\x12L\n" +
 	"\n" +
@@ -1886,7 +2034,8 @@ const file_session_proto_rawDesc = "" +
 	"\rDeleteSession\x12&.agentsessions.v1.DeleteSessionRequest\x1a\x19.agentsessions.v1.Session\x12E\n" +
 	"\x04Exec\x12\x1d.agentsessions.v1.ExecRequest\x1a\x1c.agentsessions.v1.ExecUpdate0\x01\x12H\n" +
 	"\x06Replay\x12\x1f.agentsessions.v1.ReplayRequest\x1a\x1b.agentsessions.v1.LogRecord0\x01\x12N\n" +
-	"\aApprove\x12 .agentsessions.v1.ApproveRequest\x1a!.agentsessions.v1.ApproveResponse\x12D\n" +
+	"\aApprove\x12 .agentsessions.v1.ApproveRequest\x1a!.agentsessions.v1.ApproveResponse\x12`\n" +
+	"\rCloseApproval\x12&.agentsessions.v1.CloseApprovalRequest\x1a'.agentsessions.v1.CloseApprovalResponse\x12D\n" +
 	"\x06Cancel\x12\x1f.agentsessions.v1.CancelRequest\x1a\x19.agentsessions.v1.Session\x12F\n" +
 	"\aSuspend\x12 .agentsessions.v1.SuspendRequest\x1a\x19.agentsessions.v1.Session\x12D\n" +
 	"\x06Resume\x12\x1f.agentsessions.v1.ResumeRequest\x1a\x19.agentsessions.v1.Session\x12E\n" +
@@ -1905,7 +2054,7 @@ func file_session_proto_rawDescGZIP() []byte {
 }
 
 var file_session_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_session_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_session_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_session_proto_goTypes = []any{
 	(ExecState)(0),                // 0: agentsessions.v1.ExecState
 	(ComputeState)(0),             // 1: agentsessions.v1.ComputeState
@@ -1923,79 +2072,86 @@ var file_session_proto_goTypes = []any{
 	(*ReplayRequest)(nil),         // 13: agentsessions.v1.ReplayRequest
 	(*ApproveRequest)(nil),        // 14: agentsessions.v1.ApproveRequest
 	(*ApproveResponse)(nil),       // 15: agentsessions.v1.ApproveResponse
-	(*SuspendRequest)(nil),        // 16: agentsessions.v1.SuspendRequest
-	(*ResumeRequest)(nil),         // 17: agentsessions.v1.ResumeRequest
-	(*ForkRequest)(nil),           // 18: agentsessions.v1.ForkRequest
-	(*ForkResponse)(nil),          // 19: agentsessions.v1.ForkResponse
-	(*CancelRequest)(nil),         // 20: agentsessions.v1.CancelRequest
-	(*ExecUpdate)(nil),            // 21: agentsessions.v1.ExecUpdate
-	(*Delta)(nil),                 // 22: agentsessions.v1.Delta
-	nil,                           // 23: agentsessions.v1.ComputeRef.AttributesEntry
-	nil,                           // 24: agentsessions.v1.Session.LabelsEntry
-	nil,                           // 25: agentsessions.v1.Session.AnnotationsEntry
-	nil,                           // 26: agentsessions.v1.ForkRequest.LabelsEntry
-	(*ResourceMetadata)(nil),      // 27: agentsessions.v1.ResourceMetadata
-	(*ApprovalRef)(nil),           // 28: agentsessions.v1.ApprovalRef
-	(*timestamppb.Timestamp)(nil), // 29: google.protobuf.Timestamp
-	(*IdentityRef)(nil),           // 30: agentsessions.v1.IdentityRef
-	(*Origin)(nil),                // 31: agentsessions.v1.Origin
-	(*Message)(nil),               // 32: agentsessions.v1.Message
-	(*LogRecord)(nil),             // 33: agentsessions.v1.LogRecord
+	(*CloseApprovalRequest)(nil),  // 16: agentsessions.v1.CloseApprovalRequest
+	(*CloseApprovalResponse)(nil), // 17: agentsessions.v1.CloseApprovalResponse
+	(*SuspendRequest)(nil),        // 18: agentsessions.v1.SuspendRequest
+	(*ResumeRequest)(nil),         // 19: agentsessions.v1.ResumeRequest
+	(*ForkRequest)(nil),           // 20: agentsessions.v1.ForkRequest
+	(*ForkResponse)(nil),          // 21: agentsessions.v1.ForkResponse
+	(*CancelRequest)(nil),         // 22: agentsessions.v1.CancelRequest
+	(*ExecUpdate)(nil),            // 23: agentsessions.v1.ExecUpdate
+	(*Delta)(nil),                 // 24: agentsessions.v1.Delta
+	nil,                           // 25: agentsessions.v1.ComputeRef.AttributesEntry
+	nil,                           // 26: agentsessions.v1.Session.LabelsEntry
+	nil,                           // 27: agentsessions.v1.Session.AnnotationsEntry
+	nil,                           // 28: agentsessions.v1.ForkRequest.LabelsEntry
+	(*ResourceMetadata)(nil),      // 29: agentsessions.v1.ResourceMetadata
+	(*ApprovalRef)(nil),           // 30: agentsessions.v1.ApprovalRef
+	(*timestamppb.Timestamp)(nil), // 31: google.protobuf.Timestamp
+	(*IdentityRef)(nil),           // 32: agentsessions.v1.IdentityRef
+	(*Origin)(nil),                // 33: agentsessions.v1.Origin
+	(*Message)(nil),               // 34: agentsessions.v1.Message
+	(*LogRecord)(nil),             // 35: agentsessions.v1.LogRecord
 }
 var file_session_proto_depIdxs = []int32{
 	3,  // 0: agentsessions.v1.ComputeRef.snapshot:type_name -> agentsessions.v1.SnapshotRef
 	4,  // 1: agentsessions.v1.ComputeRef.capabilities:type_name -> agentsessions.v1.RuntimeCapabilities
-	23, // 2: agentsessions.v1.ComputeRef.attributes:type_name -> agentsessions.v1.ComputeRef.AttributesEntry
-	27, // 3: agentsessions.v1.Session.metadata:type_name -> agentsessions.v1.ResourceMetadata
+	25, // 2: agentsessions.v1.ComputeRef.attributes:type_name -> agentsessions.v1.ComputeRef.AttributesEntry
+	29, // 3: agentsessions.v1.Session.metadata:type_name -> agentsessions.v1.ResourceMetadata
 	0,  // 4: agentsessions.v1.Session.exec_state:type_name -> agentsessions.v1.ExecState
 	1,  // 5: agentsessions.v1.Session.compute_state:type_name -> agentsessions.v1.ComputeState
-	28, // 6: agentsessions.v1.Session.pending_approval:type_name -> agentsessions.v1.ApprovalRef
+	30, // 6: agentsessions.v1.Session.pending_approval:type_name -> agentsessions.v1.ApprovalRef
 	2,  // 7: agentsessions.v1.Session.deletion_state:type_name -> agentsessions.v1.DeletionState
-	29, // 8: agentsessions.v1.Session.deletion_requested_time:type_name -> google.protobuf.Timestamp
-	30, // 9: agentsessions.v1.Session.identity:type_name -> agentsessions.v1.IdentityRef
+	31, // 8: agentsessions.v1.Session.deletion_requested_time:type_name -> google.protobuf.Timestamp
+	32, // 9: agentsessions.v1.Session.identity:type_name -> agentsessions.v1.IdentityRef
 	5,  // 10: agentsessions.v1.Session.compute:type_name -> agentsessions.v1.ComputeRef
-	31, // 11: agentsessions.v1.Session.origin:type_name -> agentsessions.v1.Origin
-	24, // 12: agentsessions.v1.Session.labels:type_name -> agentsessions.v1.Session.LabelsEntry
-	25, // 13: agentsessions.v1.Session.annotations:type_name -> agentsessions.v1.Session.AnnotationsEntry
+	33, // 11: agentsessions.v1.Session.origin:type_name -> agentsessions.v1.Origin
+	26, // 12: agentsessions.v1.Session.labels:type_name -> agentsessions.v1.Session.LabelsEntry
+	27, // 13: agentsessions.v1.Session.annotations:type_name -> agentsessions.v1.Session.AnnotationsEntry
 	6,  // 14: agentsessions.v1.CreateSessionRequest.session:type_name -> agentsessions.v1.Session
 	6,  // 15: agentsessions.v1.ListSessionsResponse.sessions:type_name -> agentsessions.v1.Session
-	32, // 16: agentsessions.v1.ExecRequest.inputs:type_name -> agentsessions.v1.Message
-	30, // 17: agentsessions.v1.ApproveRequest.identity:type_name -> agentsessions.v1.IdentityRef
+	34, // 16: agentsessions.v1.ExecRequest.inputs:type_name -> agentsessions.v1.Message
+	32, // 17: agentsessions.v1.ApproveRequest.identity:type_name -> agentsessions.v1.IdentityRef
 	6,  // 18: agentsessions.v1.ApproveResponse.session:type_name -> agentsessions.v1.Session
-	33, // 19: agentsessions.v1.ApproveResponse.decision:type_name -> agentsessions.v1.LogRecord
-	30, // 20: agentsessions.v1.ForkRequest.identity:type_name -> agentsessions.v1.IdentityRef
-	26, // 21: agentsessions.v1.ForkRequest.labels:type_name -> agentsessions.v1.ForkRequest.LabelsEntry
-	6,  // 22: agentsessions.v1.ForkResponse.children:type_name -> agentsessions.v1.Session
-	33, // 23: agentsessions.v1.ExecUpdate.record:type_name -> agentsessions.v1.LogRecord
-	22, // 24: agentsessions.v1.ExecUpdate.delta:type_name -> agentsessions.v1.Delta
-	6,  // 25: agentsessions.v1.ExecUpdate.session:type_name -> agentsessions.v1.Session
-	7,  // 26: agentsessions.v1.Sessions.CreateSession:input_type -> agentsessions.v1.CreateSessionRequest
-	8,  // 27: agentsessions.v1.Sessions.GetSession:input_type -> agentsessions.v1.GetSessionRequest
-	9,  // 28: agentsessions.v1.Sessions.ListSessions:input_type -> agentsessions.v1.ListSessionsRequest
-	11, // 29: agentsessions.v1.Sessions.DeleteSession:input_type -> agentsessions.v1.DeleteSessionRequest
-	12, // 30: agentsessions.v1.Sessions.Exec:input_type -> agentsessions.v1.ExecRequest
-	13, // 31: agentsessions.v1.Sessions.Replay:input_type -> agentsessions.v1.ReplayRequest
-	14, // 32: agentsessions.v1.Sessions.Approve:input_type -> agentsessions.v1.ApproveRequest
-	20, // 33: agentsessions.v1.Sessions.Cancel:input_type -> agentsessions.v1.CancelRequest
-	16, // 34: agentsessions.v1.Sessions.Suspend:input_type -> agentsessions.v1.SuspendRequest
-	17, // 35: agentsessions.v1.Sessions.Resume:input_type -> agentsessions.v1.ResumeRequest
-	18, // 36: agentsessions.v1.Sessions.Fork:input_type -> agentsessions.v1.ForkRequest
-	6,  // 37: agentsessions.v1.Sessions.CreateSession:output_type -> agentsessions.v1.Session
-	6,  // 38: agentsessions.v1.Sessions.GetSession:output_type -> agentsessions.v1.Session
-	10, // 39: agentsessions.v1.Sessions.ListSessions:output_type -> agentsessions.v1.ListSessionsResponse
-	6,  // 40: agentsessions.v1.Sessions.DeleteSession:output_type -> agentsessions.v1.Session
-	21, // 41: agentsessions.v1.Sessions.Exec:output_type -> agentsessions.v1.ExecUpdate
-	33, // 42: agentsessions.v1.Sessions.Replay:output_type -> agentsessions.v1.LogRecord
-	15, // 43: agentsessions.v1.Sessions.Approve:output_type -> agentsessions.v1.ApproveResponse
-	6,  // 44: agentsessions.v1.Sessions.Cancel:output_type -> agentsessions.v1.Session
-	6,  // 45: agentsessions.v1.Sessions.Suspend:output_type -> agentsessions.v1.Session
-	6,  // 46: agentsessions.v1.Sessions.Resume:output_type -> agentsessions.v1.Session
-	19, // 47: agentsessions.v1.Sessions.Fork:output_type -> agentsessions.v1.ForkResponse
-	37, // [37:48] is the sub-list for method output_type
-	26, // [26:37] is the sub-list for method input_type
-	26, // [26:26] is the sub-list for extension type_name
-	26, // [26:26] is the sub-list for extension extendee
-	0,  // [0:26] is the sub-list for field type_name
+	35, // 19: agentsessions.v1.ApproveResponse.decision:type_name -> agentsessions.v1.LogRecord
+	6,  // 20: agentsessions.v1.CloseApprovalResponse.session:type_name -> agentsessions.v1.Session
+	35, // 21: agentsessions.v1.CloseApprovalResponse.decision:type_name -> agentsessions.v1.LogRecord
+	35, // 22: agentsessions.v1.CloseApprovalResponse.receipt:type_name -> agentsessions.v1.LogRecord
+	32, // 23: agentsessions.v1.ForkRequest.identity:type_name -> agentsessions.v1.IdentityRef
+	28, // 24: agentsessions.v1.ForkRequest.labels:type_name -> agentsessions.v1.ForkRequest.LabelsEntry
+	6,  // 25: agentsessions.v1.ForkResponse.children:type_name -> agentsessions.v1.Session
+	35, // 26: agentsessions.v1.ExecUpdate.record:type_name -> agentsessions.v1.LogRecord
+	24, // 27: agentsessions.v1.ExecUpdate.delta:type_name -> agentsessions.v1.Delta
+	6,  // 28: agentsessions.v1.ExecUpdate.session:type_name -> agentsessions.v1.Session
+	7,  // 29: agentsessions.v1.Sessions.CreateSession:input_type -> agentsessions.v1.CreateSessionRequest
+	8,  // 30: agentsessions.v1.Sessions.GetSession:input_type -> agentsessions.v1.GetSessionRequest
+	9,  // 31: agentsessions.v1.Sessions.ListSessions:input_type -> agentsessions.v1.ListSessionsRequest
+	11, // 32: agentsessions.v1.Sessions.DeleteSession:input_type -> agentsessions.v1.DeleteSessionRequest
+	12, // 33: agentsessions.v1.Sessions.Exec:input_type -> agentsessions.v1.ExecRequest
+	13, // 34: agentsessions.v1.Sessions.Replay:input_type -> agentsessions.v1.ReplayRequest
+	14, // 35: agentsessions.v1.Sessions.Approve:input_type -> agentsessions.v1.ApproveRequest
+	16, // 36: agentsessions.v1.Sessions.CloseApproval:input_type -> agentsessions.v1.CloseApprovalRequest
+	22, // 37: agentsessions.v1.Sessions.Cancel:input_type -> agentsessions.v1.CancelRequest
+	18, // 38: agentsessions.v1.Sessions.Suspend:input_type -> agentsessions.v1.SuspendRequest
+	19, // 39: agentsessions.v1.Sessions.Resume:input_type -> agentsessions.v1.ResumeRequest
+	20, // 40: agentsessions.v1.Sessions.Fork:input_type -> agentsessions.v1.ForkRequest
+	6,  // 41: agentsessions.v1.Sessions.CreateSession:output_type -> agentsessions.v1.Session
+	6,  // 42: agentsessions.v1.Sessions.GetSession:output_type -> agentsessions.v1.Session
+	10, // 43: agentsessions.v1.Sessions.ListSessions:output_type -> agentsessions.v1.ListSessionsResponse
+	6,  // 44: agentsessions.v1.Sessions.DeleteSession:output_type -> agentsessions.v1.Session
+	23, // 45: agentsessions.v1.Sessions.Exec:output_type -> agentsessions.v1.ExecUpdate
+	35, // 46: agentsessions.v1.Sessions.Replay:output_type -> agentsessions.v1.LogRecord
+	15, // 47: agentsessions.v1.Sessions.Approve:output_type -> agentsessions.v1.ApproveResponse
+	17, // 48: agentsessions.v1.Sessions.CloseApproval:output_type -> agentsessions.v1.CloseApprovalResponse
+	6,  // 49: agentsessions.v1.Sessions.Cancel:output_type -> agentsessions.v1.Session
+	6,  // 50: agentsessions.v1.Sessions.Suspend:output_type -> agentsessions.v1.Session
+	6,  // 51: agentsessions.v1.Sessions.Resume:output_type -> agentsessions.v1.Session
+	21, // 52: agentsessions.v1.Sessions.Fork:output_type -> agentsessions.v1.ForkResponse
+	41, // [41:53] is the sub-list for method output_type
+	29, // [29:41] is the sub-list for method input_type
+	29, // [29:29] is the sub-list for extension type_name
+	29, // [29:29] is the sub-list for extension extendee
+	0,  // [0:29] is the sub-list for field type_name
 }
 
 func init() { file_session_proto_init() }
@@ -2006,8 +2162,8 @@ func file_session_proto_init() {
 	file_common_proto_init()
 	file_session_proto_msgTypes[9].OneofWrappers = []any{}
 	file_session_proto_msgTypes[11].OneofWrappers = []any{}
-	file_session_proto_msgTypes[14].OneofWrappers = []any{}
-	file_session_proto_msgTypes[18].OneofWrappers = []any{
+	file_session_proto_msgTypes[16].OneofWrappers = []any{}
+	file_session_proto_msgTypes[20].OneofWrappers = []any{
 		(*ExecUpdate_Record)(nil),
 		(*ExecUpdate_Delta)(nil),
 		(*ExecUpdate_Session)(nil),
@@ -2018,7 +2174,7 @@ func file_session_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_session_proto_rawDesc), len(file_session_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   24,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

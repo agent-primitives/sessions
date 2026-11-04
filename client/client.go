@@ -327,6 +327,16 @@ func (c *Client) Approve(ctx context.Context, uid string, decision api.ApprovalD
 	})
 }
 
+// CloseApproval closes the approval gate ref names with host records, returning its decision and
+// receipt; an exact retry, or a gate that already has a receipt, returns the existing records. It
+// never resumes compute: Exec can take a new turn afterwards, and Resume re-drives the closed
+// execution. The server records the closer only from its own caller authentication.
+func (c *Client) CloseApproval(ctx context.Context, uid string, ref api.ApprovalRef) (*v1.CloseApprovalResponse, error) {
+	return c.stub.CloseApproval(ctx, &v1.CloseApprovalRequest{
+		Session: uid, ExecutionId: ref.ExecutionID, ToolCallId: ref.ToolCallID, RequestSeq: ref.RequestSeq,
+	})
+}
+
 // Resume brings a suspended session back. boot is sent as ResumeRequest.boot, which is deprecated:
 // the reference service ignores it, and the Runtime backend chooses how the session comes back.
 // It is still sent so a server that reads the field sees what the caller asked for.

@@ -29,6 +29,8 @@ func TestOwnerAllowlistAuthorizer(t *testing.T) {
 		{"allowlist cannot bypass ownership", other, api.ActionRead, "s", false},
 		{"explicit approve", owner, api.ActionApprove, "s", true},
 		{"approve denied", other, api.ActionApprove, "s", false},
+		{"owner closes approval", owner, api.ActionApprovalClose, "s", true},
+		{"close approval needs ownership", other, api.ActionApprovalClose, "s", false},
 		{"issuer exact", api.CallerIdentity{Issuer: "issuer/", Subject: "owner"}, api.ActionCreate, "", false},
 		{"incomplete", api.CallerIdentity{Subject: "owner"}, api.ActionCreate, "", false},
 		{"create", owner, api.ActionCreate, "", true},
@@ -60,7 +62,7 @@ func TestOwnerAllowlistAuthorizer(t *testing.T) {
 func TestOwnerAuthorizer(t *testing.T) {
 	owner := api.CallerIdentity{Issuer: "https://issuer", Subject: "caller"}
 	var authorizer api.Authorizer = api.OwnerAuthorizer{}
-	for _, action := range []api.Action{api.ActionRead, api.ActionExec, api.ActionFork, api.ActionSuspend, api.ActionResume, api.ActionDelete, api.ActionCancel} {
+	for _, action := range []api.Action{api.ActionRead, api.ActionExec, api.ActionFork, api.ActionSuspend, api.ActionResume, api.ActionDelete, api.ActionCancel, api.ActionApprovalClose} {
 		t.Run(string(action), func(t *testing.T) {
 			if err := authorizer.Authorize(context.Background(), api.AuthorizationRequest{Caller: owner, Owner: owner, SessionUID: "session", Action: action}); err != nil {
 				t.Fatal(err)
@@ -84,6 +86,8 @@ func TestOwnerAuthorizer(t *testing.T) {
 		{"partial owner", owner, api.CallerIdentity{Subject: "caller"}, "s", api.ActionRead},
 		{"missing session", owner, owner, "", api.ActionRead},
 		{"approval separate", owner, owner, "s", api.ActionApprove},
+		{"close needs ownership", api.CallerIdentity{Issuer: owner.Issuer, Subject: "other"}, owner, "s", api.ActionApprovalClose},
+		{"close needs session", owner, owner, "", api.ActionApprovalClose},
 		{"audience separate", owner, owner, "s", api.ActionMint},
 		{"create not claim", owner, owner, "s", api.ActionCreate},
 		{"empty action", owner, owner, "s", ""},

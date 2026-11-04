@@ -247,6 +247,16 @@ optional [pre-dispatch tool policy hook](security.md#pre-dispatch-tool-policy) c
 approved call: a transient refusal is `FAILED_PRECONDITION` and leaves the decision recoverable, and
 a definitive refusal records `POLICY_DENIED` without executing the tool.
 
+If the harness can no longer re-issue the call (its code changed, or the turn is abandoned), the
+owner can close the gate with `CloseApproval`: an undecided gate gets a host denial and a
+`NOT_EXECUTED` receipt, a denied gate gets `NOT_EXECUTED`, and an approved gate without a receipt
+gets `OUTCOME_UNKNOWN`, because the journal cannot prove the tool never ran. The receipt unlocks new
+input; `CloseApproval` resumes no compute. A later `Resume` serves the decision and receipt to a
+harness that re-issues the call, and fails with a replay divergence for one that does not. A
+memory-snapshot harness restored at the gate is the exception: unless the gate is the turn's first
+effect, that `Resume` fails (spec `APR-19`), and the session continues with `Exec`. See
+[spec §10.5](../spec.md#105-close).
+
 The gate covers `STATELESS_REPLAY` and `REQUIRES_MEMORY_SNAPSHOT` harnesses. A memory-snapshot
 harness restored at a decided gate continues from memory: its first sink call must be the gated call,
 or recovery fails with `ErrReplayDiverged` (spec `APR-16`). Identity is provenance, not authorization. Custom Go hosts can install

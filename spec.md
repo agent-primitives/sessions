@@ -1001,11 +1001,18 @@ invokes no harness and stays a no-op without one.
 - `APR-12`: Receipt rules, enforced by both sides:
   - `approval_request_seq` equals the decision's `request_seq`, and `approval_decision_seq > 0`
     identifies the committed decision in the same session;
-  - a denial is `APPROVAL_DENIED` with `is_error = true`, and the executor MUST NOT have been
-    called;
+  - a denial is `APPROVAL_DENIED` or `NOT_EXECUTED` with `is_error = true`, and the executor MUST
+    NOT have been called;
   - an approval is `CODE_UNSPECIFIED` with `is_error = false`, `EXECUTOR_ERROR` with
-    `is_error = true`, or `POLICY_DENIED` with `is_error = true`, in which case the executor MUST
-    NOT have been called (`TOOL-16`).
+    `is_error = true`, `POLICY_DENIED` with `is_error = true`, in which case the executor MUST
+    NOT have been called (`TOOL-16`), or `OUTCOME_UNKNOWN` with `is_error = true`, which makes no
+    claim about the executor (`APR-18`).
+  - Only `CloseApproval` writes `NOT_EXECUTED` and `OUTCOME_UNKNOWN` (`APR-18`). A harness report
+    carrying either, and an executor result carrying either for an ordinary host-executed call,
+    MUST be rejected (`ErrApprovalReceiptReport`) before any receipt is written, and a host MUST
+    NOT relay either as the reply to an ordinary call. An executor result carrying either for an
+    approved call, whatever its `is_error`, is an executor failure and becomes an `EXECUTOR_ERROR`
+    receipt with `is_error = true` (`APR-14`), so a close code never comes from an executor.
 
 ### 10.4 Recovery
 
@@ -1028,7 +1035,11 @@ invokes no harness and stays a no-op without one.
   write no receipt and fail as a chain failure (`CHAIN-12`, `DATA_LOSS`). When the executor fails
   with an error instead of a result, the reference host sets the receipt's `content` to the fixed
   text "Tool execution failed." and keeps the error text in `error`; a result the executor returns
-  with `is_error = true` keeps the `content` it returned. An error the host caused by ending the
+  with `is_error = true` keeps the `content` it returned. A result carrying a close code with
+  `is_error = false` claimed success, so the reference host discards it as it does a failed call's
+  partial result: the receipt's `content` is the same fixed text and its `error` is the result's
+  `error`, or the fixed text "tool executor returned a result code only the host writes" when that
+  is empty (`APR-12`); no other field of that result is kept. An error the host caused by ending the
   recovery is not an executor failure: either the context the recovery runs under is done and the
   executor returned that context's error, or that context's deadline has passed and the executor
   returned a deadline error (a deadline enforced by I/O can surface just before the context reports
@@ -1068,37 +1079,87 @@ invokes no harness and stays a no-op without one.
     whose execution has no `END`.
 - Requests and snapshots are retained indefinitely.
 
+### 10.5 Close
+
+`CloseApproval` lets the session owner end a gate the harness can no longer re-issue (its code
+changed, or the turn is abandoned), so the session can take a new turn (`OPS-14`). It writes host
+records only.
+
+- `APR-17`: `CloseApproval` MUST be `INVALID_ARGUMENT` when `session`, `execution_id`, or
+  `tool_call_id` is empty or `request_seq <= 0`. An unknown session is `NOT_FOUND`. Opt-in
+  authorization (§17) precedes validation as for `APR-5`, checking read and then `approval.close`.
+  The tuple MUST name a journaled `APPROVAL_REQUEST` the session owns; a tuple that names none
+  (including a call-only cut, `APR-13`), an inherited request (`APR-15`), or, when the call has no
+  receipt, a request that is not the selected one (`APR-6`) is `FAILED_PRECONDITION`, as is a
+  deleted session, even for a retry (`OPS-34`). A journal that fails hash-chain verification is
+  `DATA_LOSS` (`CHAIN-12`). Contention (`OPS-1`, `OPS-2`), an append CAS conflict, or a superseded
+  fence is `ABORTED`. None of these writes anything.
+- `APR-18`: When the call already has a receipt, from any writer and with any code, the host MUST
+  return its `APPROVAL_RESULT` and `TOOL_RESULT` records, minting no fence and appending nothing, so
+  a retry returns the first close's records. Otherwise it MUST mint one fence and append, starting
+  at the head it read when it selected the gate:
+  - undecided: `APPROVAL_RESULT{tool_call_id, approved = false, reason = "approval closed",
+    request_seq, verified_approver}`, with `verified_approver` set from the caller as `APR-8`
+    defines it and `Event.actor` empty, then, after that record, a `NOT_EXECUTED` receipt;
+  - denied: a `NOT_EXECUTED` receipt;
+  - approved: an `OUTCOME_UNKNOWN` receipt. The journal cannot prove the executor never ran (a
+    cancelled recovery, a crash after dispatch, another host's recovery in flight), so the receipt
+    makes no claim either way. It revokes the approval for later recovery but cannot stop a call
+    another host has already dispatched; that host's receipt append then fails (`LOG-13`).
+
+  Each receipt carries the call id, `approval_request_seq`, `approval_decision_seq` and
+  `is_error = true`. The reference host sets `content` and `error` to the fixed text "Tool call was
+  closed without running." (`NOT_EXECUTED`) or "Tool call was closed; whether it ran is unknown."
+  (`OUTCOME_UNKNOWN`). The fixed reason marks a host close in the audit record; an `Approve` denial
+  that supplies the same reason cannot be told apart from one. A denied or approved close writes
+  only a `TOOL_RESULT`, which has no identity field, so the journal does not record who closed it.
+  If the undecided case's receipt append fails after its denial committed, the gate is denied: a
+  retry writes the `NOT_EXECUTED` receipt, or returns the `APPROVAL_DENIED` receipt a recovery
+  wrote in the meantime. After a close, `Approve` of the gate is `FAILED_PRECONDITION` unless it is
+  an exact retry of the recorded decision (`APR-7`). `CloseApproval` MUST NOT call the executor,
+  the pre-dispatch policy hook (§9.4), a harness, or the runtime.
+- `APR-19`: After a close the call has a receipt, so `Exec` with inputs MUST be admitted (`OPS-14`).
+  The host appends no `EVENT_END` for the closed execution, so `Resume` or input-less `Exec`
+  re-drives it: a harness that re-issues the call is served the decision and receipt (`APR-11`) and
+  can finish the turn; a harness that diverges fails that recovery (`ErrReplayDiverged`) and `Exec`
+  stays admitted. A `REQUIRES_MEMORY_SNAPSHOT` harness restored at the gate is the exception
+  (`APR-16`): recovery serves it from the execution's first effect, so unless the gate is that
+  effect, its re-issued call is refused (normally `ErrApprovalUnavailable`), that recovery fails
+  and leaves the receipt, and `Exec` with inputs is the session's route. `CloseApproval` does not
+  resume compute; the caller calls `Exec` or `Resume`.
+  TODO(spike): Should a close also end the closed execution with `EVENT_END` or `EVENT_ERROR`?
+
 ## 11. Session lifecycle operations
 
 ### 11.1 Concurrency
 
-- `OPS-1`: A host MUST serialize, per session, `Exec`, `Resume`, `Suspend`, and `Approve`. An
-  overlapping call MUST fail with `ABORTED` without changing compute or the journal. The reference
-  guard is non-blocking.
-- `OPS-30`: A host MUST also exclude `DeleteSession` from each of those operations and from a
-  `Fork` of the same session, both ways: the call that arrives second fails `ABORTED` without
-  writing. In the reference host the exclusion is per `Registry` (one host). For `Exec`,
-  `Resume`, `Suspend`, and `Approve` it covers two phases: the session lookup and routing, and
-  the guarded operation (`OPS-1`). A deletion can commit between the two; `OPS-34` covers that
-  case. For `Fork` it covers the lookup, and separately the fan-out until it ends, including
-  any rollback (`OPS-27`). A deletion can commit after the fan-out ends, while the host records
-  the children's metadata. The children still stand, because the fan-out completed before the
-  deletion; the fork returns them if those later metadata writes succeed. Lookup phases and
-  `Fork` do not exclude each other or the operations in `OPS-1`. `DeleteSession` neither waits
-  for nor cancels the holder; the caller retries.
-- `OPS-2`: A per-session checkpoint mark MUST be held by `Suspend`, `Approve`, an approval park
-  handoff, a cursor-checked `Resume` while it mints each fence and re-reads the head (`OPS-29`),
-  and a `REQUIRES_MEMORY_SNAPSHOT` fork from checkpoint until its last child is cloned.
-  A second checkpoint holder MUST fail with `ABORTED`. `Exec` and `Resume` during a checkpoint
-  MUST fail with `ABORTED` unless a check the host runs before the mark check fails or answers
-  the call. The reference host checks the mark only after the session guard (`OPS-1`), the
-  deletion check (`OPS-34`), the request and harness checks (§11.3), the approval-state checks
-  (`APR-13`, `APR-15`, `OPS-14`), admission (`RT-1`) and, on `Resume`, the head check (`OPS-29`)
-  and the snapshot lookup; an error from those is returned instead of `ABORTED`.
-  A `Resume` or input-less `Exec` on an owned gate with no decision (`APR-13`) is answered before
-  the check. Its call-only repair takes the mark only for a `Resume` with `expected_last_seq` set
-  (`OPS-29`); otherwise it can append `APPROVAL_REQUEST` under a new fence during a checkpoint.
-  TODO(spike): Should the call-only approval repair refuse with `ABORTED` during a checkpoint?
+- `OPS-1`: A host MUST serialize, per session, `Exec`, `Resume`, `Suspend`, `Approve`, and
+  `CloseApproval`. An overlapping call MUST fail with `ABORTED` without changing compute or the
+  journal. The reference guard is non-blocking.
+- `OPS-30`: A host MUST also exclude `DeleteSession` from each of those operations and from a `Fork`
+  of the same session, both ways: the call that arrives second fails `ABORTED` without writing. In
+  the reference host the exclusion is per `Registry` (one host). For `Exec`, `Resume`, `Suspend`,
+  `Approve`, and `CloseApproval` it covers two phases: the session lookup and routing, and the
+  guarded operation (`OPS-1`). A deletion can commit between the two; `OPS-34` covers that case. For
+  `Fork` it covers the lookup, and separately the fan-out until it ends, including any rollback
+  (`OPS-27`). A deletion can commit after the fan-out ends, while the host records the children's
+  metadata. The children still stand, because the fan-out completed before the deletion; the fork
+  returns them if those later metadata writes succeed. Lookup phases and `Fork` do not exclude each
+  other or the operations in `OPS-1`. `DeleteSession` neither waits for nor cancels the holder; the
+  caller retries.
+- `OPS-2`: A per-session checkpoint mark MUST be held by `Suspend`, `Approve`, `CloseApproval`, an
+  approval park handoff, a cursor-checked `Resume` while it mints each fence and re-reads the head
+  (`OPS-29`), and a `REQUIRES_MEMORY_SNAPSHOT` fork from checkpoint until its last child is cloned.
+  A second checkpoint holder MUST fail with `ABORTED`. `Exec` and `Resume` during a checkpoint MUST
+  fail with `ABORTED` unless a check the host runs before the mark check fails or answers the call.
+  The reference host checks the mark only after the session guard (`OPS-1`), the deletion check
+  (`OPS-34`), the request and harness checks (§11.3), the approval-state checks (`APR-13`, `APR-15`,
+  `OPS-14`), admission (`RT-1`) and, on `Resume`, the head check (`OPS-29`) and the snapshot lookup;
+  an error from those is returned instead of `ABORTED`. A `Resume` or input-less `Exec` on an owned
+  gate with no decision (`APR-13`) is answered before the check. Its call-only repair takes the mark
+  only for a `Resume` with `expected_last_seq` set (`OPS-29`); otherwise it can append
+  `APPROVAL_REQUEST` under a new fence during a checkpoint. TODO(spike): Should the call-only
+  approval repair refuse with `ABORTED` during a checkpoint?
 - `OPS-3`: A `REQUIRES_MEMORY_SNAPSHOT` fork MUST end any in-flight execution on the parent; that
   execution fails with `ABORTED`.
 - `CreateSession`, `GetSession`, `ListSessions`, and `Replay` take no guard. `Fork` (either tier)
@@ -1286,17 +1347,17 @@ does not erase data or reclaim compute.
   `GetSession` (`SES-14`) and `Replay` (§6.6) keep working; `ListSessions` omits the session
   (`SES-9`). Children are unaffected: a fork child keeps its own copied prefix (`CHAIN-8`), stays
   `DELETION_ACTIVE`, and can run and fork.
-- `OPS-34`: `Exec`, `Fork` at any `at_seq`, `Resume`, `Suspend`, and `Approve`, including an exact
-  retry of a committed decision (`APR-7`), on a deleted session MUST fail `FAILED_PRECONDITION`
-  before routing, `Describe`, a fence, a journal write, or a runtime call. In the reference host the
-  check follows only the request's own field checks (`APR-5`, `OPS-21`, an empty session), the
-  deletion exclusion (`OPS-30`), and the session lookup (`NOT_FOUND`); it precedes `Fork`'s `count`
-  and `child_names` checks (`OPS-22`), `Resume`'s cursor check (`OPS-29`), and on `Exec` the first
-  frame (`OPS-11`). The host repeats the check under the session guard (`OPS-1`) before `Describe`
-  or runtime IO, and `Fork` repeats it for the parent and every child before its checkpoint, so a
-  deletion that commits after the lookup also fails `FAILED_PRECONDITION` (on `Exec`, after the
-  first frame; on `Approve`, after its checkpoint mark, `OPS-2`). The store's refusal (`LOG-19`)
-  backs both checks.
+- `OPS-34`: `Exec`, `Fork` at any `at_seq`, `Resume`, `Suspend`, `Approve`, and `CloseApproval`,
+  including an exact retry of a committed decision (`APR-7`), on a deleted session MUST fail
+  `FAILED_PRECONDITION` before routing, `Describe`, a fence, a journal write, or a runtime call. In
+  the reference host the check follows only the request's own field checks (`APR-5`, `OPS-21`, an
+  empty session), the deletion exclusion (`OPS-30`), and the session lookup (`NOT_FOUND`); it
+  precedes `Fork`'s `count` and `child_names` checks (`OPS-22`), `Resume`'s cursor check (`OPS-29`),
+  and on `Exec` the first frame (`OPS-11`). The host repeats the check under the session guard
+  (`OPS-1`) before `Describe` or runtime IO, and `Fork` repeats it for the parent and every child
+  before its checkpoint, so a deletion that commits after the lookup also fails
+  `FAILED_PRECONDITION` (on `Exec`, after the first frame; on `Approve` and `CloseApproval`, after
+  the checkpoint mark, `OPS-2`). The store's refusal (`LOG-19`) backs both checks.
 - `OPS-35`: `DELETION_PENDING` acknowledges intent only. The host MUST NOT report deletion as
   reclamation. The reference host calls no runtime method for it (no `Stop`, `RT-7`), releases
   no actor, snapshot, or fork-child pin, and never reports `COMPUTE_TERMINATED` or a completed
@@ -1409,7 +1470,9 @@ sequenceDiagram
   a tool call with unspecified mediation is then rejected by `TOOL-1`.
 - `WIRE-15`: `ToolResult.code` is converted without validation; the checks in `TOOL-3`, `TOOL-7`,
   and `APR-12` reject unexpected codes, including a code the peer's build does not know. A peer
-  built before `POLICY_DENIED` therefore rejects that receipt instead of serving it (§18).
+  built before `POLICY_DENIED`, `NOT_EXECUTED`, or `OUTCOME_UNKNOWN` therefore rejects that receipt
+  instead of serving it (§18). `Start.history` is not checked: such a peer receives the unknown
+  code as its number.
 - If an `Event` has more than one body set, only the first in the converter's order is kept.
 
 ## 13. Placement and runtime contract
@@ -1860,6 +1923,7 @@ involved, and `TestApprovalRawProtocol` uses neither controller nor journal.
 | `TestWireMemoryTierApproval/deny` | A denial returns the `APPROVAL_DENIED` receipt with 0 executor calls | `APR-12`, `APR-16` |
 | `TestWireMemoryTierApproval/wrong_first_call` | A first call other than the gated call diverges with one `ERROR` and no receipt; a later compliant recovery completes | `APR-16`, `EXE-14` |
 | `TestWireMemoryTierApproval/stateless_unchanged` | `STATELESS_REPLAY` recovery still serves the prefix first | `EXE-21` |
+| `TestApprovalCloseWire` | After `CloseApproval`, recovery serves each closed state to a protobuf-only peer as approval then `NOT_EXECUTED` or `OUTCOME_UNKNOWN` receipt, with no executor call | `APR-11`, `APR-12`, `APR-18`, `APR-19` |
 
 CI also runs `python3 hack/verify_chain.py --golden` and `hack/verify_chain.sh` (`CHAIN-9` to
 `CHAIN-11`).
@@ -1905,15 +1969,15 @@ The reference implementation protects the integrity of the record, not access to
   `session.WithRegistryAuthorization(api.Authorizer)` on `NewHarnessRegistry`. Missing verified
   caller MUST be `UNAUTHENTICATED`, including direct handler calls, before validation. Nil policy
   MUST fail closed. The default service remains unenforced. Checks MUST precede runtime IO, fence
-  minting, first stream frame and approval repair. The action mapping is Get/Replay → read,
-  Exec → exec, Suspend → suspend, Resume → resume+exec, Delete → delete, Cancel → cancel then
-  `UNIMPLEMENTED`, Approve → read+approve. Inputless Exec entering approval-recovery Resume also
-  MUST check resume; ordinary Exec, including restoration of suspended compute, requires only exec.
-  The Resume RPC MUST check resume+exec even for a no-op. Create MUST check global create before
-  inserting the verified caller as immutable owner; auto-create Exec also checks exec on the
-  prospective UID before insertion. Fork checks parent fork and global create but MUST refuse
-  `FAILED_PRECONDITION` before discovery/effects until owner-before-log child publication is
-  available.
+  minting, first stream frame and approval repair. The action mapping is Get/Replay → read, Exec →
+  exec, Suspend → suspend, Resume → resume+exec, Delete → delete, Cancel → cancel then
+  `UNIMPLEMENTED`, Approve → read+approve, CloseApproval → read+approval.close. Inputless Exec
+  entering approval-recovery Resume also MUST check resume; ordinary Exec, including restoration of
+  suspended compute, requires only exec. The Resume RPC MUST check resume+exec even for a no-op.
+  Create MUST check global create before inserting the verified caller as immutable owner;
+  auto-create Exec also checks exec on the prospective UID before insertion. Fork checks parent fork
+  and global create but MUST refuse `FAILED_PRECONDITION` before discovery/effects until
+  owner-before-log child publication is available.
 - ListSessions MUST check global list and filter exact verified owner in SQL before keyset paging.
   Registry uses distinct global registry.read/list/register/retire actions, including read before
   observed Describe. Global actions carry empty UID/owner; requests cannot supply ownership.
@@ -1923,10 +1987,12 @@ The reference implementation protects the integrity of the record, not access to
   field, not a protobuf message or wire field.
   The first `OwnerAllowlistAuthorizer` policy composes ordinary owner checks with exact-caller
   allowlists for create/list/approve/registry actions. Ownership alone MUST NOT authorize approve;
-  with this policy an approver must also own the session. Unknown actions and mint remain denied.
-- Mutation owner lookups for Exec, Suspend, Resume, Fork, Approve and DeleteSession MUST probe
-  deletion admission (`OPS-30`) after authentication. The probe MUST acquire and release shared
-  admission before owner SQL or policy evaluation; it MUST NOT lease SQL. An exclusive Delete
+  with this policy an approver must also own the session. `approval.close` is an owner action:
+  it can deny or revoke an approval but never grant one, so `OwnerAuthorizer` allows it for the
+  owner and the allowlist policy delegates it unchanged. Unknown actions and mint remain denied.
+- Mutation owner lookups for Exec, Suspend, Resume, Fork, Approve, CloseApproval and DeleteSession
+  MUST probe deletion admission (`OPS-30`) after authentication. The probe MUST acquire and release
+  shared admission before owner SQL or policy evaluation; it MUST NOT lease SQL. An exclusive Delete
   present at the probe MUST return `ABORTED` without waiting for SQL, even for a verified non-owner
   who knows the UID. This can disclose deletion in progress, but grants no access. The probe can
   race a later Delete; subsequent mutation guards remain authoritative. Owner queries, including
@@ -2074,6 +2140,19 @@ The reference implementation protects the integrity of the record, not access to
     harness, and every audit schema before installing a hook that can refuse definitively; after one
     is recorded, rolling a host back leaves that session unusable to it, except as raw records from
     `Replay`.
+  - `ToolResult.Code.NOT_EXECUTED` and `OUTCOME_UNKNOWN` (`APR-18`, version `0.4.0-draft`) are new
+    values in a hashed `TOOL_RESULT`, written only by `CloseApproval`. They need no SQLite schema
+    version: journals without a close are unchanged, and a build older than version 9 refuses the
+    journal at Open. An unreleased version 9 build without the codes still serves every session
+    that holds no close receipt. For a session that holds one, it canonicalizes the stored value as
+    a number, so hash verification fails at that record (`CHAIN-12`): `VerifyJournal` and the
+    controller's `Exec`, `Resume` and `controller.Replay` refuse the session (`DATA_LOSS`). Its
+    `Exec` and `Resume` RPCs inspect the approval before verifying the chain, so they fail
+    `INTERNAL` with a replay divergence instead. The `Replay` RPC (§6.6) does not verify: it streams
+    the stored record with the code as the unknown number 4 or 5. An older harness rejects the
+    receipt on the wire (`WIRE-15`) and receives the number in `Start.history`. Upgrade every host
+    sharing a journal and every harness before calling `CloseApproval`; after a close, rolling a
+    host back leaves that session unusable to it except as raw records from `Replay`.
 
 ## 19. Open questions
 
@@ -2086,6 +2165,7 @@ Each item is also marked inline where it applies.
 - TODO(spike): Language-neutral `input_hash` (§8.3).
 - TODO(spike): Authoritative invariant numbering, `I4` and `I5` (§8.6).
 - TODO(spike): Compare re-reported `IN_HARNESS_REPORTED` results on reconstruction (§9.3).
+- TODO(spike): Whether a close ends the closed execution with `EVENT_END` or `EVENT_ERROR` (§10.5).
 - TODO(spike): Approval repair during a checkpoint (§11.1).
 - TODO(spike): Repeated `Suspend` and `Resume` without `Suspend` (§11.5).
 - TODO(spike): Fork journal atomicity and `at_seq > head` (§11.7).

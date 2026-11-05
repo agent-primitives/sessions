@@ -1,6 +1,6 @@
 //go:build !(linux || darwin || freebsd || netbsd || openbsd || dragonfly || illumos)
 
-package main
+package harnessnode
 
 import (
 	"errors"

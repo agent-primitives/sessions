@@ -11,7 +11,9 @@ tracker) and an agent. `agentsessions` stores that session as an append-only, ha
 and drives it through a single-writer controller. Because the log is the source of truth, a session
 can be killed and reconstructed byte-for-byte by replaying the log, moved between compute backends,
 forked to explore alternatives, and audited by anyone. The core knows nothing about which framework
-wrote the agent or which cloud runs it.
+wrote the agent or which cloud runs it. Replay-based reconstruction needs a **mediated** harness,
+one whose model calls go through the host; an **unmediated** harness, which calls its model itself,
+relies on memory snapshots instead ([harness classes](#harness-classes-mediated-or-unmediated)).
 
 ## The three seams
 
@@ -458,6 +460,28 @@ The distinction is honest by design. A stateless-replay harness costs nothing sp
 A memory-snapshot harness gets a capability a plain pod structurally cannot provide, and pays for it by
 being placeable only on memory-capable compute.
 
+## Harness classes: mediated or unmediated
+
+Where a harness's model calls originate is a second property of the harness, separate from tool
+mediation tiers ([spec §8.8](../spec.md#88-harness-classes)):
+
+- **Mediated** (every reference harness). Each model call goes through `sink.Model`: the host calls
+  the provider with a credential it holds and records the call. This is what makes replay exact and
+  spend visible to the host.
+- **Unmediated**. The harness makes some or all of its model calls from its own compute, through
+  the runtime's egress. An agent CLI such as Claude Code is the example. The provider key never
+  enters the harness: it holds a placeholder that the egress swaps for the real credential. For a
+  call outside `sink.Model` the journal holds only the output and usage the harness reports, with no
+  `MODEL_CALL`, so the host cannot replay, audit or bound that call; a call it still makes through
+  `sink.Model` is checked and journaled as for a mediated harness. Its conversation lives in its
+  compute, where the log cannot rebuild it, so it must declare `REQUIRES_MEMORY_SNAPSHOT`. A turn
+  interrupted by losing that compute's memory fails, and the user re-prompts; the host never
+  continues it.
+
+The class is not advertised in `Describe`. The host cannot see a call that does not reach it, so
+the class is the harness author's declaration. See
+[unmediated harnesses](harness-authoring.md#unmediated-harnesses).
+
 ## Capability matching and `CanPlace`
 
 A harness declares what it needs (`api.Capabilities`). A runtime declares what it can do
@@ -470,8 +494,9 @@ discovering it later.
 ## Determinism invariants
 
 Replay is only useful if it is exact. The controller (`controller/`) mediates every nondeterministic
-effect through the harness event sink so the effect is recorded before it is observed, and the
-replay-conformance suite (`conformance/`) enforces a numbered contract. The load-bearing rules:
+effect a harness routes through the harness event sink, so the effect is recorded before it is
+observed, and the replay-conformance suite (`conformance/`) enforces a numbered contract. The
+load-bearing rules:
 
 - **I1: replay never invokes the model.** On replay the recorded model result is served from the
   journal. The model is called zero times.
@@ -487,6 +512,13 @@ replay-conformance suite (`conformance/`) enforces a numbered contract. The load
   not re-emit the turn's earlier effects either: its first call must be the gated call.
 - **I5: byte-identical replay.** Replay reproduces the recorded events byte-for-byte (checked against the
   canonical hash), not merely output that looks equivalent.
+
+These numbers are this page's; [spec §8.4](../spec.md#84-determinism-invariants) numbers some of
+the rules differently. An unmediated harness
+([harness classes](#harness-classes-mediated-or-unmediated)) makes model calls that never reach the
+sink. For those calls I1, I2 and I5 do not hold (spec `I1`, `EXE-13` and `I0`), and its executions
+cannot be reconstructed. I3 still holds for its host-executed tools, and I4 applies to it in full,
+since it must declare `REQUIRES_MEMORY_SNAPSHOT`.
 
 ## How one turn flows
 
@@ -538,5 +570,7 @@ back byte-identically without spending a single model call.
 | Resumability | `STATELESS_REPLAY` or `REQUIRES_MEMORY_SNAPSHOT`. |
 | `CanPlace` | The gate matching a harness's needs to a runtime's capabilities. |
 | Harness | The Bring-Your-Own-Harness agent behind the `api.Harness` SPI. |
+| Mediated harness | Makes every model call through the host (`sink.Model`); replayable. |
+| Unmediated harness | Makes some or all model calls itself through runtime egress; memory snapshot only. |
 | Runtime | The pluggable compute backend behind the `api.Runtime` SPI. |
 | Producer | An adapter that maps an external world (issues, chat) onto sessions. |

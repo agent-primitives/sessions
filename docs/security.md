@@ -36,7 +36,8 @@ rather than aspirational.
 
 **Replay does not re-execute side effects.** Reconstructing a session serves recorded model results
 from the journal and never calls a provider, so replaying someone's session cannot spend their
-budget or trigger a new external action.
+budget or trigger a new external action. This holds for a mediated harness; an unmediated one
+cannot be reconstructed ([below](#provider-credentials-and-harness-classes)).
 
 **Payloads stay out of the logs.** Operational logging records structure — session ids, counts,
 outcomes — and never message contents, event payloads, or fence values.
@@ -117,9 +118,11 @@ credential at actor creation and has `harnessnode` check it on every Connect, so
 to its own session's host whatever the ingress allows. Router-side caller authorization (T-04)
 belongs upstream in substrate and would complement it, not replace it.
 
-**The harness is trusted code.** The host mediates model calls and host-executed tools, which is what
-makes replay exact, but that is a determinism mechanism, not a containment one. Whatever isolation a
-harness has comes from the `Runtime` backend underneath it, and the backends differ sharply:
+**The harness is trusted code.** For a mediated harness the host makes the model calls and runs the
+host-executed tools, which is what makes replay exact, but that is a determinism mechanism, not a
+containment one. An unmediated harness sends the model calls it makes itself from its own compute,
+where only the runtime's egress can see them. Whatever isolation a harness has comes from the
+`Runtime` backend underneath it, and the backends differ sharply:
 `runtime/local` serves the harness **inside the host process** over a unix socket, so a harness there
 shares the host's memory, filesystem, and credentials. A sandboxed backend is what puts a boundary
 there; the local one has none.
@@ -153,8 +156,9 @@ answer there declares the same resumability.
 
 **Registering a harness is an admin action.** A caller that can register a harness chooses what the
 host dials, which means where it sends every session's history and whose model credential pays for
-that harness's calls. The `HarnessRegistry` API therefore has no place on the Sessions port, which
-anyone who can reach it can call. `agentsessionsd` only serves it when `--registry-addr` is set to
+the calls that harness makes through the host. The `HarnessRegistry` API therefore has no place on
+the Sessions port, which anyone who can reach it can call. `agentsessionsd` only serves it when
+`--registry-addr` is set to
 a **literal loopback IP:port** (for example `127.0.0.1:8081`); wildcard, hostnames including
 `localhost`, and non-loopback IPs are refused. The listener is separate from Sessions, off by
 default, plaintext and **unauthenticated**. Sessions remains plaintext and unauthenticated too; it
@@ -165,6 +169,49 @@ it off the Sessions listener and control access to it. A registered remote harne
 is whatever answers at its address, as above. `HarnessSpec.descriptor_id` makes the host refuse a
 turn when the harness there reports another descriptor id, which catches a misdirected address; the
 id is what the harness says about itself, so it does not authenticate the harness.
+
+## Provider credentials and harness classes
+
+A harness is **mediated** or **unmediated** by where its model calls originate
+([spec §8.8](../spec.md#88-harness-classes)). The credential invariant is the same for both
+classes; what differs is who upholds it and what the journal records.
+
+- **The invariant.** Where the runtime isolates the harness from the host, the value of a provider
+  credential never enters the harness's compute: not its environment, filesystem, memory, or a
+  snapshot of any of them. `runtime/local` isolates nothing: its harness shares the host process
+  and the host's credentials.
+- **Mediated** (for example `chatagent` under `harnessnode`): the harness asks the host for each
+  model call through `EventSink.Model`. The host makes the call with the key from its own
+  environment and journals it, so the host keeps the key out, sees and records every call, and
+  applies the model policy when one is configured. The policy restricts which models are called;
+  the reference host enforces no call, token, or cost budget.
+- **Unmediated** (an agent CLI that calls its provider itself, such as Claude Code): model calls
+  it makes itself leave its compute through the runtime's egress. The harness holds only a
+  placeholder key, which the egress replaces with the real credential on the way out. The egress,
+  not the host, keeps the key out, and the host cannot check that it does. An unmediated harness
+  must declare `REQUIRES_MEMORY_SNAPSHOT`, so it runs only on memory-snapshot compute. A call it
+  still makes through `EventSink.Model` is handled as for a mediated harness.
+
+What an unmediated harness gives up for the calls it makes itself, and an operator accepts by
+running one:
+
+- **Spend is not bounded by the host.** The value stays out of the harness, but its use does not:
+  every request the harness sends through the egress is authenticated. The host never sees these
+  calls, so its model policy does not apply and it has no place to add a budget; only the harness,
+  the egress policy and the provider account bound spend.
+- **No model-call audit.** The journal holds no `MODEL_CALL` for these calls, only the output and
+  usage the harness reports. A verified chain proves the record was not altered after writing, not
+  that a report matches what the provider returned.
+- **No replay.** Reconstructing an unmediated execution would call the provider again, so the
+  replay guarantee [above](#what-is-protected) does not apply. A turn interrupted by losing the
+  harness's memory fails, and the user re-prompts; once the compute is gone, that means a new
+  session (spec `EXE-43`).
+- **The egress sees session content.** It must read the request to inject the credential, so it is
+  trusted with prompts and outputs as well as the key.
+
+Not yet verified end to end: that a runtime egress injects the credential over a placeholder
+(request header, retries, TLS trust in the actor) and that no actor snapshot holds the value. See
+the open question in spec §17.
 
 ## Deletion is not erasure or containment
 

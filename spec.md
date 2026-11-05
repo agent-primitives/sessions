@@ -12,8 +12,10 @@ AgentSessions defines a durable agent session: an append-only, hash-chained even
 one live compute incarnation. A client creates a session, runs executions (turns) against it,
 suspends and resumes its compute, forks it into children, reads its log back, and can permanently
 tombstone it. An agent implementation (a harness) connects through a streaming protocol in which
-the host records every model call and host-executed tool call before the harness observes its
-result, so a session can be reconstructed from its log without calling the model again.
+the host records every model call it makes for the harness and every host-executed tool call before
+the harness observes its result, so a session whose harness routes its model calls through the host
+can be reconstructed from its log without calling the model again. A harness that calls its model
+from its own compute instead (§8.8) gives up that reconstruction and relies on memory snapshots.
 
 This specification defines the session model, the event log and its append rules, the canonical
 encoding and provenance chain, execution, replay and recovery semantics, tool execution and approval
@@ -49,6 +51,10 @@ Unless stated otherwise:
   and drives harnesses. The reference host is `agentsessionsd` (or `agentctl` in embedded mode).
 - **Harness**: an agent implementation that serves the `Harness` service, or the in-process Go
   `api.Harness` interface. It runs one execution per invocation.
+- **Mediated harness**, **unmediated harness**: the two harness classes (§8.8). A mediated harness
+  makes every model call through the host; an unmediated harness makes some or all of its model
+  calls from its own compute, through the runtime's egress. The class concerns model calls only and
+  is independent of tool `Mediation` (§9.1).
 - **Producer**: a client of the Sessions API (an issue tracker, chat platform, or application).
 - **Runtime**: a compute backend implementing the `api.Runtime` Go interface plus `Describe`
   (§13.3).
@@ -612,7 +618,9 @@ reads the catalog that registration writes; the reference daemon does.
 ### 8.2 Effects
 
 The host mediates exactly these harness operations, in the Go SPI as `api.EventSink` and on the
-wire as §12 frames: model call, output, tool call, reported tool result, and usage.
+wire as §12 frames: model call, output, tool call, reported tool result, and usage. A harness that
+makes model calls without the model call operation is unmediated (§8.8): the host journals its
+other operations but never sees those calls.
 
 - `EXE-8`: The host MUST serialize the sink operations of one execution. After the harness's run
   returns, further sink calls MUST fail.
@@ -665,7 +673,9 @@ wire as §12 frames: model call, output, tool call, reported tool result, and us
 
 ### 8.4 Determinism invariants
 
-These are named in the reference controller. The numbering is the code's.
+These are named in the reference controller. The numbering is the code's. `I0`, `I1`, and
+`EXE-13` assume a mediated harness; §8.8 states what an unmediated harness gets instead. `I3`
+concerns host-executed tools and applies to both classes.
 
 - `I0`: On reconstruction replay, each model call the harness re-issues MUST have the same
   `input_hash` as the recorded `MODEL_CALL` at that position, its output text MUST equal the
@@ -805,6 +815,71 @@ invokes no harness and stays a no-op without one.
   recovery routes as in `OPS-8`), and no input-completeness check (`EXE-24`). An
   `EXECUTION_START` that is not the first record of its execution, or that has no payload, is an
   invalid log.
+
+### 8.8 Harness classes
+
+Every harness belongs to one of two classes, set by where its model calls originate. The class is a
+property of the harness that its author declares in the harness's documentation. It is not a field
+of `HarnessDescriptor` or `api.Capabilities`, and the host neither reads nor enforces it: the host
+cannot observe a model call that does not reach it. The class concerns model calls only; tool
+`Mediation` (§9.1) is independent of it.
+
+- `EXE-36`: A **mediated** harness makes every model call through the model call operation
+  (`EventSink.Model` in the Go SPI, `EVENT_MODEL_CALL` on the wire). The host makes the call with a
+  credential it holds and journals it (`EXE-10`). Rules about model calls elsewhere in this
+  specification describe calls made through the model call operation, by either class.
+- `EXE-37`: A harness that makes any model call outside the model call operation is
+  **unmediated**. Those calls originate in its own compute and leave through the runtime's
+  egress. An agent CLI that calls its provider itself, such as Claude Code, is an example.
+- `EXE-38`: An unmediated harness MUST declare `REQUIRES_MEMORY_SNAPSHOT` (§13.1). Its conversation
+  state lives in its compute, and the log, which holds no record of the model calls it makes outside
+  the model call operation, cannot rebuild that state.
+- `EXE-39`: An unmediated harness reports what its model produced on a call outside the model
+  call operation through the output, reported tool result (`TOOL-2`), and usage operations. On the
+  live path the host journals each report as given: no `MODEL_CALL` precedes such an `OUTPUT`, and
+  nothing ties the report to a provider response.
+- `EXE-40`: The value of the provider credential an unmediated harness uses MUST NOT enter the
+  harness's compute: not its environment, its filesystem, its memory, or a snapshot of any of
+  them. The harness holds only a placeholder, which the runtime's egress replaces with the
+  credential on the way to the provider. The host takes no part in that exchange and cannot check
+  it (§17).
+- `EXE-41`: For each model call it makes outside the model call operation, an unmediated harness
+  gives up what rests on the host making the call. A call it makes through the model call operation
+  is handled as for a mediated harness: the host applies the model policy and journals the call
+  (`EXE-10`).
+  - Host-bounded spend. For a mediated harness every model call passes through the host, which
+    applies the model policy (`EXE-34`, `EXE-35`) and is the place a deployment can bound spend;
+    the reference host enforces no call, token, or cost budget. The host neither sees nor limits
+    an unmediated harness's calls outside the model call operation, and the policy and recorded
+    default do not apply to them. Spend on those calls is bounded only by the harness, the
+    runtime's egress, and the provider account.
+  - Model-call audit. No `MODEL_CALL` or `input_hash` is journaled for those calls. The log holds
+    what the harness reported, not what the provider received or returned.
+  - Replay. `I0`, `I1`, `EXE-13`, and the model cut rule (`EXE-22`) do not hold for those calls.
+    Reconstruction replay (§8.5) of an unmediated execution is not supported: re-running the
+    harness calls the provider again and diverges (`I0`) unless the new output repeats the recorded
+    text. Reading the log with the `Replay` RPC and verifying the chain (§7.3) are unaffected.
+- `EXE-42`: An unmediated harness MUST NOT continue or re-run an interrupted execution. Recovery
+  (§8.6) re-invokes the harness with that execution's `Start`, serves its recorded effects, then
+  goes live (`EXE-21`); for an unmediated harness the live part calls the provider again and
+  repeats side effects the log does not record. A harness given a `Start` whose `execution_id`
+  names an execution it already started MUST fail the run without calling its model, so the
+  execution stays incomplete (`EXE-23`), and the caller re-prompts with a new `Exec` (§11.4), which
+  starts a new execution. The exception is an execution the harness left parked at an approval
+  gate: recovery at the decided gate (`APR-16`) continues it from memory with the gated call, as
+  for any `REQUIRES_MEMORY_SNAPSHOT` harness.
+- TODO(spike): How does an unmediated harness recognize recovery of an execution that its restored
+  memory holds no record of, and can a session reach that state past `RT-4h` and `RT-4i`?
+- `EXE-43`: Mid-turn memory loss. If an unmediated harness loses its compute, and with it its
+  memory, while an execution runs, that `Exec` fails: the host journals a best-effort `EVENT_ERROR`
+  (`EXE-5`) and does not continue the execution, then or on a later `Resume` (`EXE-42`). The user
+  re-prompts. Once the compute that held the memory is gone (`RT-4e`), or replaced on a backend
+  that records `ComputeInstance` (`RT-4h`, for example `runtime/substrate`), every later `Exec` and
+  `Resume` on the session fails `FAILED_PRECONDITION`, so the re-prompt goes to a new session; the
+  failed session's log stays readable. When the compute and its memory survive, for example when
+  only the host or the harness stream failed, the re-prompt is an `Exec` on the same session.
+- TODO(spike): How long does a reference substrate `Exec` take to fail after the session's actor
+  dies mid-turn, and is the failure the stream's end or a router timeout?
 
 ## 9. Tool execution and receipts
 
@@ -1497,6 +1572,9 @@ sequenceDiagram
 - For `REQUIRES_MEMORY_SNAPSHOT` the host relies on the backend: `Restore`, and `Create` on a
   suspended session (`RT-4e`), MUST bring back the captured memory, because the harness does not
   rebuild that state from the log.
+- An unmediated harness (§8.8) MUST declare `REQUIRES_MEMORY_SNAPSHOT` (`EXE-38`): with no
+  `MODEL_CALL` for the calls it makes outside the model call operation, the log cannot rebuild its
+  state, so `STATELESS_REPLAY` would be false.
 - The host does not read `SnapshotRef.memory` to choose a path. It records it on `SUSPEND`
   (`RT-5`) and decides by the harness tier.
 - Neither tier promises that `Suspend`, `Resume`, or a memory-tier fork succeeds while the backend
@@ -2033,7 +2111,27 @@ The reference implementation protects the integrity of the record, not access to
   `GetSession` and `Replay` (`OPS-33`), and compute and snapshots are retained until an operator
   reclaims them (`OPS-35`).
 - The harness is trusted code. Host mediation is a determinism mechanism, not containment; isolation
-  comes from the runtime backend, and `runtime/local` has none.
+  comes from the runtime backend, and `runtime/local` has none. An unmediated harness (§8.8) also
+  sends the model calls it makes itself from its own compute, and only the runtime's egress, not the
+  host, can see or limit those calls.
+- Provider credential invariant: where the runtime isolates the harness from the host, the value
+  of a provider credential MUST NOT enter the harness's compute, in either class (§8.8): not its
+  environment, filesystem, memory, or a snapshot of any of them. `runtime/local` isolates nothing,
+  so its harness shares the host's credentials. A mediated harness needs no credential, because
+  the host makes its model calls with one the host holds; the reference daemon reads it from its
+  environment, never its arguments. An unmediated harness holds only a placeholder, which the
+  runtime's egress replaces with the credential on the way to the provider (`EXE-40`). That
+  egress is a runtime capability this specification does not define, and the host cannot check
+  that it is in place. A runtime that cannot inject the credential cannot host an unmediated
+  harness under this invariant.
+- The invariant keeps the value out of the harness, not its use. An unmediated harness can send
+  any request the egress allows with the injected credential, and the host neither bounds nor
+  records that spend (`EXE-41`). Its prompts and outputs pass through the egress, which must see
+  the request to inject the credential, so the egress is trusted with session content as well as
+  the credential.
+- TODO(spike): Verify end to end that a runtime egress can inject a provider credential over a
+  placeholder for an unmediated harness (request header, retries, TLS trust in the actor), and
+  that no snapshot of the actor contains the value.
 - The harness does not authenticate the host, and a harness registered by address is whatever
   answers there. A forged harness or a forged host can inject content that the chain then records
   faithfully. A verified chain proves the log was not altered after writing, not that its content
@@ -2051,8 +2149,8 @@ The reference implementation protects the integrity of the record, not access to
   approved `REQUIRES_APPROVAL` call runs on recovery without the declaration (`APR-14`): the
   journal cannot tell its first attempt from a re-drive after a crash or host cancellation during
   execution, so an executor that does not deduplicate can apply that effect twice.
-- The harness registry chooses what the host dials and whose model credential pays for it. It MUST
-  NOT be served on the Sessions listener.
+- The harness registry chooses what the host dials and whose model credential pays for the calls
+  made through the model call operation. It MUST NOT be served on the Sessions listener.
 
 ## 18. Versioning and compatibility
 
@@ -2166,6 +2264,8 @@ Each item is also marked inline where it applies.
   negative zero, and fractional timestamps (§7.4).
 - TODO(spike): Language-neutral `input_hash` (§8.3).
 - TODO(spike): Authoritative invariant numbering, `I4` and `I5` (§8.6).
+- TODO(spike): Recovery of an execution an unmediated harness's memory has no record of (§8.8).
+- TODO(spike): Time for a substrate `Exec` to fail after mid-turn actor loss (§8.8).
 - TODO(spike): Compare re-reported `IN_HARNESS_REPORTED` results on reconstruction (§9.3).
 - TODO(spike): Whether a close ends the closed execution with `EVENT_END` or `EVENT_ERROR` (§10.5).
 - TODO(spike): Approval repair during a checkpoint (§11.1).
@@ -2175,6 +2275,7 @@ Each item is also marked inline where it applies.
 - TODO(spike): Stream close without `EVENT_END` and ignored harness event kinds (§12.2).
 - TODO(spike): Session check and stickiness for model reply correlation failures (§12.2).
 - TODO(spike): Black-box conformance packaging (§16.2).
+- TODO(spike): End-to-end egress credential injection for an unmediated harness (§17).
 
 ## 20. References
 

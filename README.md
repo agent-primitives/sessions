@@ -67,7 +67,9 @@ The load-bearing claims are demonstrated end to end, and a replay-conformance su
   ([quickstart](docs/quickstart.md#7-verify-the-provenance-chain-with-a-non-go-verifier)).
 - **Bring-your-own-harness, out of process.** The host mediates the model over `Harness.Connect`,
   so the determinism guarantees hold across the process boundary
-  ([harness authoring](docs/harness-authoring.md#running-out-of-process)).
+  ([harness authoring](docs/harness-authoring.md#running-out-of-process)). A harness that makes any
+  model call itself is unmediated and gives up replay of its executions
+  ([unmediated harnesses](docs/harness-authoring.md#unmediated-harnesses)).
 - **Both capability tiers on real agent-substrate, in CI.** Byte-identical replay, and memory
   snapshot suspend / restore with in-RAM state continuing, against a real `ate-system` on a
   micro-VM ([substrate conformance](docs/substrate-conformance.md)).

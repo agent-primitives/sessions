@@ -38,10 +38,10 @@
 # failure does not fail the run.
 #
 # On a pull request the changes job first diffs the merge commit against the base branch with
-# hack/ci-path-filter.sh. When only paths the suite does not read changed (docs, markdown, the site,
-# the license, CODEOWNERS, the dependabot and copilot configs), both live jobs skip their cluster
-# work and the required gate reports success in seconds. Push to main,
-# the nightly schedule and manual runs always run the full suite.
+# hack/ci-path-filter.sh. When only paths the suite does not read changed (that script's substrate
+# list: docs, markdown, the site and the other paths no image, test or workflow reads), both live
+# jobs skip their cluster work and the required gate reports success in seconds. Push to main, the
+# nightly schedule and manual runs always run the full suite.
 #
 # ate-setup, kubectl-ate and the suite are still compiled here, so the Go build and module caches
 # are kept between runs, and a warm run reuses them instead of compiling from scratch.

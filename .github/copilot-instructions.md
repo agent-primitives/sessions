@@ -14,8 +14,9 @@
 4. **Ownership and neutrality.** No cloud, sandbox or provider-specific code or naming in the root
    module `github.com/agent-primitives/sessions`; `go list -deps ./... | grep -c agent-substrate`
    stays `0`. The one exception is `runtime/substrate`, which reaches substrate only through its
-   own `ControlClient` interface; flag anything that widens it. Vendor code belongs in its own
-   module, such as `integrations/substrate`.
+   own `ControlClient` interface; flag anything that widens it. Vendor and provider code belongs
+   in its own module under `integrations/`, such as `integrations/substrate` or
+   `integrations/claudecode`.
 5. **Scope and size.** One change per PR; flag unrelated edits, timeout increases used to hide
    failures, hand edits to `api/genpb` or `docs/api-reference.md`, and tests that add no distinct
    behavioral coverage.
@@ -27,8 +28,8 @@
 7. **Verification.** Require gofmt, `go vet`, `go test -race`, golangci-lint, govulncheck, a tidy
    `go.mod`, `buf lint`, no diff after `buf generate` or `hack/gen-api-reference.sh`,
    `hack/verify_chain.py --golden`, `hack/verify_chain.sh`, `hack/check-doc-links.py`, and
-   `integrations/substrate` tested as its own module. Also flag new conformance test skips, a
-   committed `go.work`, or a `replace` beyond `integrations/substrate`'s `=> ../..`.
+   each `integrations/*` module tested as its own module. Also flag new conformance test skips, a
+   committed `go.work`, or a `replace` beyond an `integrations/*` module's `=> ../..`.
 
 Skip style nits already enforced by tools. Prefer one concrete failing scenario
 over speculative comments.

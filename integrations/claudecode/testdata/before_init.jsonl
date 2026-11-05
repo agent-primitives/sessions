@@ -1,0 +1,1 @@
+{"type":"assistant","message":{"id":"msg_80","type":"message","role":"assistant","model":"claude-test-model-1","content":[{"type":"text","text":"early"}],"usage":{"input_tokens":1,"output_tokens":1}},"parent_tool_use_id":null,"session_id":"{{SESSION_ID}}","uuid":"00000000-0000-4000-8000-000000000801"}

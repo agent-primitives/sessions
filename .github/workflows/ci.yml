@@ -195,12 +195,15 @@ jobs:
         if: needs.changes.outputs.decision != 'skip'
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
-      # Vendor-neutrality gate: the core module must not link any backend vendor. This is the
-      # architectural invariant the whole design rests on, so it is enforced per-PR and not only
-      # nightly — a stray import from core into the substrate adapter has to fail here.
+      # Vendor-neutrality gate: the core module must not link any backend vendor or any
+      # integration module. This is the architectural invariant the whole design rests on, so it
+      # is enforced per-PR and not only nightly — a stray import from core into the substrate
+      # adapter or a provider-specific harness has to fail here.
       - name: core links no backend vendor
         if: needs.changes.outputs.decision != 'skip'
-        run: test "$(go list -deps ./... | grep -cE 'agent-substrate|go\.ate\.dev')" = "0"
+        run: |
+          test "$(go list -deps ./... | grep -cE 'agent-substrate|go\.ate\.dev')" = "0"
+          test "$(go list -deps ./... | grep -c '^github.com/agent-primitives/sessions/integrations/')" = "0"
 
       # Cheap always-on integrity gate: the zero-dep golden self-check (stdlib only, no venv).
       - name: integrity golden self-check
@@ -231,24 +234,23 @@ jobs:
         run: hack/substrate-lib-test.sh
 
   integrations:
-    # `integrations/substrate` is a SEPARATE Go module, so the root job's ./... never reaches it and a
-    # break there would otherwise surface only in the nightly substrate-e2e run. Compiling and testing
-    # it needs no cluster, so it belongs on the per-PR gate. (gofmt is covered by the root job, which
-    # walks the tree, not the module graph.)
+    # Each integrations/* directory is a SEPARATE Go module, so the root job's ./... never reaches
+    # it, and a break in integrations/substrate would otherwise surface only in the nightly
+    # substrate-e2e run. Compiling and testing them needs no cluster, so they belong on the per-PR
+    # gate. One job runs every module in turn, so the required check keeps its name. (gofmt is
+    # covered by the root job, which walks the tree, not the module graph.)
     needs: changes
     # Runs even when the changes job fails, so this required check fails instead of being
     # skipped: a skipped required check would count as passing.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: integrations/substrate
+    env:
+      MODULES: integrations/substrate integrations/claudecode
     steps:
       - name: Fail when the path filter failed
         # The changes job never fails on its own (any doubt decides `run`). If it still does (a
         # runner fault), its decision is empty: fail integrations rather than trust it.
         if: ${{ !cancelled() && needs.changes.result != 'success' }}
-        working-directory: ${{ github.workspace }}
         env:
           RESULT: ${{ needs.changes.result }}
         run: |
@@ -258,9 +260,7 @@ jobs:
       - name: Skip (no ci-relevant changes)
         # The changes job found only markdown or the license, so every step below is skipped and
         # this job reports success; the changes job's log lists each changed path and its verdict.
-        # Runs in the workspace: the default directory exists only after the checkout it skips.
         if: needs.changes.outputs.decision == 'skip'
-        working-directory: ${{ github.workspace }}
         run: |
           echo "Only markdown or the license changed; integrations passes without running." |
             tee -a "${GITHUB_STEP_SUMMARY}"
@@ -268,6 +268,7 @@ jobs:
       - uses: actions/checkout@v7
         if: needs.changes.outputs.decision != 'skip'
 
+      # The newest go directive among the modules, so one toolchain builds them all.
       - uses: actions/setup-go@v7
         if: needs.changes.outputs.decision != 'skip'
         with:
@@ -276,26 +277,39 @@ jobs:
       - name: go.mod is tidy
         if: needs.changes.outputs.decision != 'skip'
         run: |
-          go mod tidy
-          git diff --exit-code -- go.mod go.sum
+          for m in ${MODULES}; do
+            (cd "${m}" && go mod tidy && git diff --exit-code -- go.mod go.sum)
+          done
 
-      - run: go build ./...
+      - name: build, vet and test
         if: needs.changes.outputs.decision != 'skip'
-      - run: go vet ./...
-        if: needs.changes.outputs.decision != 'skip'
-      - run: go test -race -shuffle=on ./...
-        if: needs.changes.outputs.decision != 'skip'
+        run: |
+          for m in ${MODULES}; do
+            echo "::group::${m}"
+            (cd "${m}" && go build ./... && go vet ./... && go test -race -shuffle=on ./...)
+            echo "::endgroup::"
+          done
 
-      - name: golangci-lint
+      - name: golangci-lint (integrations/substrate)
         if: needs.changes.outputs.decision != 'skip'
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
           working-directory: integrations/substrate
 
+      - name: golangci-lint (integrations/claudecode)
+        if: needs.changes.outputs.decision != 'skip'
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          working-directory: integrations/claudecode
+
       - name: govulncheck
         if: needs.changes.outputs.decision != 'skip'
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: |
+          for m in ${MODULES}; do
+            (cd "${m}" && go run golang.org/x/vuln/cmd/govulncheck@latest ./...)
+          done
 
   # Go native fuzzing, 30s per target, one job per package. The nightly run in fuzz.yml gives each
   # target longer. Not a required check, so on a `skip` decision the whole job is skipped rather

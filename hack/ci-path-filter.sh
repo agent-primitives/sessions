@@ -52,6 +52,7 @@ substrate)
 		'site/*'
 		'cmd/agentui/*'
 		'demos/*'
+		'integrations/claudecode/*'
 		'LICENSE'
 		'.github/CODEOWNERS'
 		'.github/dependabot.yml'

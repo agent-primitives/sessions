@@ -139,7 +139,9 @@ POOL="agentsuite-demo-${SANDBOX}"
 # current context.
 K=(kubectl --context "kind-${CLUSTER}" --kubeconfig "${KUBECONFIG}")
 ATE=("${WORK}/bin/kubectl-ate" --context "kind-${CLUSTER}" --kubeconfig "${KUBECONFIG}")
-# The substrate commit the adapter's go.mod pins; the cluster runs the same one.
+# The substrate release the adapter's go.mod pins, whose images the cluster runs, and the commit its
+# tag names, whose manifests and tools up.sh uses.
+SUBSTRATE_VERSION="$(sed -n 's/^  SUBSTRATE_VERSION: //p' "${ROOT}/.github/workflows/substrate-e2e.yml")"
 SUBSTRATE_REF="$(sed -n 's/^  SUBSTRATE_REF: //p' "${ROOT}/.github/workflows/substrate-e2e.yml")"
 SUBSTRATE="${SUBSTRATE_DIR:-${WORK}/substrate}"
 mkdir -p "${WORK}/bin" "${STATE}"

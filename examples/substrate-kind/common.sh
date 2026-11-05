@@ -22,9 +22,10 @@ KUBECONFIG="${SUBSTRATE_KIND_KUBECONFIG:-${STATE}/kubeconfig}"
 [[ "${KUBECONFIG}" == /* ]] || KUBECONFIG="${PWD}/${KUBECONFIG}"
 export KUBECONFIG
 
-# Use the workflow's Substrate revision for compatible tools and control-plane components.
+# Use the workflow's Substrate release for its images, and the revision its tag names for its tools.
 SUBSTRATE_DIR="${SUBSTRATE_DIR:-${WORK}/substrate}"
 SUBSTRATE_REF="$(sed -n 's/^  SUBSTRATE_REF: //p' "${ROOT}/.github/workflows/substrate-e2e.yml")"
+SUBSTRATE_VERSION="$(sed -n 's/^  SUBSTRATE_VERSION: //p' "${ROOT}/.github/workflows/substrate-e2e.yml")"
 NS=sessions-example
 PROJECT="${PROJECT:-example}"
 ACTOR_TEMPLATE="${ACTOR_TEMPLATE:-chat-harness}"

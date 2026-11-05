@@ -94,15 +94,18 @@ is named `triage-memory`, is `REQUIRES_MEMORY_SNAPSHOT`, and is applied as
 
 ## Requirements
 
-- docker, kind, kubectl, ko, go 1.27, git, python3 and curl.
-- The kind lane of agent-substrate at the commit `.github/workflows/substrate-e2e.yml` pins. `up.sh`
-  clones it into the work directory, `$TMPDIR/agentsuite-demo` (set `AGENTSUITE_DEMO_WORK` to move it).
-- Every image is built for the architecture `docker info` reports, not the host's, so an amd64
-  Docker VM on an arm64 Mac gets amd64 images (not tested). For this, `up.sh` runs substrate's
-  `ate-setup` with `--ko-default-platforms`, which otherwise builds ate-system for the host. The
-  micro-VM kata assets are the exception: on kind, `ate-setup` assembles them for the architecture
-  it runs as (Go's target on this machine), so the micro-VM class needs that to match the Docker
-  VM's; `up.sh` refuses it before any cluster call when they differ.
+- docker with `buildx`, kind, kubectl, ko, go 1.27, git, python3 and curl.
+- The agent-substrate release `.github/workflows/substrate-e2e.yml` pins (`SUBSTRATE_VERSION`).
+  `up.sh` installs that release's images from `ghcr.io/agent-substrate/substrate`, each pinned to its
+  digest, and builds none of substrate's. Its kind lane, `ate-setup` and `kubectl-ate` come from a
+  checkout of the commit the tag names (`SUBSTRATE_REF`), which `up.sh` clones into the work
+  directory, `$TMPDIR/agentsuite-demo` (set `AGENTSUITE_DEMO_WORK` to move it); it refuses a tag that
+  names another commit.
+- The images `up.sh` builds are for the architecture `docker info` reports, not the host's, so an
+  amd64 Docker VM on an arm64 Mac gets amd64 images (not tested); the substrate release images are
+  multi-arch. The micro-VM kata assets are the exception: on kind, `ate-setup` assembles them for
+  the architecture it runs as (Go's target on this machine), so the micro-VM class needs that to
+  match the Docker VM's; `up.sh` refuses it before any cluster call when they differ.
 - Docker must publish ports on this machine's loopback. A remote daemon (`DOCKER_HOST`) is not
   supported: the registry (`localhost:5001`) and the kind API server publish only on the Docker
   host's loopback, and `ko` pushes and `kubectl` connects from this machine.

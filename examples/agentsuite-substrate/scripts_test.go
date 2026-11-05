@@ -126,6 +126,8 @@ fi
 case "$1" in
 info) echo "${STUB_DOCKER_ARCH:-arm64}" ;;
 run) [ -z "${STUB_NO_KVM:-}" ] || exit 125 ;;
+# hack/substrate-image.sh pins a release image to the index digest buildx reports.
+buildx) [ "$2" = version ] || printf '{\n  "digest": "%s",\n  "size": 1\n}\n' "`+digest+`" ;;
 inspect)
 	case "$3" in
 	*RepoDigests*) echo "localhost:5001/agentsuite-harness@`+digest+`" ;;
@@ -213,9 +215,16 @@ exec "`+python3+`" "$@"
 `)
 	// The waits in up.sh and hack/wait-worker-pool.sh need not wait for stubs.
 	stub(t, bin, "sleep", "")
-	for _, name := range []string{"git", "curl"} {
-		stub(t, bin, name, log)
-	}
+	// git reports the substrate release tag as naming STUB_TAGGED, by default the pinned commit; with
+	// STUB_TAGGED=none the tag does not resolve.
+	stub(t, bin, "git", log+`
+case "$*" in
+*" rev-parse --verify --quiet refs/tags/"*)
+	[ "${STUB_TAGGED:-}" != none ] || exit 1
+	echo "${STUB_TAGGED:-$STUB_REF}" ;;
+esac
+`)
+	stub(t, bin, "curl", log)
 	// kubectl-ate is built into the work directory by up.sh's go build; the go stub builds nothing.
 	if err := os.MkdirAll(filepath.Join(s.work, "bin"), 0o755); err != nil {
 		t.Fatal(err)
@@ -259,6 +268,7 @@ exit "${STUB_CREATE_RC:-0}"
 		"AGENTSUITE_DEMO_WORK=" + s.work,
 		"AGENTSUITE_DEMO_CLUSTER=" + cluster,
 		"SUBSTRATE_DIR=" + substrate,
+		"STUB_REF=" + workflowPin(t, "SUBSTRATE_REF"),
 	}
 	return s
 }
@@ -353,15 +363,22 @@ const installCall = "go run ./cmd/ate-setup --kind"
 // router dataplane (envoy).
 func installed(t *testing.T, node string) string {
 	t.Helper()
+	return node + " installed " + workflowPin(t, "SUBSTRATE_REF") + " envoy"
+}
+
+// workflowPin is the value of key (SUBSTRATE_REF or SUBSTRATE_VERSION) in the substrate e2e
+// workflow, which common.sh reads.
+func workflowPin(t *testing.T, key string) string {
+	t.Helper()
 	b, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "substrate-e2e.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`(?m)^  SUBSTRATE_REF: (\S+)$`).FindSubmatch(b)
+	m := regexp.MustCompile(`(?m)^  ` + key + `: (\S+)$`).FindSubmatch(b)
 	if m == nil {
-		t.Fatal("substrate-e2e.yml sets no SUBSTRATE_REF")
+		t.Fatalf("substrate-e2e.yml sets no %s", key)
 	}
-	return node + " installed " + string(m[1]) + " envoy"
+	return string(m[1])
 }
 
 // staleRef is a substrate commit other than the one the example pins: the pin before v0.5.0, as
@@ -409,17 +426,17 @@ func TestUpClusterPhase(t *testing.T) {
 			wantOwned: "node-1", wantSetup: installed(t, "node-1"),
 		},
 		{
-			// ate-setup on Kind builds for its own GOARCH unless told otherwise, so up.sh passes the
-			// platform Docker reports: a Mac driving a remote amd64 Docker gets amd64 images.
-			name: "the install builds for the platform Docker reports", env: []string{"STUB_DOCKER_ARCH=x86_64"},
-			wantCode:  pastClusterPhase,
-			wantCalls: []string{installCall, "--ko-default-platforms=linux/amd64", "--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/agentsuite-demo/sa/agentsessionsd deploy ate-system --setup-csi=none --sandbox-classes=gvisor"},
-			wantOwned: "node-1", wantSetup: installed(t, "node-1"),
-		},
-		{
-			name:      "an arm64 Docker gets arm64 control-plane images",
-			wantCode:  pastClusterPhase,
-			wantCalls: []string{installCall, "--ko-default-platforms=linux/arm64", "deploy ate-system"},
+			// The control plane is the substrate release's published images, which cover both
+			// architectures, so nothing of substrate's is built for the platform Docker reports.
+			name: "the install uses the substrate release's images", env: []string{"STUB_DOCKER_ARCH=x86_64"},
+			wantCode: pastClusterPhase,
+			wantCalls: []string{
+				" fetch -q https://github.com/agent-substrate/substrate refs/tags/" + workflowPin(t, "SUBSTRATE_VERSION") + ":refs/tags/" + workflowPin(t, "SUBSTRATE_VERSION"),
+				installCall,
+				"--image-repo=ghcr.io/agent-substrate/substrate --image-tag=" + workflowPin(t, "SUBSTRATE_VERSION") + " --credential-provider",
+				"--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/agentsuite-demo/sa/agentsessionsd deploy ate-system --setup-csi=none --sandbox-classes=gvisor",
+			},
+			noCalls:   []string{"--ko-default-platforms"},
 			wantOwned: "node-1", wantSetup: installed(t, "node-1"),
 		},
 		{
@@ -705,6 +722,39 @@ func TestUpDeploysTheMicroVMClass(t *testing.T) {
 	want := installCall + " --no-dev-env --kind-cluster-name=demo --context=kind-demo"
 	if !strings.Contains(calls, want) || !strings.Contains(calls, "deploy sandboxconfig --sandbox-classes=microvm") {
 		t.Errorf("want the micro-VM class deployed through ate-setup; calls:\n%s", calls)
+	}
+	// The worker is the release's ateworker-microvm, pinned to its digest, never a build.
+	version := workflowPin(t, "SUBSTRATE_VERSION")
+	worker := "ghcr.io/agent-substrate/substrate/ateworker-microvm:" + version
+	if !strings.Contains(calls, "docker buildx imagetools inspect "+worker) || strings.Contains(calls, "./cmd/ateworker") {
+		t.Errorf("want the worker image resolved from the release; calls:\n%s", calls)
+	}
+	pool, err := os.ReadFile(filepath.Join(s.dir, "kubectl-stdin"))
+	if err != nil || !strings.Contains(string(pool), "workerImage: "+worker+"@"+digest) {
+		t.Errorf("WorkerPool does not run the pinned release worker: %v\n%s", err, pool)
+	}
+}
+
+// The images up.sh installs are the release tag's and the manifests are the pinned commit's, so a
+// tag that names another commit (moved upstream, or a stale pin) is refused before the checkout
+// moves or anything is installed.
+func TestUpRefusesAReleaseTagNamingAnotherCommit(t *testing.T) {
+	for _, tc := range []struct{ name, tagged, want string }{
+		{"moved tag", strings.Repeat("0", 40), "its tag names " + strings.Repeat("0", 40)},
+		{"unresolvable tag", "none", "its tag names no commit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStubs(t)
+			code, out, calls := s.run(t, "up.sh", "STUB_TAGGED="+tc.tagged)
+			if code != 1 || !strings.Contains(out, tc.want) {
+				t.Fatalf("up.sh exit %d, want 1 mentioning %q\noutput:\n%s\ncalls:\n%s", code, tc.want, out, calls)
+			}
+			for _, c := range []string{" checkout -q ", "create-kind-cluster.sh", installCall, "./cmd/kubectl-ate"} {
+				if strings.Contains(calls, c) {
+					t.Errorf("calls contain %q past the refusal:\n%s", c, calls)
+				}
+			}
+		})
 	}
 }
 

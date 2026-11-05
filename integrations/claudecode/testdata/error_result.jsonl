@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","cwd":"/work","session_id":"{{SESSION_ID}}","tools":["Bash"],"mcp_servers":[],"model":"claude-test-model-1","permissionMode":"dontAsk","apiKeySource":"none","uuid":"00000000-0000-4000-8000-000000000201"}
+{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":900,"duration_api_ms":800,"num_turns":2,"session_id":"{{SESSION_ID}}","total_cost_usd":0.01,"usage":{"input_tokens":7,"cache_creation_input_tokens":0,"cache_read_input_tokens":3,"output_tokens":2},"permission_denials":[],"uuid":"00000000-0000-4000-8000-000000000202"}

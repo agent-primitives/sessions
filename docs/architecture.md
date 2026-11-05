@@ -302,4 +302,5 @@ transport. Passing this suite is the neutrality/leadership deliverable.
 | `cmd/agentctl` | Client CLI (create / list / get / exec / replay / fork / suspend / resume / approve / deny / delete). |
 | `conformance/` | The replay-conformance suite (the neutral determinism checks). |
 | `integrations/substrate/` | The substrate `ControlClient` adapter — a **separate module** so the core stays substrate-free. |
+| `integrations/claudecode/` | An [unmediated](harness-authoring.md#unmediated-harnesses) harness that runs Claude Code — a **separate module** so the core names no model provider. |
 | `deploy/substrate/`, `.github/workflows/substrate-e2e.yml` | Manifests + CI for the real-substrate conformance. |

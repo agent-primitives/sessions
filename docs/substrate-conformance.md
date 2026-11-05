@@ -1056,9 +1056,9 @@ bootstrap, smoke or teardown failure blocks the same gate as a pinned conformanc
 a filter skips never reports, and the pull request could not merge. Its first job,
 `substrate-e2e path filter`, diffs the pull request's merge commit against the base branch with
 `hack/ci-path-filter.sh`; the `substrate` profile there is the ignore list (prose, the site, the
-agent UI, demos and a few repository metadata files). When every changed path is on it,
-the suite skips its live steps, the example job is skipped, and the final `substrate-conformance`
-gate reports success in seconds. Any other path, including
+agent UI, demos, the `integrations/claudecode` module and a few repository metadata files).
+When every changed path is on it, the suite skips its live steps, the example job is skipped,
+and the final `substrate-conformance` gate reports success in seconds. Any other path, including
 any workflow file and the filter itself, runs the suite. The job decides with the base branch's copy
 of the filter, so a pull request that edits it cannot decide its own run; only while the base branch
 has no copy (the pull request that adds the filter) does the pull request's own copy decide. The job

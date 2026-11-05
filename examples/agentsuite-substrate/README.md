@@ -82,9 +82,9 @@ platform, so kaimahi's suite on arm64, or an agent the suite lacks, is refused w
 | `containers[0].wakeupProbe` | `GET /readyz` on 8081 |
 | `containers[0].securityContext` | `capabilities: {}`, adding none |
 | `containers[0].resources` | Unset: the sandbox bounds the container (see `resources`). |
-| `snapshotConfig` | `preferredFidelity` from `binding.snapshot.fidelity`, which must be `MEMORY` (or unset) for `-tier memory`: that tier keeps the conversation in RAM. At substrate `v0.6.0` a suspend snapshot takes the template's `preferredFidelity`, and `agentsessionsd-memory` refuses to suspend, fork, resume or run a turn on a session whose completed snapshot is not `MEMORY` with a durable URI (`FAILED_PRECONDITION`; no `SUSPEND` or child is journaled). The stateless tier accepts any fidelity substrate admits: `ROOTFS` only with `sandbox.class` `microvm`: `emit render` refuses `ROOTFS` on `gvisor`, which substrate `v0.5.0` refused at create time and `v0.6.0` no longer checks there. `storageLocation` is `binding.snapshot.storageLocation` + `<name>/`, a preview field at `v0.6.0` that substrate ignores unless its `PerTemplateSnapshotLocation` gate is on, so snapshots go under the cluster's `--snapshot-location`. |
-| `workerSelector` | `binding.workerSelector`, which is required. Substrate `v0.6.0` templates carry no sandbox configuration: the sandbox is the one the selected WorkerPool runs (its `configRef`, else the class's default SandboxConfig), so the selector is what puts the template on `binding.sandbox.class`. `emit render` refuses a binding without `matchLabels`, and a `binding.sandbox.configName` other than unset or the class default (`gvisor-default`, `microvm`): name a custom config in the pool's `sandboxClasses[].configRef`. |
-| `resources` | `binding.resources` as `limits.cpuMillicores` and `limits.memoryBytes`, both required: `emit render` takes whole Kubernetes quantities (`1`, `500m`, `512Mi`, `2G`) and refuses fractions and zero. Substrate sizes the sandbox and books the worker from these, against the limits the WorkerPool's pods declare (a pool without them admits no actor). A micro-VM gets the CPU rounded up to whole vCPUs and the memory less the VMM reserve (128MiB at substrate `v0.6.0`, cmd/ateworker-microvm/run.go), so `512Mi` boots a 384MiB guest; ateworker-microvm refuses a container limit above the guest, which is why the container declares none. gVisor applies these limits to the container. |
+| `snapshotConfig` | `preferredFidelity` from `binding.snapshot.fidelity`, which must be `MEMORY` (or unset) for `-tier memory`: that tier keeps the conversation in RAM. At substrate v1 a suspend snapshot takes the template's `preferredFidelity`, and `agentsessionsd-memory` refuses to suspend, fork, resume or run a turn on a session whose completed snapshot is not `MEMORY` with a durable URI (`FAILED_PRECONDITION`; no `SUSPEND` or child is journaled). The stateless tier accepts `VOLUMES` and `MEMORY` on either class and `ROOTFS` only with `sandbox.class` `microvm`: `emit render` refuses `ROOTFS` on `gvisor`. That is this example's restriction, not substrate's (the v1 gVisor worker serves `ROOTFS`), since no run of this example covers a gVisor `ROOTFS` suspend and resume. No `storageLocation`: substrate v1 rejects one unless its `PerTemplateSnapshotLocation` preview gate is on, so snapshots go under the cluster's `--snapshot-location`, and `emit render` refuses a binding that sets `snapshot.storageLocation`. |
+| `workerSelector` | `binding.workerSelector`, which is required. Substrate v1 templates carry no sandbox configuration: the sandbox is the one the selected WorkerPool runs (its `configRef`, else the class's default SandboxConfig), so the selector is what puts the template on `binding.sandbox.class`. `emit render` refuses a binding without `matchLabels`, and a `binding.sandbox.configName` other than unset or the class default (`gvisor-default`, `microvm`): name a custom config in the pool's `sandboxClasses[].configRef`. |
+| `resources` | `binding.resources` as `limits.cpuMillicores` and `limits.memoryBytes`, both required: `emit render` takes whole Kubernetes quantities (`1`, `500m`, `512Mi`, `2G`) and refuses fractions and zero. Substrate sizes the sandbox and books the worker from these, against the limits the WorkerPool's pods declare (a pool without them admits no actor). A micro-VM gets the CPU rounded up to whole vCPUs and the whole memory limit (substrate v1, cmd/ateworker-microvm/run.go `resolveGuestMemMiB`), so `512Mi` boots a 512MiB guest that bounds the container, which is why the container declares none. The scheduler also books a per-actor runtime overhead on micro-VM workers (4MiB plus 8MiB per GiB), so a `512Mi` actor takes 520MiB of a 1Gi worker. gVisor applies these limits to the container. |
 
 The harness registration is a `HarnessRegistration` with `spec.substrate {atespace, template}`,
 `STATELESS_REPLAY` and `descriptor_id: triage`. `agentsessionsd` does not serve the registry, so
@@ -99,8 +99,10 @@ is named `triage-memory`, is `REQUIRES_MEMORY_SNAPSHOT`, and is applied as
   clones it into the work directory, `$TMPDIR/agentsuite-demo` (set `AGENTSUITE_DEMO_WORK` to move it).
 - Every image is built for the architecture `docker info` reports, not the host's, so an amd64
   Docker VM on an arm64 Mac gets amd64 images (not tested). For this, `up.sh` runs substrate's
-  `ate-setup` itself with `--ko-default-platforms`; `hack/install-ate-kind.sh` would build
-  ate-system for the host.
+  `ate-setup` with `--ko-default-platforms`, which otherwise builds ate-system for the host. The
+  micro-VM kata assets are the exception: on kind, `ate-setup` assembles them for the architecture
+  it runs as (Go's target on this machine), so the micro-VM class needs that to match the Docker
+  VM's; `up.sh` refuses it before any cluster call when they differ.
 - Docker must publish ports on this machine's loopback. A remote daemon (`DOCKER_HOST`) is not
   supported: the registry (`localhost:5001`) and the kind API server publish only on the Docker
   host's loopback, and `ko` pushes and `kubectl` connects from this machine.
@@ -108,7 +110,8 @@ is named `triage-memory`, is `REQUIRES_MEMORY_SNAPSHOT`, and is applied as
   `docker run --device /dev/kvm`, as substrate's `create-kind-cluster.sh` does before it mounts it
   into the node. The first micro-VM `up.sh` on a machine assembles the kata assets (downloads), then
   stages them in the cluster's object store and applies the `microvm` SandboxConfig
-  (`hack/install-microvm-deps.sh`); later runs skip that while the SandboxConfig exists.
+  (`ate-setup deploy sandboxconfig --sandbox-classes=microvm`); later runs skip that while the
+  SandboxConfig exists. ate-system itself is installed with the gVisor class only.
 - About 4 GiB free in the Docker VM. The recorded run used an 8 GiB VM with no other kind cluster
   running. The first `up.sh` on a machine also pulls the ate-system images, so it takes longer than
   the 2.5 minutes recorded.
@@ -135,11 +138,11 @@ is named `triage-memory`, is `REQUIRES_MEMORY_SNAPSHOT`, and is applied as
   it installed from another commit, or before it recorded one, before it switches the shared
   substrate checkout. `ui.sh` reads the records the same way: it refuses that cluster too, and one
   `up.sh` created whose setup record is missing, names another node or stops short of the install.
-  Substrate has no in-place upgrade between releases before 1.0, and v0.6.0 changed the
-  ActorTemplate (resources required, no sandbox configuration), so an older install's templates and
+  Substrate has no in-place upgrade between minor releases before 1.0, and v1 moved the API to
+  package `substrate.ateapi.v1` and WorkerPool to `ate.dev/v1`, so an older install's templates and
   actors do not carry over. Run `./down.sh`, which
   deletes the cluster and its sessions, then `up.sh` again.
-- Substrate v0.6.0 authorizes each call by the atespace's AccessPolicy. Both `agentsessionsd` tiers
+- Substrate authorizes each call by the atespace's AccessPolicy. Both `agentsessionsd` tiers
   run as the `agentsessionsd` ServiceAccount (`deploy/namespace.yaml`), and `up.sh` grants
   `user:system:serviceaccount:agentsuite-demo:agentsessionsd` editor on `agentsuite-demo` when the
   atespace has no policy. It keeps a policy that already grants it and refuses any other, which it
@@ -250,7 +253,7 @@ header has not been run against a live deployment.
   [security.md](../../docs/security.md). A cluster an earlier `up.sh` installed with another router
   dataplane is refused on reuse: run `down.sh` and `up.sh` again. `cmd/replay`, the replay step of
   `demo.sh` and `demo/driver.sh` drive the session's actor from the laptop through a port-forward
-  to the router, which the envoy router does not admit, so they fail on v0.6.0 until a follow-up
+  to the router, which the envoy router does not admit, so they fail until a follow-up
   gives them a certificate. They do not check this up front: `demo.sh` runs steps 1 to 5, creating
   its session, then fails at step 6 (replay) and leaves that session in place. See [router clients
   outside the cluster](../../docs/substrate-conformance.md#router-clients-outside-the-cluster).

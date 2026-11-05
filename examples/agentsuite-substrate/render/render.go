@@ -27,7 +27,7 @@ import (
 	"strings"
 
 	"github.com/kaimahi-agents/kaimahi/agentsuite"
-	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/api/ateapi/v1"
 
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/examples/agentsuite-substrate/agent"
@@ -162,8 +162,9 @@ type Binding struct {
 		ConfigName string `json:"configName"`
 	} `json:"sandbox"`
 	Snapshot struct {
-		Fidelity        string `json:"fidelity"`
-		StorageLocation string `json:"storageLocation"`
+		Fidelity string `json:"fidelity"`
+		// StorageLocation is refused (see LoadBinding); it is decoded only to say why.
+		StorageLocation string `json:"storageLocation,omitempty"`
 	} `json:"snapshot"`
 	Resources struct {
 		CPU    string `json:"cpu,omitempty"`
@@ -198,8 +199,11 @@ func LoadBinding(path string) (*Binding, error) {
 	if !dnsLabel.MatchString(b.Atespace) {
 		return nil, fmt.Errorf("binding %s: atespace %q is not a DNS label", path, b.Atespace)
 	}
-	if b.Snapshot.StorageLocation == "" {
-		return nil, fmt.Errorf("binding %s: snapshot.storageLocation is required", path)
+	// substrate v1 rejects a template's snapshotConfig.storageLocation unless its
+	// PerTemplateSnapshotLocation preview gate is on, so the renderer cannot carry one: refuse it
+	// rather than drop it, so the binding never claims a location its snapshots do not use.
+	if b.Snapshot.StorageLocation != "" {
+		return nil, fmt.Errorf("binding %s: snapshot.storageLocation %q: substrate v1 refuses a per-template snapshot location unless its PerTemplateSnapshotLocation preview gate is on; remove it, snapshots go under the cluster's --snapshot-location", path, b.Snapshot.StorageLocation)
 	}
 	if b.digest, err = agentsuite.Digest(raw); err != nil {
 		return nil, fmt.Errorf("binding %s: %w", path, err)
@@ -301,13 +305,13 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 	if o.Memory && fidelity != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
 		return nil, fmt.Errorf("snapshot.fidelity %q: the memory tier keeps the conversation in RAM, so it needs MEMORY", b.Snapshot.Fidelity)
 	}
-	// Only the micro-VM class captures the root filesystem without memory. substrate v0.5.0 refused a
-	// ROOTFS template on any other class at creation; v0.6.0 templates carry no class, so nothing
-	// would refuse it before a suspend. Refuse it here instead.
+	// This example renders ROOTFS only for the micro-VM class. The restriction is the renderer's, not
+	// substrate's: the v1 gVisor worker serves ROOTFS too, but no run of this example has covered a
+	// gVisor ROOTFS suspend and resume, so it stays refused rather than emitted unverified.
 	if fidelity == atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS && class != SandboxClassMicroVM {
-		return nil, fmt.Errorf("snapshot.fidelity %q with sandbox.class %q: substrate takes a ROOTFS snapshot only on microvm", b.Snapshot.Fidelity, b.Sandbox.Class)
+		return nil, fmt.Errorf("snapshot.fidelity %q with sandbox.class %q: this example renders ROOTFS only on microvm", b.Snapshot.Fidelity, b.Sandbox.Class)
 	}
-	// At substrate v0.6.0 a template has no sandbox config: its actors run on whatever class the
+	// A substrate v1 template has no sandbox config: its actors run on whatever class the
 	// WorkerPool it selects runs, with that pool's configRef or the class default. The selector is
 	// therefore the only thing that can honor sandbox.class.
 	if len(b.WorkerSelector.MatchLabels) == 0 {
@@ -341,24 +345,19 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 		container.Env = append(container.Env, &atepb.EnvVar{Name: agent.MemoryEnv, Value: agent.MemoryRAM})
 		harness, resumability, tier = c.Agent.ID+"-memory", v1.Resumability_RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT, ",memory"
 	}
-	// The binding's resources go on the template only. At substrate v0.6.0 the template's
-	// resources size the sandbox and book the worker against the capacity it advertises.
+	// The binding's resources go on the template only. At substrate v1 the template's resources
+	// size the sandbox and book the worker against the capacity it advertises.
 	// ateworker-gvisor writes them into the container's OCI spec (internal/sizing.ApplyToOCISpec).
-	// ateworker-microvm boots a guest with the template's memory less a VMM reserve (128MiB by
-	// default, cmd/ateworker-microvm/run.go vmmMemReserveMiB) and refuses a container limit above
-	// the guest, so a container copy of the same memory limit would fail the golden snapshot; the
-	// guest bounds the container instead.
+	// ateworker-microvm boots a guest with the template's whole memory limit
+	// (cmd/ateworker-microvm/run.go resolveGuestMemMiB) and refuses a container limit above the
+	// guest, so the guest bounds the container and a container copy would only restate it.
 	//
-	// snapshotConfig.storageLocation is a preview field at v0.6.0 (PerTemplateSnapshotLocation):
-	// accepted, but ignored while the gate is off, so snapshots go under the cluster's
-	// --snapshot-location. It is kept so the template still says where the binding wants them.
+	// The template sets no snapshotConfig.storageLocation (see LoadBinding): snapshots go under
+	// the cluster's --snapshot-location.
 	tmpl := &atepb.ActorTemplate{
-		Metadata:   &atepb.ResourceMetadata{Atespace: b.Atespace, Name: name},
-		Containers: []*atepb.Container{container},
-		SnapshotConfig: &atepb.SnapshotConfig{
-			PreferredFidelity: fidelity,
-			StorageLocation:   strings.TrimSuffix(b.Snapshot.StorageLocation, "/") + "/" + name + "/",
-		},
+		Metadata:       &atepb.ResourceMetadata{Atespace: b.Atespace, Name: name},
+		Containers:     []*atepb.Container{container},
+		SnapshotConfig: &atepb.SnapshotConfig{PreferredFidelity: fidelity},
 		Resources:      &atepb.ResourceRequirements{Limits: limits},
 		WorkerSelector: &atepb.Selector{MatchLabels: b.WorkerSelector.MatchLabels},
 	}
@@ -382,7 +381,7 @@ func Render(c *Composition, image string, b *Binding, o Options) (*Output, error
 }
 
 // resourceLimits converts a binding's Kubernetes-style cpu and memory quantities to the template's
-// limits. substrate v0.6.0 rejects a template without both, so both are required.
+// limits. substrate v1 rejects a template without both, so both are required.
 func resourceLimits(cpu, memory string) (*atepb.Resources, error) {
 	if cpu == "" || memory == "" {
 		return nil, fmt.Errorf("resources: cpu %q and memory %q are both required: substrate requires a cpu and a memory limit on every template", cpu, memory)
@@ -448,22 +447,22 @@ func sandboxClass(s string) (string, error) {
 	return "", fmt.Errorf("sandbox.class %q: want %s or %s", s, SandboxClassMicroVM, SandboxClassGVisor)
 }
 
-// classDefaultConfigs names the SandboxConfig substrate v0.6.0 installs as each class's default
-// (manifests/ate-install/sandboxconfig-gvisor.yaml, manifests/microvm/sandboxconfig-microvm.yaml.tmpl,
-// both annotated sandboxconfig.ate.dev/is-class-default).
+// classDefaultConfigs names the SandboxConfig substrate v1 installs as each class's default
+// (manifests/ate-install/sandboxconfig-gvisor.yaml and sandboxconfig-microvm.yaml.tmpl, both
+// annotated sandboxconfig.ate.dev/is-class-default).
 var classDefaultConfigs = map[string]string{
 	SandboxClassGVisor:  "gvisor-default",
 	SandboxClassMicroVM: "microvm",
 }
 
-// sandboxConfigName validates a binding's sandbox.configName. A v0.6.0 template names no config,
+// sandboxConfigName validates a binding's sandbox.configName. A v1 template names no config,
 // so the actor runs on the selected pool's configRef or its class default: the renderer cannot
 // honor any other name, and refuses one rather than drop it.
 func sandboxConfigName(class, name string) error {
 	if name == "" || name == classDefaultConfigs[class] {
 		return nil
 	}
-	return fmt.Errorf("sandbox.configName %q: substrate v0.6.0 templates name no SandboxConfig, so the template runs on the selected WorkerPool's config; leave it unset or %q (the %s class default), and to run %q add configRef: {name: %s} to that pool's sandboxClasses entry", name, classDefaultConfigs[class], class, name, name)
+	return fmt.Errorf("sandbox.configName %q: substrate v1 templates name no SandboxConfig, so the template runs on the selected WorkerPool's config; leave it unset or %q (the %s class default), and to run %q add configRef: {name: %s} to that pool's sandboxClasses entry", name, classDefaultConfigs[class], class, name, name)
 }
 
 func snapshotFidelity(s string) (atepb.SnapshotFidelity, error) {

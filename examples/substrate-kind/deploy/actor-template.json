@@ -28,7 +28,6 @@
   },
   "snapshotConfig": {
     "preferredFidelity": "SNAPSHOT_FIDELITY_MEMORY",
-    "storageLocation": "gs://ate-snapshots/sessions-example/chat-harness/",
     "goldenSnapshotConfig": {"mode": "GOLDEN_SNAPSHOT_MODE_ENABLED"}
   }
 }

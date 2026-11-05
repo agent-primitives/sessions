@@ -40,6 +40,7 @@ case "$*" in
     [[ " $* " == *" --kubeconfig=$KUBECONFIG "* ]]
     [[ " $* " != *" --atenet-dataplane"* ]]
     [[ " $* " == *" --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/sessions-example/sa/agentsessions deploy ate-system "* ]]
+    [[ " $* " == *" --sandbox-classes=gvisor "* ]]
     echo install >> "$TEST_DIR/bootstrap-calls" ;;
   "build -o "*)
     echo client-build >> "$TEST_DIR/bootstrap-calls"

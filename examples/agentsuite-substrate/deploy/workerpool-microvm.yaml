@@ -1,12 +1,13 @@
 # Micro-VM workers (kata + cloud-hypervisor) for the agent's actors: the default class, which needs
-# /dev/kvm in the kind node. up.sh installs the cluster-scoped `microvm` SandboxConfig (the class default, which this pool runs) and its assets
-# first (substrate's hack/install-microvm-deps.sh). One worker builds each template's golden snapshot
-# (the stateless and the memory tier each have one); the others host session actors and fork children.
+# /dev/kvm in the kind node. up.sh installs the cluster-scoped `microvm` SandboxConfig (the class
+# default, which this pool runs) and its assets first (`ate-setup deploy sandboxconfig`). One worker
+# builds each template's golden snapshot (the stateless and the memory tier each have one); the
+# others host session actors and fork children.
 #
 # The workload label is what the rendered ActorTemplate's workerSelector matches
 # (binding-microvm.json). It is demo-scoped because worker eligibility matches labels across every
 # pool in the cluster.
-apiVersion: ate.dev/v1alpha1
+apiVersion: ate.dev/v1
 kind: WorkerPool
 metadata:
   name: agentsuite-demo-microvm

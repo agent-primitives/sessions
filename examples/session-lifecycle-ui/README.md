@@ -26,8 +26,8 @@ them, or the page's port, is already taken, so it never talks to another run's f
 requirements are the example's, so micro-VMs need `/dev/kvm` in the Docker host and an arm64 Mac
 cannot run them.
 
-Not supported on Substrate v0.6.0 yet: the page's replay port-forwards the router to this machine,
-and v0.6.0's envoy router admits only clients with an allowlisted pod certificate, so `ui.sh`
+Not supported on Substrate yet: the page's replay port-forwards the router to this machine, and
+Substrate's envoy router admits only clients with an allowlisted pod certificate, so `ui.sh`
 refuses to start. `ui.sh check` against a page that is already running is unaffected. See
 [router clients outside the
 cluster](../../docs/substrate-conformance.md#router-clients-outside-the-cluster).
@@ -66,7 +66,7 @@ is not atomic with it, so a Suspend from another client in between is not caught
 `up.sh` deploys two daemons. `ui.sh` adds a third, `agentsessionsd-volumes`, which serves the
 memory-tier harness (`REQUIRES_MEMORY_SNAPSHOT`) from a template that prefers VOLUMES snapshots.
 `lifecycle-ui inject` derives that template from the memory tier `up.sh` rendered, with three
-changes: `preferredFidelity: VOLUMES`, one `durableDir` volume (at substrate v0.6.0, ateworker-microvm
+changes: `preferredFidelity: VOLUMES`, one `durableDir` volume (at substrate v1, ateworker-microvm
 refuses a VOLUMES checkpoint without one and the actor crashes), and a `-vol` name. A first turn
 passes, because the template's golden snapshot is MEMORY. The session's first suspend then completes
 a VOLUMES snapshot, and the daemon refuses it:

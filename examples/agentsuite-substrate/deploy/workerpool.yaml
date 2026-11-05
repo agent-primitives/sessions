@@ -4,7 +4,7 @@
 #
 # The workload label is what the rendered ActorTemplate's workerSelector matches (binding.json). It
 # is demo-scoped because worker eligibility matches labels across every pool in the cluster.
-apiVersion: ate.dev/v1alpha1
+apiVersion: ate.dev/v1
 kind: WorkerPool
 metadata:
   name: agentsuite-demo-gvisor

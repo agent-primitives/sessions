@@ -4,7 +4,7 @@ set -euo pipefail
 # Validate immutable template inputs. The class selects the worker pool; the pool resolves the
 # class's default SandboxConfig, so the template names no config.
 source "$(dirname "$0")/common.sh"
-refuse_sandbox_config
+refuse_template_overrides
 need jq
 timeout_command
 : "${HARNESS_IMAGE:?digest-pinned HARNESS_IMAGE is required}"
@@ -26,13 +26,11 @@ deadline=$((SECONDS + budget))
 progress "Rendering the desired ActorTemplate ${NS}/${ACTOR_TEMPLATE}"
 desired="${STATE}/actor-template.json"
 jq --arg image "${HARNESS_IMAGE}" --arg model "${MODEL_NAME}" \
-	--arg name "${ACTOR_TEMPLATE}" --arg class "${SANDBOX_CLASS}" \
-	--arg location "${SNAPSHOT_LOCATION%/}/${ACTOR_TEMPLATE}/" '
+	--arg name "${ACTOR_TEMPLATE}" --arg class "${SANDBOX_CLASS}" '
 	.metadata.name = $name |
 	.containers[0].image = $image |
 	.containers[0].env |= map(if .name == "HARNESS_MODEL" then .value = $model else . end) |
-	.workerSelector.matchLabels.workload = ("sessions-example-" + $class) |
-	.snapshotConfig.storageLocation = $location
+	.workerSelector.matchLabels.workload = ("sessions-example-" + $class)
 ' "${HERE}/deploy/actor-template.json" >"${desired}"
 
 # Bound each CLI call by the remaining budget and accept only an explicitly allowed RPC error.

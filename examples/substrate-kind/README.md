@@ -75,8 +75,12 @@ creation. `SANDBOX_CLASS=microvm` requires the device check to pass; `SANDBOX_CL
 this initial probe. The upstream cluster-creation helper probes KVM independently; before installing
 or reusing a microVM deployment, setup also requires a writable `/dev/kvm` mount on the kind node.
 If the helper omitted that mount, setup refuses rather than installing incompatible workers; use
-`down.sh` before recreating the cluster. Images and runtime assets target the Docker server's
-architecture.
+`down.sh` before recreating the cluster. Images target the Docker server's architecture. The
+control plane installs with the gVisor class only; a microVM setup then adds that class with
+`ate-setup deploy sandboxconfig --sandbox-classes=microvm`, which on kind assembles the kata assets
+for the architecture `ate-setup` runs as (Go's target on this machine), so microVM needs that to
+match the Docker server's. When they differ, automatic selection uses gVisor and
+`SANDBOX_CLASS=microvm` is refused before any cluster call.
 
 ## Deployment layout
 
@@ -100,7 +104,7 @@ Server-owned metadata and status are excluded. `--check-only` performs this
 comparison before worker/daemon changes. Each CLI invocation is bounded to two minutes, and the
 whole provisioning/golden wait to ten minutes.
 
-Substrate v0.6.0 authorizes every Control API call by the atespace's AccessPolicy. The daemon
+Substrate authorizes every Control API call by the atespace's AccessPolicy. The daemon
 calls as `user:system:serviceaccount:sessions-example:agentsessions` and needs `editor` (or
 `owner`) on the `sessions-example` atespace. When the atespace has no policy, `provision.sh`
 creates one with that single editor binding. A policy that already grants it is left alone. Any
@@ -120,14 +124,16 @@ requires a new name or a fresh cluster; setup never silently keeps an incompatib
 WorkerPools are named `chat-harness-microvm` and `chat-harness-gvisor`, so changing sandbox class
 with a new template does not mutate the previous pool's immutable class or remove its actors.
 Switching to microVM also requires the existing kind node's KVM mount; otherwise use a fresh cluster.
-Substrate v0.6.0 templates name no sandbox config: the worker pool runs its class's default
+Substrate templates name no sandbox config: the worker pool runs its class's default
 SandboxConfig. Setup and deploy refuse `SANDBOX_CONFIG`, the former template override, before
 changing the cluster; to run a custom config, which must exist and be of the pool's class, add
 `configRef: {name: <config>}` to the `sandboxClasses` entry in `deploy/workerpool.yaml`. The
 template's limits (1000m CPU, 768 MiB) are booked against the capacity the pool's worker pods
-declare (1 CPU, 1 GiB in `deploy/workerpool.yaml`). `SNAPSHOT_LOCATION` defaults to
-`gs://ate-snapshots/sessions-example/`; the template name is appended; `storageLocation` is a
-preview field at v0.6.0 that Substrate ignores unless its `PerTemplateSnapshotLocation` gate is on.
+declare (1 CPU, 1 GiB in `deploy/workerpool.yaml`), less the worker's reserve (64 MiB) and, on
+microVM workers, a per-actor overhead of 4 MiB plus 8 MiB per GiB. The template sets no
+`storageLocation`: Substrate v1 rejects one unless its `PerTemplateSnapshotLocation` preview gate is
+on, so snapshots go under the cluster's `--snapshot-location`. Setup refuses `SNAPSHOT_LOCATION`,
+the former override, before changing the cluster.
 Generated JSON and tools live under `_local/substrate-kind/${CLUSTER}/`, not in source files.
 
 For manual access:
@@ -155,8 +161,10 @@ bounded to three seconds within a thirty-second readiness budget.
 `up.sh` records the kind control-plane container ID and the installed Substrate revision, not just
 its name. Reruns reuse that cluster and retain its SQLite volume only when the revision matches.
 An older or unrecorded revision is refused before changing the managed checkout: Substrate does
-not support an in-place upgrade to v0.6.0. Use a new `CLUSTER` to preserve the old cluster, or run
-`down.sh` explicitly before recreating it; teardown deletes its journal and model cache.
+not support an in-place upgrade between minor releases before 1.0, and v1 moved the API to package
+`substrate.ateapi.v1` and WorkerPool to `ate.dev/v1`. Use a new `CLUSTER` to preserve the old
+cluster, or run `down.sh` explicitly before recreating it; teardown deletes its journal and model
+cache.
 `down.sh` refuses foreign/replaced clusters or uncertain inspection
 results and preserves the shared `kind-registry`. Interrupted creation is recorded but never
 automatically recreated. Keep the state directory; losing its ownership record does not authorize
@@ -182,10 +190,10 @@ This is **production-shaped, not production-ready**:
 - Sessions has no authentication or TLS termination here. Access is through local port-forward;
   deny-all pod ingress requires an enforcing CNI. The pinned kind setup supplies one.
 - The projected ate-api token has a dedicated audience and the default Kubernetes API token is
-  disabled. Substrate v0.6.0 authorizes each call by the atespace's AccessPolicy, and the daemon
+  disabled. Substrate authorizes each call by the atespace's AccessPolicy, and the daemon
   holds editor on `sessions-example` only; that is not a tenant boundary between sessions. The
   namespace carries `ate.dev/api-access=true` for
-  Substrate v0.6.0's ate-api ingress policy; worker pods are excluded from that allowance.
+  Substrate's ate-api ingress policy; worker pods are excluded from that allowance.
 - Harness traffic goes to atenet-router's :443 over mTLS. `up.sh` installs Substrate's default
   envoy router with one allowlisted client, the daemon's SPIFFE ID
   `spiffe://cluster.local/ns/sessions-example/sa/agentsessions`; the daemon presents it from a

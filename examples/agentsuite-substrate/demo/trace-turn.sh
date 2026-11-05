@@ -49,7 +49,7 @@ exec 2>&3 3>&-
 hop() { python3 "${here}/trace-hop.py" "$@"; }
 shopt -s nullglob
 hop agentsessionsd "operation=exec session_uid=${session} .*phase=finish" operation,session_uid,outcome "${dir}/agentsessionsd.log"
-hop ate-api "\"method\":\"/ateapi\\.Control/(CreateActor|ResumeActor)\".*\"${session}\"" method,actor=req.actor.metadata.name,actor=req.actor.name "${dir}"/ate-system.ate-api*.log
+hop ate-api "\"method\":\"/substrate\\.ateapi\\.v1\\.Control/(CreateActor|ResumeActor)\".*\"${session}\"" method,actor=req.actor.metadata.name,actor=req.actor.name "${dir}"/ate-system.ate-api*.log
 hop worker "\"method\":\"/ateworker\\.Worker/(RestoreWorkload|RunWorkload)\".*\"actor_name\":\"${session}\"" method,actor=req.actor_name "${dir}"/agentsuite-demo.*.log
 hop micro-VM '"Actor (started|restored)' "" "${dir}/actor-lifecycle.log"
 hop atenet-router "Route ok.*${session}" actor.name,targetAddr "${dir}"/ate-system.atenet-router*.log

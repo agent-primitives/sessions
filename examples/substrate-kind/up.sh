@@ -6,7 +6,7 @@ set -euo pipefail
 requested="${SANDBOX_CLASS:-auto}"
 source "$(dirname "$0")/common.sh"
 progress "Checking setup prerequisites and settings"
-refuse_sandbox_config
+refuse_template_overrides
 source "${HERE}/model.sh"
 for tool in git go docker kubectl ko jq; do need "${tool}"; done
 timeout_command
@@ -22,8 +22,19 @@ export KO_DOCKER_REPO="${KO_DOCKER_REPO:-localhost:5001}"
 
 # Prefer microVM when Docker can expose /dev/kvm. Only a missing device permits
 # automatic gVisor fallback; other Docker errors must not change the selected runtime.
+# On kind, ate-setup stages the microVM guest assets only for the architecture it runs as (Go's
+# target here), so a Docker host of another architecture cannot run microVM workers from this
+# machine: automatic selection uses gVisor, and an explicit microvm is refused before any cluster
+# call.
 if [[ "${requested}" == gvisor ]]; then
 	progress "Skipping the KVM probe; gVisor was selected explicitly"
+	SANDBOX_CLASS=gvisor
+elif ! setup_arch="$(go env GOARCH)" || [[ -z "${setup_arch}" ]]; then
+	die "Cannot read Go's target architecture."
+elif [[ "${setup_arch}" != "${arch}" ]]; then
+	[[ "${requested}" == auto ]] ||
+		die "Explicit microvm needs ate-setup to run as ${arch}, the Docker host's architecture: on kind it stages microVM guest assets only for its own (${setup_arch}). Set SANDBOX_CLASS=gvisor, or run this script on a machine of that architecture."
+	progress "Using gVisor: microVM guest assets would be staged for ${setup_arch}, not the Docker host's ${arch}."
 	SANDBOX_CLASS=gvisor
 else
 	progress "Checking Docker access to /dev/kvm for microVM workers"
@@ -141,7 +152,7 @@ if [[ "${stage}" == created ]]; then
 		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${arch}" \
 		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m \
 		--ingress-allowed-spiffe-ids="${ROUTER_CLIENT_ID}" \
-		deploy ate-system --setup-csi=none)
+		deploy ate-system --setup-csi=none --sandbox-classes=gvisor)
 	stage="$(cluster_state)"
 	[[ "${stage}" == created ]] || die "Cluster changed during installation."
 	id="$(node_id)"
@@ -151,12 +162,17 @@ else
 	progress "Reusing owned cluster ${CLUSTER}; retaining its journal."
 fi
 
-# MicroVM workers need the guest runtime assets and the class-default SandboxConfig in addition to
-# the control plane.
+# The control plane is installed with the gVisor class only, so a host without KVM never assembles
+# microVM assets. MicroVM workers need the guest runtime assets and the class-default SandboxConfig
+# too. On kind ate-setup assembles the assets for the architecture it runs as, which the sandbox
+# selection above checked is the node's.
 if [[ "${SANDBOX_CLASS}" == microvm ]]; then
 	progress "Installing microVM runtime assets and sandbox configuration"
-	(cd "${SUBSTRATE_DIR}" && NO_DEV_ENV=true ATE_INSTALL_KIND=true BUCKET_NAME=ate-snapshots \
-		KUBECTL_CONTEXT="kind-${CLUSTER}" ARCH="${arch}" hack/install-microvm-deps.sh --install)
+	(cd "${SUBSTRATE_DIR}" && env -u GCE_REGION -u CLUSTER_LOCATION -u NETWORK -u SUBNETWORK \
+		-u MEMORYSTORE_INSTANCE -u PROJECT_ID \
+		go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}" \
+		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${arch}" \
+		--credential-provider='{"name":"k8s.io"}' deploy sandboxconfig --sandbox-classes=microvm)
 fi
 
 # Build the matching Control API client and publish the daemon, harness and worker images.

@@ -12,16 +12,21 @@ func TestSandboxSelectionAndForeignSetupRefusal(t *testing.T) {
 	for _, tc := range []struct {
 		name, class, kvm, want string
 		probed                 bool
+		goarch                 string // what go env GOARCH reports; the Docker host is amd64
 	}{
-		{"automatic microvm", "", "available", "Sandbox: microvm", true},
-		{"automatic fallback", "", "unavailable", "Falling back to gVisor", true},
-		{"automatic fallback with legacy Docker status", "", "unavailable-legacy", "Falling back to gVisor", true},
-		{"explicit microvm", "microvm", "available", "Sandbox: microvm", true},
-		{"explicit microvm unavailable", "microvm", "unavailable", "Explicit microvm requires /dev/kvm access", true},
-		{"explicit gvisor", "gvisor", "unavailable", "Sandbox: gvisor", false},
-		{"Docker failure", "", "docker-failed", "refusing to fall back", true},
-		{"image pull failure", "", "pull-failed", "image pull refused", false},
-		{"invalid class", "typo", "available", "SANDBOX_CLASS must be", false},
+		{"automatic microvm", "", "available", "Sandbox: microvm", true, "amd64"},
+		{"automatic fallback", "", "unavailable", "Falling back to gVisor", true, "amd64"},
+		{"automatic fallback with legacy Docker status", "", "unavailable-legacy", "Falling back to gVisor", true, "amd64"},
+		{"explicit microvm", "microvm", "available", "Sandbox: microvm", true, "amd64"},
+		{"explicit microvm unavailable", "microvm", "unavailable", "Explicit microvm requires /dev/kvm access", true, "amd64"},
+		{"explicit gvisor", "gvisor", "unavailable", "Sandbox: gvisor", false, ""},
+		{"Docker failure", "", "docker-failed", "refusing to fall back", true, "amd64"},
+		{"image pull failure", "", "pull-failed", "image pull refused", false, "amd64"},
+		{"invalid class", "typo", "available", "SANDBOX_CLASS must be", false, ""},
+		// On kind ate-setup stages microVM assets only for the architecture it runs as.
+		{"automatic on another architecture", "", "available", "Using gVisor: microVM guest assets would be staged for arm64", false, "arm64"},
+		{"explicit microvm on another architecture", "microvm", "available", "Explicit microvm needs ate-setup to run as amd64", false, "arm64"},
+		{"unreadable Go architecture", "", "available", "Cannot read Go's target architecture", false, "fail"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, _ := fixture(t, map[string]string{
@@ -45,8 +50,10 @@ case "$1" in
 esac`,
 				"git":  `case "$*" in *"rev-parse HEAD") echo "$TEST_PIN" ;; *"status --porcelain") exit 0 ;; *) exit 1 ;; esac`,
 				"kind": `echo "$*" >> "$TEST_DIR/kind-calls"; [[ "$*" == "get clusters" ]]; echo recipe-test`,
-				"go":   `echo unexpected-go-invocation >&2; exit 1`,
-				"ko":   `echo unexpected-ko-invocation >&2; exit 1`,
+				"go": `echo "$*" >> "$TEST_DIR/go-calls"
+[[ "$*" == "env GOARCH" && "$TEST_GOARCH" != fail ]] || exit 1
+echo "$TEST_GOARCH"`,
+				"ko": `echo unexpected-ko-invocation >&2; exit 1`,
 			})
 			prerequisites(t)
 			workflow, err := os.ReadFile("../../.github/workflows/substrate-e2e.yml")
@@ -60,6 +67,7 @@ esac`,
 				}
 			}
 			t.Setenv("TEST_KVM", tc.kvm)
+			t.Setenv("TEST_GOARCH", tc.goarch)
 			t.Setenv("SANDBOX_CLASS", tc.class)
 			t.Setenv("MODEL_SOURCE", "stub")
 			out, err := exec.CommandContext(t.Context(), "bash", "up.sh").CombinedOutput()
@@ -73,12 +81,19 @@ esac`,
 			if strings.Contains(string(calls), "run ") != tc.probed {
 				t.Fatalf("unexpected Docker probe calls: %s", calls)
 			}
-			if tc.class == "gvisor" && strings.Contains(string(calls), "pull ") {
-				t.Fatalf("explicit gvisor pulled the probe image: %s", calls)
+			if !tc.probed && tc.kvm != "pull-failed" && strings.Contains(string(calls), "pull ") {
+				t.Fatalf("a selection without the KVM probe pulled the probe image: %s", calls)
+			}
+			goCalls, _ := os.ReadFile(filepath.Join(dir, "go-calls"))
+			if (len(goCalls) > 0) != (tc.goarch != "") {
+				t.Fatalf("unexpected architecture reads: %q", goCalls)
 			}
 			kindCalls, _ := os.ReadFile(filepath.Join(dir, "kind-calls"))
 			if strings.Contains(string(kindCalls), "delete") || strings.Contains(string(kindCalls), "export") {
 				t.Fatalf("foreign cluster modified: %s", kindCalls)
+			}
+			if !strings.Contains(string(out), "Sandbox:") && len(kindCalls) > 0 {
+				t.Fatalf("a refused selection reached the cluster: %s", kindCalls)
 			}
 		})
 	}
@@ -91,7 +106,7 @@ func TestSetupChecksCreatedAndReusedNodeKVMMount(t *testing.T) {
 		reuse              bool
 	}{
 		{"creation helper probe failure", "[]", "lacks the required writable /dev/kvm mount", false},
-		{"created writable mount", writable, "reached-install", false},
+		{"created writable mount", writable, "reached-microvm-config", false},
 		{"reused missing mount", "[]", "lacks the required writable /dev/kvm mount", true},
 		{"reused read-only mount", `[{"Source":"/dev/kvm","Destination":"/dev/kvm","RW":false}]`, "lacks the required writable /dev/kvm mount", true},
 		{"inspection failure", "error", "Cannot inspect the kind node's mounts", true},
@@ -114,7 +129,13 @@ esac`,
   "export kubeconfig"*) exit 0 ;;
   *) exit 1 ;;
 esac`,
-				"go":      `echo reached-install >&2; exit 1`,
+				// The control plane installs with the gVisor class only; the micro-VM class follows.
+				"go": `case "$*" in
+  "env GOARCH") echo amd64 ;;
+  *" deploy ate-system --setup-csi=none --sandbox-classes=gvisor") echo reached-install >&2 ;;
+  *" deploy sandboxconfig --sandbox-classes=microvm") echo reached-microvm-config >&2; exit 1 ;;
+  *) exit 1 ;;
+esac`,
 				"ko":      `exit 1`,
 				"kubectl": `exit 1`,
 			})
@@ -129,7 +150,6 @@ set -euo pipefail
 if docker run --rm --device /dev/kvm busybox true; then :; fi
 echo node > "$TEST_DIR/node"
 `,
-				"install-microvm-deps.sh": "#!/usr/bin/env bash\necho reached-install >&2\nexit 1\n",
 			} {
 				if err := os.WriteFile(filepath.Join(hack, name), []byte(body), 0o700); err != nil {
 					t.Fatal(err)
@@ -161,7 +181,7 @@ echo node > "$TEST_DIR/node"
 			if err == nil || !strings.Contains(string(out), tc.want) {
 				t.Fatalf("node mount check: %v\n%s; want %q", err, out, tc.want)
 			}
-			if tc.want != "reached-install" && strings.Contains(string(out), "reached-install") {
+			if tc.want != "reached-microvm-config" && strings.Contains(string(out), "reached-install") {
 				t.Fatalf("incompatible node reached installation:\n%s", out)
 			}
 			owner, err := os.ReadFile(filepath.Join(state, "owner"))

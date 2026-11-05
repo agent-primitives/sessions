@@ -17,3 +17,8 @@ category: Added
   re-run of a started execution fails (`EXE-42`), a turn on an instance that lost the session's
   memory fails rather than start an empty conversation (`EXE-43`), and approvals are not
   supported. `controller.Replay` does not refuse this harness and must not be pointed at it.
+- `integrations/claudecode/cmd/harnessnode`: a harness server that serves only this harness, built
+  on the root module's `harnessnode` and reading the same server settings. `HARNESS_KIND` must be
+  unset or `claudecode`. The harness is configured by `HARNESS_CLAUDE_WORKDIR` and
+  `HARNESS_CLAUDE_PERMISSION_MODE` (both required), and optionally `HARNESS_CLAUDE_BIN`,
+  `HARNESS_MODEL`, `HARNESS_CLAUDE_MAX_TURNS` and `HARNESS_CLAUDE_MAX_BUDGET_USD`.

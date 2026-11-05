@@ -63,12 +63,13 @@ concurrency:
   group: substrate-e2e-${{ github.ref }}
   cancel-in-progress: true
 
-# The agent-substrate main commit our adapter's go.mod pins (the v1 API, api/ateapi/v1); keep them
-# in lockstep so the cluster's ate-api and our generated client agree. The client decodes Actors by
-# field number, and upstream has renumbered fields before without a wire error, so a mismatch
-# corrupts silently rather than failing.
+# The agent-substrate release our adapter's go.mod pins (the v1 API, api/ateapi/v1), and the commit
+# its tag names; keep all three in lockstep so the cluster's ate-api and our generated client agree.
+# The client decodes Actors by field number, and upstream has renumbered fields before without a
+# wire error, so a mismatch corrupts silently rather than failing. The examples read both lines.
 env:
-  SUBSTRATE_REF: ed0371a15f6f265c64100001adafb9731be03970
+  SUBSTRATE_VERSION: v1.0.0
+  SUBSTRATE_REF: b34fbee742906494b5eb4f1f36987176bf8770a4
   KO_DOCKER_REPO: localhost:5001
   E2E_IMAGE: localhost:5001/agentsessions-e2e:${{ github.sha }}
   # ate-setup requires an image credential provider; the kind recipe uses the k8s.io one.

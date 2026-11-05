@@ -52,6 +52,11 @@ type allocationBackend struct {
 	describes int
 	forks     int
 	failFork  int
+	// address overrides the incarnation's address; live opts in to LiveDescriber.
+	address string
+	live    bool
+	// computeInstance is the Incarnation.ComputeInstance every allocation returns.
+	computeInstance string
 }
 
 func (b *allocationBackend) Describe(ctx context.Context) (api.Descriptor, error) {
@@ -59,9 +64,16 @@ func (b *allocationBackend) Describe(ctx context.Context) (api.Descriptor, error
 	return (echoagent.Harness{}).Describe(ctx)
 }
 func (b *allocationBackend) Capabilities() api.RuntimeCapabilities { return api.RuntimeCapabilities{} }
+func (b *allocationBackend) DescribesLiveHarness() bool            { return b.live }
 func (b *allocationBackend) allocate(uid, operation string) (api.Incarnation, error) {
 	*b.trace = append(*b.trace, operation)
-	return api.Incarnation{ID: "resource-" + uid, Worker: "worker", Address: "shared:1234", Runtime: "test"}, b.cause
+	address := "shared:1234"
+	if b.address != "" {
+		address = b.address
+	}
+	in := api.Incarnation{ID: "resource-" + uid, Worker: "worker", Address: address, Runtime: "test",
+		ComputeInstance: b.computeInstance}
+	return in, b.cause
 }
 func (b *allocationBackend) Create(_ context.Context, spec *api.SessionSpec) (api.Incarnation, error) {
 	return b.allocate(spec.SessionUID, "create")
@@ -84,11 +96,14 @@ type safeAllocationBackend struct {
 	key        string
 	released   []string
 	releaseErr error
+	// releaseCtxErrs records each release context's error when ReleaseSession was called.
+	releaseCtxErrs []error
 }
 
 func (b *safeAllocationBackend) CleanupKey() string { return b.key }
-func (b *safeAllocationBackend) ReleaseSession(_ context.Context, uid string) error {
+func (b *safeAllocationBackend) ReleaseSession(ctx context.Context, uid string) error {
 	b.released = append(b.released, uid)
+	b.releaseCtxErrs = append(b.releaseCtxErrs, ctx.Err())
 	return b.releaseErr
 }
 

@@ -1,9 +1,11 @@
 // Package computestate is the SES-8 compute-state projection: what a session's committed events
-// say about whether its compute is running. sqlitelog stores it per session as each event commits.
+// say about whether its compute is running. sqlitelog stores it per session as each event commits;
+// placement folds it over a journal to decide who owns compute a failed Resume or Exec allocated.
 package computestate
 
 import (
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/eventlog"
 )
 
 // Event maps a committed event to the compute state it implies, reporting false for
@@ -39,4 +41,16 @@ func Event(ev api.Event) (api.ComputeState, bool) {
 	default:
 		return api.ComputeNone, false
 	}
+}
+
+// Of folds records from NONE, as sqlitelog's projection does as each one commits: the last record
+// whose event implies a state decides it.
+func Of(recs []eventlog.Record) api.ComputeState {
+	state := api.ComputeNone
+	for _, r := range recs {
+		if s, moves := Event(r.Event); moves {
+			state = s
+		}
+	}
+	return state
 }

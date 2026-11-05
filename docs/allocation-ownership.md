@@ -29,7 +29,9 @@ idempotent release; the surviving row remains unreleased.
 
 `api.CleanupRuntime` is an optional, non-destructive release contract. Local and remote backends
 opt in using configuration keys; unsupported backends record an empty key instead of guessing a
-safe release route. This stage does not run cleanup and does not change Fork's rollback semantics.
+safe release route. The ledger runs no cleanup and does not change Fork's rollback semantics. Apart
+from the ledger, a failed `Exec` or `Resume` releases the compute it allocated through
+`ReleaseSession` when the journal records nothing that owns it (spec `RT-7`).
 
 ## Compatibility
 

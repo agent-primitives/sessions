@@ -9,6 +9,9 @@
 # substrate's `ate-setup deploy ate-system` applies, with the assets it stages, when
 # --sandbox-classes includes microvm (the default).
 #
+# workerImage is a placeholder: CI substitutes the Substrate release's ateworker-microvm, pinned to
+# its digest by `hack/substrate-image.sh ateworker-microvm`, before applying.
+#
 # The `workload` label is repo-scoped on purpose: worker eligibility is the sandbox class plus a label
 # selector matched over every worker in the cluster with no namespace filter, so a label shared with
 # another micro-VM pool would let the scheduler place our actor there. Keep it unique to this repo.

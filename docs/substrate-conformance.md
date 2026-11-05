@@ -570,7 +570,8 @@ v0.6.0 changed what an install and its manifests must say, beyond the module pat
 
 - The module is `go.ate.dev/substrate` (was `github.com/agent-substrate/substrate`), and the worker
   binaries are `cmd/ateworker-gvisor` and `cmd/ateworker-microvm` (were `cmd/ateom-*`), so a
-  WorkerPool's `workerImage` is `ko://go.ate.dev/substrate/cmd/ateworker-<class>`. The worker gRPC
+  WorkerPool's `workerImage` is the release's `ghcr.io/agent-substrate/substrate/ateworker-<class>`
+  (`ko://go.ate.dev/substrate/cmd/ateworker-<class>` when built from source). The worker gRPC
   service is `/ateworker.Worker/...` (was `/ateom.Ateom/...`).
 - Every Control call is authorized: see
   [authorization](#substrate-v1-authorization-and-atespace-provisioning).
@@ -1292,10 +1293,13 @@ clusters standing. It copies substrate's own recipe: `hack/create-kind-cluster.s
 `go run ./cmd/ate-setup --kind deploy ate-system` with the default classes, `gvisor,microvm`, before
 either tier runs (it assembles and stages the kata + cloud-hypervisor assets and installs the
 cluster-scoped micro-VM SandboxConfig as the class default, which both pools resolve to).
-Substrate publishes no images, so its binaries are built from source at `SUBSTRATE_REF`; the
-workflow caches the Go build and module caches between runs. It installs ate-system with the
-default envoy dataplane, whose `envoy-dataplane` image it builds during the install, and allowlists
-the conformance Job's SPIFFE ID ([the transport](#the-transport-harnesswire-through-atenet-router)).
+Nothing of Substrate's is built: `--image-repo=ghcr.io/agent-substrate/substrate
+--image-tag=<SUBSTRATE_VERSION>` installs the images the release publishes, each pinned to its
+digest, and `hack/substrate-image.sh ateworker-microvm` resolves the worker image the pools run the
+same way. The manifests, `ate-setup` and `kubectl-ate` come from the checkout, and the workflow
+refuses a tag that no longer names `SUBSTRATE_REF`. It installs ate-system with the default envoy
+dataplane (the release's `envoy-dataplane` image) and allowlists the conformance Job's SPIFFE ID
+([the transport](#the-transport-harnesswire-through-atenet-router)).
 
 The durable [kind example](../examples/substrate-kind/README.md) runs independently in the
 `substrate-kind example lifecycle` job, with a fresh managed checkout and its own cluster. That job
@@ -1319,12 +1323,13 @@ merge commit. Push to main, the nightly schedule and manual runs always run it. 
 required jobs the same way with the `ci` profile, skipping only markdown (other than
 `docs/api-reference.md`) and `LICENSE`.
 
-Scheduled and manual runs add a canary job, `substrate-conformance (substrate main)`, that runs the
-same suite against agent-substrate's `main` head, with the adapter's client moved to that commit in
-the runner's checkout only. It surfaces upstream drift before a bump; it never runs on a pull
-request and its failure does not fail the run. It shares the pinned run's v1 layout
-(`go.ate.dev/substrate/api/ateapi/v1`, `cmd/ate-setup --kind`), so it fails only on drift past the
-pin. It has not run green yet; until a nightly canary does, read its result in the job list
+Scheduled and manual runs add a canary job, `substrate-conformance (newest substrate release)`,
+that runs the same suite against agent-substrate's newest release tag, installed from that
+release's images, with the adapter's client moved to that tag in the runner's checkout only. It runs
+only while that tag is newer than `SUBSTRATE_VERSION`, so it surfaces drift before a bump; it never
+runs on a pull request and its failure does not fail the run. It shares the pinned run's v1 layout
+(`go.ate.dev/substrate/api/ateapi/v1`, `cmd/ate-setup --kind --image-repo`), so it fails only on
+drift past the pin. It has not run green yet; until a nightly canary does, read its result in the job list
 (`continue-on-error` hides it from the run's status). Once a nightly canary runs green,
 `continue-on-error` is meant to be dropped, so new drift turns the nightly run red.
 
@@ -1362,32 +1367,35 @@ default) or `gvisor`. Any other value is refused. `KIND_CLUSTER_NAME` selects th
 
 On a host without KVM (an arm64 Mac running kind), install only the gVisor class, install both
 gVisor WorkerPools, and run both tiers with `gvisor`. The block below starts from a host with only
-Docker, kind, kubectl, ko, Go and git installed, and runs from the root of this checkout. It clones
-agent-substrate at the commit the workflow pins (`SUBSTRATE_REF`), creates the kind cluster and its
-local registry (`localhost:5001`) with substrate's `hack/create-kind-cluster.sh`, and installs
-`ate-system` with `ate-setup` the way CI does, with `--sandbox-classes=gvisor`.
+Docker (with `buildx`), kind, kubectl, ko, Go and git installed, and runs from the root of this
+checkout. It clones agent-substrate at the release the workflow pins (`SUBSTRATE_VERSION`, whose tag
+names `SUBSTRATE_REF`), creates the kind cluster and its local registry (`localhost:5001`) with
+substrate's `hack/create-kind-cluster.sh`, and installs `ate-system` from the release's images with
+`ate-setup` the way CI does, with `--sandbox-classes=gvisor`.
 `create-kind-cluster.sh` deletes any existing cluster named `KIND_CLUSTER_NAME` before it creates
 one, so pick a name you do not use for anything else.
 
-The pool manifests name the worker image as a `ko://` import path, which the WorkerPool controller
-passes to its Pods unchanged, so the block builds `ateworker-gvisor` from the same agent-substrate
-checkout and substitutes its digest, as CI does for `ateworker-microvm`. Every image must match the
-node's architecture: ko builds `linux/amd64` unless `KO_DEFAULTPLATFORMS` says otherwise, and an
+The pool manifests name the worker image with a `ko://` placeholder, which the WorkerPool
+controller would pass to its Pods unchanged, so the block substitutes the release's
+`ateworker-gvisor`, pinned to its digest by `hack/substrate-image.sh`, as CI does for
+`ateworker-microvm`. The release images are multi-arch. The images this repository builds must match
+the node's architecture: ko builds `linux/amd64` unless `KO_DEFAULTPLATFORMS` says otherwise, and an
 amd64 harness image on an arm64 node fails `runsc start`.
 
 ```bash
 export KIND_CLUSTER_NAME=agentsessions-e2e
 export KO_DOCKER_REPO=localhost:5001 KO_DEFAULTPLATFORMS="linux/$(go env GOARCH)"
-SUBSTRATE_REF="$(sed -n 's/^  SUBSTRATE_REF: //p' .github/workflows/substrate-e2e.yml)"
+SUBSTRATE_VERSION="$(sed -n 's/^  SUBSTRATE_VERSION: //p' .github/workflows/substrate-e2e.yml)"
 SUBSTRATE="$(mktemp -d)/substrate"
 git clone https://github.com/agent-substrate/substrate "${SUBSTRATE}"
-git -C "${SUBSTRATE}" checkout "${SUBSTRATE_REF}"
+git -C "${SUBSTRATE}" checkout "${SUBSTRATE_VERSION}"
 
 # Cluster, local registry and ate-system, as the workflow does.
 (cd "${SUBSTRATE}" && hack/create-kind-cluster.sh)
 (cd "${SUBSTRATE}" && ATE_CREDENTIAL_PROVIDER='{"name":"k8s.io"}' \
   go run ./cmd/ate-setup --kind --rollout-timeout=10m \
     --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-agentsessions/sa/substrate-e2e \
+    --image-repo=ghcr.io/agent-substrate/substrate --image-tag="${SUBSTRATE_VERSION}" \
     deploy ate-system --sandbox-classes=gvisor)
 
 # Images: the conformance test binary, the harness and the gVisor worker.
@@ -1397,7 +1405,7 @@ E2E_DIR="$(mktemp -d)"
   CGO_ENABLED=0 GOOS=linux GOARCH="$(go env GOARCH)" go test -c -o "${E2E_DIR}/e2e.test" ./e2e)
 cp deploy/substrate/Dockerfile.e2e "${E2E_DIR}/Dockerfile"
 docker build -t "${E2E_IMAGE}" "${E2E_DIR}" && docker push "${E2E_IMAGE}"
-ATEWORKER_IMG="$(cd "${SUBSTRATE}" && ko build --base-import-paths ./cmd/ateworker-gvisor)"
+ATEWORKER_IMG="$(hack/substrate-image.sh ateworker-gvisor)"
 HARNESS_IMAGE="$(ko build ./cmd/harnessnode)"
 
 # The gVisor WorkerPools, the suite's atespaces and access, then both tiers.

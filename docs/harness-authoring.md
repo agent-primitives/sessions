@@ -9,6 +9,10 @@ and a tamper-evident provenance chain, none of which your harness has to impleme
 This guide is the `api.Harness` (`api/harness.go`) contract, the rules that keep replay exact, and
 three reference harnesses. Read [`concepts.md`](concepts.md) first for the nouns.
 
+Most of it assumes a **mediated** harness, one whose model calls go through the host. A harness that
+calls its model from its own compute, such as an agent CLI, is **unmediated**: it can still run here
+but gives up replay. See [Unmediated harnesses](#unmediated-harnesses).
+
 ## The contract
 
 <!-- doccheck: skip excerpt of api.Harness; the real definition is in api/harness.go -->
@@ -243,12 +247,17 @@ replay path**, and replay is exact for free.
 ## The rules that keep replay exact
 
 Six rules. Follow them and every determinism guarantee holds across process death, resume, and fork.
+An unmediated harness breaks Rule 1 by design, and its executions cannot be reconstructed by
+replay. Rules 2, 5 and 6 still apply to every call it makes through `sink.Model`, and Rules 3 and 4
+apply to it as written; [Unmediated harnesses](#unmediated-harnesses) says what changes.
 
 ### Rule 1: all model calls go through `sink.Model`
 
 Never call an LLM provider SDK directly. Route every completion through `sink.Model`. If you call a
 provider directly, that call is invisible to the log, so replay cannot reproduce it and will either
-diverge or re-spend the call. This single rule is why replay never invokes the model (I1).
+diverge or re-spend the call. This single rule is why replay never invokes the model (I1). A harness
+that calls its provider anyway is unmediated, whether or not it means to be, and loses that
+guarantee.
 
 The host records `MODEL_CALL` (with the request's input hash) before it invokes the provider and records
 the completion as `OUTPUT` after. A process death or provider error between the two leaves a turn whose
@@ -287,15 +296,15 @@ model did not produce through the mediated call (for example progress text you g
 
 ### Rule 3: choose resumability honestly
 
-- If your harness keeps **no durable in-process state** beyond the log, declare `STATELESS_REPLAY`. On
-  resume and fork the host replays `Start.History` into you. You reconstruct from `History`. This runs on
-  any runtime, including a plain pod.
-- If your harness keeps **in-process state the log cannot rebuild** (a REPL, a browser, a warm process),
-  declare `REQUIRES_MEMORY_SNAPSHOT`. The host schedules you only on memory-capable compute and restores
-  your RAM on resume and on fork — a forked child is a clone of the parent's snapshot, not a replay. In
-  this mode `Start.History` still carries the full prior log after a restore, and you must **never**
-  reconstruct state from it (I4). Doing so would reset or double-apply the very state the snapshot
-  preserved.
+- If your harness is mediated and keeps **no durable in-process state** beyond the log, declare
+  `STATELESS_REPLAY`. On resume and fork the host replays `Start.History` into you. You reconstruct
+  from `History`. This runs on any runtime, including a plain pod.
+- If your harness keeps **in-process state the log cannot rebuild** (a REPL, a browser, a warm
+  process), or is [unmediated](#unmediated-harnesses), declare `REQUIRES_MEMORY_SNAPSHOT`. The host
+  schedules you only on memory-capable compute and restores your RAM on resume and on fork — a
+  forked child is a clone of the parent's snapshot, not a replay. In this mode `Start.History` still
+  carries the full prior log after a restore, and you must **never** reconstruct state from it (I4).
+  Doing so would reset or double-apply the very state the snapshot preserved.
 
 Do not declare `REQUIRES_MEMORY_SNAPSHOT` to be safe. It restricts where you can run. Declare it only if
 your state genuinely cannot be replayed.
@@ -901,6 +910,68 @@ The `ctx` passed to `Run` carries the host's trace context. Spans you start from
 OpenTelemetry API join the turn's trace, under the SDK's own `harness.run` span. Keep prompts and tool
 arguments out of span attributes. See [Observability](observability.md#harness-spans).
 
+## Unmediated harnesses
+
+Some agents cannot route their model calls through `sink.Model`. An agent CLI such as Claude Code
+calls its provider itself and keeps its conversation in its compute, in process memory or in files
+such as a transcript it reloads on the next turn. Such a harness is
+**unmediated** ([spec §8.8](../spec.md#88-harness-classes)). It can run on `agentsessions`, but it
+gives up, for the calls it makes itself, what depends on the host making the call, so choose it
+deliberately. The class is not declared in `Describe`: the host cannot see a model call that does
+not reach it, so say which class your harness is in its documentation.
+
+What is different:
+
+- **The provider key never enters your compute.** The model calls you make yourself leave through
+  the runtime's egress. Your environment, files and memory hold only a placeholder key, which the
+  egress replaces with the real credential on the way out, so no snapshot of your harness contains
+  it either. The runtime must provide that egress; the host can neither provide it nor check it.
+  Never put the real key in config, an environment variable or the image. See
+  [security](security.md#provider-credentials-and-harness-classes).
+- **Declare `REQUIRES_MEMORY_SNAPSHOT`.** The journal holds no `MODEL_CALL` for the calls you make
+  yourself, so it cannot rebuild your conversation; your compute is the state, even when your
+  process exits between turns. Rule 3 applies: never rebuild state from `Start.History`. The host
+  places you only on compute that snapshots memory. The tier promises that memory comes back, not
+  every file: keep a conversation you hold on disk where your runtime's snapshot captures it.
+- **Report what the model produced on the calls you make yourself.** Send assistant text through
+  `sink.Output`, token accounting through `sink.Usage`, and tools your agent ran itself through
+  `sink.Report` (`MEDIATION_IN_HARNESS_REPORTED`, Rule 4). Do not call `sink.Model` for a call you
+  already made. The host journals each report as given, with no `MODEL_CALL` before the `OUTPUT`,
+  as it does for `counteragent`'s output. Rule 2 does not apply to those calls, because your
+  `OUTPUT` is the only record of their completions. It does apply to a call you make through
+  `sink.Model`: the host already records that completion, so do not also send it through
+  `sink.Output`.
+- **For the calls you make yourself, you give up replay, model-call audit and host-bounded
+  spend.** Reconstructing your turns would call the provider again, so reconstruction replay is not
+  supported, though the journal stays readable and verifiable. The journal records your reports,
+  not what the provider received or returned. The host's model allowlist does not apply to those
+  calls, and the host does not check what they call against `Start.Model`; the egress and the
+  provider account are what bound their spend. A call you make through `sink.Model` is still
+  checked and journaled as a `MODEL_CALL`, and Rules 2, 5 and 6 apply to it as they do for a
+  mediated harness.
+- **Never continue an interrupted turn.** `Resume` recovers an unfinished or failed turn by calling
+  `Run` again with the same `Start`, including `Start.ExecutionID`. The host serves the turn's
+  recorded outputs against your new ones and then goes live, so a re-run either diverges at the
+  first output that differs or spends the turn again and repeats its actions. Remember the
+  execution IDs you have started; when `Run` gets one of them, return an error without calling the
+  model. The turn stays failed and the user re-prompts with a new `Exec`, which starts a new
+  execution. This works only while that record survives a memory restore, or while the runtime
+  refuses to restore memory older than the record: a record held only in memory, restored from a
+  snapshot taken before the execution started, no longer names it, and the re-run looks new.
+  Whether a session can reach that state, and how a harness would recognize it, is an open
+  question in [spec §8.8](../spec.md#88-harness-classes); no harness in this repository implements
+  this check. The exception is a turn you left parked at an approval gate: recovery at the decided
+  gate continues it, and your first sink call must be the gated call (spec `APR-16`).
+- **Mid-turn memory loss fails the turn.** If your compute dies during a turn, the `Exec` fails and
+  the host does not continue it. Once that compute is gone, or replaced on a backend that records
+  `ComputeInstance` (spec `RT-4h`, for example `runtime/substrate`), the session refuses every
+  later `Exec` and `Resume` with `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`), so the user
+  re-prompts in a new session; the old journal stays readable. If the compute and its memory
+  survived because only the host or the stream failed, the user re-prompts on the same session.
+- **The reference daemon still requires `-model`.** `agentsessionsd` refuses to start a harness
+  from a harness backend, such as `-substrate-harness`, without `-model`, whichever class the
+  harness is in. The host uses that model only for calls a harness makes through `sink.Model`.
+
 ## Capability matching
 
 When you declare `Capabilities`, the host matches them against the runtime's `RuntimeCapabilities`
@@ -914,10 +985,12 @@ actually honor it, and what makes the system degrade honestly instead of silentl
 - [ ] `Describe` returns a stable `ID` and accurate `Capabilities`.
 - [ ] If `Version` is advertised, keep it stable for replay-compatible behavior and change it when
       deterministic execution/config interpretation changes; an empty version is supported.
-- [ ] Every model call goes through `sink.Model`, never a provider SDK directly.
-- [ ] You do not re-emit the mediated completion through `sink.Output`.
-- [ ] Resumability matches reality: replayable state is `STATELESS_REPLAY`; genuine in-RAM state is
-      `REQUIRES_MEMORY_SNAPSHOT` and never rebuilt from `History`.
+- [ ] Mediated: every model call goes through `sink.Model`, never a provider SDK directly.
+- [ ] In either class, you do not re-emit a `sink.Model` completion through `sink.Output`.
+- [ ] Unmediated: documented as such, `REQUIRES_MEMORY_SNAPSHOT`, a placeholder key only, and `Run`
+      fails instead of re-running an execution it already started.
+- [ ] Resumability matches reality: replayable state is `STATELESS_REPLAY`; genuine in-RAM state and
+      any unmediated harness are `REQUIRES_MEMORY_SNAPSHOT` and never rebuilt from `History`.
 - [ ] Side-effecting tools set an `IdempotencyKey` and use the right mediation tier.
 - [ ] Opaque reasoning parts are returned verbatim, with `ReasoningReplay` set.
 - [ ] Tools ride `ModelRequest.Tools`, and tool calls and results ride as parts rebuilt from the

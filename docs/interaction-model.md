@@ -292,8 +292,9 @@ the two disagree, the proto wins and the code is wrong.
 ## Connecting a model
 
 The core ships no provider and never calls a model itself: the host mediates the call, which is what
-makes replay free and exact. `model/openai` fills that seam for anything speaking the
-chat-completions body, with no vendor SDK:
+makes replay free and exact. (A harness that calls its provider itself is
+[unmediated](harness-authoring.md#unmediated-harnesses) and gives that up.) `model/openai` fills
+that seam for anything speaking the chat-completions body, with no vendor SDK:
 
 ```bash
 export MODEL_API_KEY=...

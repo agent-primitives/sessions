@@ -115,7 +115,9 @@ and replayed verbatim, which was validated across Anthropic, OpenAI, and Gemini 
 continuity work. Because the harness routes model calls through the sink and not a provider SDK, swapping
 providers does not change the replay path. The bundled protocol clients are Chat Completions
 (`openai.New`) and explicit Responses (`openai.NewResponses`); see the [Responses mapping and
-limits](responses-adapter.md). The daemon/CLI still select Chat Completions.
+limits](responses-adapter.md). The daemon/CLI still select Chat Completions. A harness that calls
+its provider itself instead, such as an agent CLI, is unmediated and gives up replay; see
+[unmediated harnesses](harness-authoring.md#unmediated-harnesses).
 
 ## Can I bring my existing agent framework?
 
@@ -125,11 +127,18 @@ all plug in the same way. See [`harness-authoring.md`](harness-authoring.md).
 
 ## What happens if the harness crashes in the middle of a turn?
 
-Use `Resume` to re-drive an interrupted execution. For an existing current approval-bearing execution,
-no-input `Exec` also continues that recorded invocation, ignoring request config/harness/cursor
-overrides. Other inputless Exec calls keep ordinary new-turn behavior. Host-executed tools carry an
-idempotency key; a durable executor must deduplicate on session UID plus that key and retrieve the
-original receipt after a crash. The journal alone does not make external effects exactly once.
+For a mediated harness, use `Resume` to re-drive an interrupted execution. For an existing current
+approval-bearing execution, no-input `Exec` also continues that recorded invocation, ignoring
+request config/harness/cursor overrides. Other inputless Exec calls keep ordinary new-turn behavior.
+Host-executed tools carry an idempotency key; a durable executor must deduplicate on session UID
+plus that key and retrieve the original receipt after a crash. The journal alone does not make
+external effects exactly once.
+
+An unmediated harness does not continue an interrupted turn, apart from one parked at an approval
+gate: the `Exec` fails and the user re-prompts with a new `Exec`. Once the compute that held the
+harness's memory is gone, or replaced on `runtime/substrate`, every later `Exec` and `Resume` on
+the session fails `FAILED_PRECONDITION`, so the re-prompt goes to a new session. See
+[unmediated harnesses](harness-authoring.md#unmediated-harnesses).
 
 ## What is fork actually for?
 

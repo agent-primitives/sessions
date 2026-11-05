@@ -69,9 +69,10 @@ the harness stream, so what is journaled is what the harness emitted.
 ## The controller (`controller/`)
 
 The single-writer, event-sourced core. It drives one session's log with one incarnation (fence). Per turn
-it appends the input, runs the harness, and **mediates every nondeterministic effect** through the sink so
-the effect is recorded before it is observed. The determinism invariants it enforces (specified in the
-companion determinism contract, exercised by `conformance/`):
+it appends the input, runs the harness, and **mediates every nondeterministic effect the harness
+routes through the sink**, so the effect is recorded before it is observed. The determinism
+invariants it enforces (specified in the companion determinism contract, exercised by
+`conformance/`):
 
 - **I1 — replay never invokes the model.** On `Replay`, recorded model results are served from the
   journal; the model is called zero times.
@@ -96,6 +97,14 @@ companion determinism contract, exercised by `conformance/`):
   harness's first call must be the gated call (spec `APR-16`).
 - **I5 — byte-identical replay.** Replay reproduces the recorded events byte-for-byte (checked against the
   canonical hash), not merely equivalent output.
+
+These numbers are this document's; [spec §8.4](../spec.md#84-determinism-invariants) numbers
+some of the invariants differently. An unmediated harness
+([spec §8.8](../spec.md#88-harness-classes)) makes model calls that never reach the sink. For those
+calls I1, I2 and I5 do not hold (spec `I1`, `EXE-13` and `I0`), nor does I3's re-drive of a cut
+model call (spec `EXE-22`), and its executions cannot be reconstructed. I3 still holds for its
+host-executed tools, and I4 applies to it in full, since it must declare
+`REQUIRES_MEMORY_SNAPSHOT`.
 
 ## Harness transport (`harnesswire/`)
 

@@ -1762,7 +1762,7 @@ and never downgrade the migrated journal to v0.3.0 or older.
   before Resume; the older ref is stale. Local-only state wraps `api.ErrInvalidCheckpoint`
   (`FAILED_PRECONDITION`): it may never upload, so inspect and explicitly establish a durable
   checkpoint instead of waiting. The adapter requests a synchronous suspend (an unset mode is
-  asynchronous at v0.6.0), so `SuspendActor` capturing a `RUNNING` actor returns only once its
+  asynchronous at v1), so `SuspendActor` capturing a `RUNNING` actor returns only once its
   upload completed. An actor already `SUSPENDED`, for example by a worker-requested asynchronous
   suspend, is returned as it is in any mode, its upload still `PENDING` until the background upload
   completes: Suspend refuses it as pending, and suspending again does not upload it. This
@@ -1782,8 +1782,8 @@ and never downgrade the migrated journal to v0.3.0 or older.
   [issue #192](https://github.com/agent-primitives/sessions/issues/192); held-URI/readiness checks
   do not solve effective-source validation. A resume that Substrate (since v0.5.0) binds to a worker
   whose sandbox runtime cannot restore the recorded runtime of the MEMORY snapshot it restores from
-  does not restore that memory: v0.5.0 restores the snapshot's volumes only and v0.6.0 its root
-  filesystem, and in both cases the actor loses RAM. The adapter reports it as
+  does not restore that memory: v0.5.0 restores the snapshot's volumes only and v0.6.0 and v1 its
+  root filesystem, and in both cases the actor loses RAM. The adapter reports it as
   `ActorInfo.MemoryNotRestored`, and for a `REQUIRES_MEMORY_SNAPSHOT` harness the backend refuses
   that actor with `api.ErrMemoryStateLost` wherever it would hand it out (Create, Restore, a
   stateful Fork's clone) and before `Snapshot` suspends it, recorded compute instance or not.
@@ -1811,7 +1811,7 @@ and never downgrade the migrated journal to v0.3.0 or older.
   resume onto a worker of the same runtime between the check and the suspend keeps the lineage and
   the newest snapshot, so the capture lacks the turns since the last checkpoint. Only a precondition
   on `SuspendActor` that substrate enforces (the worker assignment, generation or UID checked)
-  closes it; v0.6.0 has none on `SuspendActor` (which takes only a durability mode) or
+  closes it; v1 has none on `SuspendActor` (which takes only a durability mode) or
   `ResumeActor`. A router resume alone keeps the recorded checkpoint, but a suspend by any other
   caller, such as a gateway's idle suspend, leaves a capture no `SUSPEND` names, so the host must be
   the only caller that suspends a `REQUIRES_MEMORY_SNAPSHOT` harness's actor. One outside suspend

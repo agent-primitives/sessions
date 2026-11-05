@@ -2,15 +2,20 @@
 category: Compatibility
 ---
 
-- The substrate adapter and examples require substrate v0.6.0 (`go.ate.dev/substrate`, formerly
-  `github.com/agent-substrate/substrate`). Moving from v0.5.0 is a Substrate reinstall with fresh
-  state, which loses every actor and its checkpoints: v0.6.0 renumbers proto fields with no
-  migration. Re-run the atespace provisioning afterwards, and upgrade `agentsessionsd` together
-  with Substrate; a mismatched pair is unsupported. The worker binaries are `ateworker-gvisor` and
+- The substrate adapter and examples require Substrate v1, pinned to agent-substrate main at
+  `ed0371a1` (module `go.ate.dev/substrate`, formerly `github.com/agent-substrate/substrate`; API
+  `go.ate.dev/substrate/api/ateapi/v1`, proto package `substrate.ateapi.v1`). Moving from v0.5.0
+  or v0.6.0 is a Substrate reinstall with fresh state, which loses every actor and its checkpoints:
+  v0.6.0 renumbered proto fields with no migration, and v1 moved the proto package under the same
+  service names, so an adapter and control plane on either side of the move fail every Control
+  call with `UNIMPLEMENTED`. Re-run the atespace provisioning afterwards, and upgrade
+  `agentsessionsd` together with Substrate; a mismatched pair is unsupported. Install a kind
+  cluster with substrate's `cmd/ate-setup` (`hack/install-ate-kind.sh` and
+  `hack/install-microvm-deps.sh` are gone). The worker binaries are `ateworker-gvisor` and
   `ateworker-microvm`, so a WorkerPool's `workerImage` is
   `ko://go.ate.dev/substrate/cmd/ateworker-<class>`. See
-  [Running on agent-substrate](../../docs/substrate-conformance.md#substrate-v060-asynchronous-suspends-suspend-durability-and-runtime-fallback).
-- Install Substrate v0.6.0 with its default envoy router and list each `agentsessionsd`'s SPIFFE ID
+  [Running on agent-substrate](../../docs/substrate-conformance.md#substrate-v1-asynchronous-suspends-suspend-durability-and-runtime-fallback).
+- Install Substrate with its default envoy router and list each `agentsessionsd`'s SPIFFE ID
   (`spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`) in ate-setup's
   `--ingress-allowed-spiffe-ids`. The substrate build of `agentsessionsd` now reaches harnesses
   over mTLS on the router's :443 (`-atenet-router` and `runtime/substrate.DefaultRouterAddress`
@@ -19,7 +24,7 @@ category: Compatibility
   `clusterTrustBundle` volume as `deploy/substrate/e2e-job.yaml` does. The plaintext h2c path to the
   router's :80 is gone. Tools that port-forward the router from a laptop (`cmd/replay`, the
   agentsuite `demo.sh` replay step, `demo/driver.sh`, `demo/smoke-microvm.sh` and the session
-  lifecycle UI) do not work on v0.6.0 yet; see
+  lifecycle UI) do not work on Substrate v1 yet; see
   [the transport](../../docs/substrate-conformance.md#the-transport-harnesswire-through-atenet-router).
 - ActorTemplates need `spec.resources.limits` (`cpu_millicores` and `memory_bytes`, both
   nonzero) and select their sandbox through the WorkerPool, not a per-template `SandboxConfig`,
@@ -29,12 +34,21 @@ category: Compatibility
   which workers advertise as scheduling capacity; a pool with none admits no sized actor. The
   agentsuite renderer converts a binding's `resources.cpu` and `resources.memory` to these
   limits and refuses fractional quantities such as `0.5` CPU or `1.5Gi` memory: write whole
-  millicores or bytes instead (`500m`, `1536Mi`). See
-  [templates and worker pools](../../docs/substrate-conformance.md#substrate-v060-templates-and-worker-pools).
+  millicores or bytes instead (`500m`, `1536Mi`). Micro-VM workers book each actor's memory limit
+  plus 4MiB and 8MiB per GiB against their limits less a 64Mi reserve; the examples' 1Gi pools
+  still hold one 512Mi actor. See
+  [templates and worker pools](../../docs/substrate-conformance.md#substrate-v1-templates-and-worker-pools).
+- WorkerPools are `ate.dev/v1` (was `v1alpha1`). Substrate v1 refuses an ActorTemplate's
+  `snapshotConfig.storageLocation` unless its `PerTemplateSnapshotLocation` preview gate is on, so
+  the substrate-kind example refuses `SNAPSHOT_LOCATION` and no longer writes one, and the
+  agentsuite renderer refuses a binding's `snapshot.storageLocation`: snapshots go under the
+  cluster's `--snapshot-location`. Both examples install ate-system with only the gVisor class and
+  add the micro-VM `SandboxConfig` with `ate-setup deploy sandboxconfig` when they need it. See
+  [templates and worker pools](../../docs/substrate-conformance.md#substrate-v1-templates-and-worker-pools).
 - Each atespace needs an AccessPolicy that grants the `agentsessionsd` principal the `editor` role.
   Without it Substrate denies every Control call with `PERMISSION_DENIED`; Sessions currently
   reports a Resume denied this way as `INTERNAL`. See
-  [authorization](../../docs/substrate-conformance.md#substrate-v060-authorization-and-atespace-provisioning).
+  [authorization](../../docs/substrate-conformance.md#substrate-v1-authorization-and-atespace-provisioning).
 - After a reinstall and re-provisioning, a session whose latest `SUSPEND` recorded a checkpoint has
   lost it with its actor (an operator delete has the same effect; see
   [a lost actor refuses Resume](../../docs/substrate-conformance.md#a-lost-actor-refuses-resume)):

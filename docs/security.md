@@ -84,7 +84,7 @@ hop is mTLS too.
 
 **On substrate, the host reaches the router over mTLS, and any allowlisted client can drive any
 session's harness.** The substrate backend dials `atenet-router.ate-system.svc:443`, substrate
-v0.6.0's default envoy router, naming the actor in an `ate-target-actor: <atespace>/<actor>` header
+v1's default envoy router, naming the actor in an `ate-target-actor: <atespace>/<actor>` header
 ([the transport](substrate-conformance.md#the-transport-harnesswire-through-atenet-router)). What
 each side checks:
 
@@ -132,14 +132,14 @@ that port-forward the router (the agentsuite demo's replay, `driver.sh`, `smoke-
 session lifecycle UI) are not supported yet
 ([router clients outside the cluster](substrate-conformance.md#router-clients-outside-the-cluster)).
 
-The `ate.dev/api-access=true` label that v0.6.0 requires on the `agentsessionsd` namespace
-([namespace access](substrate-conformance.md#substrate-v060-namespace-access-to-ate-api-server))
+The `ate.dev/api-access=true` label that Substrate v1 requires on the `agentsessionsd` namespace
+([namespace access](substrate-conformance.md#substrate-v1-namespace-access-to-ate-api-server))
 admits every pod in that namespace except worker pods to ate-api-server at the network level.
 ate-api-server still authenticates and authorizes each request (as the policy's comment in substrate
-`manifests/ate-install/ate-system-networkpolicies.yaml` notes): v0.6.0 checks every call against the
-atespace's AccessPolicy, and the daemon needs only `editor` in its atespace
-([authorization](substrate-conformance.md#substrate-v060-authorization-and-atespace-provisioning)).
-So the label widens reachability, not permissions. Keep untrusted workloads out of a labeled namespace.
+`manifests/ate-install/ate-system-networkpolicies.yaml` notes): Substrate checks every call against
+the atespace's AccessPolicy, and the daemon needs only `editor` in its atespace
+([authorization](substrate-conformance.md#substrate-v1-authorization-and-atespace-provisioning)). So
+the label widens reachability, not permissions. Keep untrusted workloads out of a labeled namespace.
 
 Not yet implemented: the harness does not authenticate the host. A planned fix delivers a per-session
 credential at actor creation and has `harnessnode` check it on every Connect, so a harness talks only

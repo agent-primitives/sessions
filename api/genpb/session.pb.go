@@ -1485,7 +1485,9 @@ type ForkRequest struct {
 	// 0 = HEAD. A REQUIRES_MEMORY_SNAPSHOT harness forks by cloning a memory snapshot, which captures
 	// RAM as of now, so it accepts only HEAD; a historical seq is FAILED_PRECONDITION.
 	AtSeq int64 `protobuf:"varint,2,opt,name=at_seq,json=atSeq,proto3" json:"at_seq,omitempty"`
-	Count int32 `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"` // fan-out N children; must be 1..128, else INVALID_ARGUMENT
+	// Number of children to fan out, at most 128; above that is INVALID_ARGUMENT. Zero or negative
+	// forks one child.
+	Count int32 `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`
 	// Unsupported: per-child principals are not enforced. Any supplied identity, including an empty
 	// message, is INVALID_ARGUMENT before placement or mutation. Leave unset to fork.
 	Identity *IdentityRef `protobuf:"bytes,4,opt,name=identity,proto3" json:"identity,omitempty"`
@@ -1493,7 +1495,7 @@ type ForkRequest struct {
 	// empty gives children an empty label map. The parent's annotations are inherited unchanged.
 	Labels map[string]string `protobuf:"bytes,5,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// Display names for the children, in the order they are returned. Length must be 0 or exactly
-	// count, else INVALID_ARGUMENT.
+	// the effective count (1 when count <= 0), else INVALID_ARGUMENT.
 	//
 	// Left unset, a child's name is empty rather than a copy of the parent's. A fork inherits the
 	// parent's workload (project, harness, model) because that is what defines the run, but a name is

@@ -329,9 +329,11 @@ real model on Azure OpenAI. It runs on a Linux host with KVM and Docker (all of 
 cluster, the port-forwards), in two parts:
 
 - `driver.sh setup`, off camera: `up.sh --substrate-only` (its output must say substrate enabled
-  `micro-VM (kata + cloud-hypervisor)`), the micro-VM smoke test (`smoke-microvm.sh`: substrate's
-  counter-microvm actor boots, suspends to a MEMORY snapshot and resumes with its RAM count and UID;
-  it must print `SMOKE OK`), the suite's files against `SOURCE`, `up.sh --templates-only`, an Entra
+  `micro-VM (kata + cloud-hypervisor)`), the micro-VM smoke test (`smoke-microvm.sh`: a micro-VM
+  actor boots, suspends to a MEMORY snapshot and resumes with its RAM count and UID; it must print
+  `SMOKE OK`; on Substrate v1 it refuses before it deploys anything, since it reaches the actor
+  through a router port-forward the envoy router does not admit yet), the suite's files against
+  `SOURCE`, `up.sh --templates-only`, an Entra
   token from the instance metadata endpoint (never printed; only its expiry is kept), `up.sh`, and the
   `agentctl` and `replay` binaries, and the harness binary copied out of the harness image. The
   stateless tier's ActorTemplate is only rendered (`AGENTSUITE_DEMO_SKIP_TEMPLATE=stateless`):

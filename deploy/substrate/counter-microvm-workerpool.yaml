@@ -8,6 +8,9 @@
 # TODO(microvm): a dedicated agentsessions SandboxConfig referencing the same staged assets, so this
 # does not depend on substrate's installer creating one.
 #
+# workerImage is a placeholder: CI substitutes the Substrate release's ateworker-microvm, pinned to
+# its digest by `hack/substrate-image.sh ateworker-microvm`, before applying.
+#
 # The `workload` label is repo-scoped on purpose: worker eligibility is the sandbox class plus a label
 # selector matched over every worker in the cluster with no namespace filter, so a label shared with
 # another micro-VM pool would let the scheduler place our actor there. Keep it unique to this repo.

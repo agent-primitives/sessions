@@ -15,6 +15,12 @@
 # ActorTemplates are substrate API resources, not Kubernetes objects, so the suite creates its own
 # through Control with the harness image built here; the workflow only applies the WorkerPools.
 #
+# Substrate is installed from the images its release publishes (ghcr.io/agent-substrate/substrate,
+# tag SUBSTRATE_VERSION), not built: ate-setup's --image-repo/--image-tag pins each control-plane
+# image to its digest, and hack/substrate-image.sh does the same for the worker image the pools run.
+# The manifests, ate-setup and kubectl-ate still come from a checkout of SUBSTRATE_REF, which must
+# be the commit the tag names. Only this repository's images (harnessnode, the suite) are built.
+#
 # Both tiers run on the micro-VM sandbox class, so the suite exercises the same isolation class in
 # both and covers the micro-VM path end to end. ate-setup stages the class (assets and the
 # `microvm` SandboxConfig) while installing ate-system, before any tier runs. The suite then runs in
@@ -26,8 +32,10 @@
 #      child required to continue at N+1 independently.
 #
 # Scheduled and manual runs add a canary entry that runs the same suite against agent-substrate's
-# main head instead of SUBSTRATE_REF, to surface upstream drift before a bump. It never runs on a
-# pull request, and its failure does not fail the run.
+# newest release tag, installed from that release's images, to surface drift before a bump. It runs
+# only while that tag differs from SUBSTRATE_VERSION, so it skips until a newer release exists, and
+# a tag whose images are not published yet fails it. It never runs on a pull request, and its
+# failure does not fail the run.
 #
 # On a pull request the changes job first diffs the merge commit against the base branch with
 # hack/ci-path-filter.sh. When only paths the suite does not read changed (docs, markdown, the site,
@@ -35,9 +43,8 @@
 # work and the required gate reports success in seconds. Push to main,
 # the nightly schedule and manual runs always run the full suite.
 #
-# Substrate's binaries are built from source at SUBSTRATE_REF (it publishes no images), so the Go
-# build and module caches are kept between runs, and a warm run reuses them instead of compiling
-# from scratch.
+# ate-setup, kubectl-ate and the suite are still compiled here, so the Go build and module caches
+# are kept between runs, and a warm run reuses them instead of compiling from scratch.
 # The durable example has a separate runner and cluster, exercising up.sh, reuse, smoke.sh and
 # down.sh without conformance setup hiding bootstrap bugs. The existing required check combines
 # the pinned conformance suite and the example lifecycle.
@@ -84,6 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       decision: ${{ steps.filter.outputs.decision }}
+      canary: ${{ steps.canary.outputs.version }}
     steps:
       - name: Checkout agentsessions
         if: github.event_name == 'pull_request'
@@ -125,30 +133,51 @@ jobs:
           fi
           echo "decision=${decision}" | tee -a "${GITHUB_OUTPUT}"
 
+      - name: Pick the canary's Substrate release
+        # Scheduled and manual runs only: agent-substrate's newest release tag (an rc sorts before
+        # its release), or nothing when it is the pinned SUBSTRATE_VERSION, so the canary entry runs
+        # only against a newer release. A failed lookup warns and runs no canary.
+        id: canary
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          newest="$(git -c versionsort.suffix=- ls-remote --tags --refs --sort=-v:refname \
+            https://github.com/agent-substrate/substrate 'v*' |
+            sed -n 's#^[0-9a-f]*\trefs/tags/##p' |
+            grep -m1 -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$')" || newest=
+          if [[ -z "${newest}" ]]; then
+            echo "::warning::cannot list agent-substrate's release tags; no canary runs."
+          elif [[ "${newest}" == "${SUBSTRATE_VERSION}" ]]; then
+            echo "The newest Substrate release is the pinned ${SUBSTRATE_VERSION}; no canary runs."
+          else
+            echo "version=${newest}" | tee -a "${GITHUB_OUTPUT}"
+          fi
+
   substrate-conformance-suite:
     # The final substrate-conformance gate combines this suite and the independent example.
-    # The canary (main) exists only on scheduled and manual runs; continue-on-error keeps its
-    # failure out of the run's result.
+    # The canary (release) exists only on scheduled and manual runs, and only when the changes job
+    # found a release newer than the pin; continue-on-error keeps its failure out of the run's
+    # result.
     #
     # The pinned entry and the canary share the v1 layout (go.ate.dev/substrate/api/ateapi/v1,
-    # cmd/ate-setup --kind), so the canary fails only on drift past the pin. It has not run green
-    # yet; until it does, read its result in the job list. continue-on-error hides it from the
-    # run's status and notifications.
+    # cmd/ate-setup --kind --image-repo), so the canary fails only on drift past the pin. It has not
+    # run green yet; until it does, read its result in the job list. continue-on-error hides it from
+    # the run's status and notifications.
     # TODO(canary): drop continue-on-error once a nightly canary is green, so new drift turns the
     # nightly run red (it still never runs on a pull request).
-    name: ${{ matrix.substrate == 'main' && 'substrate-conformance (substrate main)' || 'substrate-conformance suite' }}
+    name: ${{ matrix.substrate == 'release' && 'substrate-conformance (newest substrate release)' || 'substrate-conformance suite' }}
     needs: changes
     # Runs even when the changes job fails, so a filter failure cannot silently skip coverage.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.substrate == 'main' }}
+    continue-on-error: ${{ matrix.substrate == 'release' }}
     strategy:
       fail-fast: false
       matrix:
         substrate: >-
           ${{ fromJSON(
             (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-            && '["pinned", "main"]' || '["pinned"]'
+            && needs.changes.outputs.canary != ''
+            && '["pinned", "release"]' || '["pinned"]'
           ) }}
     steps:
       - name: Fail when the path filter failed
@@ -205,24 +234,36 @@ jobs:
         uses: ko-build/setup-ko@v0.10
 
       - name: Clone agent-substrate
-        # The pinned commit, or main's head on the canary entry. The commit actually checked out is
-        # the step's `commit` output, which the cache key and the canary's adapter build use.
+        # The release whose images are installed (`version`: SUBSTRATE_VERSION, or the canary's
+        # newer tag) and the commit its tag names (`commit`), for the manifests and tools. The
+        # pinned entry refuses a tag that no longer names SUBSTRATE_REF: the images would not match
+        # the manifests checked out here.
         if: needs.changes.outputs.decision != 'skip'
         id: substrate
         env:
           SUBSTRATE: ${{ matrix.substrate }}
+          CANARY_VERSION: ${{ needs.changes.outputs.canary }}
         run: |
+          version="${SUBSTRATE_VERSION}"
+          [[ "${SUBSTRATE}" != release ]] || version="${CANARY_VERSION}"
           git clone https://github.com/agent-substrate/substrate _substrate
-          if [[ "${SUBSTRATE}" != main ]]; then
-            git -C _substrate checkout "${SUBSTRATE_REF}"
+          commit="$(git -C _substrate rev-parse --verify "refs/tags/${version}^{commit}")"
+          if [[ "${SUBSTRATE}" != release && "${commit}" != "${SUBSTRATE_REF}" ]]; then
+            echo "::error::tag ${version} names ${commit}, not SUBSTRATE_REF ${SUBSTRATE_REF}."
+            exit 1
           fi
-          git -C _substrate log -1 --format='agent-substrate %H (%cd)'
-          echo "commit=$(git -C _substrate rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git -C _substrate -c advice.detachedHead=false checkout "${commit}"
+          git -C _substrate log -1 --format="agent-substrate ${version} %H (%cd)"
+          {
+            echo "version=${version}"
+            echo "commit=${commit}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Restore the Go build and module caches
-        # ko builds every substrate binary from source, which is most of a cold run. Keyed on the
-        # substrate commit and the Go version (what decides substrate's builds) plus our go.sum
-        # files; the prefixes fall back to the newest cache for the same commit, then Go version.
+        # ate-setup and kubectl-ate are compiled from the substrate checkout, the suite from this
+        # one. Keyed on the substrate commit and the Go version (what decides substrate's builds)
+        # plus our go.sum files; the prefixes fall back to the newest cache for the same commit,
+        # then Go version.
         if: needs.changes.outputs.decision != 'skip'
         id: go-cache
         uses: actions/cache/restore@v6
@@ -264,12 +305,16 @@ jobs:
         # soon as a rollout is ready, so this costs nothing on a healthy cluster.
         # The default envoy router admits only the allowlisted SPIFFE IDs: here the suite's Job
         # (deploy/substrate/e2e-job.yaml), the only router client this cluster runs.
+        # --image-repo/--image-tag install the release's published images; ate-setup runs no ko.
         if: needs.changes.outputs.decision != 'skip'
         working-directory: _substrate
+        env:
+          SUBSTRATE_VERSION: ${{ steps.substrate.outputs.version }}
         run: |
           hack/create-kind-cluster.sh
           go run ./cmd/ate-setup --kind --rollout-timeout=10m \
             --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-agentsessions/sa/substrate-e2e \
+            --image-repo=ghcr.io/agent-substrate/substrate --image-tag="${SUBSTRATE_VERSION}" \
             deploy ate-system
 
       - name: Wait for the disk cleanup
@@ -291,12 +336,13 @@ jobs:
         run: echo "HARNESS_IMAGE=$(ko build ./cmd/harnessnode)" >> "$GITHUB_ENV"
 
       - name: Apply the echo micro-VM WorkerPool
-        # Resolve substrate's ateworker-microvm in its own module once; the counter pool below reuses
-        # it. Only for the node's platform: substrate's .ko.yaml also lists linux/arm64, which would
-        # cross-compile a second, unused image.
+        # The release's ateworker-microvm, pinned to its digest once; the counter pool below reuses
+        # it.
         if: needs.changes.outputs.decision != 'skip'
+        env:
+          SUBSTRATE_VERSION: ${{ steps.substrate.outputs.version }}
         run: |
-          ATEWORKER_MV_IMG="$(cd _substrate && ko build --platform=linux/amd64 ./cmd/ateworker-microvm)"
+          ATEWORKER_MV_IMG="$(hack/substrate-image.sh ateworker-microvm)"
           echo "ATEWORKER_MV_IMG=${ATEWORKER_MV_IMG}" >> "$GITHUB_ENV"
           kubectl --context kind-kind apply -f deploy/substrate/namespace.yaml
           sed -e "s#ko://go.ate.dev/substrate/cmd/ateworker-microvm#${ATEWORKER_MV_IMG}#" \
@@ -313,15 +359,15 @@ jobs:
           (cd _substrate && go build -o "${RUNNER_TEMP}/kubectl-ate" ./cmd/kubectl-ate)
           KUBECTL_ATE="${RUNNER_TEMP}/kubectl-ate" hack/provision-e2e-access.sh
 
-      - name: Build the adapter against substrate main (canary only)
-        # The lockstep rule above applies to the canary too: the cluster runs main's head, so the
-        # suite's client must come from the same commit. This edits the runner's checkout only.
-        if: needs.changes.outputs.decision != 'skip' && matrix.substrate == 'main'
+      - name: Build the adapter against the newest substrate release (canary only)
+        # The lockstep rule above applies to the canary too: the cluster runs the newer release, so
+        # the suite's client must come from the same tag. This edits the runner's checkout only.
+        if: needs.changes.outputs.decision != 'skip' && matrix.substrate == 'release'
         working-directory: integrations/substrate
         env:
-          SUBSTRATE_COMMIT: ${{ steps.substrate.outputs.commit }}
+          SUBSTRATE_VERSION: ${{ steps.substrate.outputs.version }}
         run: |
-          go get "go.ate.dev/substrate@${SUBSTRATE_COMMIT}"
+          go get "go.ate.dev/substrate@${SUBSTRATE_VERSION}"
           go mod tidy
 
       - name: Build the conformance test binary image
@@ -337,8 +383,8 @@ jobs:
 
       - name: Save the Go build and module caches
         # After the last build, so a test failure below still keeps them. Pinned entry only, and
-        # only when the exact key missed: the canary resolves a new commit every night, and saving
-        # each one would evict the cache pull requests restore.
+        # only when the exact key missed: the canary's release changes with each new tag, and
+        # saving each one would evict the cache pull requests restore.
         if: >-
           needs.changes.outputs.decision != 'skip'
           && matrix.substrate == 'pinned'
@@ -440,7 +486,7 @@ jobs:
         run: go test -race -shuffle=on ./...
 
       - name: Free runner disk space
-        # This dedicated runner needs room for a cold Substrate build and micro-VM assets.
+        # This dedicated runner needs room for the Substrate release images and micro-VM assets.
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL

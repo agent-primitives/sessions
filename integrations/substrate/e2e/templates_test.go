@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/api/ateapi/v1"
 )
 
 // ActorTemplates are substrate API resources living in an atespace, not Kubernetes objects, so the
@@ -40,7 +40,7 @@ func harnessContainer(kind string) *atepb.Container {
 	return c
 }
 
-// templateResources is every template's compute size. substrate v0.6.0 requires both limits on a
+// templateResources is every template's compute size. substrate v1 requires both limits on a
 // template: the scheduler books them against worker capacity and boots a micro-VM at that size.
 var templateResources = &atepb.ResourceRequirements{Limits: &atepb.Resources{
 	CpuMillicores: 1000,
@@ -49,7 +49,7 @@ var templateResources = &atepb.ResourceRequirements{Limits: &atepb.Resources{
 
 // tierSandbox is where one tier's template runs: the sandbox class ("microvm" or "gvisor") and the
 // `workload` label of the WorkerPool that serves it (deploy/substrate/<tier>-<class>-workerpool.yaml).
-// substrate v0.6.0 has no per-template sandbox config: the class is whatever the selected pool's
+// substrate v1 has no per-template sandbox config: the class is whatever the selected pool's
 // worker runs, so the pool label is what pins it.
 type tierSandbox struct {
 	class string
@@ -64,7 +64,7 @@ type tierSandbox struct {
 // same reason: the template cannot carry it, so the tier would run on the pool's config instead.
 func sandboxFor(prefix, tier string) (tierSandbox, error) {
 	if v := os.Getenv(prefix + "_SANDBOX_CONFIG"); v != "" {
-		return tierSandbox{}, fmt.Errorf("%s_SANDBOX_CONFIG=%q: substrate v0.6.0 templates name no SandboxConfig; unset it and set configRef on the tier's WorkerPool sandboxClasses entry instead", prefix, v)
+		return tierSandbox{}, fmt.Errorf("%s_SANDBOX_CONFIG=%q: substrate templates name no SandboxConfig; unset it and set configRef on the tier's WorkerPool sandboxClasses entry instead", prefix, v)
 	}
 	key := prefix + "_SANDBOX_CLASS"
 	switch v := env(key, "microvm"); v {
@@ -89,10 +89,9 @@ func templateSpec(t *testing.T, atespace, name, prefix, tier, harnessKind string
 		WorkerSelector: &atepb.Selector{MatchLabels: map[string]string{"workload": sb.pool}},
 		Containers:     []*atepb.Container{harnessContainer(harnessKind)},
 		SnapshotConfig: &atepb.SnapshotConfig{
+			// No StorageLocation: substrate v1 rejects one unless the PerTemplateSnapshotLocation
+			// preview gate is on, so snapshots go under the cluster's --snapshot-location.
 			PreferredFidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
-			// A preview field at v0.6.0 (PerTemplateSnapshotLocation): accepted but ignored while the
-			// gate is off, so snapshots go under the cluster's --snapshot-location.
-			StorageLocation: env("SNAPSHOT_LOCATION", "gs://ate-snapshots/agentsessions/") + name + "/",
 		},
 		Resources: templateResources,
 	}

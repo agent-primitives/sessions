@@ -9,7 +9,7 @@
 # build ateworker-gvisor with ko and substitute its digest before applying (see the no-KVM recipe in
 # docs/substrate-conformance.md).
 
-apiVersion: ate.dev/v1alpha1
+apiVersion: ate.dev/v1
 kind: WorkerPool
 metadata:
   name: counter-gvisor

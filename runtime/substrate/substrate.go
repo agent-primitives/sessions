@@ -166,7 +166,7 @@ type ActorInfo struct {
 }
 
 // ControlClient is the subset of agent-substrate's ateapi.Control gRPC that the backend uses. A
-// real substrate deployment implements this over pkg/proto/ateapipb; keeping it an interface here
+// real substrate deployment implements this over api/ateapi/v1; keeping it an interface here
 // is what keeps agentsessions free of a substrate dependency.
 type ControlClient interface {
 	// CreateActor creates a SUSPENDED actor, borrowing the template's current golden tag as its
@@ -609,7 +609,7 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 // is refused with api.ErrMemoryStateLost before suspending, so its RAM-less state is never
 // recorded as the session's checkpoint.
 //
-// That check and the suspend are separate calls, and substrate's SuspendActor (through v0.6.0,
+// That check and the suspend are separate calls, and substrate's SuspendActor (through v1,
 // which added only a durability mode) takes no precondition (no UID, generation or worker), so
 // another caller can suspend the checked actor and resume it on a worker that cannot restore its
 // memory before this suspend captures it. The capture then holds RAM that is not the session's, and
@@ -962,7 +962,7 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (api.Incarna
 // api.ErrMemoryStateLost wrapped in ErrSnapshotNotRestorable, and the actor is left running and not
 // handed out (see resumedNotHandedOut). This sees only what the response reports. It is not a
 // precondition on the resume itself, which substrate's ResumeActorRequest (the actor reference only,
-// through v0.6.0) cannot carry.
+// through v1) cannot carry.
 func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, recorded func() (string, error)) (inc api.Incarnation, err error) {
 	ctx, finish := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "restore_compute",
 		"actor", ref.Local,

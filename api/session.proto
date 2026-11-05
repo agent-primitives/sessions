@@ -469,8 +469,9 @@ service Sessions {
   // A STATELESS_REPLAY fork leaves the parent untouched. Forking a REQUIRES_MEMORY_SNAPSHOT
   // harness, which only forks at the head, first checkpoints the parent once for the whole fan-out
   // (it suspends, and a SUSPEND event lands on its chain) and clones every child from that
-  // snapshot. The checkpoint stays committed if the fan-out then fails: the parent stays suspended
-  // (its next Exec or Resume restores it), and a retry must fork at the new head (at_seq <= 0, or
-  // the new head's seq).
+  // snapshot. If the fan-out then fails, the checkpoint is not rolled back and the parent is not
+  // resumed automatically. A pending approval keeps it parked, and a turn can run on it while the
+  // failed children are stopped. A retry must fork at the new head (at_seq <= 0, or the new head's
+  // seq).
   rpc Fork(ForkRequest) returns (ForkResponse);
 }

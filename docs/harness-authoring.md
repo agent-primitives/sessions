@@ -418,8 +418,11 @@ like an executor error.
 
 Set `MediationRequiresApproval` and a nonempty call ID/idempotency key before `sink.ToolCall`. Never run
 the gated effect inside the harness. The host owns `TOOL_CALL`, `APPROVAL_REQUEST`, the later
-`APPROVAL_RESULT`, and the receipt for `STATELESS_REPLAY` and `REQUIRES_MEMORY_SNAPSHOT` harnesses; a
-harness that declares no tier is refused before the effect. An
+`APPROVAL_RESULT`, and the receipt for `STATELESS_REPLAY` and `REQUIRES_MEMORY_SNAPSHOT` harnesses.
+An in-process harness with an empty or unknown `Resumability` is refused before the effect
+(`ErrApprovalUnavailable`). Over the wire an omitted or unknown tier is read as `STATELESS_REPLAY`,
+the proto default, so such a wire harness gets the stateless gate; a Go harness served through
+`harnesswire.NewServer` with an empty or unknown tier is advertised as `STATELESS_REPLAY` too. An
 unresolved call returns a typed `*api.ApprovalParkedError`: stop Run and propagate it, with no END or
 later model/tool/sink operation. The Go bridge validates the host's session/execution/call/request
 control tuple, sends exactly one correlated `EVENT_PARKED` acknowledgement, and closes without END;

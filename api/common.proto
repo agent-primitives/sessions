@@ -130,8 +130,9 @@ enum Mediation {
   MEDIATION_CONTROLLER_MEDIATED = 2; // host/gateway executes (host-enforced WAL; trustless)
   // Host-owned durable approval gate for STATELESS_REPLAY and REQUIRES_MEMORY_SNAPSHOT
   // harnesses. The harness emits a tool call, then awaits a decision/receipt or park control
-  // frame; it never executes the effect itself. A harness declaring no tier fails closed before
-  // the effect.
+  // frame; it never executes the effect itself. An in-process harness with an empty or unknown
+  // tier fails closed before the effect. A wire harness that omits its tier or sends an unknown
+  // one is read as STATELESS_REPLAY, the Resumability default, and gets the gate.
   MEDIATION_REQUIRES_APPROVAL = 3;
 }
 

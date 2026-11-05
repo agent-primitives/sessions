@@ -2,8 +2,8 @@
 # Prints the root-module release tags goreleaser must use, as GORELEASER_CURRENT_TAG and
 # GORELEASER_PREVIOUS_TAG lines for $GITHUB_ENV.
 #
-# The repository also tags the nested integrations/substrate module (integrations/substrate/vX.Y.Z,
-# which Go requires for a nested module). Left to itself, goreleaser takes the nearest tag reachable
+# The repository also tags the nested integrations/* modules (integrations/substrate/vX.Y.Z, which
+# Go requires for a nested module). Left to itself, goreleaser takes the nearest tag reachable
 # from HEAD as the current tag and the nearest one before it as the previous tag, whichever module
 # it belongs to. An adapter tag then becomes the version, the archive names and the image tag, where
 # its `/` is not a valid image tag, and bounds the changelog range. goreleaser's OSS edition cannot

@@ -919,6 +919,8 @@ such as a transcript it reloads on the next turn. Such a harness is
 gives up, for the calls it makes itself, what depends on the host making the call, so choose it
 deliberately. The class is not declared in `Describe`: the host cannot see a model call that does
 not reach it, so say which class your harness is in its documentation.
+[`integrations/claudecode`](../integrations/claudecode) is an unmediated harness that runs Claude
+Code, in its own module so the root module names no model provider.
 
 What is different:
 
@@ -943,7 +945,9 @@ What is different:
   `sink.Output`.
 - **For the calls you make yourself, you give up replay, model-call audit and host-bounded
   spend.** Reconstructing your turns would call the provider again, so reconstruction replay is not
-  supported, though the journal stays readable and verifiable. The journal records your reports,
+  supported, though the journal stays readable and verifiable. Nothing enforces that yet:
+  `controller.Replay` does not know your class and re-runs your harness if pointed at it, so
+  document that it must not be. The journal records your reports,
   not what the provider received or returned. The host's model allowlist does not apply to those
   calls, and the host does not check what they call against `Start.Model`; the egress and the
   provider account are what bound their spend. A call you make through `sink.Model` is still

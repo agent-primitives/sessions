@@ -59,7 +59,9 @@ jobs:
       - run: go test -race ./...
 
       - name: core links no backend vendor
-        run: test "$(go list -deps ./... | grep -c agent-substrate)" = "0"
+        run: |
+          test "$(go list -deps ./... | grep -c agent-substrate)" = "0"
+          test "$(go list -deps ./... | grep -c '^github.com/agent-primitives/sessions/integrations/')" = "0"
 
       - name: integrity golden self-check
         run: python3 hack/verify_chain.py --golden
@@ -105,7 +107,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # The current tag is the pushed one, and the previous tag the root-module release before it,
-      # so an integrations/substrate/vX.Y.Z tag can never become the version, the image tag or the
+      # so an integrations/<module>/vX.Y.Z tag can never become the version, the image tag or the
       # start of the changelog range. See hack/release-tags.sh.
       - name: pin goreleaser to root-module tags
         # Captured first: the default run shell has no pipefail, so a pipe would hide a failure.

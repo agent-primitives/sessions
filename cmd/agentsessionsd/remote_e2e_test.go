@@ -29,7 +29,8 @@ import (
 )
 
 // harnessnodeServesUnix lists the platforms where cmd/harnessnode serves a unix socket; it mirrors
-// the build constraint on cmd/harnessnode/listen_unix.go. Elsewhere listen_other.go refuses it.
+// the build constraint on internal/harnessnode/listen_unix.go. Elsewhere listen_other.go refuses
+// it.
 var harnessnodeServesUnix = map[string]bool{
 	"linux": true, "darwin": true, "freebsd": true, "netbsd": true, "openbsd": true, "dragonfly": true, "illumos": true,
 }

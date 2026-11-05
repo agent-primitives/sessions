@@ -9,6 +9,8 @@
 #
 # Usage: hack/substrate-image.sh <image>    (for example ateworker-microvm)
 set -euo pipefail
+# shellcheck source=hack/substrate-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/substrate-lib.sh"
 
 REPO=ghcr.io/agent-substrate/substrate
 
@@ -24,10 +26,7 @@ fail() {
 image="$1"
 
 version="${SUBSTRATE_VERSION:-}"
-if [[ -z "${version}" ]]; then
-	workflow="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.github/workflows/substrate-e2e.yml"
-	version="$(sed -n 's/^  SUBSTRATE_VERSION: //p' "${workflow}")"
-fi
+[[ -n "${version}" ]] || version="$(substrate_pin SUBSTRATE_VERSION)"
 [[ "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] ||
 	fail "SUBSTRATE_VERSION '${version}' is not a release tag (vX.Y.Z or vX.Y.Z-pre)"
 

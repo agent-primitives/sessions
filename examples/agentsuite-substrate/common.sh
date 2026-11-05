@@ -2,6 +2,8 @@
 # shellcheck shell=bash disable=SC2034 # the variables are for the scripts that source this file
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${HERE}/../.." && pwd)"
+# shellcheck source=hack/substrate-lib.sh
+source "${ROOT}/hack/substrate-lib.sh"
 TMP="${TMPDIR:-/tmp}"
 WORK="${AGENTSUITE_DEMO_WORK:-${TMP%/}/agentsuite-demo}"
 # The demo's cluster is named by its own variable. KIND_CLUSTER_NAME is what substrate's hack/
@@ -141,7 +143,7 @@ K=(kubectl --context "kind-${CLUSTER}" --kubeconfig "${KUBECONFIG}")
 ATE=("${WORK}/bin/kubectl-ate" --context "kind-${CLUSTER}" --kubeconfig "${KUBECONFIG}")
 # The substrate release the adapter's go.mod pins, whose images the cluster runs, and the commit its
 # tag names, whose manifests and tools up.sh uses.
-SUBSTRATE_VERSION="$(sed -n 's/^  SUBSTRATE_VERSION: //p' "${ROOT}/.github/workflows/substrate-e2e.yml")"
-SUBSTRATE_REF="$(sed -n 's/^  SUBSTRATE_REF: //p' "${ROOT}/.github/workflows/substrate-e2e.yml")"
+SUBSTRATE_VERSION="$(substrate_pin SUBSTRATE_VERSION)"
+SUBSTRATE_REF="$(substrate_pin SUBSTRATE_REF)"
 SUBSTRATE="${SUBSTRATE_DIR:-${WORK}/substrate}"
 mkdir -p "${WORK}/bin" "${STATE}"

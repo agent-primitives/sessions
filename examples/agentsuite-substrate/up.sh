@@ -41,8 +41,14 @@ case "${SKIP_TEMPLATE}" in
 esac
 
 step() { printf '\n==> %s\n' "$*"; }
+# die and progress are what hack/substrate-lib.sh (sourced by common.sh) reports through.
+die() {
+	echo "$*" >&2
+	exit 1
+}
+progress() { echo "$*"; }
 
-for tool in docker kind ko go git python3 kubectl curl; do
+for tool in docker kind ko go git python3 jq kubectl curl; do
 	command -v "${tool}" >/dev/null || {
 		echo "missing ${tool}" >&2
 		exit 1
@@ -279,22 +285,16 @@ if [[ "${stage}" == absent || "${stage}" == incomplete ]]; then
 	stage=created
 fi
 kind export kubeconfig --name "${CLUSTER}" --kubeconfig "${KUBECONFIG}"
-# ate-setup's global flags for this cluster, run from the substrate checkout.
-ATE_SETUP=(env -u GCE_REGION -u CLUSTER_LOCATION -u NETWORK -u SUBNETWORK -u MEMORYSTORE_INSTANCE
-	-u PROJECT_ID go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}"
-	--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}"
-	--image-repo=ghcr.io/agent-substrate/substrate --image-tag="${SUBSTRATE_VERSION}")
 if [[ "${stage}" == created ]]; then
 	step "ate-system (ate-setup deploy ate-system)"
-	# --image-repo/--image-tag install the release's images, pinned to their digests, which the
-	# release publishes for amd64 and arm64; ate-setup builds none of them. The GCP variables are
-	# unset so a shell configured for GKE cannot redirect the install. The default envoy router
-	# admits only mTLS clients whose SPIFFE ID it allowlists: here the agentsessionsd ServiceAccount
-	# both daemon tiers run as (deploy/agentsessionsd.yaml). Only the gVisor class is installed
-	# here, so a host without KVM skips the micro-VM assets; the micro-VM step below adds that class.
-	(cd "${SUBSTRATE}" && "${ATE_SETUP[@]}" --credential-provider='{"name":"k8s.io"}' \
+	# kind_ate_setup (hack/substrate-lib.sh) installs the release's images, published for amd64 and
+	# arm64. The default envoy router admits only mTLS clients whose SPIFFE ID it allowlists: here the
+	# agentsessionsd ServiceAccount both daemon tiers run as (deploy/agentsessionsd.yaml). Only the
+	# gVisor class is installed here, so a host without KVM skips the micro-VM assets; the micro-VM
+	# step below adds that class.
+	kind_ate_setup "${SUBSTRATE}" "${CLUSTER}" "${KUBECONFIG}" "${SUBSTRATE_VERSION}" \
 		--rollout-timeout=10m --ingress-allowed-spiffe-ids="${ROUTER_CLIENT_ID}" \
-		deploy ate-system --setup-csi=none --sandbox-classes=gvisor)
+		deploy ate-system --setup-csi=none --sandbox-classes=gvisor
 	echo "${id} installed ${SUBSTRATE_REF} envoy" >"${SETUP}"
 else
 	step "reusing kind cluster ${CLUSTER}"
@@ -311,8 +311,8 @@ if [[ "${SANDBOX}" == microvm ]] && ! "${K[@]}" get sandboxconfig microvm >/dev/
 	step "micro-VM sandbox class: kata assets and the microvm SandboxConfig (ate-setup deploy sandboxconfig)"
 	# Run once per cluster: assets already assembled in the substrate checkout are reused. On Kind
 	# ate-setup assembles them for the architecture it runs on, which must be the node's.
-	(cd "${SUBSTRATE}" && "${ATE_SETUP[@]}" --credential-provider='{"name":"k8s.io"}' \
-		deploy sandboxconfig --sandbox-classes=microvm)
+	kind_ate_setup "${SUBSTRATE}" "${CLUSTER}" "${KUBECONFIG}" "${SUBSTRATE_VERSION}" \
+		deploy sandboxconfig --sandbox-classes=microvm
 fi
 
 step "${SANDBOX} WorkerPool ${POOL}"
@@ -347,29 +347,13 @@ for tier in stateless memory; do
 	cat "${out}/harness-registration.json"
 done
 
-"${ATE[@]}" get atespace "${ATESPACE}" >/dev/null 2>&1 || "${ATE[@]}" create atespace "${ATESPACE}"
-
 # substrate authorizes every call by the atespace's AccessPolicy. Both agentsessionsd tiers
 # run as the agentsessionsd ServiceAccount (deploy/namespace.yaml), which needs editor on the
-# atespace to create, suspend, resume and delete actors. A missing policy is created with that one
-# binding; a policy that already grants it editor or owner is left alone; any other policy is
-# refused rather than overwritten, since it may carry bindings someone else relies on.
+# atespace to create, suspend, resume and delete actors. ensure_atespace_editor (hack/substrate-lib.sh)
+# creates a missing atespace and policy, and refuses a policy that does not grant it, rather than
+# overwrite bindings someone else relies on.
 step "AccessPolicy ${ATESPACE}: editor for ${DAEMON_PRINCIPAL}"
-grants_daemon() {
-	python3 -c 'import json, sys
-p = json.load(sys.stdin)
-sys.exit(0 if any(b.get("role") in ("editor", "owner") and sys.argv[1] in b.get("members", []) for b in p.get("bindings") or []) else 1)' "${DAEMON_PRINCIPAL}"
-}
-policy="$("${ATE[@]}" get access-policy -a "${ATESPACE}" -o json)"
-if [[ -z "${policy}" ]]; then
-	printf 'bindings:\n- role: editor\n  members:\n  - %s\n' "${DAEMON_PRINCIPAL}" |
-		"${ATE[@]}" create access-policy -a "${ATESPACE}" -f -
-	policy="$("${ATE[@]}" get access-policy -a "${ATESPACE}" -o json)"
-fi
-if ! grants_daemon <<<"${policy}"; then
-	echo "AccessPolicy ${ATESPACE} does not grant ${DAEMON_PRINCIPAL} editor; add it with: kubectl ate get access-policy -a ${ATESPACE} -o yaml >policy.yaml, add the member to an editor binding, then kubectl ate update access-policy -a ${ATESPACE} -f policy.yaml; the policy was not changed" >&2
-	exit 1
-fi
+ensure_atespace_editor "${ATESPACE}" "${DAEMON_PRINCIPAL}"
 for out in "${STATE}/render" "${STATE}/render-memory"; do
 	TEMPLATE="$(cat "${out}/template-name")"
 	tier=stateless

@@ -94,7 +94,7 @@ is named `triage-memory`, is `REQUIRES_MEMORY_SNAPSHOT`, and is applied as
 
 ## Requirements
 
-- docker with `buildx`, kind, kubectl, ko, go 1.27, git, python3 and curl.
+- docker with `buildx`, kind, kubectl, ko, go 1.27, git, python3, jq and curl.
 - The agent-substrate release `.github/workflows/substrate-e2e.yml` pins (`SUBSTRATE_VERSION`).
   `up.sh` installs that release's images from `ghcr.io/agent-substrate/substrate`, each pinned to its
   digest, and builds none of substrate's. Its kind lane, `ate-setup` and `kubectl-ate` come from a

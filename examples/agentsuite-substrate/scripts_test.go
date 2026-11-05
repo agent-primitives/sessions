@@ -223,18 +223,22 @@ esac
 	if err := os.MkdirAll(filepath.Join(s.work, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// get access-policy answers per STUB_POLICY: granted (default) lists the daemon as editor, absent
-	// reports no policy until create access-policy records one, foreign lists only someone else.
+	// The atespace exists. get access-policy answers per STUB_POLICY: granted (default) lists the daemon
+	// as editor, absent reports no policy until create access-policy records one, foreign lists only
+	// someone else. Like kubectl-ate, create prints the resource it created.
 	stub(t, filepath.Join(s.work, "bin"), "kubectl-ate", log+`
 granted='{"bindings":[{"role":"editor","members":["user:system:serviceaccount:agentsuite-demo:agentsessionsd"]}]}'
 case " $* " in
+*" get atespace agentsuite-demo "*) echo '{"metadata":{"name":"agentsuite-demo"}}' ;;
 *" get access-policy "*)
 	case "${STUB_POLICY:-granted}" in
 	absent) if [ -e "$STUB_DIR/policy-created" ]; then echo "$granted"; else echo "agentsuite-demo has no access policy" >&2; fi ;;
 	foreign) echo '{"bindings":[{"role":"editor","members":["user:someone"]},{"role":"viewer","members":["user:system:serviceaccount:agentsuite-demo:agentsessionsd"]}]}' ;;
 	*) echo "$granted" ;;
 	esac ;;
-*" create access-policy "*) cat >"$STUB_DIR/policy-created" ;;
+*" create access-policy "*)
+	cat >"$STUB_DIR/policy-created"
+	echo "$granted" ;;
 *" -o json "*) echo '{"status": {"goldenSnapshotStatus": {"goldenTag": {"name": "golden-1"}}}}' ;;
 esac
 `)
@@ -2162,8 +2166,9 @@ exec "$@"
 	}
 }
 
-// up.sh grants agentsessionsd editor on the atespace only when it has no AccessPolicy, keeps a
-// policy that already grants it, and refuses one that does not rather than overwrite it.
+// up.sh has hack/substrate-lib.sh's ensure_atespace_editor, which hack/substrate-lib-test.sh tests,
+// grant the daemon's principal editor in the demo's atespace: it keeps a policy that already grants
+// it and goes on to the template, and stops before any template when it refuses the policy.
 func TestUpEnsuresTheDaemonsAccessPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		policy, wantOut string
@@ -2172,7 +2177,7 @@ func TestUpEnsuresTheDaemonsAccessPolicy(t *testing.T) {
 	}{
 		{policy: "granted"},
 		{policy: "absent", wantCreate: true},
-		{policy: "foreign", wantCode: 1, wantOut: "AccessPolicy agentsuite-demo does not grant user:system:serviceaccount:agentsuite-demo:agentsessionsd editor"},
+		{policy: "foreign", wantCode: 1, wantOut: "atespace agentsuite-demo has an access policy that does not grant user:system:serviceaccount:agentsuite-demo:agentsessionsd editor"},
 	} {
 		t.Run(tc.policy, func(t *testing.T) {
 			s := newStubs(t)
@@ -2186,8 +2191,8 @@ func TestUpEnsuresTheDaemonsAccessPolicy(t *testing.T) {
 			if got := strings.Contains(calls, "create access-policy -a agentsuite-demo -f -"); got != tc.wantCreate {
 				t.Fatalf("create access-policy called=%v, want %v; calls:\n%s", got, tc.wantCreate, calls)
 			}
-			if tc.wantCode != 0 && strings.Contains(calls, "create actor-template") {
-				t.Errorf("a refused policy must stop before any template is created; calls:\n%s", calls)
+			if templated := strings.Contains(calls, " actor-template "); templated != (tc.wantCode == 0) {
+				t.Errorf("actor-template step reached=%v, want it only after the policy is accepted; calls:\n%s", templated, calls)
 			}
 			if !tc.wantCreate {
 				return

@@ -224,6 +224,12 @@ jobs:
         if: needs.changes.outputs.decision != 'skip'
         run: hack/substrate-image-test.sh
 
+      # The atespace and access-policy provisioning hack/provision-e2e-access.sh and the substrate
+      # examples share.
+      - name: substrate script helpers self-test
+        if: needs.changes.outputs.decision != 'skip'
+        run: hack/substrate-lib-test.sh
+
   integrations:
     # `integrations/substrate` is a SEPARATE Go module, so the root job's ./... never reaches it and a
     # break there would otherwise surface only in the nightly substrate-e2e run. Compiling and testing

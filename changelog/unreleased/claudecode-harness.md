@@ -26,3 +26,10 @@ category: Added
   session that has run a turn creates a child, and every turn on the child fails with the same
   error, `claudecode: session has earlier turns but this harness holds no state for it`; a follow-up
   issue tracks it. `controller.Replay` does not refuse this harness and must not be pointed at it.
+- `integrations/claudecode/cmd/harnessnode`: a harness server that serves only this harness, built
+  on the root module's `harnessnode` and reading the same server settings. `HARNESS_KIND` must be
+  unset or `claudecode`. The harness is configured by `HARNESS_CLAUDE_WORKDIR` and
+  `HARNESS_CLAUDE_PERMISSION_MODE` (both required), and optionally `HARNESS_CLAUDE_BIN`,
+  `HARNESS_MODEL`, `HARNESS_CLAUDE_MAX_TURNS`, `HARNESS_CLAUDE_MAX_BUDGET_USD`,
+  `HARNESS_CLAUDE_ENV_ALLOWLIST` (further variable names `claude` receives) and
+  `HARNESS_CLAUDE_ALLOW_BYPASS_PERMISSIONS` (the second opt-in `bypassPermissions` requires).

@@ -527,11 +527,11 @@ label is not authorization: see
 
 ### Substrate v1: asynchronous suspends, suspend durability and runtime fallback
 
-The adapter pins agent-substrate main at `ed0371a1` (`SUBSTRATE_REF` in
-`.github/workflows/substrate-e2e.yml`; Go pseudo-version `v0.6.1-0.20261105021627-ed0371a15f6f`),
-module `go.ate.dev/substrate`, API package `substrate.ateapi.v1`
-(`go.ate.dev/substrate/api/ateapi/v1`). Its `api/ateapi/v1/ateapi.proto` is the same as the
-`v1.0.0-rc.3` tag's. v1 has no pause: no `PauseActor` RPC and no `PAUSED` or `PAUSING` actor state.
+The adapter pins the agent-substrate release `v1.0.0` (`SUBSTRATE_VERSION` in
+`.github/workflows/substrate-e2e.yml`, with its commit `b34fbee7` as `SUBSTRATE_REF`), module
+`go.ate.dev/substrate`, API package `substrate.ateapi.v1` (`go.ate.dev/substrate/api/ateapi/v1`).
+The tag is on agent-substrate's `release-1.0` branch, not main. v1 has no pause: no `PauseActor`
+RPC and no `PAUSED` or `PAUSING` actor state.
 An actor is left `SUSPENDED` without a durable checkpoint by an asynchronous suspend: one the worker
 requests (`cmd/ateapi/internal/workerservice/suspend.go` sends no options) or one from a client that
 leaves `SuspendOptions.mode` unset. It returns once the capture is on the node. Every generation a

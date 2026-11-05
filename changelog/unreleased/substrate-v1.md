@@ -2,8 +2,8 @@
 category: Compatibility
 ---
 
-- The substrate adapter and examples require Substrate v1, pinned to agent-substrate main at
-  `ed0371a1` (module `go.ate.dev/substrate`, formerly `github.com/agent-substrate/substrate`; API
+- The substrate adapter and examples require Substrate v1, pinned to the `v1.0.0` release
+  (module `go.ate.dev/substrate`, formerly `github.com/agent-substrate/substrate`; API
   `go.ate.dev/substrate/api/ateapi/v1`, proto package `substrate.ateapi.v1`). Moving from v0.5.0
   or v0.6.0 is a Substrate reinstall with fresh state, which loses every actor and its checkpoints:
   v0.6.0 renumbered proto fields with no migration, and v1 moved the proto package under the same

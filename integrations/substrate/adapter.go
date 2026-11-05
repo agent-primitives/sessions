@@ -1,5 +1,5 @@
 // Package ateadapter implements the frozen agentsessions runtime/substrate.ControlClient over the
-// REAL agent-substrate ate-api Control gRPC (go.ate.dev/substrate/pkg/proto/ateapipb).
+// REAL agent-substrate ate-api Control gRPC (go.ate.dev/substrate/api/ateapi/v1).
 //
 // Neutrality (hard rule): this lives in its OWN Go module so the core agentsessions module imports
 // zero substrate code and its go.mod stays clean. runtime/substrate.ControlClient is the seam —
@@ -17,7 +17,7 @@ import (
 	"slices"
 
 	"github.com/agent-primitives/sessions/runtime/substrate"
-	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -99,7 +99,7 @@ func (ad *Adapter) ResumeActor(ctx context.Context, actor substrate.ActorRef) (s
 // substrate.ErrActorNotFound, which the ControlClient contract requires: a memory-tier Snapshot
 // reads it as the session's in-RAM state being gone, not as a transport failure.
 //
-// The suspend is synchronous. Substrate v0.6.0 defaults SuspendOptions.mode to
+// The suspend is synchronous. Substrate v1 defaults SuspendOptions.mode to
 // DURABILITY_MODE_ASYNCHRONOUS, which returns once the snapshot is captured on the node, so the
 // request asks for DURABILITY_MODE_SYNCHRONOUS: SuspendActor in
 // cmd/ateapi/internal/controlapi/workflow_suspend.go then checkpoints a running actor with
@@ -218,8 +218,8 @@ func (ad *Adapter) DeleteTag(ctx context.Context, tag substrate.SnapshotID) erro
 func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 	st := a.GetStatus()
 	snap := heldSnapshot(st)
-	durable := snap.GetDurableSnapshot().GetStatus()
-	notReady := snap != nil && durable != atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+	durable := snap.GetDurableSnapshot().GetState()
+	notReady := snap != nil && durable != atepb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED
 	if notReady {
 		snap = nil // never expose an older completed generation as the held checkpoint
 	}
@@ -227,7 +227,7 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 		SnapshotNotReady: notReady,
 		// Only an explicit PENDING upload can complete by waiting; a local-only or unrecognized
 		// durable status needs inspection and a new durable checkpoint.
-		SnapshotPending: notReady && durable == atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING,
+		SnapshotPending: notReady && durable == atepb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_PENDING,
 		// Unknown legacy fields (notably pre-list external_snapshot) are not proof of no history.
 		NoSnapshotHistory: st != nil && a.GetMetadata().GetUid() != "" &&
 			st.GetState() == atepb.ActorState_ACTOR_STATE_SUSPENDED &&
@@ -246,7 +246,7 @@ func actorInfo(a *atepb.Actor) substrate.ActorInfo {
 
 // memoryNotRestored reports that the actor holds a worker whose sandbox runtime cannot restore the
 // process memory of the snapshot ResumeActor restores from. That is substrate's own choice, not
-// heldSnapshot's, and this restates it from substrate v0.6.0
+// heldSnapshot's, and this restates it from substrate v1
 // cmd/ateapi/internal/controlapi/workflow_resume.go: the source is snapshotToResume, the latest
 // snapshot that has a node-local copy or a COMPLETED durable copy (a tag borrowed at creation
 // included), and requiredSnapshotRuntime makes its recorded runtime a requirement only for a MEMORY
@@ -274,7 +274,7 @@ func memoryNotRestored(a *atepb.Actor) bool {
 	var src *atepb.Snapshot
 	for _, snap := range st.GetSnapshots() {
 		restorable := snap.GetLocality() != "" ||
-			snap.GetDurableSnapshot().GetStatus() == atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+			snap.GetDurableSnapshot().GetState() == atepb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED
 		if restorable && (src == nil || snap.GetGeneration() >= src.GetGeneration()) {
 			src = snap
 		}
@@ -290,7 +290,7 @@ func memoryNotRestored(a *atepb.Actor) bool {
 }
 
 // captureLineage is ActorInfo.CaptureLineage: the generation and the recorded sandbox runtime of
-// the snapshot a SuspendActor of the actor ends up holding, as substrate v0.6.0 assigns them
+// the snapshot a SuspendActor of the actor ends up holding, as substrate v1 assigns them
 // (cmd/ateapi/internal/controlapi/workflow_suspend.go):
 //
 //   - SUSPENDING: the capture in progress, the newest generation. ensureMarkedSuspending assigned
@@ -328,7 +328,7 @@ func captureLineage(st *atepb.ActorStatus) string {
 	return fmt.Sprintf("generation %d runtime %s", gen, stamp)
 }
 
-// noCapture is ActorInfo.NoCapture: the actor holds no snapshot captured from it. Substrate v0.6.0
+// noCapture is ActorInfo.NoCapture: the actor holds no snapshot captured from it. Substrate v1
 // creates an actor with no snapshot, or with the one snapshot of its source tag (a fork's, or the
 // template's golden tag) as generation 1, owned by the tag (CreateActor in
 // cmd/ateapi/internal/controlapi/actor.go). Every suspend of the actor, synchronous or not, assigns
@@ -348,7 +348,7 @@ func noCapture(st *atepb.ActorStatus) bool {
 }
 
 // runtimeRestores reports whether an actor running under assigned can have restored the memory of
-// a snapshot stamped with recorded. It restates Requirement.Matches in substrate v0.6.0
+// a snapshot stamped with recorded. It restates Requirement.Matches in substrate v1
 // internal/hardware/hardware.go, which ResumeActor uses for that decision and which is not
 // importable: the sandbox classes are equal, the compatibility schema versions are equal and
 // nonempty, and every attribute recorded on the snapshot is present on assigned and satisfied by
@@ -376,12 +376,12 @@ func runtimeRestores(assigned, recorded *atepb.ActorSandboxRuntime) bool {
 	return true
 }
 
-// cpuFeaturesAttr is the attribute key substrate v0.6.0 records a gVisor runtime's CPU feature set
+// cpuFeaturesAttr is the attribute key substrate v1 records a gVisor runtime's CPU feature set
 // under (hardware.AttrCPUFeatures).
 const cpuFeaturesAttr = "cpu_features"
 
 // attributeSatisfied reports whether a worker's value for key satisfies the snapshot's, as
-// Requirement.attributeSatisfied in substrate v0.6.0 internal/hardware/hardware.go does.
+// Requirement.attributeSatisfied in substrate v1 internal/hardware/hardware.go does.
 func attributeSatisfied(key, have, want string) bool {
 	if key != cpuFeaturesAttr {
 		return have == want
@@ -403,11 +403,11 @@ func attributeSatisfied(key, have, want string) bool {
 }
 
 // cpuFeatureMaskWords is the width of a cpu_features bitmask in 64-bit words (featureMaskWords in
-// substrate v0.6.0 internal/hardware/cpufeatures.go).
+// substrate v1 internal/hardware/cpufeatures.go).
 const cpuFeatureMaskWords = 6
 
 // cpuFeatureMask parses a cpu_features value in its canonical encoding, as parseFeatureMask in
-// substrate v0.6.0 internal/hardware/cpufeatures.go does: lowercase hex with no prefix and no
+// substrate v1 internal/hardware/cpufeatures.go does: lowercase hex with no prefix and no
 // leading zero ("0" for the empty set), at most cpuFeatureMaskWords words. Anything else is
 // refused, so a non-canonical mask matches nothing.
 func cpuFeatureMask(s string) ([cpuFeatureMaskWords]uint64, bool) {
@@ -473,14 +473,14 @@ func snapshotFidelity(f atepb.SnapshotFidelity) substrate.SnapshotFidelity {
 // state this client does not know map to StatusUnknown, which the backend refuses to place onto
 // rather than guess which side it will land on.
 //
-// Substrate v0.6.0 has no pause: an asynchronous suspend (one the worker requested, or a client
+// Substrate v1 has no pause: an asynchronous suspend (one the worker requested, or a client
 // that leaves SuspendOptions.mode unset) leaves the actor SUSPENDED with a node-local newest
 // generation whose durable copy is PENDING until atelet's background upload completes
 // (ensureSuspendedFinalized in cmd/ateapi/internal/controlapi/workflow_suspend.go). It maps to
 // StatusSuspended. What tells it apart is its snapshots, so actorInfo reports it as
 // SnapshotNotReady and SnapshotPending, and the backend refuses to restore or attach to it, as a
 // retryable failure, until the upload completes. A local-only or unrecognized durable status is
-// SnapshotNotReady without SnapshotPending and is refused. v0.6.0 never writes one (every suspend
+// SnapshotNotReady without SnapshotPending and is refused. v1 never writes one (every suspend
 // creates its generation PENDING), and suspending again does not upload it: SuspendActor returns a
 // SUSPENDED actor as it is in any mode.
 func actorStatus(s atepb.ActorState) substrate.ActorStatus {

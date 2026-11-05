@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -268,7 +268,7 @@ func runDeleteHierarchy(t *testing.T, f *fixture, template string, desc api.Desc
 func deleteHeldSnapshotURI(st *atepb.ActorStatus) string {
 	var held *atepb.Snapshot
 	for _, snap := range st.GetSnapshots() {
-		if snap.GetDurableSnapshot().GetStatus() == atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED &&
+		if snap.GetDurableSnapshot().GetState() == atepb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED &&
 			(held == nil || snap.GetGeneration() >= held.GetGeneration()) {
 			held = snap
 		}

@@ -6,14 +6,14 @@
 # atespace, so the conformance suite creates it through Control (integrations/substrate/e2e/
 # templates_test.go) with the harness image under test. The pool names the `microvm` class without a
 # configRef, so it resolves to the class default: the cluster-scoped `microvm` SandboxConfig that
-# substrate's hack/install-microvm-deps.sh --install installs along with the assets it stages
-# (run-microvm-demo-kind.sh calls the same script).
+# substrate's `ate-setup deploy ate-system` applies, with the assets it stages, when
+# --sandbox-classes includes microvm (the default).
 #
 # The `workload` label is repo-scoped on purpose: worker eligibility is the sandbox class plus a label
-# selector matched over every worker in the cluster with no namespace filter, and
-# run-microvm-demo-kind.sh installs its own micro-VM pool. Keep this label unique to this repo.
+# selector matched over every worker in the cluster with no namespace filter, so a label shared with
+# another micro-VM pool would let the scheduler place our actor there. Keep it unique to this repo.
 
-apiVersion: ate.dev/v1alpha1
+apiVersion: ate.dev/v1
 kind: WorkerPool
 metadata:
   name: echo-microvm
@@ -29,9 +29,11 @@ spec:
   template:
     # The worker advertises these limits as its scheduling capacity, and the ate-api scheduler books
     # each ActorTemplate's spec.resources against it: the suite's templates ask for 1000m and 512Mi
-    # (integrations/substrate/e2e/templates_test.go), so each worker holds one actor. A worker with
-    # no limits advertises none and admits no sized actor. The micro-VM is sized by the template,
-    # not by these. Requests stay low so every pool fits on a single kind node next to ate-system.
+    # (integrations/substrate/e2e/templates_test.go), so each worker holds one actor. The worker
+    # keeps 64Mi of its limit for itself, and substrate v1 books a micro-VM actor's runtime overhead
+    # (4Mi plus 8Mi per GiB of its limit) on top of the 512Mi, which still fits. A worker with no
+    # limits advertises none and admits no sized actor. The micro-VM is sized by the template, not
+    # by these. Requests stay low so every pool fits on a single kind node next to ate-system.
     resources:
       limits:
         cpu: "1"

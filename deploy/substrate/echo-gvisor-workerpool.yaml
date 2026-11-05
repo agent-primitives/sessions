@@ -12,7 +12,7 @@
 # labels across every pool in the cluster, so a label shared with a substrate demo pool would let the
 # scheduler place our actor there.
 
-apiVersion: ate.dev/v1alpha1
+apiVersion: ate.dev/v1
 kind: WorkerPool
 metadata:
   name: echo-gvisor

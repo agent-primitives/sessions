@@ -36,7 +36,7 @@ import (
 	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/runtime/substrate"
 	"github.com/agent-primitives/sessions/sqlitelog"
-	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/api/ateapi/v1"
 )
 
 // Template names the suite creates in the template atespace (see templates_test.go).
@@ -107,7 +107,7 @@ func newFixture(t *testing.T, atespace string) *fixture {
 // provisionScript creates every fixed e2e atespace and grants the Job's principal editor in it.
 const provisionScript = "hack/provision-e2e-access.sh"
 
-// ensureAtespace looks the atespace up and creates it only when it is absent. Substrate v0.6.0 always
+// ensureAtespace looks the atespace up and creates it only when it is absent. Substrate v1 always
 // enforces authorization: the Job runs with atespace editor (the role the docs tell operators to
 // grant), which can read its atespace but not create one, since CreateAtespace needs a global owner.
 // So the atespaces come from provisionScript, and an atespace it does not list fails here with a

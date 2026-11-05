@@ -16,9 +16,9 @@
 # through Control with the harness image built here; the workflow only applies the WorkerPools.
 #
 # Both tiers run on the micro-VM sandbox class, so the suite exercises the same isolation class in
-# both and covers the micro-VM path end to end. The class is staged once (substrate's
-# install-microvm-deps.sh) before any tier runs. The suite then runs in passes against one
-# cluster so the cheap tier fails first:
+# both and covers the micro-VM path end to end. ate-setup stages the class (assets and the
+# `microvm` SandboxConfig) while installing ate-system, before any tier runs. The suite then runs in
+# passes against one cluster so the cheap tier fails first:
 #   1. stateless tier: the echo harness + byte-identical replay, and a suspend under an idle stream.
 #   2. idle stream: one harness stream held idle through the router for 6m30s.
 #   3. stateful tier + fork: the in-RAM counter driven to N, suspended to a memory snapshot and
@@ -63,12 +63,12 @@ concurrency:
   group: substrate-e2e-${{ github.ref }}
   cancel-in-progress: true
 
-# The agent-substrate commit our adapter's go.mod pins (tag v0.6.0); keep them in lockstep so the
-# cluster's ate-api and our generated client agree. The client decodes Actors by field number, and
-# upstream has renumbered fields before without a wire error, so a mismatch corrupts silently rather
-# than failing.
+# The agent-substrate main commit our adapter's go.mod pins (the v1 API, api/ateapi/v1); keep them
+# in lockstep so the cluster's ate-api and our generated client agree. The client decodes Actors by
+# field number, and upstream has renumbered fields before without a wire error, so a mismatch
+# corrupts silently rather than failing.
 env:
-  SUBSTRATE_REF: d3f2363590a11b2f50489971985ba033b4c9eff7
+  SUBSTRATE_REF: ed0371a15f6f265c64100001adafb9731be03970
   KO_DOCKER_REPO: localhost:5001
   E2E_IMAGE: localhost:5001/agentsessions-e2e:${{ github.sha }}
   # ate-setup requires an image credential provider; the kind recipe uses the k8s.io one.
@@ -129,8 +129,8 @@ jobs:
     # The canary (main) exists only on scheduled and manual runs; continue-on-error keeps its
     # failure out of the run's result.
     #
-    # The pinned entry and the canary now share the v0.6.0 layout (go.ate.dev/substrate,
-    # cmd/ateworker-microvm), so the canary fails only on drift past v0.6.0. It has not run green
+    # The pinned entry and the canary share the v1 layout (go.ate.dev/substrate/api/ateapi/v1,
+    # cmd/ate-setup --kind), so the canary fails only on drift past the pin. It has not run green
     # yet; until it does, read its result in the job list. continue-on-error hides it from the
     # run's status and notifications.
     # TODO(canary): drop continue-on-error once a nightly canary is green, so new drift turns the
@@ -235,13 +235,13 @@ jobs:
             substrate-e2e-go-${{ runner.os }}-${{ steps.setup-go.outputs.go-version }}-
 
       - name: Cache micro-VM assets (kata-static + cloud-hypervisor + virtiofsd)
-        # Assembling the assets is fully pinned by assemble.sh (all downloads on amd64), so key the
-        # cache on its hash. install-microvm-deps.sh skips assembling when these are present.
+        # The SHA-256 digests in sandboxconfig-microvm.yaml.tmpl pin the assets, so key the cache on
+        # its hash, as substrate's own CI does. ate-setup skips assembling when these are present.
         if: needs.changes.outputs.decision != 'skip'
         uses: actions/cache@v6
         with:
-          path: _substrate/bin/microvm-assets/amd64
-          key: microvm-assets-amd64-${{ hashFiles('_substrate/hack/microvm-assets/assemble.sh') }}
+          path: _substrate/bin/microvm-assets
+          key: microvm-assets-${{ hashFiles('_substrate/manifests/ate-install/sandboxconfig-microvm.yaml.tmpl') }}
 
       - name: Enable KVM
         # Grant /dev/kvm via the udev rule substrate's CI uses: both tiers run on micro-VMs (kata +
@@ -254,17 +254,20 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Create kind cluster + install ate-system
-        # install-ate-kind.sh passes its arguments to ate-setup, so global flags come before the
-        # `deploy ate-system` command. ate-setup waits for the api-server before its database has
-        # converged on a cold runner, so give the rollouts more than the default budget. `rollout
-        # status` returns as soon as a rollout is ready, so this costs nothing on a healthy cluster.
+        # Global ate-setup flags come before the `deploy ate-system` command. The default
+        # --sandbox-classes=gvisor,microvm also assembles the micro-VM assets (cached above), stages
+        # them into the in-cluster object store and applies the cluster-scoped `microvm`
+        # SandboxConfig, which our pools (sandboxClasses: [{name: microvm}], no configRef) resolve
+        # to. ate-setup waits for the api-server before its database has converged on a cold
+        # runner, so give the rollouts more than the default budget. `rollout status` returns as
+        # soon as a rollout is ready, so this costs nothing on a healthy cluster.
         # The default envoy router admits only the allowlisted SPIFFE IDs: here the suite's Job
         # (deploy/substrate/e2e-job.yaml), the only router client this cluster runs.
         if: needs.changes.outputs.decision != 'skip'
         working-directory: _substrate
         run: |
           hack/create-kind-cluster.sh
-          hack/install-ate-kind.sh --rollout-timeout=10m \
+          go run ./cmd/ate-setup --kind --rollout-timeout=10m \
             --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-agentsessions/sa/substrate-e2e \
             deploy ate-system
 
@@ -286,23 +289,6 @@ jobs:
         if: needs.changes.outputs.decision != 'skip'
         run: echo "HARNESS_IMAGE=$(ko build ./cmd/harnessnode)" >> "$GITHUB_ENV"
 
-      - name: Deploy the micro-VM sandbox class
-        # Before any tier: both run on it. install-microvm-deps.sh is the step of substrate's
-        # run-microvm-demo-kind.sh that stages the (cached) kata assets into the in-cluster object
-        # store and installs the cluster-scoped `microvm` SandboxConfig as the class default, which
-        # our pools (sandboxClasses: [{name: microvm}], no configRef) resolve to. The env
-        # mirrors what that wrapper exports, with ARCH naming the cached asset set. The rest of the
-        # wrapper (a second ate-system apply and substrate's own counter demo) is not needed here.
-        if: needs.changes.outputs.decision != 'skip'
-        working-directory: _substrate
-        env:
-          NO_DEV_ENV: "true"
-          ATE_INSTALL_KIND: "true"
-          BUCKET_NAME: ate-snapshots
-          KUBECTL_CONTEXT: kind-kind
-          ARCH: amd64
-        run: hack/install-microvm-deps.sh --install
-
       - name: Apply the echo micro-VM WorkerPool
         # Resolve substrate's ateworker-microvm in its own module once; the counter pool below reuses
         # it. Only for the node's platform: substrate's .ko.yaml also lists linux/arm64, which would
@@ -317,7 +303,7 @@ jobs:
           hack/wait-worker-pool.sh echo-microvm
 
       - name: Provision the suite's atespaces and access
-        # Substrate v0.6.0 always enforces authorization. The suite's Job runs as the substrate-e2e
+        # Substrate always enforces authorization. The suite's Job runs as the substrate-e2e
         # ServiceAccount with only the atespace editor role, the role operators grant agentsessionsd,
         # so this creates its atespaces and grants that role as kubectl-ate's bootstrap owner
         # (ate-client). kubectl-ate is built from the same substrate commit as the cluster.

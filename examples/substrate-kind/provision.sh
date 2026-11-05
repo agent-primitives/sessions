@@ -33,71 +33,21 @@ jq --arg image "${HARNESS_IMAGE}" --arg model "${MODEL_NAME}" \
 	.workerSelector.matchLabels.workload = ("sessions-example-" + $class)
 ' "${HERE}/deploy/actor-template.json" >"${desired}"
 
-# Bound each CLI call by the remaining budget and accept only an explicitly allowed RPC error.
-# Represent expected absence as null; malformed responses and ambiguous errors stop provisioning.
-# NoOutput allows a successful call with empty output: `get access-policy` reports a missing
-# policy that way rather than with NotFound.
-ate() {
-	local allowed="$1" output remaining codes
-	shift
-	remaining=$((deadline - SECONDS))
-	((remaining > 0)) || die "Template provisioning deadline exceeded."
-	((remaining <= 120)) || remaining=120
-	if output="$("${TIMEOUT}" --kill-after=5s "${remaining}s" "${ATE[@]}" "$@" 2>"${STATE}/ate-error")"; then
-		if [[ "${allowed}" == NoOutput && -z "${output}" ]]; then
-			echo null
-			return
-		fi
-		jq -e 'type == "object" and length > 0' <<<"${output}" >/dev/null ||
-			die "kubectl-ate returned an ambiguous resource."
-		printf '%s\n' "${output}"
-	else
-		codes="$(grep -o 'rpc error: code = [A-Za-z]* desc =' "${STATE}/ate-error" | cut -d ' ' -f 5)" || codes=""
-		if [[ -n "${allowed}" && "${codes}" == "${allowed}" ]]; then
-			echo null
-		else
-			cat "${STATE}/ate-error" >&2
-			die "kubectl-ate failed; template provisioning refused."
-		fi
-	fi
-}
+# Every kubectl-ate call (hack/substrate-lib.sh's ate) ends by the provisioning deadline, and a
+# failed one stops provisioning with ATE_FAILURE.
+# shellcheck disable=SC2034 # hack/substrate-lib.sh reads it
+ATE_DEADLINE="${deadline}"
+# shellcheck disable=SC2034 # hack/substrate-lib.sh reads it
+ATE_FAILURE="kubectl-ate failed; template provisioning refused."
 
-# Ensure the atespace exists and verify its identity. Preflight never creates missing resources.
-progress "Checking Substrate atespace ${NS}"
-space="$(ate NotFound get atespace "${NS}")"
-if [[ "${space}" == null ]]; then
-	if [[ "${1:-}" == --check-only ]]; then
-		progress "Atespace is absent; preflight complete without creating resources"
-		exit 0
-	fi
-	progress "Creating Substrate atespace ${NS}"
-	ate AlreadyExists create atespace "${NS}" >/dev/null
-	space="$(ate "" get atespace "${NS}")"
-fi
-jq -e --arg name "${NS}" '.metadata.name == $name' <<<"${space}" >/dev/null ||
-	die "kubectl-ate returned a different atespace."
-
-# Substrate enforces authorization: the daemon needs the atespace editor role (or owner) in NS.
-# Create the policy only when NS has none. An existing policy is operator-managed and update
-# replaces it whole, so one that lacks the daemon is refused with the remedy, never rewritten.
-progress "Checking the access policy of atespace ${NS} for ${DAEMON_PRINCIPAL}"
-policy="$(ate NoOutput get access-policy -a "${NS}")"
-if [[ "${policy}" == null ]]; then
-	if [[ "${1:-}" == --check-only ]]; then
-		progress "Access policy is absent; provisioning will grant ${DAEMON_PRINCIPAL} editor"
-	else
-		progress "Granting ${DAEMON_PRINCIPAL} the editor role in atespace ${NS}"
-		printf 'bindings:\n- role: editor\n  members:\n  - %s\n' "${DAEMON_PRINCIPAL}" |
-			ate AlreadyExists create access-policy -a "${NS}" -f - >/dev/null
-		# Read it back: an AlreadyExists race leaves whatever policy won it.
-		policy="$(ate NoOutput get access-policy -a "${NS}")"
-		[[ "${policy}" != null ]] || die "The access policy of atespace ${NS} disappeared after creation."
-	fi
-fi
-if [[ "${policy}" != null ]] && ! jq -e --arg member "${DAEMON_PRINCIPAL}" \
-	'any(.bindings[]?; (.role == "editor" or .role == "owner") and any(.members[]?; . == $member))' \
-	<<<"${policy}" >/dev/null; then
-	die "The access policy of atespace ${NS} does not grant ${DAEMON_PRINCIPAL} editor. Add it to an editor binding: kubectl ate get access-policy -a ${NS} -o yaml > policy.yaml, edit policy.yaml, then kubectl ate update access-policy -a ${NS} -f policy.yaml"
+# The daemon needs the atespace editor role (or owner) in NS. Preflight never creates missing
+# resources: it stops at an absent atespace, and reports an absent access policy.
+check_only=()
+if [[ "${1:-}" == --check-only ]]; then check_only=(--check-only); fi
+ensure_atespace_editor ${check_only[@]+"${check_only[@]}"} "${NS}" "${DAEMON_PRINCIPAL}"
+if [[ "${ATESPACE_ABSENT}" == true ]]; then
+	progress "Atespace is absent; preflight complete without creating resources"
+	exit 0
 fi
 
 # Create the template only when absent; an AlreadyExists race is checked by reading it back.

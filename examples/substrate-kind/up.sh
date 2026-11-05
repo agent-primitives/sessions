@@ -150,19 +150,14 @@ fi
 # Install the Substrate control plane only on a newly created cluster. Keep an
 # installed cluster intact on reruns, and record completion only if its identity still matches.
 # The default envoy router admits only mTLS clients whose SPIFFE ID it allowlists: here the
-# daemon's ServiceAccount (deploy/agentsessionsd.yaml). Substrate's images are the release's,
-# pinned to their digests; ate-setup builds none of them.
-IMAGES=(--image-repo=ghcr.io/agent-substrate/substrate --image-tag="${SUBSTRATE_VERSION}")
+# daemon's ServiceAccount (deploy/agentsessionsd.yaml). kind_ate_setup (hack/substrate-lib.sh)
+# installs the release's images.
 kind_command export kubeconfig --name "${CLUSTER}" --kubeconfig "${KUBECONFIG}"
 if [[ "${stage}" == created ]]; then
 	progress "Installing the Substrate control plane in cluster ${CLUSTER}"
-	(cd "${SUBSTRATE_DIR}" && env -u GCE_REGION -u CLUSTER_LOCATION -u NETWORK -u SUBNETWORK \
-		-u MEMORYSTORE_INSTANCE -u PROJECT_ID \
-		go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}" \
-		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" "${IMAGES[@]}" \
-		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m \
-		--ingress-allowed-spiffe-ids="${ROUTER_CLIENT_ID}" \
-		deploy ate-system --setup-csi=none --sandbox-classes=gvisor)
+	kind_ate_setup "${SUBSTRATE_DIR}" "${CLUSTER}" "${KUBECONFIG}" "${SUBSTRATE_VERSION}" \
+		--rollout-timeout=10m --ingress-allowed-spiffe-ids="${ROUTER_CLIENT_ID}" \
+		deploy ate-system --setup-csi=none --sandbox-classes=gvisor
 	stage="$(cluster_state)"
 	[[ "${stage}" == created ]] || die "Cluster changed during installation."
 	id="$(node_id)"
@@ -178,11 +173,8 @@ fi
 # selection above checked is the node's.
 if [[ "${SANDBOX_CLASS}" == microvm ]]; then
 	progress "Installing microVM runtime assets and sandbox configuration"
-	(cd "${SUBSTRATE_DIR}" && env -u GCE_REGION -u CLUSTER_LOCATION -u NETWORK -u SUBNETWORK \
-		-u MEMORYSTORE_INSTANCE -u PROJECT_ID \
-		go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}" \
-		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" "${IMAGES[@]}" \
-		--credential-provider='{"name":"k8s.io"}' deploy sandboxconfig --sandbox-classes=microvm)
+	kind_ate_setup "${SUBSTRATE_DIR}" "${CLUSTER}" "${KUBECONFIG}" "${SUBSTRATE_VERSION}" \
+		deploy sandboxconfig --sandbox-classes=microvm
 fi
 
 # Build the matching Control API client, publish the daemon and harness images, and pin the

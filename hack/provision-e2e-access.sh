@@ -17,6 +17,8 @@
 #   KUBECTL_ATE        kubectl-ate binary (default kubectl-ate on PATH)
 #   KIND_CLUSTER_NAME  kind cluster to provision (default kind)
 set -euo pipefail
+# shellcheck source=hack/substrate-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/substrate-lib.sh"
 
 NAMESPACE="ate-agentsessions"
 SERVICE_ACCOUNT="substrate-e2e" # deploy/substrate/e2e-job.yaml
@@ -34,55 +36,15 @@ ATESPACES=(
 	e2e-execution-state
 	agentsessions-templates # ACTORTEMPLATE_ATESPACE
 )
-ATE=("${KUBECTL_ATE:-kubectl-ate}" --context "kind-${KIND_CLUSTER_NAME:-kind}" -o json)
-
-errfile="$(mktemp)"
-trap 'rm -f "${errfile}"' EXIT
+ATE=("${KUBECTL_ATE:-kubectl-ate}" --context "kind-${KIND_CLUSTER_NAME:-kind}")
 
 die() {
 	echo "provision-e2e-access: $*" >&2
 	exit 1
 }
-
-# ate <allowed-code> <args...> prints the command's stdout. A failure whose gRPC code is
-# <allowed-code> prints nothing and succeeds; any other failure stops provisioning.
-ate() {
-	local allowed="$1" output
-	shift
-	if output="$("${ATE[@]}" "$@" 2>"${errfile}")"; then
-		printf '%s' "${output}"
-		return 0
-	fi
-	if [[ -n "${allowed}" ]] && grep -q "rpc error: code = ${allowed} desc =" "${errfile}"; then
-		return 0
-	fi
-	cat "${errfile}" >&2
-	die "kubectl-ate $* failed"
-}
-
-# A role that covers every RPC the adapter calls: an atespace editor, or an owner.
-grants_member() {
-	jq -e --arg member "${MEMBER}" \
-		'any(.bindings[]?; (.role == "editor" or .role == "owner") and any(.members[]?; . == $member))' \
-		>/dev/null
-}
+progress() { echo "$*"; }
 
 for atespace in "${ATESPACES[@]}"; do
-	if [[ -z "$(ate NotFound get atespace "${atespace}")" ]]; then
-		ate AlreadyExists create atespace "${atespace}" >/dev/null
-		echo "created atespace ${atespace}"
-	fi
-
-	# `get access-policy` succeeds with empty output when the atespace has no policy.
-	policy="$(ate "" get access-policy -a "${atespace}")"
-	if [[ -z "${policy}" ]]; then
-		printf 'bindings:\n- role: editor\n  members:\n  - %s\n' "${MEMBER}" |
-			ate AlreadyExists create access-policy -a "${atespace}" -f - >/dev/null
-		# Read it back: an AlreadyExists race leaves whatever policy won it.
-		policy="$(ate "" get access-policy -a "${atespace}")"
-	fi
-	# Never rewrite a policy someone else manages: update replaces the whole policy.
-	grants_member <<<"${policy}" ||
-		die "atespace ${atespace} has an access policy that does not grant ${MEMBER} editor; add it with: ${ATE[0]} get access-policy -a ${atespace} -o yaml > policy.yaml, add the member to an editor binding, then ${ATE[0]} update access-policy -a ${atespace} -f policy.yaml"
+	ensure_atespace_editor "${atespace}" "${MEMBER}"
 	echo "atespace ${atespace}: ${MEMBER} is an editor"
 done

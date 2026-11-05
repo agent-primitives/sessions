@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	atepb "go.ate.dev/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/protobuf/proto"
 
 	v1 "github.com/agent-primitives/sessions/api/genpb"
@@ -125,8 +125,9 @@ func TestRenderMapsTheComposition(t *testing.T) {
 			t.Fatalf("model credentials must stay with the host, found env %s", name)
 		}
 	}
+	// No storageLocation: substrate v1 refuses one while PerTemplateSnapshotLocation is off.
 	if tmpl.GetSnapshotConfig().GetPreferredFidelity() != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY ||
-		tmpl.GetSnapshotConfig().GetStorageLocation() != "gs://ate-snapshots/agentsuite-demo/"+name+"/" {
+		tmpl.GetSnapshotConfig().GetStorageLocation() != "" {
 		t.Fatalf("snapshot = %v", tmpl.GetSnapshotConfig())
 	}
 	if tmpl.GetWorkerSelector().GetMatchLabels()["workload"] != "agentsuite-demo-gvisor" {
@@ -148,11 +149,9 @@ func TestRenderMapsTheComposition(t *testing.T) {
 
 // Substrate sizes the sandbox (the micro-VM's vCPUs and RAM) and books the worker from the
 // template's resources, so the binding's resources go there, converted to millicores and bytes. The
-// container declares none: a micro-VM guest gets the template's memory less a 128MiB VMM reserve,
-// and ateworker-microvm refuses a container memory limit above the guest, so a copy of the binding's
-// memory on the container (512Mi in a 384MiB guest for the demo binding) would fail the golden
-// snapshot. substrate v0.6.0 rejects a template without both limits, so a binding missing either is
-// refused.
+// container declares none: a micro-VM guest gets the template's whole memory limit and bounds the
+// container, and gVisor applies the template's limits to the container itself. substrate v1 rejects
+// a template without both limits, so a binding missing either is refused.
 func TestRenderSizesTheSandboxFromTheTemplate(t *testing.T) {
 	comp, err := Load("../suite", "triage", "linux/arm64")
 	if err != nil {
@@ -261,7 +260,7 @@ func TestParseQuantity(t *testing.T) {
 	}
 }
 
-// substrate v0.6.0 templates carry no sandbox config: the class comes from the WorkerPool the
+// substrate v1 templates carry no sandbox config: the class comes from the WorkerPool the
 // template selects. A binding that names a class without a selector to carry it is refused rather
 // than rendered onto whichever pool happens to match; with one, the template has no class of its own
 // and selects exactly the binding's labels.
@@ -291,7 +290,7 @@ func TestRenderCarriesTheSandboxOnlyThroughTheSelector(t *testing.T) {
 	}
 }
 
-// A v0.6.0 template names no SandboxConfig, so Render cannot carry a binding's sandbox.configName.
+// A v1 template names no SandboxConfig, so Render cannot carry a binding's sandbox.configName.
 // It accepts the name only when the pool resolves to it anyway (unset or the class default) and
 // refuses any other, for both classes, rather than render a template that runs on another config.
 func TestRenderRefusesAConfigNameItCannotHonor(t *testing.T) {
@@ -434,7 +433,7 @@ func TestRenderMemoryTierNeedsMemoryFidelity(t *testing.T) {
 	}
 }
 
-// Only the micro-VM class captures the root filesystem without memory, and a v0.6.0 template carries
+// Only the micro-VM class captures the root filesystem without memory, and a v1 template carries
 // no class for admission to check, so Render refuses a gVisor binding that asks for ROOTFS, for both
 // tiers, before emitting anything.
 func TestRenderRefusesRootfsOnGvisor(t *testing.T) {
@@ -493,11 +492,24 @@ func TestKaimahiFixtures(t *testing.T) {
 
 func TestLoadBindingIsStrict(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "b.json")
-	if err := os.WriteFile(path, []byte(`{"apiVersion":"kmx.kaimahi.dev/v1alpha1","kind":"AgentSessionsBinding","atespace":"a","placement":{"backend":"substrate"},"snapshot":{"storageLocation":"gs://x/"},"secret":"x"}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"apiVersion":"kmx.kaimahi.dev/v1alpha1","kind":"AgentSessionsBinding","atespace":"a","placement":{"backend":"substrate"},"secret":"x"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadBinding(path); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("err = %v, want unknown fields refused", err)
+	}
+}
+
+// substrate v1 refuses a template's storageLocation while its PerTemplateSnapshotLocation preview
+// gate is off, so LoadBinding refuses a binding that sets one rather than drop it silently.
+func TestLoadBindingRefusesAStorageLocation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "b.json")
+	if err := os.WriteFile(path, []byte(`{"apiVersion":"kmx.kaimahi.dev/v1alpha1","kind":"AgentSessionsBinding","atespace":"a","placement":{"backend":"substrate"},"snapshot":{"storageLocation":"gs://x/"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadBinding(path); err == nil || !strings.Contains(err.Error(), "snapshot.storageLocation") ||
+		!strings.Contains(err.Error(), "--snapshot-location") {
+		t.Fatalf("err = %v, want storageLocation refused, naming the cluster's --snapshot-location", err)
 	}
 }
 

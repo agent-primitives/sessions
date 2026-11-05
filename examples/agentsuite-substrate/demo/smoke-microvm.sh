@@ -27,13 +27,13 @@ wait_state() {
 }
 
 [[ "${SANDBOX}" == microvm ]] || fail "AGENTSUITE_DEMO_SANDBOX=${SANDBOX}: the smoke test is for the micro-VM class"
-# The count below goes through a port-forward of the router from this machine. Substrate v0.6.0's
-# envoy router admits only mTLS clients with an allowlisted SPIFFE ID, and this script has no
-# certificate, so it stops here, before it deploys anything.
-fail "the smoke test reaches the actor from outside the cluster, which substrate v0.6.0's envoy router does not admit yet; see docs/substrate-conformance.md#router-clients-outside-the-cluster"
+# The count below goes through a port-forward of the router from this machine. Substrate's envoy
+# router admits only mTLS clients with an allowlisted SPIFFE ID, and this script has no certificate,
+# so it stops here, before it deploys anything.
+fail "the smoke test reaches the actor from outside the cluster, which substrate's envoy router does not admit yet; see docs/substrate-conformance.md#router-clients-outside-the-cluster"
 echo "# substrate's counter-microvm demo: its WorkerPool and ActorTemplate on the microvm SandboxConfig"
-(cd "${SUBSTRATE}" && KUBECTL_CONTEXT="kind-${CLUSTER}" KO_DOCKER_REPO=localhost:5001 KO_DEFAULTPLATFORMS=linux/amd64 \
-	NO_DEV_ENV=true ATE_INSTALL_KIND=true hack/install-ate-kind.sh deploy demo counter-microvm) \
+(cd "${SUBSTRATE}" && KO_DOCKER_REPO=localhost:5001 go run ./cmd/ate-setup --kind --no-dev-env \
+	--context="kind-${CLUSTER}" --ko-default-platforms=linux/amd64 deploy demo counter-microvm) \
 	>"${STATE}/counter-demo.log" 2>&1 ||
 	{
 		tail -30 "${STATE}/counter-demo.log"

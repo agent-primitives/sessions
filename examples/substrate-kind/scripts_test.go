@@ -125,7 +125,7 @@ jq --arg mode "$TEST_MODE" '
   if $mode == "containers" then .containers[0].env += [{name:"UNEXPECTED",value:"changed"}]
   elif $mode == "resources" then .resources.limits.cpuMillicores = "2000"
   elif $mode == "sandboxConfig" then .sandboxConfig = {sandboxClass:"microvm",configName:"microvm"}
-  elif $mode == "snapshotConfig" then .snapshotConfig.storageLocation = "changed"
+  elif $mode == "snapshotConfig" then .snapshotConfig.preferredFidelity = "SNAPSHOT_FIDELITY_ROOTFS"
   elif $mode == "workerSelector" then .workerSelector.matchLabels.unexpected = "changed"
   elif $mode == "durable-volume" then .volumes = [{name:"extra",durableDir:{}}]
   elif $mode == "external-volume" then .volumes = [{name:"extra",externalVolumeTemplate:{capacity:"10Gi",storageClassName:"example"}}]
@@ -484,12 +484,21 @@ func TestModelRouteRefusalPreservesDeployment(t *testing.T) {
 	}
 }
 
-// SANDBOX_CONFIG used to name the template's SandboxConfig. v0.6.0 templates name none and the
-// rendered WorkerPool sets no configRef, so a leftover value must be refused before any cluster
-// call rather than ignored in favor of the class default.
-func TestSandboxConfigRefusedBeforeClusterChanges(t *testing.T) {
-	for _, script := range []string{"up.sh", "deploy.sh", "provision.sh"} {
-		t.Run(script, func(t *testing.T) {
+// SANDBOX_CONFIG used to name the template's SandboxConfig and SNAPSHOT_LOCATION its storage
+// location. Substrate templates name no config and the rendered WorkerPool sets no configRef, and
+// substrate v1 rejects a per-template location while PerTemplateSnapshotLocation is off, so a
+// leftover value must be refused before any cluster call rather than ignored.
+func TestTemplateOverridesRefusedBeforeClusterChanges(t *testing.T) {
+	for _, tc := range []struct{ script, env, value, hint string }{
+		{"up.sh", "SANDBOX_CONFIG", "custom", "configRef"},
+		{"deploy.sh", "SANDBOX_CONFIG", "custom", "configRef"},
+		{"provision.sh", "SANDBOX_CONFIG", "custom", "configRef"},
+		{"up.sh", "SNAPSHOT_LOCATION", "gs://x/", "--snapshot-location"},
+		{"deploy.sh", "SNAPSHOT_LOCATION", "gs://x/", "--snapshot-location"},
+		{"provision.sh", "SNAPSHOT_LOCATION", "gs://x/", "--snapshot-location"},
+	} {
+		script := tc.script
+		t.Run(script+"/"+tc.env, func(t *testing.T) {
 			dir := deploymentFixture(t)
 			if out, err := exec.CommandContext(t.Context(), "bash", "deploy.sh").CombinedOutput(); err != nil {
 				t.Fatalf("initial deployment: %v\n%s", err, out)
@@ -502,20 +511,20 @@ func TestSandboxConfigRefusedBeforeClusterChanges(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			t.Setenv("SANDBOX_CONFIG", "custom")
+			t.Setenv(tc.env, tc.value)
 			out, err := exec.CommandContext(t.Context(), "bash", script).CombinedOutput()
-			if err == nil || !strings.Contains(string(out), "SANDBOX_CONFIG is not supported") ||
-				!strings.Contains(string(out), "configRef") {
-				t.Fatalf("SANDBOX_CONFIG was not refused: %v\n%s", err, out)
+			if err == nil || !strings.Contains(string(out), tc.env+" is not supported") ||
+				!strings.Contains(string(out), tc.hint) {
+				t.Fatalf("%s was not refused: %v\n%s", tc.env, err, out)
 			}
 			for file, previous := range before {
 				calls, err := os.ReadFile(filepath.Join(dir, file))
 				if err != nil || !bytes.Equal(calls, previous) {
-					t.Fatalf("refused SANDBOX_CONFIG contacted the cluster (%s): %v\n%s", file, err, calls)
+					t.Fatalf("refused %s contacted the cluster (%s): %v\n%s", tc.env, file, err, calls)
 				}
 			}
 			if calls, err := os.ReadFile(filepath.Join(dir, "cluster-calls")); !os.IsNotExist(err) {
-				t.Fatalf("refused SANDBOX_CONFIG reached setup commands: %v\n%s", err, calls)
+				t.Fatalf("refused %s reached setup commands: %v\n%s", tc.env, err, calls)
 			}
 		})
 	}

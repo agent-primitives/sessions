@@ -271,22 +271,22 @@ if [[ "${stage}" == absent || "${stage}" == incomplete ]]; then
 	stage=created
 fi
 kind export kubeconfig --name "${CLUSTER}" --kubeconfig "${KUBECONFIG}"
+# ate-setup's global flags for this cluster, run from the substrate checkout.
+ATE_SETUP=(env -u GCE_REGION -u CLUSTER_LOCATION -u NETWORK -u SUBNETWORK -u MEMORYSTORE_INSTANCE
+	-u PROJECT_ID go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}"
+	--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${ARCH}")
 if [[ "${stage}" == created ]]; then
-	step "ate-system (ate-setup deploy ate-system, the command install-ate-kind.sh runs)"
-	# ate-setup is called directly, not through hack/install-ate-kind.sh: on Kind it builds the
-	# control-plane images for linux/<its own GOARCH> unless --ko-default-platforms is given (the
-	# wrapper's KO_DEFAULTPLATFORMS is ambient and ignored), so an arm64 Mac with an amd64 Docker VM
-	# would push arm64 images to an amd64 node. The flags below are the wrapper's settings plus the
-	# platform Docker reports; the GCP variables it unsets are unset here too. The default envoy
-	# router admits only mTLS clients whose SPIFFE ID it allowlists: here the agentsessionsd
-	# ServiceAccount both daemon tiers run as (deploy/agentsessionsd.yaml).
-	(cd "${SUBSTRATE}" && env -u GCE_REGION -u CLUSTER_LOCATION -u NETWORK -u SUBNETWORK \
-		-u MEMORYSTORE_INSTANCE -u PROJECT_ID \
-		go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}" \
-		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${ARCH}" \
-		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m \
-		--ingress-allowed-spiffe-ids="${ROUTER_CLIENT_ID}" \
-		deploy ate-system --setup-csi=none)
+	step "ate-system (ate-setup deploy ate-system)"
+	# On Kind ate-setup builds the control-plane images for linux/<its own GOARCH> unless
+	# --ko-default-platforms is given, so an arm64 Mac with an amd64 Docker VM would push arm64
+	# images to an amd64 node; the flags pass the platform Docker reports. The GCP variables are
+	# unset so a shell configured for GKE cannot redirect the install. The default envoy router
+	# admits only mTLS clients whose SPIFFE ID it allowlists: here the agentsessionsd ServiceAccount
+	# both daemon tiers run as (deploy/agentsessionsd.yaml). Only the gVisor class is installed
+	# here, so a host without KVM skips the micro-VM assets; the micro-VM step below adds that class.
+	(cd "${SUBSTRATE}" && "${ATE_SETUP[@]}" --credential-provider='{"name":"k8s.io"}' \
+		--rollout-timeout=10m --ingress-allowed-spiffe-ids="${ROUTER_CLIENT_ID}" \
+		deploy ate-system --setup-csi=none --sandbox-classes=gvisor)
 	echo "${id} installed ${SUBSTRATE_REF} envoy" >"${SETUP}"
 else
 	step "reusing kind cluster ${CLUSTER}"
@@ -300,11 +300,11 @@ step "kubectl-ate, built from the same substrate checkout"
 (cd "${SUBSTRATE}" && go build -o "${WORK}/bin/kubectl-ate" ./cmd/kubectl-ate)
 
 if [[ "${SANDBOX}" == microvm ]] && ! "${K[@]}" get sandboxconfig microvm >/dev/null 2>&1; then
-	step "micro-VM sandbox class: kata assets and the microvm SandboxConfig (substrate's install-microvm-deps.sh)"
-	# Run once per cluster: assets already assembled in the substrate checkout are reused. ARCH is
-	# passed, since the script otherwise builds for its own GOARCH.
-	(cd "${SUBSTRATE}" && export ARCH && KO_DEFAULTPLATFORMS="linux/${ARCH}" KUBECTL_CONTEXT="kind-${CLUSTER}" \
-		ATE_INSTALL_KIND=true NO_DEV_ENV=true hack/install-microvm-deps.sh --install)
+	step "micro-VM sandbox class: kata assets and the microvm SandboxConfig (ate-setup deploy sandboxconfig)"
+	# Run once per cluster: assets already assembled in the substrate checkout are reused. On Kind
+	# ate-setup assembles them for the architecture it runs on, which must be the node's.
+	(cd "${SUBSTRATE}" && "${ATE_SETUP[@]}" --credential-provider='{"name":"k8s.io"}' \
+		deploy sandboxconfig --sandbox-classes=microvm)
 fi
 
 step "${SANDBOX} WorkerPool ${POOL}"
@@ -341,7 +341,7 @@ done
 
 "${ATE[@]}" get atespace "${ATESPACE}" >/dev/null 2>&1 || "${ATE[@]}" create atespace "${ATESPACE}"
 
-# substrate v0.6.0 authorizes every call by the atespace's AccessPolicy. Both agentsessionsd tiers
+# substrate authorizes every call by the atespace's AccessPolicy. Both agentsessionsd tiers
 # run as the agentsessionsd ServiceAccount (deploy/namespace.yaml), which needs editor on the
 # atespace to create, suspend, resume and delete actors. A missing policy is created with that one
 # binding; a policy that already grants it editor or owner is left alone; any other policy is

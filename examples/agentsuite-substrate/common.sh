@@ -40,10 +40,10 @@ setup_stage() {
 }
 # refuse_stale_install exits when SETUP records that up.sh installed ate-system on the container ID
 # $1 from a substrate commit other than SUBSTRATE_REF, or from one it did not record (an install
-# from before up.sh kept the commit). Substrate supports no in-place upgrade between releases before
-# 1.0 (its docs/upgrade.md), and v0.6.0 changed the ActorTemplate (resources required, no sandbox
-# configuration), so an older install's templates and actors do not carry over: the cluster is
-# reinstalled, not reused. It also exits when the record names a router dataplane other than envoy,
+# from before up.sh kept the commit). Substrate supports no in-place upgrade between minor releases
+# before 1.0 (its docs/guides/upgrade.md), and v1 moved the API to package substrate.ateapi.v1
+# (an older client gets Unimplemented) and WorkerPool to ate.dev/v1, so an older install's
+# templates and actors do not carry over: the cluster is reinstalled, not reused. It also exits when the record names a router dataplane other than envoy,
 # or none (an install from before up.sh switched to envoy): agentsessionsd needs the envoy router's
 # mTLS listener. A cluster up.sh did not install is not checked.
 refuse_stale_install() {

@@ -1,5 +1,5 @@
 # Everything the demo runs in Kubernetes: the gVisor WorkerPool, the fake model and agentsessionsd.
-# agentsessionsd calls the ate-api from here, and substrate v0.6.0 admits ate-api-server only from
+# agentsessionsd calls the ate-api from here, and substrate admits ate-api-server only from
 # namespaces labeled ate.dev/api-access=true, worker pods excluded (agent-substrate
 # manifests/ate-install/ate-system-networkpolicies.yaml).
 apiVersion: v1

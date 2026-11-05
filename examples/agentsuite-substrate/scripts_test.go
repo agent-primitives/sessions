@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	atepb "go.ate.dev/substrate/api/ateapi/v1"
 )
 
 // These tests run up.sh and down.sh against stub tools, to pin how they decide whether the demo's
@@ -193,6 +195,7 @@ case " $* " in
 	[ "${STUB_DEPLOYED_URL:-}" = none ] || echo "-model-base-url=${STUB_DEPLOYED_URL:-}"
 	;;
 *" get pods "*) echo "worker-0=10.0.0.1" ;;
+*" get sandboxconfig microvm "*) [ -z "${STUB_NO_MICROVM_CONFIG:-}" ] || exit 1 ;;
 esac
 `)
 	// python3 is the host's. STUB_BINDING stands in for the binding.json up.sh reads.
@@ -241,14 +244,6 @@ if [ -n "${STUB_CREATE_SIGNAL:-}" ]; then
 	[ "$STUB_CREATE_SIGNAL" != INT ] || kill -s INT $$
 fi
 exit "${STUB_CREATE_RC:-0}"
-`)
-	// The micro-VM class's assets and SandboxConfig; exits STUB_MICROVM_RC.
-	stub(t, filepath.Join(substrate, "hack"), "install-microvm-deps.sh", `echo "install-microvm-deps.sh $* ARCH=$ARCH" >>"$STUB_DIR/calls"
-exit "${STUB_MICROVM_RC:-0}"
-`)
-	// up.sh runs ate-setup itself; this wrapper would build for the host's architecture.
-	stub(t, filepath.Join(substrate, "hack"), "install-ate-kind.sh", `echo "install-ate-kind.sh $*" >>"$STUB_DIR/calls"
-exit 1
 `)
 	s.env = []string{
 		"PATH=" + bin + ":/usr/bin:/bin",
@@ -405,7 +400,6 @@ func TestUpClusterPhase(t *testing.T) {
 			name:      "an absent cluster is created and installed",
 			wantCode:  pastClusterPhase,
 			wantCalls: []string{"create-kind-cluster.sh", "kind export kubeconfig", installCall + " --no-dev-env --kind-cluster-name=demo --context=kind-demo"},
-			noCalls:   []string{"install-ate-kind.sh"},
 			wantOwned: "node-1", wantSetup: installed(t, "node-1"),
 		},
 		{
@@ -413,7 +407,7 @@ func TestUpClusterPhase(t *testing.T) {
 			// platform Docker reports: a Mac driving a remote amd64 Docker gets amd64 images.
 			name: "the install builds for the platform Docker reports", env: []string{"STUB_DOCKER_ARCH=x86_64"},
 			wantCode:  pastClusterPhase,
-			wantCalls: []string{installCall, "--ko-default-platforms=linux/amd64", "--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/agentsuite-demo/sa/agentsessionsd deploy ate-system --setup-csi=none"},
+			wantCalls: []string{installCall, "--ko-default-platforms=linux/amd64", "--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/agentsuite-demo/sa/agentsessionsd deploy ate-system --setup-csi=none --sandbox-classes=gvisor"},
 			wantOwned: "node-1", wantSetup: installed(t, "node-1"),
 		},
 		{
@@ -688,6 +682,23 @@ func TestUpSkipsATemplate(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "- -substrate-harness=triage=agentsuite-demo/tmpl-1\n") {
 		t.Errorf("agentsessionsd.yaml lacks the stateless tier's flag:\n%s", b)
+	}
+}
+
+// A cluster without the microvm SandboxConfig gets the micro-VM class from ate-setup's deploy
+// sandboxconfig, with the same cluster flags as the install, and only that class.
+func TestUpDeploysTheMicroVMClass(t *testing.T) {
+	s := newStubs(t)
+	s.node(t, "node-1")
+	s.record(t, "created-cluster", "node-1")
+	s.record(t, "setup-cluster", installed(t, "node-1"))
+	code, out, calls := s.run(t, "up.sh", "STUB_CLUSTERS="+cluster, "STUB_FULL=1", "STUB_NO_MICROVM_CONFIG=1")
+	if code != 0 {
+		t.Fatalf("up.sh exit %d, want 0\noutput:\n%s\ncalls:\n%s", code, out, calls)
+	}
+	want := installCall + " --no-dev-env --kind-cluster-name=demo --context=kind-demo"
+	if !strings.Contains(calls, want) || !strings.Contains(calls, "deploy sandboxconfig --sandbox-classes=microvm") {
+		t.Errorf("want the micro-VM class deployed through ate-setup; calls:\n%s", calls)
 	}
 }
 
@@ -1831,7 +1842,7 @@ func TestDemoTapeMatchesDriverWaits(t *testing.T) {
 }
 
 // smoke-microvm.sh reaches the actor through a port-forward of the router from this machine, which
-// substrate v0.6.0's envoy router does not admit, so it refuses before it deploys anything.
+// substrate's envoy router does not admit, so it refuses before it deploys anything.
 func TestDemoSmokeMicroVMRefusesBeforeDeploying(t *testing.T) {
 	s := newStubs(t)
 	code, out, calls := s.run(t, "demo/smoke-microvm.sh")
@@ -1839,7 +1850,7 @@ func TestDemoSmokeMicroVMRefusesBeforeDeploying(t *testing.T) {
 		!strings.Contains(out, "docs/substrate-conformance.md#router-clients-outside-the-cluster") {
 		t.Fatalf("smoke-microvm.sh exited %d, want 1 with the refusal:\n%s", code, out)
 	}
-	if strings.Contains(calls, "install-ate-kind.sh") || strings.Contains(calls, "kubectl") {
+	if strings.Contains(calls, "ate-setup") || strings.Contains(calls, "kubectl") {
 		t.Fatalf("smoke-microvm.sh changed the cluster before refusing; calls:\n%s", calls)
 	}
 }
@@ -1876,9 +1887,9 @@ func TestDemoTraceHop(t *testing.T) {
 		return p
 	}
 	// The first pod's log has the later call; the earliest is in the second's, with a longer fraction.
-	podA := write("a.log", `[pod/api-a/server] {"time":"2026-10-15T05:23:31.1Z","msg":"Handle RPC","method":"/ateapi.Control/ResumeActor","req":{"actor":{"name":"sess-1"}}}`+"\n")
-	podB := write("b.log", `[pod/api-b/server] {"time":"2026-10-15T05:23:29.50412Z","msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":{"name":"sess-1"}}`+"\n"+
-		`[pod/api-b/server] {"time":"2026-10-15T05:23:29.510999Z","msg":"Handle RPC","method":"/ateapi.Control/CreateActor","req":{"actor":{"metadata":{"name":"sess-1"}}}}`+"\n")
+	podA := write("a.log", `[pod/api-a/server] {"time":"2026-10-15T05:23:31.1Z","msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/ResumeActor","req":{"actor":{"name":"sess-1"}}}`+"\n")
+	podB := write("b.log", `[pod/api-b/server] {"time":"2026-10-15T05:23:29.50412Z","msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/GetActor","req":{"name":"sess-1"}}`+"\n"+
+		`[pod/api-b/server] {"time":"2026-10-15T05:23:29.510999Z","msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/CreateActor","req":{"actor":{"metadata":{"name":"sess-1"}}}}`+"\n")
 	harness := write("harness.log", `{"time":"2026-10-15T05:23:32.622Z","message":"2026/10/15 05:23:32 harness: model m used 41 input and 37 output tokens"}`+"\n")
 	for _, tc := range []struct {
 		name    string
@@ -1888,8 +1899,8 @@ func TestDemoTraceHop(t *testing.T) {
 	}{
 		{
 			name: "the earliest match across files, keys under their short names",
-			args: []string{"ate-api", `"method":"/ateapi\.Control/(CreateActor|ResumeActor)".*"sess-1"`, "method,actor=req.actor.metadata.name,actor=req.actor.name", podA, podB},
-			want: "ate-api         05:23:29.510 Handle RPC method=/ateapi.Control/CreateActor actor=sess-1\n",
+			args: []string{"ate-api", `"method":"/substrate\.ateapi\.v1\.Control/(CreateActor|ResumeActor)".*"sess-1"`, "method,actor=req.actor.metadata.name,actor=req.actor.name", podA, podB},
+			want: "ate-api         05:23:29.510 Handle RPC method=/substrate.ateapi.v1.Control/CreateActor actor=sess-1\n",
 		},
 		{
 			name: "a message's Go log timestamp is dropped",
@@ -1921,6 +1932,26 @@ func TestDemoTraceHop(t *testing.T) {
 			}
 		})
 	}
+}
+
+// trace-turn.sh's ate-api hop matches the Control service the pinned substrate serves, so a package
+// rename on the next bump fails here instead of tracing every turn's ate-api hop as missing. The
+// pattern sits in a double-quoted shell string, where each regexp backslash is written twice.
+func TestDemoTraceTurnAteapiService(t *testing.T) {
+	b, err := os.ReadFile("demo/trace-turn.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "/" + strings.ReplaceAll(regexp.QuoteMeta(atepb.Control_ServiceDesc.ServiceName), `\`, `\\`) + "/"
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(line, "hop ate-api ") {
+			if !strings.Contains(line, want) {
+				t.Fatalf("trace-turn.sh ate-api hop %q does not match the service %s", line, want)
+			}
+			return
+		}
+	}
+	t.Fatal("trace-turn.sh has no ate-api hop")
 }
 
 // record.sh teardown runs and records the teardown only where the recording in DEMO_OUT ran its

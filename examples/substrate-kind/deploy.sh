@@ -5,7 +5,7 @@ set -euo pipefail
 # Load the selected runtime/provider and require the images produced by local setup or CI.
 source "$(dirname "$0")/common.sh"
 progress "Checking deployment settings and image inputs"
-refuse_sandbox_config
+refuse_template_overrides
 source "${HERE}/model.sh"
 need jq
 need kubectl

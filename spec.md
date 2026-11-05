@@ -1232,9 +1232,11 @@ records only.
   empty log), the `EXECUTION_START` append MUST use it as the compare-and-swap cursor; a mismatch
   is `ABORTED`. When unset, the host uses the head it read when it accepted the request, so an
   append by another writer between that read and `EXECUTION_START` is still `ABORTED`.
-- On an ordinary execution, the reference host checks `expected_last_seq` at the append, after
-  runtime creation, `Describe`, and fence minting. On the input-less approval recovery path it is
-  checked under the session guard before runtime IO or repair.
+- On an ordinary execution, the reference host checks `expected_last_seq` twice: under the session
+  guard after admission and before runtime creation, so a cursor that is already stale creates no
+  compute and the message names both values, and again at the append, after runtime creation,
+  `Describe`, and fence minting. On the input-less approval recovery path it is checked under the
+  session guard before runtime IO or repair.
 - `OPS-14`: While the session owns an approval call without a receipt, `Exec` with inputs MUST be
   `FAILED_PRECONDITION`, including after a decision. `Exec` without inputs on a current,
   non-terminal approval-bearing execution MUST recover it via the recorded invocation (§10.4)
@@ -1264,7 +1266,12 @@ records only.
   `FAILED_PRECONDITION`; for a `STATELESS_REPLAY` harness the service reports `INTERNAL` (§13.4). A
   failed `Exec` does not imply that case: when `Create` succeeded and the dial or turn failed, or
   `CreateActor` succeeded and `Create`'s `ResumeActor` failed, the actor remains, since the host
-  calls no `Stop` (`RT-7`), and a later `Suspend` or `Resume` reaches it. The neutral
+  calls no `Stop` (`RT-7`), and a later `Suspend` or `Resume` reaches it. When `Create` succeeded,
+  `runtime/substrate` has no `api.CleanupRuntime`, so unless the journal owns the actor, the error
+  is a `placement.ComputeLeftRunningError` naming the actor (`RT-7`). A partial `Create`
+  (`CreateActor` succeeded, `ResumeActor` failed) returns no incarnation, so the host has no actor
+  to report: the `Exec` error is not a `placement.ComputeLeftRunningError`, and nothing reports
+  the actor left behind. The neutral
   `agentsessionsd` builds no substrate placement. Its substrate build
   (`integrations/substrate/cmd/agentsessionsd`) serves one static `-substrate-harness`; neither
   build accepts a registered `substrate` placement (`REG-2a`).
@@ -1671,9 +1678,50 @@ The reference host takes it as `placement.Backend` in
 - `RT-7`: `Stop` is destructive teardown and is not part of suspension. The reference host calls it
   only to roll back a failed fork fan-out (`OPS-27`), never for `DeleteSession` (`OPS-35`). It does
   not call `Stop` when a later step of `Exec` or `Resume` fails after `Create` or `Restore`
-  succeeded (the dial, the `RT-3` check, the fence, or the run). The host keeps no handle to that
-  incarnation; a later `Exec` reaches it through `Create` (`RT-4e`) and a `Suspend` through
-  `Snapshot`.
+  succeeded (the allocation confirm, the dial, the `RT-3` check, the fence, the run, an approval
+  park's handoff before its `LIFECYCLE_SUSPEND` commits, or the `LIFECYCLE_RESUME` append).
+  Instead it reads the journal and verifies its hash chain (`CHAIN-12`) to decide who owns the
+  compute:
+  - The journal owns it: `compute_state` (`SES-8`) is `LIVE` before or after the call, what left
+    it `LIVE` ran on the harness the call runs on, and the runtime returned no replacement. A turn
+    ran on the harness its `EXECUTION_START` names (this harness or an alias of it), or on the
+    session's own harness when it names none; a fork child's turn re-driven across its `FORK`
+    marker is still that turn. A `LIFECYCLE_RESUME` ran on the session's own harness or on the
+    harness of a turn with a record after the latest `FORK` marker before it (any turn when there
+    is none): a resume re-drives a pending turn on that turn's harness, and two resumes that both
+    found the turn pending can each run on it, the second appending its `LIFECYCLE_RESUME` after
+    the first's. When all of those are the call's harness, the resume ran there. A host with one
+    harness counts every turn and resume. After a turn or
+    resume on another harness (an `ExecRequest.harness` override, either way), `LIVE` is that
+    harness's compute, not what this call's backend returned. A replacement is a nonempty
+    `Incarnation.compute_instance` other than the latest one this harness's turns, or the
+    session's `FORK` marker, recorded: the run refuses it (`api.ErrMemoryStateLost`), and `LIVE`
+    is the replaced instance. The host returns the error unchanged.
+  - Another owner may hold it: a record committed during the call, or the call failed on a
+    checkpoint in progress, a newer fence, or a deleted session. A checkpoint that superseded the
+    turn (`OPS-2`) counts as in progress: a stateful fork may still be snapshotting the compute, or
+    may fail before it suspends it. The host releases nothing.
+  - The owner is unknown: the host cannot read the journal or verify its chain, the journal ends
+    before the head it had when the call began (a lost tail can leave a prefix that verifies and
+    reads `LIVE`), or `LIVE` comes from a `LIFECYCLE_RESUME` that may have run on the call's
+    harness or on another one, and the journal does not record which. The host releases nothing
+    when the call runs on one of those harnesses and the runtime returned no replacement; when it
+    runs on none of them or the runtime returned a replacement, nobody owns the compute.
+  - Nobody owns it: the host calls `api.CleanupRuntime.ReleaseSession` for the session, bounded at
+    30s and detached from the caller's cancellation. After a successful release it returns the
+    error unchanged.
+
+  In the second and third cases, or when the backend has no `api.CleanupRuntime` or the release
+  fails, the error is a `placement.ComputeLeftRunningError` (`placement.ErrComputeLeftRunning`).
+  It names the incarnation, wraps the original error, and says in fixed text why nothing was
+  released; the journal, verification or release error behind that is only in the `Cleanup` field,
+  and the host log carries the same fixed text. The public code is the original error's. Under
+  `session.WithAuthorization`, which replaces an `INTERNAL` message with `internal error`, such an
+  `INTERNAL` failure keeps fixed text naming the incarnation ID and, when the runtime returned
+  one, the compute instance, with nothing from the cause or the request:
+  `internal error; compute instance "<id>" (uid "<instance>") may still be running`. The host
+  keeps no handle to that incarnation; a later `Exec` reaches it through `Create` (`RT-4e`) and a
+  `Suspend` through `Snapshot`.
 - `RT-8`: `Capabilities` reports `memory_snapshot`, `cow_fork`, `attest`, and `gpu_state`. Only
   `memory_snapshot` affects placement (`RT-2`, `OPS-7`).
 - The reference host does not call `Status`.
@@ -2002,12 +2050,13 @@ The reference implementation protects the integrity of the record, not access to
   the same generic `PERMISSION_DENIED`. Existing unbound rows MUST reach the policy with a zero
   `Owner`; `OwnerAuthorizer` denies them, but custom policies MAY allow them. Only
   `api.ErrPermissionDenied` (possibly wrapped) is policy denial; unexpected policy/store failures
-  MUST be sanitized `INTERNAL`. Caller cancellation/deadlines retain their codes. Policies own
-  their failure logs and metrics; services MUST NOT log raw policy causes. In enforced mode only,
-  `INTERNAL` diagnostics MUST include `request_id`, `method`, `error_kind` and stable
-  `error_category`. Known trusted host/store errors MUST log the full cause with category `host`.
-  Model/provider/harness and other unknown-origin errors MUST NOT log message text: category MUST
-  be `execution` for Exec/Resume, `runtime` for Suspend/Fork, or `external` for other methods.
+  MUST be sanitized `INTERNAL`; an `INTERNAL` Exec or Resume failure that left compute running
+  keeps only its fixed `RT-7` report after `internal error`. Caller cancellation/deadlines retain
+  their codes. Policies own their failure logs and metrics; services MUST NOT log raw policy causes.
+  In enforced mode only, `INTERNAL` diagnostics MUST include `request_id`, `method`, `error_kind`
+  and stable `error_category`. Known trusted host/store errors MUST log the full cause with category
+  `host`. Model/provider/harness and other unknown-origin errors MUST NOT log message text: category
+  MUST be `execution` for Exec/Resume, `runtime` for Suspend/Fork, or `external` for other methods.
   Unknown mixed execution/runtime phases MUST fail closed; store faults inside runtime MUST NOT
   qualify as trusted unless known at the service storage boundary. No heuristic redaction is used.
   Registry diagnostics and startup warnings use the logger supplied by `session.WithRegistryLogger`,

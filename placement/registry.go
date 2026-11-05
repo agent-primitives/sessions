@@ -362,7 +362,8 @@ func WithResolvedHarnessCheck(check func(name string) error) RegistryResumeOptio
 // one exception is the repair of an override turn on a runtime with memory snapshots: its harness
 // is described first, and a REQUIRES_MEMORY_SNAPSHOT one is refused (ErrStatefulOverride).
 // Decided recovery delegates to the Placer: a new gate commits SUSPEND and returns park, while
-// ordinary success records RESUME. Repair/handoff failures retain their actual cause.
+// ordinary success records RESUME. Repair/handoff failures retain their actual cause, wrapped in
+// *ComputeLeftRunningError when the Placer leaves restored compute running (RT-7).
 // Contention through this Registry wins over stale invocation errors. Legacy markerless and
 // completed journals retain sessionDefaultName (empty = registry default).
 func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, sessionDefaultName string, opts ...RegistryResumeOption) error {
@@ -439,8 +440,13 @@ func checkResumeHead(log eventlog.Store, expected *int64) error {
 	if err != nil {
 		return err
 	}
-	if head != *expected {
-		return fmt.Errorf("%w: expected_last_seq %d, head %d", eventlog.ErrConflict, *expected, head)
+	return checkCursor(head, *expected)
+}
+
+// checkCursor refuses a caller's expected_last_seq that is not the journal head.
+func checkCursor(head, expected int64) error {
+	if head != expected {
+		return fmt.Errorf("%w: expected_last_seq %d, head %d", eventlog.ErrConflict, expected, head)
 	}
 	return nil
 }

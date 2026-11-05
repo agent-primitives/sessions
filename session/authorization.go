@@ -161,7 +161,8 @@ func hostInternalError(format string, args ...any) error {
 }
 
 // internalError keeps diagnostics off enforced responses without changing off-mode
-// errors. Policies own their diagnostics; untrusted messages are never logged.
+// errors. Policies own their diagnostics; untrusted messages are never logged. An Exec or
+// Resume failure that left compute running keeps only its fixed report (RT-7).
 func (a *authorization) internalError(ctx context.Context, logger *slog.Logger, method string, err *error) {
 	if a != nil && status.Code(*err) == codes.Internal {
 		var sanitized *authorizationFailure
@@ -182,7 +183,12 @@ func (a *authorization) internalError(ctx context.Context, logger *slog.Logger, 
 			observability.Logger(ctx, logger).ErrorContext(ctx, "external operation failed",
 				"method", method, "error_kind", "internal", "error_category", category)
 		}
-		*err = status.Error(codes.Internal, "internal error")
+		msg := "internal error"
+		var left *leftRunningStatus
+		if errors.As(*err, &left) {
+			msg += "; " + left.report()
+		}
+		*err = status.Error(codes.Internal, msg)
 	}
 }
 

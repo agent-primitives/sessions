@@ -11,9 +11,12 @@ category: Compatibility
   call with `UNIMPLEMENTED`. Re-run the atespace provisioning afterwards, and upgrade
   `agentsessionsd` together with Substrate; a mismatched pair is unsupported. Install a kind
   cluster with substrate's `cmd/ate-setup` (`hack/install-ate-kind.sh` and
-  `hack/install-microvm-deps.sh` are gone). The worker binaries are `ateworker-gvisor` and
+  `hack/install-microvm-deps.sh` are gone); CI and both examples pass it
+  `--image-repo=ghcr.io/agent-substrate/substrate --image-tag=v1.0.0` to install the release's
+  published images instead of building them. The worker images are `ateworker-gvisor` and
   `ateworker-microvm`, so a WorkerPool's `workerImage` is
-  `ko://go.ate.dev/substrate/cmd/ateworker-<class>`. See
+  `ghcr.io/agent-substrate/substrate/ateworker-<class>:v1.0.0`, best pinned to its digest
+  (`hack/substrate-image.sh ateworker-<class>` prints it). See
   [Running on agent-substrate](../../docs/substrate-conformance.md#substrate-v1-asynchronous-suspends-suspend-durability-and-runtime-fallback).
 - Install Substrate with its default envoy router and list each `agentsessionsd`'s SPIFFE ID
   (`spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`) in ate-setup's

@@ -23,6 +23,21 @@ func substratePin(t *testing.T) string {
 	return ""
 }
 
+func substrateVersion(t *testing.T) string {
+	t.Helper()
+	workflow, err := os.ReadFile("../../.github/workflows/substrate-e2e.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(workflow), "\n") {
+		if version, ok := strings.CutPrefix(line, "  SUBSTRATE_VERSION: "); ok {
+			return version
+		}
+	}
+	t.Fatal("workflow has no Substrate release")
+	return ""
+}
+
 func TestSetupRefusesCheckoutInspectionFailure(t *testing.T) {
 	for _, managed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "custom", true: "managed"}[managed], func(t *testing.T) {

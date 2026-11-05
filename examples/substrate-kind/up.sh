@@ -11,9 +11,11 @@ source "${HERE}/model.sh"
 for tool in git go docker kubectl ko jq; do need "${tool}"; done
 timeout_command
 [[ "${SUBSTRATE_REF}" =~ ^[0-9a-f]{40}$ ]] || die "Invalid workflow substrate pin."
+[[ "${SUBSTRATE_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || die "Invalid workflow substrate release."
 case "${requested}" in auto | microvm | gvisor) ;; *) die "SANDBOX_CLASS must be auto, microvm, or gvisor." ;; esac
 
-# Build images for the Docker host, which may differ from the machine running this script.
+# Build this repository's images for the Docker host, which may differ from the machine running
+# this script. Substrate's come from its release, which publishes them for both architectures.
 progress "Detecting the Docker host architecture"
 arch="$(docker info --format '{{.Architecture}}')"
 case "${arch}" in x86_64 | amd64) arch=amd64 ;; aarch64 | arm64) arch=arm64 ;; *) die "Unsupported Docker architecture." ;; esac
@@ -45,13 +47,19 @@ fi
 export SANDBOX_CLASS ACTOR_TEMPLATE PROJECT
 progress "Sandbox: ${SANDBOX_CLASS}; images: linux/${arch}"
 
-# Prepare only managed checkouts; caller-supplied checkouts remain read-only.
+# Prepare only managed checkouts; caller-supplied checkouts remain read-only. The release tag must
+# still name the workflow revision: the images installed below are the tag's, the manifests the
+# revision's.
 prepare_managed_checkout() {
 	progress "Preparing the managed Substrate checkout at the workflow revision"
-	local checkout_status
+	local checkout_status tagged
 	checkout_status="$(git -C "${SUBSTRATE_DIR}" status --porcelain)" || die "Cannot inspect substrate checkout."
 	[[ -z "${checkout_status}" ]] || die "Dirty managed substrate checkout."
-	git -C "${SUBSTRATE_DIR}" fetch --quiet origin "${SUBSTRATE_REF}"
+	git -C "${SUBSTRATE_DIR}" fetch --quiet origin "refs/tags/${SUBSTRATE_VERSION}:refs/tags/${SUBSTRATE_VERSION}"
+	tagged="$(git -C "${SUBSTRATE_DIR}" rev-parse --verify --quiet "refs/tags/${SUBSTRATE_VERSION}^{commit}")" ||
+		die "Cannot resolve Substrate release ${SUBSTRATE_VERSION}."
+	[[ "${tagged}" == "${SUBSTRATE_REF}" ]] ||
+		die "Substrate release ${SUBSTRATE_VERSION} names ${tagged}, not the workflow revision ${SUBSTRATE_REF}."
 	git -C "${SUBSTRATE_DIR}" checkout --quiet --detach "${SUBSTRATE_REF}"
 }
 
@@ -131,14 +139,16 @@ fi
 # Install the Substrate control plane only on a newly created cluster. Keep an
 # installed cluster intact on reruns, and record completion only if its identity still matches.
 # The default envoy router admits only mTLS clients whose SPIFFE ID it allowlists: here the
-# daemon's ServiceAccount (deploy/agentsessionsd.yaml).
+# daemon's ServiceAccount (deploy/agentsessionsd.yaml). Substrate's images are the release's,
+# pinned to their digests; ate-setup builds none of them.
+IMAGES=(--image-repo=ghcr.io/agent-substrate/substrate --image-tag="${SUBSTRATE_VERSION}")
 kind_command export kubeconfig --name "${CLUSTER}" --kubeconfig "${KUBECONFIG}"
 if [[ "${stage}" == created ]]; then
 	progress "Installing the Substrate control plane in cluster ${CLUSTER}"
 	(cd "${SUBSTRATE_DIR}" && env -u GCE_REGION -u CLUSTER_LOCATION -u NETWORK -u SUBNETWORK \
 		-u MEMORYSTORE_INSTANCE -u PROJECT_ID \
 		go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}" \
-		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${arch}" \
+		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" "${IMAGES[@]}" \
 		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m \
 		--ingress-allowed-spiffe-ids="${ROUTER_CLIENT_ID}" \
 		deploy ate-system --setup-csi=none --sandbox-classes=gvisor)
@@ -160,11 +170,12 @@ if [[ "${SANDBOX_CLASS}" == microvm ]]; then
 	(cd "${SUBSTRATE_DIR}" && env -u GCE_REGION -u CLUSTER_LOCATION -u NETWORK -u SUBNETWORK \
 		-u MEMORYSTORE_INSTANCE -u PROJECT_ID \
 		go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}" \
-		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${arch}" \
+		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" "${IMAGES[@]}" \
 		--credential-provider='{"name":"k8s.io"}' deploy sandboxconfig --sandbox-classes=microvm)
 fi
 
-# Build the matching Control API client and publish the daemon, harness and worker images.
+# Build the matching Control API client, publish the daemon and harness images, and pin the
+# release's worker image.
 # The deterministic provider image is needed only when explicitly selecting the stub.
 progress "Building the Substrate Control API client"
 (cd "${SUBSTRATE_DIR}" && go build -o "${STATE}/kubectl-ate" ./cmd/kubectl-ate)
@@ -172,8 +183,8 @@ progress "Building and publishing the Sessions daemon image"
 DAEMON_IMAGE="$(cd "${ROOT}/integrations/substrate" && ko build ./cmd/agentsessionsd)"
 progress "Building and publishing the chat harness image"
 HARNESS_IMAGE="$(cd "${ROOT}" && ko build ./cmd/harnessnode)"
-progress "Building and publishing the ${SANDBOX_CLASS} worker image"
-WORKER_IMAGE="$(cd "${SUBSTRATE_DIR}" && ko build "./cmd/ateworker-${SANDBOX_CLASS}")"
+progress "Resolving the Substrate ${SUBSTRATE_VERSION} ${SANDBOX_CLASS} worker image"
+WORKER_IMAGE="$(SUBSTRATE_VERSION="${SUBSTRATE_VERSION}" "${ROOT}/hack/substrate-image.sh" "ateworker-${SANDBOX_CLASS}")"
 export DAEMON_IMAGE HARNESS_IMAGE WORKER_IMAGE
 if [[ "${MODEL_SOURCE}" == stub ]]; then
 	progress "Building and publishing the deterministic model stub image"

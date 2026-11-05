@@ -15,8 +15,11 @@ script demonstrates conversation continuity and journal integrity across daemon 
 
 ## Run
 
-Requires Docker, Go, `kubectl`, `ko`, `jq`, and GNU `timeout` (`gtimeout` from Homebrew coreutils also
-works). Setup builds the pinned kind and kubectl-ate tools from the workflow's Substrate revision.
+Requires Docker with `buildx`, Go, `kubectl`, `ko`, `jq`, and GNU `timeout` (`gtimeout` from Homebrew
+coreutils also works). Setup installs the images of the Substrate release the workflow pins
+(`SUBSTRATE_VERSION`, from `ghcr.io/agent-substrate/substrate`, each pinned to its digest), and builds
+the pinned kind and kubectl-ate tools from the revision its tag names (`SUBSTRATE_REF`); it refuses a
+tag that names another revision. Only this repository's images are built.
 Docker must publish its registry and Kubernetes API on this machine's loopback; a remote Docker
 daemon is not supported. Docker Desktop's Linux VM is supported.
 
@@ -75,7 +78,8 @@ creation. `SANDBOX_CLASS=microvm` requires the device check to pass; `SANDBOX_CL
 this initial probe. The upstream cluster-creation helper probes KVM independently; before installing
 or reusing a microVM deployment, setup also requires a writable `/dev/kvm` mount on the kind node.
 If the helper omitted that mount, setup refuses rather than installing incompatible workers; use
-`down.sh` before recreating the cluster. Images target the Docker server's architecture. The
+`down.sh` before recreating the cluster. This repository's images target the Docker server's
+architecture; the Substrate release images are multi-arch. The
 control plane installs with the gVisor class only; a microVM setup then adds that class with
 `ate-setup deploy sandboxconfig --sandbox-classes=microvm`, which on kind assembles the kata assets
 for the architecture `ate-setup` runs on, so microVM needs the host and Docker server to match.

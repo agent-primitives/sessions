@@ -225,9 +225,17 @@ esac
 # The control-plane container the stage is for; the install below records it.
 id="$(node_id)"
 
-step "agent-substrate ${SUBSTRATE_REF:0:8} checkout in ${SUBSTRATE}"
+step "agent-substrate ${SUBSTRATE_VERSION} (${SUBSTRATE_REF:0:8}) checkout in ${SUBSTRATE}"
 if [[ ! -d "${SUBSTRATE}/.git" ]]; then
 	git clone -q https://github.com/agent-substrate/substrate "${SUBSTRATE}"
+fi
+# The images installed below are the release tag's and the manifests are this checkout's, so the tag
+# must still name the pinned commit.
+git -C "${SUBSTRATE}" fetch -q https://github.com/agent-substrate/substrate "refs/tags/${SUBSTRATE_VERSION}:refs/tags/${SUBSTRATE_VERSION}"
+tagged="$(git -C "${SUBSTRATE}" rev-parse --verify --quiet "refs/tags/${SUBSTRATE_VERSION}^{commit}")" || tagged=
+if [[ "${tagged}" != "${SUBSTRATE_REF}" ]]; then
+	echo "refusing to install agent-substrate ${SUBSTRATE_VERSION}: its tag names ${tagged:-no commit}, not ${SUBSTRATE_REF}, the commit .github/workflows/substrate-e2e.yml pins." >&2
+	exit 1
 fi
 if [[ "$(git -C "${SUBSTRATE}" rev-parse HEAD)" != "${SUBSTRATE_REF}" ]]; then
 	git -C "${SUBSTRATE}" fetch -q https://github.com/agent-substrate/substrate "${SUBSTRATE_REF}"
@@ -274,12 +282,12 @@ kind export kubeconfig --name "${CLUSTER}" --kubeconfig "${KUBECONFIG}"
 # ate-setup's global flags for this cluster, run from the substrate checkout.
 ATE_SETUP=(env -u GCE_REGION -u CLUSTER_LOCATION -u NETWORK -u SUBNETWORK -u MEMORYSTORE_INSTANCE
 	-u PROJECT_ID go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}"
-	--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${ARCH}")
+	--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}"
+	--image-repo=ghcr.io/agent-substrate/substrate --image-tag="${SUBSTRATE_VERSION}")
 if [[ "${stage}" == created ]]; then
 	step "ate-system (ate-setup deploy ate-system)"
-	# On Kind ate-setup builds the control-plane images for linux/<its own GOARCH> unless
-	# --ko-default-platforms is given, so an arm64 Mac with an amd64 Docker VM would push arm64
-	# images to an amd64 node; the flags pass the platform Docker reports. The GCP variables are
+	# --image-repo/--image-tag install the release's images, pinned to their digests, which the
+	# release publishes for amd64 and arm64; ate-setup builds none of them. The GCP variables are
 	# unset so a shell configured for GKE cannot redirect the install. The default envoy router
 	# admits only mTLS clients whose SPIFFE ID it allowlists: here the agentsessionsd ServiceAccount
 	# both daemon tiers run as (deploy/agentsessionsd.yaml). Only the gVisor class is installed
@@ -309,7 +317,7 @@ fi
 
 step "${SANDBOX} WorkerPool ${POOL}"
 "${K[@]}" apply -f "${HERE}/deploy/namespace.yaml"
-ATEWORKER_IMAGE="$(cd "${SUBSTRATE}" && ko build --base-import-paths "./cmd/ateworker-${SANDBOX}")"
+ATEWORKER_IMAGE="$(SUBSTRATE_VERSION="${SUBSTRATE_VERSION}" "${ROOT}/hack/substrate-image.sh" "ateworker-${SANDBOX}")"
 sed -e "s#ATEWORKER_IMAGE#${ATEWORKER_IMAGE}#" "${HERE}/deploy/${WORKERPOOL_FILE}" | "${K[@]}" apply -f -
 "${ROOT}/hack/wait-worker-pool.sh" "${POOL}" "${NS}" 600
 if ${SUBSTRATE_ONLY}; then

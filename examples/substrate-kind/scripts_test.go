@@ -56,6 +56,7 @@ fi
 	t.Setenv("MODEL_API_KEY", "")
 	t.Setenv("MODEL_PATH", "")
 	t.Setenv("MODEL_AUTH_HEADER", "")
+	t.Setenv("SANDBOX_CONFIG", "")
 	state := filepath.Join(dir, "recipe-test")
 	if err := os.Mkdir(state, 0o700); err != nil {
 		t.Fatal(err)
@@ -80,6 +81,9 @@ func prerequisites(t *testing.T) {
 	}
 }
 
+// fakeATE stands in for kubectl-ate. It refuses a created access policy that does not grant
+// daemonPrincipal editor; hack/substrate-lib-test.sh tests the atespace and access-policy behavior
+// provision.sh shares through hack/substrate-lib.sh.
 const fakeATE = `echo "$*" >> "$TEST_DIR/calls"
 case "$*" in
   *"get atespace"*)
@@ -91,13 +95,26 @@ case "$*" in
       stall) sleep 5 ;;
     esac
     echo '{"metadata":{"name":"sessions-example"}}'; exit ;;
+  *"get access-policy -a sessions-example")
+    # A missing policy is a successful get with no output, as kubectl-ate reports it.
+    if [[ -f "$TEST_DIR/policy" ]]; then cat "$TEST_DIR/policy"; else echo 'atespace "sessions-example" has no access policy' >&2; fi
+    exit ;;
+  *"create access-policy -a sessions-example -f -")
+    manifest="$(cat)"
+    [[ "$manifest" == "$(printf 'bindings:\n- role: editor\n  members:\n  - %s' "$TEST_PRINCIPAL")" ]]
+    jq -n --arg member "$TEST_PRINCIPAL" '{bindings:[{role:"editor",members:[$member]}]}' > "$TEST_DIR/policy"
+    cat "$TEST_DIR/policy"; exit ;;
   *"create actor-template"*)
     jq -e --arg class "$SANDBOX_CLASS" '
-      .sandboxConfig.sandboxClass == $class and
+      (has("sandboxConfig") | not) and
+      .resources == {limits:{cpuMillicores:"1000",memoryBytes:"805306368"}} and
       .workerSelector.matchLabels.workload == ("sessions-example-" + $class)
     ' "${@: -1}" >/dev/null
     cp "${@: -1}" "$TEST_DIR/current" ;;
   *"get actor-template"*)
+    if [[ "$TEST_MODE" == template-transport ]]; then
+      echo 'rpc error: code = Unavailable desc = unavailable' >&2; exit 1
+    fi
     if [[ ! -f "$TEST_DIR/current" ]]; then
       echo 'rpc error: code = NotFound desc = absent' >&2; exit 1
     fi ;;
@@ -106,9 +123,9 @@ esac
 jq --arg mode "$TEST_MODE" '
   .status.goldenSnapshotStatus.goldenTag.name = "ready" |
   if $mode == "containers" then .containers[0].env += [{name:"UNEXPECTED",value:"changed"}]
-  elif $mode == "resources" then .resources.limits[0].quantity = "2"
-  elif $mode == "sandboxConfig" then .sandboxConfig.configName = "changed"
-  elif $mode == "snapshotConfig" then .snapshotConfig.storageLocation = "changed"
+  elif $mode == "resources" then .resources.limits.cpuMillicores = "2000"
+  elif $mode == "sandboxConfig" then .sandboxConfig = {sandboxClass:"microvm",configName:"microvm"}
+  elif $mode == "snapshotConfig" then .snapshotConfig.preferredFidelity = "SNAPSHOT_FIDELITY_ROOTFS"
   elif $mode == "workerSelector" then .workerSelector.matchLabels.unexpected = "changed"
   elif $mode == "durable-volume" then .volumes = [{name:"extra",durableDir:{}}]
   elif $mode == "external-volume" then .volumes = [{name:"extra",externalVolumeTemplate:{capacity:"10Gi",storageClassName:"example"}}]
@@ -131,7 +148,7 @@ func templateFixture(t *testing.T) (string, string) {
 	t.Setenv("MODEL_NAME", `model-with-"quotes"`)
 	t.Setenv("ACTOR_TEMPLATE", "chat-harness")
 	t.Setenv("SANDBOX_CLASS", "microvm")
-	t.Setenv("SANDBOX_CONFIG", "microvm")
+	t.Setenv("TEST_PRINCIPAL", daemonPrincipal)
 	t.Setenv("PROVISION_TIMEOUT_SECONDS", "600")
 	return dir, state
 }
@@ -178,6 +195,7 @@ func TestProvisionFailsClosed(t *testing.T) {
 	for _, mode := range []string{
 		"containers", "resources", "sandboxConfig", "snapshotConfig", "workerSelector", "durable-volume", "external-volume",
 		"identity", "golden-error", "golden-pending", "transport", "ambiguous", "auth", "null", "stall",
+		"template-transport",
 	} {
 		t.Run(mode, func(t *testing.T) {
 			dir, _ := templateFixture(t)
@@ -199,8 +217,15 @@ func TestProvisionFailsClosed(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
 			defer cancel()
-			if out, err := exec.CommandContext(ctx, "bash", "provision.sh").CombinedOutput(); err == nil || ctx.Err() != nil {
+			out, err := exec.CommandContext(ctx, "bash", "provision.sh").CombinedOutput()
+			if err == nil || ctx.Err() != nil {
 				t.Fatalf("did not refuse within its own deadline: %v\n%s", err, out)
+			}
+			switch mode {
+			case "transport", "ambiguous", "auth", "template-transport":
+				if !strings.Contains(string(out), "kubectl-ate failed; template provisioning refused.") {
+					t.Fatalf("a kubectl-ate failure did not stop with the template provisioning refusal:\n%s", out)
+				}
 			}
 			calls, err := os.ReadFile(filepath.Join(dir, "calls"))
 			if err != nil || strings.Contains(string(calls), "create ") {
@@ -212,14 +237,21 @@ func TestProvisionFailsClosed(t *testing.T) {
 
 func TestProvisionPreflightDoesNotCreate(t *testing.T) {
 	dir, _ := templateFixture(t)
-	if out, err := exec.CommandContext(t.Context(), "bash", "provision.sh", "--check-only").CombinedOutput(); err != nil {
+	out, err := exec.CommandContext(t.Context(), "bash", "provision.sh", "--check-only").CombinedOutput()
+	if err != nil {
 		t.Fatalf("preflight: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "Access policy is absent") {
+		t.Fatalf("preflight did not report the absent access policy:\n%s", out)
 	}
 	calls, err := os.ReadFile(filepath.Join(dir, "calls"))
 	if err != nil || strings.Contains(string(calls), "create ") {
 		t.Fatalf("preflight created a resource: %s %v", calls, err)
 	}
 }
+
+// daemonPrincipal is deploy/agentsessionsd.yaml's ServiceAccount as substrate's authorizer names it.
+const daemonPrincipal = "user:system:serviceaccount:sessions-example:agentsessions"
 
 func deploymentFixture(t *testing.T) string {
 	t.Helper()
@@ -272,7 +304,7 @@ esac`,
 	t.Setenv("MODEL_NAME", "fixture-model")
 	t.Setenv("MODEL_BASE_URL", "https://model.example")
 	t.Setenv("MODEL_API_KEY", "")
-	t.Setenv("SANDBOX_CONFIG", "")
+	t.Setenv("TEST_PRINCIPAL", daemonPrincipal)
 	t.Setenv("SANDBOX_CLASS", "gvisor")
 	t.Setenv("ACTOR_TEMPLATE", "chat-gvisor")
 	t.Setenv("WORKER_IMAGE", "example/worker@sha256:"+strings.Repeat("c", 64))
@@ -365,6 +397,52 @@ func TestModelRouteRefusalPreservesDeployment(t *testing.T) {
 						t.Fatalf("refused route reached setup commands: %v\n%s", err, calls)
 					}
 				})
+			}
+		})
+	}
+}
+
+// SANDBOX_CONFIG used to name the template's SandboxConfig and SNAPSHOT_LOCATION its storage
+// location. Substrate templates name no config and the rendered WorkerPool sets no configRef, and
+// substrate v1 rejects a per-template location while PerTemplateSnapshotLocation is off, so a
+// leftover value must be refused before any cluster call rather than ignored.
+func TestTemplateOverridesRefusedBeforeClusterChanges(t *testing.T) {
+	for _, tc := range []struct{ script, env, value, hint string }{
+		{"up.sh", "SANDBOX_CONFIG", "custom", "configRef"},
+		{"deploy.sh", "SANDBOX_CONFIG", "custom", "configRef"},
+		{"provision.sh", "SANDBOX_CONFIG", "custom", "configRef"},
+		{"up.sh", "SNAPSHOT_LOCATION", "gs://x/", "--snapshot-location"},
+		{"deploy.sh", "SNAPSHOT_LOCATION", "gs://x/", "--snapshot-location"},
+		{"provision.sh", "SNAPSHOT_LOCATION", "gs://x/", "--snapshot-location"},
+	} {
+		script := tc.script
+		t.Run(script+"/"+tc.env, func(t *testing.T) {
+			dir := deploymentFixture(t)
+			if out, err := exec.CommandContext(t.Context(), "bash", "deploy.sh").CombinedOutput(); err != nil {
+				t.Fatalf("initial deployment: %v\n%s", err, out)
+			}
+			before := make(map[string][]byte)
+			for _, file := range []string{"kube-calls", "calls"} {
+				var err error
+				before[file], err = os.ReadFile(filepath.Join(dir, file))
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv(tc.env, tc.value)
+			out, err := exec.CommandContext(t.Context(), "bash", script).CombinedOutput()
+			if err == nil || !strings.Contains(string(out), tc.env+" is not supported") ||
+				!strings.Contains(string(out), tc.hint) {
+				t.Fatalf("%s was not refused: %v\n%s", tc.env, err, out)
+			}
+			for file, previous := range before {
+				calls, err := os.ReadFile(filepath.Join(dir, file))
+				if err != nil || !bytes.Equal(calls, previous) {
+					t.Fatalf("refused %s contacted the cluster (%s): %v\n%s", tc.env, file, err, calls)
+				}
+			}
+			if calls, err := os.ReadFile(filepath.Join(dir, "cluster-calls")); !os.IsNotExist(err) {
+				t.Fatalf("refused %s reached setup commands: %v\n%s", tc.env, err, calls)
 			}
 		})
 	}

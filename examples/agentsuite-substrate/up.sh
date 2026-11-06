@@ -41,8 +41,14 @@ case "${SKIP_TEMPLATE}" in
 esac
 
 step() { printf '\n==> %s\n' "$*"; }
+# die and progress are what hack/substrate-lib.sh (sourced by common.sh) reports through.
+die() {
+	echo "$*" >&2
+	exit 1
+}
+progress() { echo "$*"; }
 
-for tool in docker kind ko go git python3 kubectl curl; do
+for tool in docker kind ko go git python3 jq kubectl curl; do
 	command -v "${tool}" >/dev/null || {
 		echo "missing ${tool}" >&2
 		exit 1
@@ -225,9 +231,17 @@ esac
 # The control-plane container the stage is for; the install below records it.
 id="$(node_id)"
 
-step "agent-substrate ${SUBSTRATE_REF:0:8} checkout in ${SUBSTRATE}"
+step "agent-substrate ${SUBSTRATE_VERSION} (${SUBSTRATE_REF:0:8}) checkout in ${SUBSTRATE}"
 if [[ ! -d "${SUBSTRATE}/.git" ]]; then
 	git clone -q https://github.com/agent-substrate/substrate "${SUBSTRATE}"
+fi
+# The images installed below are the release tag's and the manifests are this checkout's, so the tag
+# must still name the pinned commit.
+git -C "${SUBSTRATE}" fetch -q https://github.com/agent-substrate/substrate "refs/tags/${SUBSTRATE_VERSION}:refs/tags/${SUBSTRATE_VERSION}"
+tagged="$(git -C "${SUBSTRATE}" rev-parse --verify --quiet "refs/tags/${SUBSTRATE_VERSION}^{commit}")" || tagged=
+if [[ "${tagged}" != "${SUBSTRATE_REF}" ]]; then
+	echo "refusing to install agent-substrate ${SUBSTRATE_VERSION}: its tag names ${tagged:-no commit}, not ${SUBSTRATE_REF}, the commit .github/workflows/substrate-e2e.yml pins." >&2
+	exit 1
 fi
 if [[ "$(git -C "${SUBSTRATE}" rev-parse HEAD)" != "${SUBSTRATE_REF}" ]]; then
 	git -C "${SUBSTRATE}" fetch -q https://github.com/agent-substrate/substrate "${SUBSTRATE_REF}"
@@ -272,19 +286,16 @@ if [[ "${stage}" == absent || "${stage}" == incomplete ]]; then
 fi
 kind export kubeconfig --name "${CLUSTER}" --kubeconfig "${KUBECONFIG}"
 if [[ "${stage}" == created ]]; then
-	step "ate-system (ate-setup deploy ate-system, the command install-ate-kind.sh runs)"
-	# ate-setup is called directly, not through hack/install-ate-kind.sh: on Kind it builds the
-	# control-plane images for linux/<its own GOARCH> unless --ko-default-platforms is given (the
-	# wrapper's KO_DEFAULTPLATFORMS is ambient and ignored), so an arm64 Mac with an amd64 Docker VM
-	# would push arm64 images to an amd64 node. The flags below are the wrapper's settings plus the
-	# platform Docker reports; the GCP variables it unsets are unset here too.
-	(cd "${SUBSTRATE}" && env -u GCE_REGION -u CLUSTER_LOCATION -u NETWORK -u SUBNETWORK \
-		-u MEMORYSTORE_INSTANCE -u PROJECT_ID \
-		go run ./cmd/ate-setup --kind --no-dev-env --kind-cluster-name="${CLUSTER}" \
-		--context="kind-${CLUSTER}" --kubeconfig="${KUBECONFIG}" --ko-default-platforms="linux/${ARCH}" \
-		--credential-provider='{"name":"k8s.io"}' --rollout-timeout=10m \
-		deploy ate-system --setup-csi=none)
-	echo "${id} installed ${SUBSTRATE_REF}" >"${SETUP}"
+	step "ate-system (ate-setup deploy ate-system)"
+	# kind_ate_setup (hack/substrate-lib.sh) installs the release's images, published for amd64 and
+	# arm64. The default envoy router admits only mTLS clients whose SPIFFE ID it allowlists: here the
+	# agentsessionsd ServiceAccount both daemon tiers run as (deploy/agentsessionsd.yaml). Only the
+	# gVisor class is installed here, so a host without KVM skips the micro-VM assets; the micro-VM
+	# step below adds that class.
+	kind_ate_setup "${SUBSTRATE}" "${CLUSTER}" "${KUBECONFIG}" "${SUBSTRATE_VERSION}" \
+		--rollout-timeout=10m --ingress-allowed-spiffe-ids="${ROUTER_CLIENT_ID}" \
+		deploy ate-system --setup-csi=none --sandbox-classes=gvisor
+	echo "${id} installed ${SUBSTRATE_REF} envoy" >"${SETUP}"
 else
 	step "reusing kind cluster ${CLUSTER}"
 	if [[ "${stage}" == foreign ]]; then
@@ -297,17 +308,17 @@ step "kubectl-ate, built from the same substrate checkout"
 (cd "${SUBSTRATE}" && go build -o "${WORK}/bin/kubectl-ate" ./cmd/kubectl-ate)
 
 if [[ "${SANDBOX}" == microvm ]] && ! "${K[@]}" get sandboxconfig microvm >/dev/null 2>&1; then
-	step "micro-VM sandbox class: kata assets and the microvm SandboxConfig (substrate's install-microvm-deps.sh)"
-	# Run once per cluster: assets already assembled in the substrate checkout are reused. ARCH is
-	# passed, since the script otherwise builds for its own GOARCH.
-	(cd "${SUBSTRATE}" && export ARCH && KO_DEFAULTPLATFORMS="linux/${ARCH}" KUBECTL_CONTEXT="kind-${CLUSTER}" \
-		ATE_INSTALL_KIND=true NO_DEV_ENV=true hack/install-microvm-deps.sh --install)
+	step "micro-VM sandbox class: kata assets and the microvm SandboxConfig (ate-setup deploy sandboxconfig)"
+	# Run once per cluster: assets already assembled in the substrate checkout are reused. On Kind
+	# ate-setup assembles them for the architecture it runs on, which must be the node's.
+	kind_ate_setup "${SUBSTRATE}" "${CLUSTER}" "${KUBECONFIG}" "${SUBSTRATE_VERSION}" \
+		deploy sandboxconfig --sandbox-classes=microvm
 fi
 
 step "${SANDBOX} WorkerPool ${POOL}"
 "${K[@]}" apply -f "${HERE}/deploy/namespace.yaml"
-ATEOM_IMAGE="$(cd "${SUBSTRATE}" && ko build --base-import-paths "./cmd/ateom-${SANDBOX}")"
-sed -e "s#ATEOM_IMAGE#${ATEOM_IMAGE}#" "${HERE}/deploy/${WORKERPOOL_FILE}" | "${K[@]}" apply -f -
+ATEWORKER_IMAGE="$(SUBSTRATE_VERSION="${SUBSTRATE_VERSION}" "${ROOT}/hack/substrate-image.sh" "ateworker-${SANDBOX}")"
+sed -e "s#ATEWORKER_IMAGE#${ATEWORKER_IMAGE}#" "${HERE}/deploy/${WORKERPOOL_FILE}" | "${K[@]}" apply -f -
 "${ROOT}/hack/wait-worker-pool.sh" "${POOL}" "${NS}" 600
 if ${SUBSTRATE_ONLY}; then
 	step "substrate is up (--substrate-only); run ./up.sh again for the agent and agentsessionsd"
@@ -336,7 +347,13 @@ for tier in stateless memory; do
 	cat "${out}/harness-registration.json"
 done
 
-"${ATE[@]}" get atespace "${ATESPACE}" >/dev/null 2>&1 || "${ATE[@]}" create atespace "${ATESPACE}"
+# substrate authorizes every call by the atespace's AccessPolicy. Both agentsessionsd tiers
+# run as the agentsessionsd ServiceAccount (deploy/namespace.yaml), which needs editor on the
+# atespace to create, suspend, resume and delete actors. ensure_atespace_editor (hack/substrate-lib.sh)
+# creates a missing atespace and policy, and refuses a policy that does not grant it, rather than
+# overwrite bindings someone else relies on.
+step "AccessPolicy ${ATESPACE}: editor for ${DAEMON_PRINCIPAL}"
+ensure_atespace_editor "${ATESPACE}" "${DAEMON_PRINCIPAL}"
 for out in "${STATE}/render" "${STATE}/render-memory"; do
 	TEMPLATE="$(cat "${out}/template-name")"
 	tier=stateless

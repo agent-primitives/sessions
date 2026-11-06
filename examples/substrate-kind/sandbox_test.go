@@ -91,7 +91,7 @@ func TestSetupChecksCreatedAndReusedNodeKVMMount(t *testing.T) {
 		reuse              bool
 	}{
 		{"creation helper probe failure", "[]", "lacks the required writable /dev/kvm mount", false},
-		{"created writable mount", writable, "reached-install", false},
+		{"created writable mount", writable, "reached-microvm-config", false},
 		{"reused missing mount", "[]", "lacks the required writable /dev/kvm mount", true},
 		{"reused read-only mount", `[{"Source":"/dev/kvm","Destination":"/dev/kvm","RW":false}]`, "lacks the required writable /dev/kvm mount", true},
 		{"inspection failure", "error", "Cannot inspect the kind node's mounts", true},
@@ -114,7 +114,12 @@ esac`,
   "export kubeconfig"*) exit 0 ;;
   *) exit 1 ;;
 esac`,
-				"go":      `echo reached-install >&2; exit 1`,
+				// The control plane installs with the gVisor class only; the micro-VM class follows.
+				"go": `case "$*" in
+  *" deploy ate-system --setup-csi=none --sandbox-classes=gvisor") echo reached-install >&2 ;;
+  *" deploy sandboxconfig --sandbox-classes=microvm") echo reached-microvm-config >&2; exit 1 ;;
+  *) exit 1 ;;
+esac`,
 				"ko":      `exit 1`,
 				"kubectl": `exit 1`,
 			})
@@ -129,7 +134,6 @@ set -euo pipefail
 if docker run --rm --device /dev/kvm busybox true; then :; fi
 echo node > "$TEST_DIR/node"
 `,
-				"install-microvm-deps.sh": "#!/usr/bin/env bash\necho reached-install >&2\nexit 1\n",
 			} {
 				if err := os.WriteFile(filepath.Join(hack, name), []byte(body), 0o700); err != nil {
 					t.Fatal(err)
@@ -150,7 +154,7 @@ echo node > "$TEST_DIR/node"
 				}
 			}
 			if tc.reuse {
-				if err := os.WriteFile(filepath.Join(state, "owner"), []byte("node installed "+os.Getenv("TEST_PIN")+"\n"), 0o600); err != nil {
+				if err := os.WriteFile(filepath.Join(state, "owner"), []byte("node installed "+os.Getenv("TEST_PIN")+" envoy\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -161,7 +165,7 @@ echo node > "$TEST_DIR/node"
 			if err == nil || !strings.Contains(string(out), tc.want) {
 				t.Fatalf("node mount check: %v\n%s; want %q", err, out, tc.want)
 			}
-			if tc.want != "reached-install" && strings.Contains(string(out), "reached-install") {
+			if tc.want != "reached-microvm-config" && strings.Contains(string(out), "reached-install") {
 				t.Fatalf("incompatible node reached installation:\n%s", out)
 			}
 			owner, err := os.ReadFile(filepath.Join(state, "owner"))

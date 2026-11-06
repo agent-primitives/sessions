@@ -4,8 +4,10 @@
 #
 # It reaches the ate-api with the pod's projected ServiceAccount token and verifies the ate-api's
 # serving certificate against the cluster's servicedns ClusterTrustBundle, and reaches the agent's
-# actors through the atenet-router. Model calls go to MODEL_BASE_URL, the in-cluster fake model by
-# default; the optional key comes from the agentsessionsd-model Secret, never from the manifest.
+# actors through the atenet-router over mTLS. Its client certificate is the pod's SVID,
+# spiffe://cluster.local/ns/agentsuite-demo/sa/agentsessionsd, which up.sh allowlists on the
+# router. Model calls go to MODEL_BASE_URL, the in-cluster fake model by default; the optional key
+# comes from the agentsessionsd-model Secret, never from the manifest.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -24,6 +26,7 @@ spec:
         # resourceVersion here, so a rotated or deleted key restarts the pod.
         agentsuite-demo/model-secret-version: "MODEL_SECRET_VERSION"
     spec:
+      serviceAccountName: agentsessionsd
       containers:
         - name: agentsessionsd
           image: DAEMON_IMAGE
@@ -40,7 +43,9 @@ spec:
             - -ateapi-server-name=api.ate-system.svc
             - -ateapi-ca-file=/var/run/ate/ca/ca.pem
             - -ateapi-token-file=/var/run/ate/token/token
-            - -atenet-router=atenet-router.ate-system.svc:80
+            - -atenet-router=atenet-router.ate-system.svc:443
+            - -atenet-router-cert-file=/var/run/ate/router-client/credential-bundle.pem
+            - -atenet-router-ca-file=/var/run/ate/router-client/router-ca.pem
           env:
             - name: MODEL_API_KEY
               valueFrom:
@@ -52,6 +57,7 @@ spec:
             - {name: data, mountPath: /data}
             - {name: ate-token, mountPath: /var/run/ate/token, readOnly: true}
             - {name: ate-ca, mountPath: /var/run/ate/ca, readOnly: true}
+            - {name: router-client, mountPath: /var/run/ate/router-client, readOnly: true}
       volumes:
         - name: data
           emptyDir: {}
@@ -63,6 +69,21 @@ spec:
           projected:
             sources:
               - clusterTrustBundle: {name: "servicedns.podcert.ate.dev:identity:primary-bundle", path: ca.pem}
+        # kubelet issues and rotates the pod's SVID; the router CA follows the live servicedns
+        # bundle by label, so a CA rotation is picked up. agentsessionsd re-reads both per
+        # connection.
+        - name: router-client
+          projected:
+            sources:
+              - podCertificate:
+                  signerName: podidentity.podcert.ate.dev/identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: credential-bundle.pem
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels: {podcert.ate.dev/canarying: live}
+                  path: router-ca.pem
 ---
 apiVersion: v1
 kind: Service

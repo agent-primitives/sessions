@@ -114,7 +114,7 @@ func TestNeutralServerRefusesSubstrateFlags(t *testing.T) {
 
 // run runs the daemon as this build does, with newControl standing in for the ate-api adapter.
 func run(args []string, newControl controlFunc) error {
-	return agentsessionsd.Run(args, agentsessionsd.WithHarnessBackends(newSubstrateFlags(newControl)))
+	return agentsessionsd.Run(withRouterClient(args), agentsessionsd.WithHarnessBackends(newSubstrateFlags(newControl)))
 }
 
 // parseFlags registers this build's flags on a fresh flag set, parses args and runs the startup
@@ -124,7 +124,7 @@ func parseFlags(t *testing.T, newControl controlFunc, args ...string) *substrate
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	f := newSubstrateFlags(newControl)
 	f.RegisterFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(withRouterClient(args)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.Harnesses(); err != nil {
@@ -281,7 +281,7 @@ func TestSubstrateDialsATEAPIWithTLSAndToken(t *testing.T) {
 			var conn grpc.ClientConnInterface
 			args := append([]string{"-substrate-harness", "w=t/w", "-substrate-atespace", "s", "-ateapi-addr", lis.Addr().String(), "-ateapi-token-file", tokenFile}, tt.flags...)
 			f := parseFlags(t, func(c grpc.ClientConnInterface) substrate.ControlClient { conn = c; return nil }, args...)
-			_, closeConn, err := f.Backends(nil)
+			_, _, closeConn, err := f.Backends(nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -344,7 +344,7 @@ func TestSubstratePropagatesTraceToATEAPI(t *testing.T) {
 	var conn grpc.ClientConnInterface
 	f := parseFlags(t, func(c grpc.ClientConnInterface) substrate.ControlClient { conn = c; return nil },
 		"-substrate-harness", "w=t/w", "-substrate-atespace", "s", "-ateapi-addr", lis.Addr().String(), "-ateapi-insecure-skip-verify")
-	_, closeConn, err := f.Backends(nil)
+	_, _, closeConn, err := f.Backends(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +408,7 @@ func TestSubstrateBoundsEachATEAPICall(t *testing.T) {
 	f := parseFlags(t, func(c grpc.ClientConnInterface) substrate.ControlClient { conn = c; return nil },
 		"-substrate-harness", "w=t/w", "-substrate-atespace", "s", "-ateapi-addr", lis.Addr().String(),
 		"-ateapi-ca-file", caFile, "-ateapi-server-name", "api.ate-system.svc")
-	_, closeConn, err := f.Backends(nil)
+	_, _, closeConn, err := f.Backends(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +446,8 @@ func TestSubstrateBoundsEachATEAPICall(t *testing.T) {
 
 // A session on the -substrate-harness backend runs through the substrate wiring: the session's
 // actor is created from the configured template in -substrate-atespace and resumed, its turns reach
-// the harness through -atenet-router with the ate-target-actor metadata naming that actor, and
+// the harness through -atenet-router over mTLS (the router refuses any other client) with the
+// ate-target-actor metadata naming that actor, and
 // suspend suspends it. How agentsessionsd registers and reserves a HarnessBackends harness is
 // tested in its own module.
 func TestSubstrateHarnessRunsThroughTheRouter(t *testing.T) {
@@ -456,7 +457,7 @@ func TestSubstrateHarnessRunsThroughTheRouter(t *testing.T) {
 
 	f := parseFlags(t, func(grpc.ClientConnInterface) substrate.ControlClient { return ctl },
 		"-substrate-harness", "writer=agentsuite/minimal-writer-1a2b3c4d", "-substrate-atespace", "sessions", "-atenet-router", router, "-ateapi-insecure-skip-verify")
-	backends, closeConn, err := f.Backends(nil)
+	backends, dial, closeConn, err := f.Backends(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +465,7 @@ func TestSubstrateHarnessRunsThroughTheRouter(t *testing.T) {
 	if got, want := slices.Sorted(maps.Keys(backends)), []string{"writer"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("backends = %v, want %v", got, want)
 	}
-	registry, err := placement.NewRegistry("writer", map[string]*placement.Placer{"writer": placement.New(backends["writer"], echoagent.Model)})
+	registry, err := placement.NewRegistry("writer", map[string]*placement.Placer{"writer": placement.New(backends["writer"], echoagent.Model, placement.WithDialer(dial))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,8 +539,9 @@ func newTestClient(t *testing.T, registry *placement.Registry) *client.Client {
 	return c
 }
 
-// serveRouter stands in for the atenet-router: a harnesswire server that reports the
-// ate-target-actor metadata of every stream it accepts.
+// serveRouter stands in for the atenet-router: a harnesswire server behind the router's mTLS, which
+// admits only the shared router client, that reports the ate-target-actor metadata of every stream
+// it accepts.
 func serveRouter(t *testing.T, h api.Harness, routed chan<- string) string {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -556,6 +558,7 @@ func serveRouter(t *testing.T, h api.Harness, routed chan<- string) string {
 		}
 	}
 	srv := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(routerServerTLS(routerPKI.serverCert, testRouterClientID))),
 		grpc.ChainStreamInterceptor(func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 			if strings.HasSuffix(info.FullMethod, "/Connect") {
 				record(ss.Context())
@@ -687,7 +690,7 @@ func TestSubstrateATEAPIReconnectsQuickly(t *testing.T) {
 	var conn grpc.ClientConnInterface
 	f := parseFlags(t, func(c grpc.ClientConnInterface) substrate.ControlClient { conn = c; return nil },
 		"-substrate-harness", "w=t/w", "-substrate-atespace", "s", "-ateapi-addr", lis.Addr().String(), "-ateapi-insecure-skip-verify")
-	_, closeConn, err := f.Backends(nil)
+	_, _, closeConn, err := f.Backends(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -791,12 +794,12 @@ func TestSubstrateTokenFileErrorIsNotSentToClients(t *testing.T) {
 				"-substrate-harness", "writer=agentsuite/writer", "-substrate-atespace", "sessions",
 				"-ateapi-addr", lis.Addr().String(), "-ateapi-insecure-skip-verify", "-ateapi-token-file", tokenFile)
 			var logs syncBuffer
-			backends, closeConn, err := f.Backends(slog.New(slog.NewTextHandler(&logs, nil)))
+			backends, dial, closeConn, err := f.Backends(slog.New(slog.NewTextHandler(&logs, nil)))
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(closeConn)
-			registry, err := placement.NewRegistry("writer", map[string]*placement.Placer{"writer": placement.New(backends["writer"], echoagent.Model)})
+			registry, err := placement.NewRegistry("writer", map[string]*placement.Placer{"writer": placement.New(backends["writer"], echoagent.Model, placement.WithDialer(dial))})
 			if err != nil {
 				t.Fatal(err)
 			}

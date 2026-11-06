@@ -25,9 +25,13 @@ esac`,
     cp -R "$TEST_DIR/upstream/." "$SUBSTRATE_DIR"
     [[ "$TEST_BOOTSTRAP_FAILURE" != partial-clone ]] || exit 128 ;;
   "-C $SUBSTRATE_DIR status --porcelain") echo status >> "$TEST_DIR/bootstrap-calls" ;;
-  "-C $SUBSTRATE_DIR fetch --quiet origin $TEST_PIN")
+  "-C $SUBSTRATE_DIR fetch --quiet origin refs/tags/$TEST_VERSION:refs/tags/$TEST_VERSION")
     echo fetch >> "$TEST_DIR/bootstrap-calls"
     [[ "$TEST_BOOTSTRAP_FAILURE" != fetch ]] || exit 128 ;;
+  "-C $SUBSTRATE_DIR rev-parse --verify --quiet refs/tags/$TEST_VERSION^{commit}")
+    echo tag >> "$TEST_DIR/bootstrap-calls"
+    [[ "$TEST_BOOTSTRAP_FAILURE" != tag ]] || exit 1
+    echo "${TEST_TAGGED:-$TEST_PIN}" ;;
   "-C $SUBSTRATE_DIR checkout --quiet --detach $TEST_PIN")
     echo checkout >> "$TEST_DIR/bootstrap-calls"
     [[ "$TEST_BOOTSTRAP_FAILURE" != checkout ]] || exit 128
@@ -38,6 +42,11 @@ esac`,
 case "$*" in
   "run ./cmd/ate-setup "*)
     [[ " $* " == *" --kubeconfig=$KUBECONFIG "* ]]
+    [[ " $* " != *" --atenet-dataplane"* ]]
+    [[ " $* " == *" --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/sessions-example/sa/agentsessions deploy ate-system "* ]]
+    [[ " $* " == *" --sandbox-classes=gvisor "* ]]
+    [[ " $* " == *" --image-repo=ghcr.io/agent-substrate/substrate --image-tag=$TEST_VERSION "* ]]
+    [[ " $* " != *" --ko-default-platforms"* ]]
     echo install >> "$TEST_DIR/bootstrap-calls" ;;
   "build -o "*)
     echo client-build >> "$TEST_DIR/bootstrap-calls"
@@ -47,6 +56,8 @@ esac`,
 	})
 	t.Setenv("SUBSTRATE_DIR", filepath.Join(dir, "substrate"))
 	t.Setenv("TEST_PIN", substratePin(t))
+	t.Setenv("TEST_VERSION", substrateVersion(t))
+	t.Setenv("TEST_TAGGED", "")
 	t.Setenv("SANDBOX_CLASS", "gvisor")
 	t.Setenv("MODEL_SOURCE", "stub")
 	t.Setenv("TEST_BOOTSTRAP_FAILURE", "")
@@ -113,16 +124,44 @@ func TestSetupBootstrapsManagedCheckoutWithoutSystemKind(t *testing.T) {
 		t.Fatalf("setup did not reach client building after bootstrap: %v\n%s", err, out)
 	}
 	calls, err := os.ReadFile(filepath.Join(dir, "bootstrap-calls"))
-	want := "clone\nstatus\nfetch\ncheckout\nkind-list\ncreate\nkind-export\ninstall\nkind-list\nclient-build\n"
+	want := "clone\nstatus\nfetch\ntag\ncheckout\nkind-list\ncreate\nkind-export\ninstall\nkind-list\nclient-build\n"
 	if err != nil || string(calls) != want {
 		t.Fatalf("unexpected bootstrap ordering: %v\n%s\n%s", err, calls, out)
 	}
 	owner, err := os.ReadFile(filepath.Join(state, "owner"))
-	if err != nil || !strings.HasPrefix(string(owner), "node installed ") {
+	if err != nil || !strings.HasPrefix(string(owner), "node installed ") || !strings.HasSuffix(string(owner), " envoy\n") {
 		t.Fatalf("bootstrap did not record installation: %v\n%s", err, owner)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "substrate-bootstrap-incomplete")); !os.IsNotExist(err) {
 		t.Fatalf("successful bootstrap left an incomplete marker: %v", err)
+	}
+}
+
+// The images ate-setup installs are the release tag's, the manifests the workflow revision's, so a
+// tag that names another commit (moved upstream, or a stale pin) must stop setup before checkout.
+func TestSetupRefusesReleaseTagNamingAnotherRevision(t *testing.T) {
+	for _, tc := range []struct {
+		name, failure, tagged, want string
+	}{
+		{name: "moved tag", tagged: strings.Repeat("0", 40), want: "names " + strings.Repeat("0", 40) + ", not the workflow revision"},
+		{name: "unresolvable tag", failure: "tag", want: "Cannot resolve Substrate release"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, _ := bootstrapFixture(t)
+			t.Setenv("TEST_TAGGED", tc.tagged)
+			t.Setenv("TEST_BOOTSTRAP_FAILURE", tc.failure)
+			out, err := exec.CommandContext(t.Context(), "bash", "up.sh").CombinedOutput()
+			if err == nil || !strings.Contains(string(out), tc.want) {
+				t.Fatalf("setup did not refuse the release tag: %v\n%s; want %q", err, out, tc.want)
+			}
+			calls, err := os.ReadFile(filepath.Join(dir, "bootstrap-calls"))
+			if err != nil || string(calls) != "clone\nstatus\nfetch\ntag\n" {
+				t.Fatalf("setup went past the tag check: %v\n%s", err, calls)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "wrapper-invoked")); !os.IsNotExist(err) {
+				t.Fatalf("setup ran the unverified checkout's kind wrapper: %v", err)
+			}
+		})
 	}
 }
 

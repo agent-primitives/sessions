@@ -55,8 +55,8 @@ type suspendActor struct {
 	memoryLost bool
 	// captures counts the actor's captures, for CaptureLineage and NoCapture.
 	captures int
-	// paused models a pause: the newest capture is node-local, so GetActor reports it not ready
-	// and not pending, with no durable URI, as the adapter does on v0.5.0. A suspend uploads it.
+	// paused models a newest capture that is node-local with no durable copy, so GetActor reports
+	// it not ready and not pending, with no durable URI, as the adapter does. A suspend uploads it.
 	paused bool
 }
 

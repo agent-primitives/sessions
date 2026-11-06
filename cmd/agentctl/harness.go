@@ -121,12 +121,8 @@ func cmdHarness(args []string) error {
 	if err != nil {
 		return err
 	}
-	data, err := (protojson.MarshalOptions{UseProtoNames: true}).Marshal(out)
-	if err != nil {
-		return fmt.Errorf("encode harness response: %w", err)
-	}
-	if _, err := fmt.Fprintln(os.Stdout, string(data)); err != nil {
-		return fmt.Errorf("harness %s RPC succeeded but writing JSON response to stdout failed: %w", op, err)
+	if err := writeJSON(out); err != nil {
+		return fmt.Errorf("harness %s RPC succeeded but reporting JSON response failed: %w", op, err)
 	}
 	return nil
 }

@@ -60,6 +60,9 @@ journal on disk, and drives it as a real gRPC client. Pass `--server <addr>` to 
 controller instead. The journal path defaults to `agentsessions.db`; the examples use
 `--journal /tmp/qs.db` to keep it out of the way.
 
+The embedded server logs only warnings and errors to stderr, keeping routine INFO diagnostics out
+of CLI output. Standalone `agentsessionsd` logging is unchanged.
+
 ## 1. Run a turn
 
 ```bash
@@ -190,8 +193,8 @@ agentctl resume  --journal /tmp/sr.db --session "$SID2"
 ```
 
 ```
-session sess-... suspend compute=COMPUTE_COLD exec=COMPLETED last_seq=5
-session sess-... resume  compute=COMPUTE_LIVE exec=COMPLETED last_seq=6
+session sess-... suspend execution=COMPLETED compute=COLD last_seq=5
+session sess-... resume execution=COMPLETED compute=LIVE last_seq=6
 ```
 
 The first turn is seq 1 to 4, so `SUSPEND` lands at seq 5 and `RESUME` at seq 6. Both are `LIFECYCLE`
@@ -209,10 +212,11 @@ agentctl list   --journal /tmp/qs.db --project acme
 ```
 
 ```
-sess-0d879482...	last_seq=0	compute=NONE	exec=PENDING	harness=echo	name=triage
+SESSION           NAME    EXECUTION  COMPUTE  HARNESS  LAST SEQ
+sess-0d879482...  triage  PENDING    NONE     echo     0
 ```
 
-`last_seq=0` is the point: the session has no events and no compute yet, and it still appears. That
+`LAST SEQ` being `0` is the point: the session has no events and no compute yet, and it still appears. That
 is the case a listing built from the event log alone would miss.
 
 Sessions are returned newest first and filtered on an exact `--project`. `list` walks every page for
@@ -223,14 +227,15 @@ agentctl list --journal /tmp/sr.db --project default
 ```
 
 ```
-sess-...	last_seq=6	compute=LIVE	exec=COMPLETED	harness=echo	name=
+SESSION   NAME  EXECUTION  COMPUTE  HARNESS  LAST SEQ
+sess-...  ""    COMPLETED  LIVE     echo     6
 ```
 
 `compute` reflects what the log implies about compute, which is why the resumed session above reads
 `LIVE`. It is not a live probe of the backend; see
 [`concepts.md`](concepts.md#metadata-and-listing) for what that does and does not guarantee.
 
-`exec` is the independent execution axis. `get` and `list` show PENDING before any execution,
+`Execution` is the independent execution axis. `get` and `list` show PENDING before any execution,
 RUNNING for unfinished work, COMPLETED after END, FAILED after ERROR, or AWAITING for a valid
 pending approval. RUNNING is not proof that a controller is alive.
 
@@ -238,14 +243,92 @@ For a quick manual check, create a session, inspect it, and execute a turn:
 
 ```bash
 CHECK=$(agentctl create --journal /tmp/exec-state-check.db)
-agentctl get --journal /tmp/exec-state-check.db --session "$CHECK"  # exec=PENDING
+agentctl get --journal /tmp/exec-state-check.db --session "$CHECK"  # Execution: PENDING
 agentctl exec --journal /tmp/exec-state-check.db --session "$CHECK" --input "hello"
-agentctl get --journal /tmp/exec-state-check.db --session "$CHECK"  # exec=COMPLETED
-agentctl list --journal /tmp/exec-state-check.db                  # exec=COMPLETED
+agentctl get --journal /tmp/exec-state-check.db --session "$CHECK"  # Execution: COMPLETED
+agentctl list --journal /tmp/exec-state-check.db                  # EXECUTION: COMPLETED
 ```
 
 Each command reopens the same database, so this also checks persistence. With a standalone server,
 replace `--journal ...` on the client commands with `--server 127.0.0.1:8080`.
+
+### CLI output and server defaults
+
+Session commands use `AGENTSESSIONS_SERVER` when `--server` is omitted. An explicit flag wins,
+including `--server=` to select the embedded, echo-only server. An unset or empty environment
+variable also selects embedded mode. A remote connection failure is an error, not a fallback to
+embedded mode. Harness registry commands still require their own explicit operator `--server`;
+they never inherit the session-server environment default. When the target comes from the
+environment, the CLI prints it to stderr before making requests, including for `--json`.
+An explicit `--journal` with a remote target is an error rather than an ignored flag; omit it
+for remote commands, or pass `--server=` to use the local journal.
+
+```bash
+export AGENTSESSIONS_SERVER=127.0.0.1:8080
+agentctl list
+agentctl get --session "$SID"
+```
+
+`get` prints labeled details, including the independent execution, compute and deletion states:
+
+```text
+Session             sess-...
+Name                triage
+Project             default
+Harness             echo
+Model
+Execution           COMPLETED
+Compute             LIVE
+Last seq            5
+Deletion            ACTIVE
+Deletion requested  unset
+```
+
+Human state values omit the enum prefix everywhere (for example, `LIVE`, not `COMPUTE_LIVE`).
+Unspecified values print `UNSPECIFIED`, not a guessed state. Names and other text are escaped so
+they cannot insert terminal controls or extra rows. Tables quote names containing spaces and show
+empty names as `""`.
+
+For agents and scripts, use `--json` rather than parsing the human views:
+
+| Commands | JSON response |
+|---|---|
+| `create`, `get`, `suspend`, `resume`, `delete` | One protobuf `Session` |
+| `list` | One `ListSessionsResponse`, combining all pages with no next-page token |
+| `fork` | One `ForkResponse` containing `children` |
+| `approve`, `deny` | One `ApproveResponse` containing the original committed decision and resumed session |
+| `replay` | JSON Lines: one complete protobuf `LogRecord` per line, in sequence order |
+
+All CLI JSON uses protobuf's snake_case field names, full enum names (for example,
+`COMPUTE_LIVE`), decimal strings for 64-bit integers and RFC3339 timestamps. Default-valued fields
+and absent messages are omitted; an empty list response is `{}`. Whitespace and object-key order
+are not a stable contract: parse the content rather than comparing bytes. The field naming
+matches CHAIN-1, but CLI JSON is not the RFC 8785 canonical byte representation used for hashing.
+Harness commands retain their existing JSON format.
+
+```bash
+agentctl get --session "$SID" --json | jq '.compute_state'
+agentctl list --json | jq -r '.sessions[]? | .metadata.uid'
+agentctl replay --session "$SID" --json > records.jsonl
+```
+
+Replay JSON retains full hashes, sequence numbers and protobuf field presence; `--json` takes
+precedence over `-v`. It only reads recorded events, never calls a model, and does not itself verify
+the chain; use `agentctl verify` for verification. An empty replay writes no lines. Treat output
+as successful only when the command exits successfully.
+
+Human output is uncolored; color support is deferred. Diagnostics and the deletion PENDING warning
+go to stderr, including in JSON mode, so stdout remains parseable.
+
+**Migration:** `get` no longer emits a single key/value line; `list` now has aligned columns and
+headings, even when empty. Lifecycle and approval summaries use short state values and include
+execution state. Switch parsers to `--json`. Approval JSON changes from lowerCamelCase to snake_case:
+for example, `decision.contentHash` becomes `decision.content_hash`, and `session.lastSeq` becomes
+`session.last_seq`. `create` still prints only the UID by default; `fork` retains its existing
+default summary. Deletion still warns that PENDING is durable
+intent, not resource cleanup. Approval still reports a committed decision if Resume fails; JSON
+does not turn that failure into a successful response. `exec` output is unchanged and has no
+`--json` flag.
 
 ## 7. Verify the provenance chain with a non-Go verifier
 
@@ -403,7 +486,7 @@ agentctl replay --journal "$DELETE_JOURNAL" --session "$DELETE_SID"
 agentctl list   --journal "$DELETE_JOURNAL" --project default
 ```
 
-Delete/Get report `deletion=PENDING` and the committed RFC3339 request time. PENDING means durable
+Delete/Get report deletion state `PENDING` and the committed RFC3339 request time. PENDING means durable
 intent only: the SQLite allocation-attempt ledger is incomplete, not authoritative cleanup inventory.
 Until #88 supplies authoritative cleanup inventory and reclamation, actors, snapshots and fork-child
 pins remain retained indefinitely. No Stop or reclamation is attempted. List hides the UID, but Get and raw

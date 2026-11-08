@@ -21,26 +21,44 @@ export KIND_CLUSTER_NAME="${CLUSTER}"
 KUBECONFIG="${SUBSTRATE_KIND_KUBECONFIG:-${STATE}/kubeconfig}"
 [[ "${KUBECONFIG}" == /* ]] || KUBECONFIG="${PWD}/${KUBECONFIG}"
 export KUBECONFIG
+# shellcheck source=hack/substrate-lib.sh
+source "${ROOT}/hack/substrate-lib.sh"
 
-# Use the workflow's Substrate revision for compatible tools and control-plane components.
+# Use the workflow's Substrate release for its images, and the revision its tag names for its tools.
 SUBSTRATE_DIR="${SUBSTRATE_DIR:-${WORK}/substrate}"
-SUBSTRATE_REF="$(sed -n 's/^  SUBSTRATE_REF: //p' "${ROOT}/.github/workflows/substrate-e2e.yml")"
+SUBSTRATE_REF="$(substrate_pin SUBSTRATE_REF)"
+SUBSTRATE_VERSION="$(substrate_pin SUBSTRATE_VERSION)"
 NS=sessions-example
 PROJECT="${PROJECT:-example}"
 ACTOR_TEMPLATE="${ACTOR_TEMPLATE:-chat-harness}"
 SANDBOX_CLASS="${SANDBOX_CLASS:-microvm}"
-SANDBOX_CONFIG="${SANDBOX_CONFIG:-}"
-SNAPSHOT_LOCATION="${SNAPSHOT_LOCATION:-gs://ate-snapshots/sessions-example/}"
+# The daemon's Substrate identity: deploy/agentsessionsd.yaml's ServiceAccount. provision.sh grants it
+# the atespace editor role in NS, which covers every Control API call the daemon makes.
+DAEMON_PRINCIPAL="user:system:serviceaccount:${NS}:agentsessions"
+# The SPIFFE ID the pod-identity signer issues that ServiceAccount: the only router client up.sh
+# allowlists. smoke.sh calls only the Sessions API, so it needs no entry.
+ROUTER_CLIENT_ID="spiffe://cluster.local/ns/${NS}/sa/agentsessions"
 
 # Every cluster command names its context and kubeconfig instead of relying on the caller's default.
 K=(kubectl --context "kind-${CLUSTER}" --kubeconfig "${KUBECONFIG}")
-ATE=("${STATE}/kubectl-ate" --context "kind-${CLUSTER}" --kubeconfig "${KUBECONFIG}" -o json)
+ATE=("${STATE}/kubectl-ate" --context "kind-${CLUSTER}" --kubeconfig "${KUBECONFIG}")
 CREATE_PENDING=0
 
 # Separate script-level phase messages from command output without contaminating captured stdout.
 progress() { printf '\n==> [substrate-kind/%s] %s\n' "${0##*/}" "$*" >&2; }
 die() { progress "ERROR: $*"; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
+
+# Substrate templates name no SandboxConfig; the WorkerPool resolves its class's config. Substrate v1
+# also rejects a template's snapshotConfig.storageLocation unless its PerTemplateSnapshotLocation
+# preview gate is on, so snapshots go under the cluster's --snapshot-location. Refuse the former
+# SANDBOX_CONFIG and SNAPSHOT_LOCATION overrides before any cluster change rather than ignore them.
+refuse_template_overrides() {
+	[[ -z "${SANDBOX_CONFIG:-}" ]] ||
+		die "SANDBOX_CONFIG is not supported: Substrate templates name no SandboxConfig; nothing was changed. Unset it, and to run a custom config add configRef: {name: <config>} to the sandboxClasses entry in deploy/workerpool.yaml."
+	[[ -z "${SNAPSHOT_LOCATION:-}" ]] ||
+		die "SNAPSHOT_LOCATION is not supported: Substrate v1 rejects a per-template snapshot location unless its PerTemplateSnapshotLocation preview gate is on; nothing was changed. Unset it; snapshots go under the cluster's --snapshot-location."
+}
 
 # GNU coreutils installs timeout as gtimeout on macOS.
 timeout_command() {

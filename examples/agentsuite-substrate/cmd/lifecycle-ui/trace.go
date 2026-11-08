@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	atepb "go.ate.dev/substrate/api/ateapi/v1"
 )
 
 // kube reads the demo cluster: kubectl get and logs, and the kubectl-ate plugin's get and logs.
@@ -264,11 +266,14 @@ type traceView struct {
 // trace-turn.sh matches the same ones for a turn. The first group of each is the method the page
 // shows. ate-api logs every RPC, its request included, as "Handle RPC" (internal/ateinterceptors).
 var (
-	ateapiPlace   = regexp.MustCompile(`/ateapi\.Control/(CreateActor|ResumeActor)\b`)
-	ateapiSuspend = regexp.MustCompile(`/ateapi\.Control/(SuspendActor)\b`)
-	ateapiGet     = regexp.MustCompile(`/ateapi\.Control/(GetActor)\b`)
-	ateomRestore  = regexp.MustCompile(`/ateom\.Ateom/(RestoreWorkload|RunWorkload)\b`)
-	ateomSuspend  = regexp.MustCompile(`/ateom\.Ateom/(CheckpointWorkload)\b`)
+	// ateapiControl is ate-api's Control service as its full method names start, taken from the
+	// pinned module so a substrate package rename cannot leave every ate-api hop missing.
+	ateapiControl = "/" + regexp.QuoteMeta(atepb.Control_ServiceDesc.ServiceName) + "/"
+	ateapiPlace   = regexp.MustCompile(ateapiControl + `(CreateActor|ResumeActor)\b`)
+	ateapiSuspend = regexp.MustCompile(ateapiControl + `(SuspendActor)\b`)
+	ateapiGet     = regexp.MustCompile(ateapiControl + `(GetActor)\b`)
+	workerRestore = regexp.MustCompile(`/ateworker\.Worker/(RestoreWorkload|RunWorkload)\b`)
+	workerSuspend = regexp.MustCompile(`/ateworker\.Worker/(CheckpointWorkload)\b`)
 	routeOK       = regexp.MustCompile(`(Route ok)`)
 	// resumedTrue is ResumeActorResponse.resumed as ate-api's JSON log writes it (omitempty).
 	resumedTrue = regexp.MustCompile(`"resumed":true\b`)
@@ -449,9 +454,9 @@ func (s *server) traceCluster(ctx context.Context, a *activity, daemon string, i
 	} else {
 		idRe := anyOf(ids)
 		if a.Op != "replay" {
-			api, om := ateapiPlace, ateomRestore
+			api, om := ateapiPlace, workerRestore
 			if a.Op == "suspend" {
-				api, om = ateapiSuspend, ateomSuspend
+				api, om = ateapiSuspend, workerSuspend
 			}
 			// Resume on a RUNNING actor: Backend.RestoreInstance reads the actor (GetActor), finds it
 			// RUNNING and still calls ResumeActor, a no-op ate-api answers at once; that is the call's
@@ -600,7 +605,7 @@ const noopResumeMethod = "ResumeActor (already RUNNING)"
 //
 // A ResumeActor that resumed nothing is not a primary line. atenet-router calls ResumeActor on
 // every routed request to make sure the actor runs, and ate-api answers at once, with resumed
-// unset, when it already does (substrate v0.5.0, cmd/ateapi/internal/controlapi/
+// unset, when it already does (substrate v1, cmd/ateapi/internal/controlapi/
 // workflow_resume.go). ate-api logs the response with the call, so the daemon's resume of a
 // suspended or new actor is the line that says "resumed":true. With keepNoop (a Resume, which
 // routes no turn) a no-op ResumeActor is the daemon's own and counts as a fallback line, labelled

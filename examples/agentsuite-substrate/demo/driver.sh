@@ -207,7 +207,7 @@ setup() {
 	template_check "${HERE}/${SUITE_DIR}/agents/writer.json" 't.get("model", {}).get("model") == "example-model"' || fail "the suite's agent no longer names example-model"
 	template_check "${STATE}/render/actortemplate.json" 'any(isinstance(v, dict) and v.get("name") == "AGENTSUITE_MODEL" and v.get("value") == model for v in walk(t))' ||
 		fail "the template does not override the model with ${AGENTSUITE_MODEL}"
-	template_check "${STATE}/render/actortemplate.json" 't.get("sandboxConfig", {}).get("configName") == "microvm"' || fail "the template is not on the microvm SandboxConfig"
+	template_check "${STATE}/render/actortemplate.json" 't["workerSelector"]["matchLabels"].get("workload") == "agentsuite-demo-microvm"' || fail "the template does not select the microvm WorkerPool"
 	phase "a model token for the VM's managed identity (never printed)" fetch_token
 	MODEL_API_KEY="$(head -1 "${TOKEN_FILE}")"
 	export MODEL_API_KEY
@@ -677,20 +677,19 @@ ls -C /tmp/render
 EOF
 	offscreen "this render against the one setup made (and up.sh deployed the flag of)" diff -r /tmp/render "${STATE}/render" || fail "the render differs from setup's"
 	page "The generated ActorTemplate: its name, the worker selector and the harness container"
-	ends_at /tmp/render/actortemplate.json 65
+	ends_at /tmp/render/actortemplate.json 54
 	run -f <<'EOF'
 bat -r 1:32 /tmp/render/actortemplate.json
 EOF
-	page "The rest: wakeup probe, MEMORY snapshots, the micro-VM sandbox and the resources that size it"
+	page "The rest: wakeup probe, MEMORY snapshots and the resources that size the micro-VM"
 	run -f <<'EOF'
-bat -r 33:65 /tmp/render/actortemplate.json
+bat -r 33:54 /tmp/render/actortemplate.json
 EOF
 	lines_hold /tmp/render/actortemplate.json 3:'"atespace": "agentsuite-demo"' 4:"\"name\": \"${TEMPLATE}\"" 8:'"workload": "agentsuite-demo-microvm"' \
 		14:"\"image\": \"${IMAGE}\"" 26:'"value": "/agent"' 29:'"name": "AGENTSUITE_MODEL"' 30:"\"value\": \"${model}\"" \
-		46:"\"storageLocation\": \"gs://ate-snapshots/agentsuite-demo/${TEMPLATE}/\"" 47:'SNAPSHOT_FIDELITY_MEMORY' \
-		50:'"sandboxClass": "microvm"' 51:'"configName": "microvm"' 53:'"resources"' 57:'"quantity": "1"' 61:'"quantity": "512Mi"'
+		46:'SNAPSHOT_FIDELITY_MEMORY' 48:'"resources"' 50:'"cpuMillicores": "1000"' 51:'"memoryBytes": "536870912"'
 	template_check /tmp/render/actortemplate.json 'all("resources" not in c for c in t["containers"])' ||
-		fail "the harness container declares resources: the micro-VM guest is the template's memory less the VMM reserve"
+		fail "the harness container declares resources: the template's limits size the micro-VM guest, which bounds it"
 	template_check /tmp/render/actortemplate.json 'not any(isinstance(v, dict) and any(w in str(v.get("name", "")).upper() for w in ("KEY", "TOKEN", "SECRET", "AUTH", "PASSWORD")) for v in walk(t))' ||
 		fail "the template's env names a credential"
 	page "1/6  Suite name, agent id and a hash of image digest, binding and model name the template; the binding its atespace"
@@ -705,17 +704,17 @@ EOF
 	run -f <<'EOF'
 demo/split-view.py suites/kaimahi-minimal/agents/writer.json:9-12 -- /tmp/render/actortemplate.json:28-31
 EOF
-	page "4/6  The binding's sandbox becomes the template's sandboxConfig: a micro-VM"
+	page "4/6  The binding's sandbox is the WorkerPool its selector picks: the microvm pool, so a micro-VM"
 	run -f <<'EOF'
-demo/split-view.py binding-microvm.json:7 -- /tmp/render/actortemplate.json:49-52
+demo/split-view.py binding-microvm.json:7,10 -- /tmp/render/actortemplate.json:6-10
 EOF
-	page "5/6  The binding's snapshot becomes snapshotConfig: MEMORY snapshots, stored under the template's own name"
+	page "5/6  The binding's snapshot becomes snapshotConfig: MEMORY snapshots, under the cluster's snapshot location"
 	run -f <<'EOF'
-demo/split-view.py binding-microvm.json:8 -- /tmp/render/actortemplate.json:45-48
+demo/split-view.py binding-microvm.json:8 -- /tmp/render/actortemplate.json:45-47
 EOF
-	page "6/6  The binding's resources and workerSelector become the template's: they size the micro-VM and pick its worker"
+	page "6/6  The binding's resources become the template's limits: they size the micro-VM and book its worker"
 	run -f <<'EOF'
-demo/split-view.py binding-microvm.json:9-10 -- /tmp/render/actortemplate.json:6-10,53-64
+demo/split-view.py binding-microvm.json:9 -- /tmp/render/actortemplate.json:48-53
 EOF
 	page "And the flag that registers harness writer with agentsessionsd, pointing at this template"
 	run <<'EOF'
@@ -734,9 +733,9 @@ EOF
 	[[ "${s}" == "${suite_sums}" ]] || fail "the suite's files changed"
 	page "What -tier memory changes: the name, AGENTSUITE_MEMORY=ram, and a harness that REQUIRES_MEMORY_SNAPSHOT"
 	run -f <<'EOF'
-demo/split-view.py /tmp/render/actortemplate.json:4,46 /tmp/render/harness-registration.json:3,11 -- /tmp/render-memory/actortemplate.json:4,31-34,50 /tmp/render-memory/harness-registration.json:3,11
+demo/split-view.py /tmp/render/actortemplate.json:4 /tmp/render/harness-registration.json:3,11 -- /tmp/render-memory/actortemplate.json:4,31-34 /tmp/render-memory/harness-registration.json:3,11
 EOF
-	lines_hold /tmp/render-memory/actortemplate.json 4:"${MEMTEMPLATE}" 33:'"name": "AGENTSUITE_MEMORY"' 34:'"value": "ram"' 50:"${MEMTEMPLATE}"
+	lines_hold /tmp/render-memory/actortemplate.json 4:"${MEMTEMPLATE}" 33:'"name": "AGENTSUITE_MEMORY"' 34:'"value": "ram"'
 	lines_hold /tmp/render-memory/harness-registration.json 3:'"name": "writer-memory"' 11:RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT
 	lines_hold /tmp/render/harness-registration.json 3:'"name": "writer"' 11:RESUMABILITY_STATELESS_REPLAY
 	page "Compositions are honored: the suite has no linux/arm64 composition for writer, so emit refuses"

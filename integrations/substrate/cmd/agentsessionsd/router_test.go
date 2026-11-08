@@ -1,0 +1,555 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"errors"
+	"log/slog"
+	"math/big"
+	"net"
+	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+
+	"github.com/agent-primitives/sessions/runtime/substrate"
+
+	"github.com/agent-primitives/sessions/integrations/substrate/routertls"
+)
+
+// testRouterClientID is the SPIFFE ID of the router client the tests mount.
+const testRouterClientID = "spiffe://cluster.local/ns/sessions/sa/agentsessions"
+
+// routerPKI stands in for substrate's two pod-certificate signers: podidentity issues the router
+// client's SVID, and servicedns the router's serving certificate. TestMain writes the client's
+// files once; every test that starts a substrate harness mounts them unless it sets its own.
+var routerPKI struct {
+	certFile, caFile string
+	clientCA         *x509.CertPool
+	serverCert       tls.Certificate
+	serial           atomic.Int64
+	podidentity      testCA
+	servicedns       testCA
+}
+
+type testCA struct {
+	cert *x509.Certificate
+	key  *ecdsa.PrivateKey
+}
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "router-pki")
+	if err != nil {
+		panic(err)
+	}
+	code := func() int {
+		defer func() { _ = os.RemoveAll(dir) }()
+		if err := setupRouterPKI(dir); err != nil {
+			panic(err)
+		}
+		return m.Run()
+	}()
+	os.Exit(code)
+}
+
+func setupRouterPKI(dir string) error {
+	var err error
+	if routerPKI.podidentity, err = newTestCA("podidentity"); err != nil {
+		return err
+	}
+	if routerPKI.servicedns, err = newTestCA("servicedns"); err != nil {
+		return err
+	}
+	routerPKI.clientCA = x509.NewCertPool()
+	routerPKI.clientCA.AddCert(routerPKI.podidentity.cert)
+	if routerPKI.serverCert, _, err = routerPKI.servicedns.issue([]string{routertls.DefaultServerName}, nil, time.Now().Add(24*time.Hour)); err != nil {
+		return err
+	}
+	_, bundle, err := routerPKI.podidentity.issue(nil, []string{testRouterClientID}, time.Now().Add(24*time.Hour))
+	if err != nil {
+		return err
+	}
+	routerPKI.certFile = filepath.Join(dir, "credential-bundle.pem")
+	routerPKI.caFile = filepath.Join(dir, "router-ca.pem")
+	if err := os.WriteFile(routerPKI.certFile, bundle, 0o600); err != nil {
+		return err
+	}
+	return os.WriteFile(routerPKI.caFile, pemCert(routerPKI.servicedns.cert.Raw), 0o600)
+}
+
+func newTestCA(name string) (testCA, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return testCA{}, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(routerPKI.serial.Add(1)),
+		Subject:               pkix.Name{CommonName: name},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(48 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return testCA{}, err
+	}
+	cert, err := x509.ParseCertificate(der)
+	return testCA{cert: cert, key: key}, err
+}
+
+// issue returns a leaf as a tls.Certificate and as a podCertificate credential bundle.
+func (c testCA) issue(dns, uris []string, notAfter time.Time) (tls.Certificate, []byte, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(routerPKI.serial.Add(1)),
+		DNSNames:     dns,
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+	}
+	for _, s := range uris {
+		u, err := url.Parse(s)
+		if err != nil {
+			return tls.Certificate{}, nil, err
+		}
+		tmpl.URIs = append(tmpl.URIs, u)
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.cert, &key.PublicKey, c.key)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	kder, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	bundle := append(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder}), pemCert(der)...)
+	return tls.Certificate{Certificate: [][]byte{der, c.cert.Raw}, PrivateKey: key}, bundle, nil
+}
+
+func pemCert(der []byte) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// withRouterClient adds the shared router client files to a start that configures a substrate
+// harness and sets no router client of its own.
+func withRouterClient(args []string) []string {
+	if !slices.Contains(args, "-substrate-harness") || slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "-atenet-router-cert-file") }) {
+		return args
+	}
+	return append(slices.Clone(args), "-atenet-router-cert-file", routerPKI.certFile, "-atenet-router-ca-file", routerPKI.caFile)
+}
+
+// routerServerTLS is the TLS config of a router that, like v0.6.0's envoy, requires a podidentity
+// client certificate and admits only the allowed SPIFFE ID.
+func routerServerTLS(cert tls.Certificate, allowed string) *tls.Config {
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    routerPKI.clientCA,
+		VerifyPeerCertificate: func(_ [][]byte, chains [][]*x509.Certificate) error {
+			for _, u := range chains[0][0].URIs {
+				if u.String() == allowed {
+					return nil
+				}
+			}
+			return errors.New("SPIFFE ID not allowlisted")
+		},
+	}
+}
+
+// serveTLSRouter serves an empty gRPC server behind routerServerTLS.
+func serveTLSRouter(t *testing.T, cert tls.Certificate, allowed string) string {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(routerServerTLS(cert, allowed))))
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	return lis.Addr().String()
+}
+
+func writeFile(t *testing.T, name string, b []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A substrate harness needs a router client: both files, a podidentity SVID with one SPIFFE ID and
+// a CA bundle. Each refusal comes before the journal opens or anything is dialed.
+func TestSubstrateRouterClientStartupChecks(t *testing.T) {
+	_, expired, err := routerPKI.podidentity.issue(nil, []string{testRouterClientID}, time.Now().Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, servicedns, err := routerPKI.servicedns.issue([]string{"agentsessions.sessions.svc"}, nil, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"-model", "m", "-substrate-harness", "w=t/w", "-substrate-atespace", "sessions"}
+	dir := t.TempDir()
+	for _, tt := range []struct {
+		name  string
+		flags []string
+		want  string
+	}{
+		{name: "no router client", flags: []string{"-atenet-router-cert-file="}, want: "-atenet-router-cert-file and -atenet-router-ca-file are required with -substrate-harness"},
+		{name: "no CA", flags: []string{"-atenet-router-cert-file", routerPKI.certFile}, want: "are required with -substrate-harness"},
+		{name: "missing SVID", flags: []string{"-atenet-router-cert-file", filepath.Join(dir, "absent"), "-atenet-router-ca-file", routerPKI.caFile}, want: "no such file"},
+		{name: "missing CA", flags: []string{"-atenet-router-cert-file", routerPKI.certFile, "-atenet-router-ca-file", filepath.Join(dir, "absent")}, want: "router CA"},
+		{name: "expired SVID", flags: []string{"-atenet-router-cert-file", writeFile(t, "expired.pem", expired), "-atenet-router-ca-file", routerPKI.caFile}, want: "expired at"},
+		{name: "servicedns certificate mounted as the SVID", flags: []string{"-atenet-router-cert-file", writeFile(t, "servicedns.pem", servicedns), "-atenet-router-ca-file", routerPKI.caFile}, want: "spiffe:// URI SAN"},
+		{name: "CA without certificates", flags: []string{"-atenet-router-cert-file", routerPKI.certFile, "-atenet-router-ca-file", writeFile(t, "ca.pem", []byte("x"))}, want: "no PEM certificates"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dialed := false
+			journal := filepath.Join(t.TempDir(), "journal.db")
+			err := run(append(append([]string{"-journal", journal, "-addr", "127.0.0.1:0"}, base...), tt.flags...), func(grpc.ClientConnInterface) substrate.ControlClient {
+				dialed = true
+				return nil
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Run error = %v, want %q", err, tt.want)
+			}
+			if _, statErr := os.Stat(journal); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("a refused start left a journal behind: %v", statErr)
+			}
+			if dialed {
+				t.Fatal("a refused start built a control client")
+			}
+		})
+	}
+}
+
+func TestRouterProbe(t *testing.T) {
+	creds, err := routertls.Load(routertls.Config{CertFile: routerPKI.certFile, CAFile: routerPKI.caFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	impostorCA, err := newTestCA("impostor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	impostor, _, err := impostorCA.issue([]string{routertls.DefaultServerName}, nil, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedAddr := closed.Addr().String()
+	_ = closed.Close()
+
+	for _, tt := range []struct {
+		name    string
+		addr    string
+		want    probeOutcome
+		wantLog string
+	}{
+		{name: "allowlisted", addr: serveTLSRouter(t, routerPKI.serverCert, testRouterClientID), want: probeAccepted, wantLog: "atenet-router accepted the router client"},
+		{name: "not on the allowlist", addr: serveTLSRouter(t, routerPKI.serverCert, "spiffe://cluster.local/ns/x/sa/y"), want: probeRefused, wantLog: "add its ID to the router's --ingress-allowed-spiffe-ids"},
+		{name: "router from another CA", addr: serveTLSRouter(t, impostor, testRouterClientID), want: probeUnverified, wantLog: "cannot verify the atenet-router's serving certificate"},
+		{name: "router unreachable", addr: closedAddr, want: probeFailed, wantLog: "atenet-router probe failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			got, err := probeRouter(ctx, creds, tt.addr)
+			if got != tt.want {
+				t.Fatalf("probeRouter = %d (%v), want %d", got, err, tt.want)
+			}
+			var logs bytes.Buffer
+			logRouterProbe(slog.New(slog.NewTextHandler(&logs, nil)), got, err, creds, tt.addr, routerPKI.caFile)
+			if !strings.Contains(logs.String(), tt.wantLog) || !strings.Contains(logs.String(), testRouterClientID) && tt.want != probeUnverified {
+				t.Fatalf("log = %q, want %q and the client ID", logs.String(), tt.wantLog)
+			}
+		})
+	}
+}
+
+// stallingRouter accepts one connection and never answers. With handshake set it first completes the
+// TLS handshake as routerServerTLS, so the probe stalls on its read rather than in the handshake.
+// ready is closed once the router holds the connection.
+func stallingRouter(t *testing.T, handshake bool) (addr string, ready <-chan struct{}) {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := make(chan net.Conn, 1)
+	t.Cleanup(func() {
+		_ = lis.Close()
+		select {
+		case c := <-conn:
+			_ = c.Close()
+		default:
+		}
+	})
+	held := make(chan struct{})
+	go func() {
+		c, err := lis.Accept()
+		if err != nil {
+			return
+		}
+		conn <- c
+		// A failed handshake leaves ready open, so the test fails waiting for it.
+		if handshake && tls.Server(c, routerServerTLS(routerPKI.serverCert, testRouterClientID)).Handshake() != nil {
+			return
+		}
+		close(held)
+	}()
+	return lis.Addr().String(), held
+}
+
+// The probe runs in the background: Backends returns while a router that never answers holds it,
+// whether it stalls in the handshake or after it, and closing the backends cancels it without
+// logging the cancelled attempt as a failure.
+func TestRouterProbeDoesNotHoldStartup(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		handshake bool
+	}{
+		{name: "silent in the handshake"},
+		{name: "silent after the handshake", handshake: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, ready := stallingRouter(t, tt.handshake)
+			f := parseFlags(t, newControl, "-substrate-harness", "w=t/w", "-substrate-atespace", "s", "-atenet-router", addr, "-ateapi-insecure-skip-verify")
+			var logs syncBuffer
+			start := time.Now()
+			_, _, closeConn, err := f.Backends(slog.New(slog.NewTextHandler(&logs, nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := time.Since(start); d > 2*time.Second {
+				t.Fatalf("Backends took %v with a silent router, want it not to wait for the probe", d)
+			}
+			select {
+			case <-ready:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the probe never reached the router")
+			}
+			start = time.Now()
+			closeConn()
+			if d := time.Since(start); d > 2*time.Second {
+				t.Fatalf("closing the backends took %v, want the probe cancelled", d)
+			}
+			if strings.Contains(logs.String(), "atenet-router probe") {
+				t.Fatalf("log = %q, want shutdown not logged as a probe failure", logs.String())
+			}
+		})
+	}
+}
+
+// Cancelling the probe interrupts its read of a router that completed the handshake and then sends
+// nothing, not only a handshake in progress.
+func TestRouterProbeCancelAfterHandshake(t *testing.T) {
+	creds, err := routertls.Load(routertls.Config{CertFile: routerPKI.certFile, CAFile: routerPKI.caFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr, ready := stallingRouter(t, true)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	type result struct {
+		outcome probeOutcome
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		outcome, err := probeRouter(ctx, creds, addr)
+		done <- result{outcome, err}
+	}()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the probe never completed the handshake")
+	}
+	cancel()
+	select {
+	case r := <-done:
+		if r.outcome != probeFailed {
+			t.Fatalf("probeRouter = %d (%v), want probeFailed", r.outcome, r.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("probeRouter did not return within 2s of its context being cancelled")
+	}
+}
+
+// lineWriter hands each log record to the test as one line.
+type lineWriter chan string
+
+func (w lineWriter) Write(p []byte) (int, error) {
+	w <- string(p)
+	return len(p), nil
+}
+
+func (w lineWriter) next(t *testing.T) string {
+	t.Helper()
+	select {
+	case l := <-w:
+		return l
+	case <-time.After(10 * time.Second):
+		t.Fatal("the probe logged nothing within 10s")
+		return ""
+	}
+}
+
+// startProbe runs runRouterProbe in the background against addr and returns its log lines and a
+// channel closed when it returns.
+func startProbe(ctx context.Context, t *testing.T, addr string, b probeBackoff) (lineWriter, <-chan struct{}) {
+	t.Helper()
+	creds, err := routertls.Load(routertls.Config{CertFile: routerPKI.certFile, CAFile: routerPKI.caFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := make(lineWriter, 64)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runRouterProbe(ctx, slog.New(slog.NewTextHandler(lines, nil)), creds, addr, routerPKI.caFile, b)
+	}()
+	return lines, done
+}
+
+func waitProbeDone(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the probe did not return within 2s")
+	}
+}
+
+func unusedAddr(t *testing.T) string {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := lis.Addr().String()
+	_ = lis.Close()
+	return addr
+}
+
+// A daemon that starts before the router retries until the router is up, then logs its answer once.
+func TestRouterProbeRetriesUntilRouterAnswers(t *testing.T) {
+	addr := unusedAddr(t)
+	lines, done := startProbe(t.Context(), t, addr, probeBackoff{initial: 100 * time.Millisecond, max: 100 * time.Millisecond, attempts: 100})
+	if l := lines.next(t); !strings.Contains(l, "atenet-router probe failed") || !strings.Contains(l, "attempt=1 ") || !strings.Contains(l, "retry_in=100ms") {
+		t.Fatalf("first log = %q, want attempt 1 logged as failed with its retry delay", l)
+	}
+	// The router comes up on the address the first attempt could not reach.
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(routerServerTLS(routerPKI.serverCert, testRouterClientID))))
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	for {
+		l := lines.next(t)
+		if strings.Contains(l, "atenet-router accepted the router client") {
+			break
+		}
+		if !strings.Contains(l, "atenet-router probe failed") {
+			t.Fatalf("log = %q, want failed attempts until the router accepts", l)
+		}
+	}
+	waitProbeDone(t, done)
+	if len(lines) != 0 {
+		t.Fatalf("log after the router answered: %q", <-lines)
+	}
+}
+
+// A router that answers ends the probe, a refusal included: the allowlist does not change by asking
+// again.
+func TestRouterProbeStopsOnAnswer(t *testing.T) {
+	addr := serveTLSRouter(t, routerPKI.serverCert, "spiffe://cluster.local/ns/x/sa/y")
+	lines, done := startProbe(t.Context(), t, addr, probeBackoff{initial: time.Millisecond, max: time.Millisecond, attempts: 15})
+	if l := lines.next(t); !strings.Contains(l, "atenet-router refused the router client") {
+		t.Fatalf("log = %q, want the refusal", l)
+	}
+	waitProbeDone(t, done)
+	if len(lines) != 0 {
+		t.Fatalf("log after the router answered: %q", <-lines)
+	}
+}
+
+// Shutdown while the probe waits to retry stops it at once, with no further attempt and no log.
+func TestRouterProbeStopsOnShutdown(t *testing.T) {
+	// The router accepts and closes before TLS, which the probe takes as unreachable.
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lis.Close() })
+	var accepted atomic.Int32
+	go func() {
+		for {
+			c, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			_ = c.Close()
+		}
+	}()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	lines, done := startProbe(ctx, t, lis.Addr().String(), probeBackoff{initial: time.Hour, max: time.Hour, attempts: 15})
+	if l := lines.next(t); !strings.Contains(l, "atenet-router probe failed") || !strings.Contains(l, "attempt=1 ") {
+		t.Fatalf("log = %q, want attempt 1 logged as failed", l)
+	}
+	cancel()
+	waitProbeDone(t, done)
+	if n := accepted.Load(); n != 1 {
+		t.Fatalf("router saw %d probe connections, want 1", n)
+	}
+	if len(lines) != 0 {
+		t.Fatalf("log after shutdown: %q", <-lines)
+	}
+}
+
+// A router that never comes up is retried a bounded number of times, then the probe gives up.
+func TestRouterProbeGivesUp(t *testing.T) {
+	lines, done := startProbe(t.Context(), t, unusedAddr(t), probeBackoff{initial: time.Millisecond, max: 2 * time.Millisecond, attempts: 3})
+	for i, want := range []string{"attempt=1 retry_in=1ms", "attempt=2 retry_in=2ms"} {
+		if l := lines.next(t); !strings.Contains(l, "atenet-router probe failed") || !strings.Contains(l, want) {
+			t.Fatalf("log %d = %q, want a failed attempt with %q", i, l, want)
+		}
+	}
+	if l := lines.next(t); !strings.Contains(l, "atenet-router probe gave up") || !strings.Contains(l, "attempts=3") {
+		t.Fatalf("log = %q, want the probe to give up after 3 attempts", l)
+	}
+	waitProbeDone(t, done)
+	if len(lines) != 0 {
+		t.Fatalf("log after giving up: %q", <-lines)
+	}
+}

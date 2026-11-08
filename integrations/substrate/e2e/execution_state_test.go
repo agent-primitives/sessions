@@ -219,7 +219,7 @@ func newExecutionStateFixture(t *testing.T) *executionStateFixture {
 			return api.ModelResponse{}, ctx.Err()
 		}
 	}
-	registry, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": placement.New(backend, model)})
+	registry, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": newPlacer(t, backend, model)})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,8 +15,11 @@ script demonstrates conversation continuity and journal integrity across daemon 
 
 ## Run
 
-Requires Docker, Go, `kubectl`, `ko`, `jq`, and GNU `timeout` (`gtimeout` from Homebrew coreutils also
-works). Setup builds the pinned kind and kubectl-ate tools from the workflow's Substrate revision.
+Requires Docker with `buildx`, Go, `kubectl`, `ko`, `jq`, and GNU `timeout` (`gtimeout` from Homebrew
+coreutils also works). Setup installs the images of the Substrate release the workflow pins
+(`SUBSTRATE_VERSION`, from `ghcr.io/agent-substrate/substrate`, each pinned to its digest), and builds
+the pinned kind and kubectl-ate tools from the revision its tag names (`SUBSTRATE_REF`); it refuses a
+tag that names another revision. Only this repository's images are built.
 Docker must publish its registry and Kubernetes API on this machine's loopback; a remote Docker
 daemon is not supported. Docker Desktop's Linux VM is supported.
 
@@ -75,8 +78,13 @@ creation. `SANDBOX_CLASS=microvm` requires the device check to pass; `SANDBOX_CL
 this initial probe. The upstream cluster-creation helper probes KVM independently; before installing
 or reusing a microVM deployment, setup also requires a writable `/dev/kvm` mount on the kind node.
 If the helper omitted that mount, setup refuses rather than installing incompatible workers; use
-`down.sh` before recreating the cluster. Images and runtime assets target the Docker server's
-architecture.
+`down.sh` before recreating the cluster. This repository's images target the Docker server's
+architecture; the Substrate release images are multi-arch. The control plane installs with the
+gVisor class only; a microVM setup then adds that class with
+`ate-setup deploy sandboxconfig --sandbox-classes=microvm`, which on kind assembles the kata assets
+for the architecture `ate-setup` runs as (Go's target on this machine), so microVM needs that to
+match the Docker server's. When they differ, automatic selection uses gVisor and
+`SANDBOX_CLASS=microvm` is refused before any cluster call.
 
 ## Deployment layout
 
@@ -95,20 +103,42 @@ architecture.
 `provision.sh` uses `jq --arg` to parameterize image/model values in the checked-in JSON.
 Templates are created through `kubectl-ate`, because they belong to Substrate's Control API,
 not `kubectl apply`. The complete existing specification, including volumes, containers, resource
-limits, selectors, sandbox configuration and snapshot configuration, must match exactly.
+limits, selectors and snapshot configuration, must match exactly.
 Server-owned metadata and status are excluded. `--check-only` performs this
 comparison before worker/daemon changes. Each CLI invocation is bounded to two minutes, and the
 whole provisioning/golden wait to ten minutes.
+
+Substrate authorizes every Control API call by the atespace's AccessPolicy. The daemon
+calls as `user:system:serviceaccount:sessions-example:agentsessions` and needs `editor` (or
+`owner`) on the `sessions-example` atespace. When the atespace has no policy, `provision.sh`
+creates one with that single editor binding. A policy that already grants it is left alone. Any
+other policy is refused, never overwritten, since update replaces it whole; add the member
+yourself:
+
+```sh
+kubectl ate get access-policy -a sessions-example -o yaml > policy.yaml
+# add user:system:serviceaccount:sessions-example:agentsessions to an editor binding
+kubectl ate update access-policy -a sessions-example -f policy.yaml
+```
+
+`--check-only` reports a missing policy and creates nothing.
 
 `ACTOR_TEMPLATE` defaults to `chat-harness`. Intentionally changing an immutable image/model/sandbox
 requires a new name or a fresh cluster; setup never silently keeps an incompatible template.
 WorkerPools are named `chat-harness-microvm` and `chat-harness-gvisor`, so changing sandbox class
 with a new template does not mutate the previous pool's immutable class or remove its actors.
 Switching to microVM also requires the existing kind node's KVM mount; otherwise use a fresh cluster.
-`SANDBOX_CONFIG` overrides the class's default config (`microvm` or `gvisor-default`), which must
-already exist when custom. `SNAPSHOT_LOCATION` defaults to `gs://ate-snapshots/sessions-example/`;
-the template name is appended. Generated JSON and tools live under
-`_local/substrate-kind/${CLUSTER}/`, not in source files.
+Substrate templates name no sandbox config: the worker pool runs its class's default
+SandboxConfig. Setup and deploy refuse `SANDBOX_CONFIG`, the former template override, before
+changing the cluster; to run a custom config, which must exist and be of the pool's class, add
+`configRef: {name: <config>}` to the `sandboxClasses` entry in `deploy/workerpool.yaml`. The
+template's limits (1000m CPU, 768 MiB) are booked against the capacity the pool's worker pods
+declare (1 CPU, 1 GiB in `deploy/workerpool.yaml`), less the worker's reserve (64 MiB) and, on
+microVM workers, a per-actor overhead of 4 MiB plus 8 MiB per GiB. The template sets no
+`storageLocation`: Substrate v1 rejects one unless its `PerTemplateSnapshotLocation` preview gate is
+on, so snapshots go under the cluster's `--snapshot-location`. Setup refuses `SNAPSHOT_LOCATION`,
+the former override, before changing the cluster.
+Generated JSON and tools live under `_local/substrate-kind/${CLUSTER}/`, not in source files.
 
 For manual access:
 
@@ -135,8 +165,10 @@ bounded to three seconds within a thirty-second readiness budget.
 `up.sh` records the kind control-plane container ID and the installed Substrate revision, not just
 its name. Reruns reuse that cluster and retain its SQLite volume only when the revision matches.
 An older or unrecorded revision is refused before changing the managed checkout: Substrate does
-not support an in-place upgrade to v0.5.0. Use a new `CLUSTER` to preserve the old cluster, or run
-`down.sh` explicitly before recreating it; teardown deletes its journal and model cache.
+not support an in-place upgrade between minor releases before 1.0, and v1 moved the API to package
+`substrate.ateapi.v1` and WorkerPool to `ate.dev/v1`. Use a new `CLUSTER` to preserve the old
+cluster, or run `down.sh` explicitly before recreating it; teardown deletes its journal and model
+cache.
 `down.sh` refuses foreign/replaced clusters or uncertain inspection
 results and preserves the shared `kind-registry`. Interrupted creation is recorded but never
 automatically recreated. Keep the state directory; losing its ownership record does not authorize
@@ -162,11 +194,18 @@ This is **production-shaped, not production-ready**:
 - Sessions has no authentication or TLS termination here. Access is through local port-forward;
   deny-all pod ingress requires an enforcing CNI. The pinned kind setup supplies one.
 - The projected ate-api token has a dedicated audience and the default Kubernetes API token is
-  disabled. At this Substrate pin, the audience token is not least-privilege service-account
-  authorization or a tenant boundary. The namespace carries `ate.dev/api-access=true` for
-  Substrate v0.5.0's ate-api ingress policy; worker pods are excluded from that allowance.
-- Harness traffic is h2c through atenet-router; routing metadata is not authorization. Long model
-  calls can exceed the router's stream/idle timeouts.
+  disabled. Substrate authorizes each call by the atespace's AccessPolicy, and the daemon
+  holds editor on `sessions-example` only; that is not a tenant boundary between sessions. The
+  namespace carries `ate.dev/api-access=true` for
+  Substrate's ate-api ingress policy; worker pods are excluded from that allowance.
+- Harness traffic goes to atenet-router's :443 over mTLS. `up.sh` installs Substrate's default
+  envoy router with one allowlisted client, the daemon's SPIFFE ID
+  `spiffe://cluster.local/ns/sessions-example/sa/agentsessions`; the daemon presents it from a
+  `podCertificate` volume and verifies the router by its DNS name. Any allowlisted client can drive
+  any actor, and routing metadata is not authorization; see
+  [security.md](../../docs/security.md). A cluster an earlier `up.sh` installed with another router
+  dataplane is refused on reuse: run `down.sh` and `up.sh` again. Long model calls can exceed the
+  router's stream/idle timeouts.
 - The actor runs the reference chat context policy, which sends the full recorded conversation
   on every turn, not a production context-window strategy.
 

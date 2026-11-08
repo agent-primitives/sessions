@@ -6,12 +6,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/agent-primitives/sessions/examples/agentsuite-substrate/render"
-	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -65,7 +66,7 @@ func TestClusterReadsAreReadOnly(t *testing.T) {
 	}
 }
 
-// actorJSON is the plugin's output shape for an actor (ateapipb.Actor in protojson).
+// actorJSON is the plugin's output shape for an actor (ateapi v1 Actor in protojson).
 const actorJSON = `{
   "metadata": {"atespace": "agentsuite-demo", "name": "sess-abc", "uid": "a-1"},
   "actorTemplate": {"atespace": "agentsuite-demo", "name": "support-desk-triage-memory-1234-vol"},
@@ -109,6 +110,49 @@ func traceServer(f *fakeCluster) *server {
 	}
 }
 
+// The ate-api matchers match the methods the pinned substrate serves, by their generated full
+// names, and not a prefix from another substrate release.
+func TestAteapiMatchers(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		re      *regexp.Regexp
+		match   []string
+		noMatch []string
+	}{
+		{
+			name:    "place",
+			re:      ateapiPlace,
+			match:   []string{atepb.Control_CreateActor_FullMethodName, atepb.Control_ResumeActor_FullMethodName},
+			noMatch: []string{atepb.Control_GetActor_FullMethodName, atepb.Control_SuspendActor_FullMethodName, "/ateapi.Control/CreateActor", "/ateapi.Control/ResumeActor"},
+		},
+		{
+			name:    "suspend",
+			re:      ateapiSuspend,
+			match:   []string{atepb.Control_SuspendActor_FullMethodName},
+			noMatch: []string{atepb.Control_ResumeActor_FullMethodName, "/ateapi.Control/SuspendActor"},
+		},
+		{
+			name:    "get",
+			re:      ateapiGet,
+			match:   []string{atepb.Control_GetActor_FullMethodName},
+			noMatch: []string{atepb.Control_GetActorEgressPolicy_FullMethodName, "/ateapi.Control/GetActor"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, m := range tt.match {
+				if !tt.re.MatchString(`{"msg":"Handle RPC","method":"` + m + `"}`) {
+					t.Errorf("%v does not match %s", tt.re, m)
+				}
+			}
+			for _, m := range tt.noMatch {
+				if tt.re.MatchString(`{"msg":"Handle RPC","method":"` + m + `"}`) {
+					t.Errorf("%v matches %s", tt.re, m)
+				}
+			}
+		})
+	}
+}
+
 func TestTraceRefusedSuspend(t *testing.T) {
 	f := &fakeCluster{out: map[string]string{
 		"logs -n agentsuite-demo deploy/agentsessionsd-volumes": at(-time.Second) + `msg="operation finished" component=session operation=exec session_uid=sess-abc phase=finish outcome=success
@@ -117,12 +161,12 @@ func TestTraceRefusedSuspend(t *testing.T) {
 		"get pods -n ate-system":      "pod/ate-api-server-0\npod/atenet-router-1\npod/atelet-x\n",
 		"get pods -n agentsuite-demo": "pod/agentsessionsd-volumes-1\npod/fakemodel-2\npod/agentsuite-demo-microvm-0\n",
 		// The previous call's CreateActor, inside --since-time's whole second but before this call.
-		"logs -n ate-system ate-api-server-0": at(-600*time.Millisecond) + `msg="Handle RPC" method=/ateapi.Control/CreateActor actor=sess-abc
-` + at(20*time.Millisecond) + `msg="Handle RPC" method=/ateapi.Control/GetActor actor=sess-abc
-` + at(30*time.Millisecond) + `msg="Handle RPC" method=/ateapi.Control/SuspendActor actor=sess-abc`,
-		"logs -n agentsuite-demo agentsuite-demo-microvm-0": at(-500*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateom.Ateom/RestoreWorkload","actor_name":"sess-abc"}
-` + at(40*time.Millisecond) + `{"time":"t3","msg":"Handle RPC","method":"/ateom.Ateom/CheckpointWorkload","actor_name":"sess-other"}
-` + at(50*time.Millisecond) + `{"time":"t4","msg":"Handle RPC","method":"/ateom.Ateom/CheckpointWorkload","actor_name":"sess-abc"}`,
+		"logs -n ate-system ate-api-server-0": at(-600*time.Millisecond) + `msg="Handle RPC" method=/substrate.ateapi.v1.Control/CreateActor actor=sess-abc
+` + at(20*time.Millisecond) + `msg="Handle RPC" method=/substrate.ateapi.v1.Control/GetActor actor=sess-abc
+` + at(30*time.Millisecond) + `msg="Handle RPC" method=/substrate.ateapi.v1.Control/SuspendActor actor=sess-abc`,
+		"logs -n agentsuite-demo agentsuite-demo-microvm-0": at(-500*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateworker.Worker/RestoreWorkload","actor_name":"sess-abc"}
+` + at(40*time.Millisecond) + `{"time":"t3","msg":"Handle RPC","method":"/ateworker.Worker/CheckpointWorkload","actor_name":"sess-other"}
+` + at(50*time.Millisecond) + `{"time":"t4","msg":"Handle RPC","method":"/ateworker.Worker/CheckpointWorkload","actor_name":"sess-abc"}`,
 		"get actor sess-abc": actorJSON,
 	}}
 	s := traceServer(f)
@@ -163,8 +207,8 @@ func TestTraceMissingHopIsNotAssumed(t *testing.T) {
 ` + at(-time.Second) + `msg="operation finished" component=session operation=resume session_uid=sess-abc phase=finish`,
 		"get pods -n ate-system":      "pod/ate-api-server-0\npod/atenet-router-1\n",
 		"get pods -n agentsuite-demo": "pod/agentsuite-demo-microvm-0\n",
-		"logs -n ate-system":          at(10*time.Second) + `method=/ateapi.Control/ResumeActor actor=sess-abc`,
-		"logs -n agentsuite-demo":     `method=/ateom.Ateom/RestoreWorkload actor_name=sess-abc`,
+		"logs -n ate-system":          at(10*time.Second) + `method=/substrate.ateapi.v1.Control/ResumeActor actor=sess-abc`,
+		"logs -n agentsuite-demo":     `method=/ateworker.Worker/RestoreWorkload actor_name=sess-abc`,
 	}}
 	s := traceServer(f)
 	tr := s.trace(context.Background(), &activity{ID: 1, Op: "resume", Lane: "volumes", Session: "sess-abc", OK: true, Started: t0, DurationMS: 50})
@@ -184,16 +228,16 @@ func attachCluster(apiLog string) *fakeCluster {
 		"get pods -n agentsuite-demo":                   "pod/agentsessionsd-1\npod/agentsuite-demo-microvm-0\n",
 		"logs -n ate-system ate-api-server-0":           apiLog,
 		// Turn 1's restore, inside --since-time's whole second but before this call.
-		"logs -n agentsuite-demo agentsuite-demo-microvm-0": at(-700*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateom.Ateom/RestoreWorkload","actor_name":"sess-abc"}`,
+		"logs -n agentsuite-demo agentsuite-demo-microvm-0": at(-700*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateworker.Worker/RestoreWorkload","actor_name":"sess-abc"}`,
 		"logs -n ate-system atenet-router-1":                at(30*time.Millisecond) + `{"msg":"Route ok","actor":"sess-abc","targetAddr":"10.244.0.21:443"}`,
 		"get actor sess-abc":                                strings.Replace(actorJSON, "ACTOR_STATE_SUSPENDED", "ACTOR_STATE_RUNNING", 1),
 	}}
 }
 
 func TestTraceExecAttachIsNotARestore(t *testing.T) {
-	f := attachCluster(at(-650*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/ResumeActor","req":"sess-abc"}
-` + at(15*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc"}
-` + at(25*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"}}}`)
+	f := attachCluster(at(-650*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/ResumeActor","req":"sess-abc"}
+` + at(15*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/GetActor","req":"sess-abc"}
+` + at(25*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"}}}`)
 	s := &server{
 		cfg:   config{Namespace: "agentsuite-demo", Atespace: "agentsuite-demo"},
 		lanes: []*lane{{Name: "stateless", Daemon: "agentsessionsd"}},
@@ -225,7 +269,7 @@ func TestTraceExecAttachIsNotARestore(t *testing.T) {
 // A line found in a pod that was read still counts.
 func TestTraceUnreadLogsAreUnknown(t *testing.T) {
 	const denied = `Error from server (Forbidden): pods "x" is forbidden: User "u" cannot get resource "pods/log"`
-	getOnly := at(15*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc"}`
+	getOnly := at(15*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/GetActor","req":"sess-abc"}`
 	exec := func(f *fakeCluster) traceView {
 		s := traceServer(f)
 		s.lanes = []*lane{{Name: "stateless", Daemon: "agentsessionsd"}}
@@ -262,7 +306,7 @@ func TestTraceUnreadLogsAreUnknown(t *testing.T) {
 	})
 
 	t.Run("a line in a pod that was read", func(t *testing.T) {
-		f := attachCluster(at(20*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/CreateActor","req":"sess-abc"}`)
+		f := attachCluster(at(20*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/CreateActor","req":"sess-abc"}`)
 		f.out["get pods -n ate-system"] = "pod/ate-api-server-0\npod/ate-api-server-1\npod/atenet-router-1\n"
 		f.errs = map[string]string{"logs -n ate-system ate-api-server-1": "context deadline exceeded"}
 		tr := exec(f)
@@ -324,16 +368,16 @@ func TestTraceResumeOfARunningActor(t *testing.T) {
 			// ResumeActor alone still identifies the call.
 			name: "resume only", lane: "volumes", daemon: "agentsessionsd-volumes",
 			reads: []actorRead{{uid: "sess-abc", from: t0.Add(-300 * time.Millisecond), to: t0.Add(-200 * time.Millisecond)}},
-			apiLog: at(-290*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc","t":"bridge"}
-` + at(10*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc","t":"daemon"}
-` + at(20*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"}}}`,
+			apiLog: at(-290*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/GetActor","req":"sess-abc","t":"bridge"}
+` + at(10*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/GetActor","req":"sess-abc","t":"daemon"}
+` + at(20*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"}}}`,
 			method: noopResumeMethod,
 		},
 		{
 			// Every lane reads the actor before resuming it (runtime/substrate requireRestoreSnapshot).
 			name: "read then resume", lane: "stateless", daemon: "agentsessionsd",
-			apiLog: at(10*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc"}
-` + at(20*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"}}}`,
+			apiLog: at(10*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/GetActor","req":"sess-abc"}
+` + at(20*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"}}}`,
 			method: "GetActor + " + noopResumeMethod,
 		},
 	} {
@@ -363,11 +407,11 @@ func TestTraceResumeOfARunningActor(t *testing.T) {
 // A Resume of a suspended actor reports the ResumeActor that resumed it, not the daemon's read
 // before it (runtime/substrate requireRestoreSnapshot) nor a no-op next to it.
 func TestTraceResumeOfASuspendedActor(t *testing.T) {
-	f := attachCluster(at(5*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc"}
-` + at(10*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"},"resumed":true}}
-` + at(30*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"}}}`)
+	f := attachCluster(at(5*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/GetActor","req":"sess-abc"}
+` + at(10*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"},"resumed":true}}
+` + at(30*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"}}}`)
 	f.out["logs -n agentsuite-demo deploy/agentsessionsd"] = at(60*time.Millisecond) + `msg="operation finished" component=session operation=resume session_uid=sess-abc phase=finish outcome=success`
-	f.out["logs -n agentsuite-demo agentsuite-demo-microvm-0"] = at(20*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateom.Ateom/RestoreWorkload","actor_name":"sess-abc"}`
+	f.out["logs -n agentsuite-demo agentsuite-demo-microvm-0"] = at(20*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateworker.Worker/RestoreWorkload","actor_name":"sess-abc"}`
 	s := traceServer(f)
 	s.lanes = []*lane{{Name: "stateless", Daemon: "agentsessionsd"}}
 	tr := s.trace(context.Background(), &activity{ID: 5, Op: "resume", Lane: "stateless", Session: "sess-abc", OK: true, Started: t0, DurationMS: 60})
@@ -382,7 +426,7 @@ func TestTraceResumeOfASuspendedActor(t *testing.T) {
 // A suspend that ate-api saw only a GetActor for does not say the actor was attached: that is a
 // turn's wording.
 func TestTraceFallbackWordingIsPerOp(t *testing.T) {
-	f := attachCluster(at(10*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc"}`)
+	f := attachCluster(at(10*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/GetActor","req":"sess-abc"}`)
 	f.out["logs -n agentsuite-demo deploy/agentsessionsd"] = at(60*time.Millisecond) + `msg="operation finished" component=session operation=suspend session_uid=sess-abc phase=finish outcome=success`
 	s := traceServer(f)
 	s.lanes = []*lane{{Name: "stateless", Daemon: "agentsessionsd"}}
@@ -398,11 +442,11 @@ func TestTraceFallbackWordingIsPerOp(t *testing.T) {
 // A placing turn reports every lifecycle method it made, in the order logged across ate-api's
 // replicas, and the restore.
 func TestTracePlacementMethods(t *testing.T) {
-	f := attachCluster(at(10*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc"}
-` + at(20*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/CreateActor","req":"sess-abc"}`)
+	f := attachCluster(at(10*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/GetActor","req":"sess-abc"}
+` + at(20*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/CreateActor","req":"sess-abc"}`)
 	f.out["get pods -n ate-system"] = "pod/ate-api-server-1\npod/ate-api-server-0\npod/atenet-router-1\n"
-	f.out["logs -n ate-system ate-api-server-1"] = at(200*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateapi.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"},"resumed":true}}`
-	f.out["logs -n agentsuite-demo agentsuite-demo-microvm-0"] = at(150*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateom.Ateom/RestoreWorkload","actor_name":"sess-abc"}`
+	f.out["logs -n ate-system ate-api-server-1"] = at(200*time.Millisecond) + `{"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/ResumeActor","req":"sess-abc","resp":{"actor":{"name":"sess-abc"},"resumed":true}}`
+	f.out["logs -n agentsuite-demo agentsuite-demo-microvm-0"] = at(150*time.Millisecond) + `{"msg":"Handle RPC","method":"/ateworker.Worker/RestoreWorkload","actor_name":"sess-abc"}`
 	s := traceServer(f)
 	s.lanes = []*lane{{Name: "stateless", Daemon: "agentsessionsd"}}
 	tr := s.trace(context.Background(), &activity{ID: 1, Op: "exec", Lane: "stateless", Session: "sess-abc", OK: true, Started: t0, DurationMS: 400})
@@ -424,7 +468,7 @@ func TestTraceIgnoresTheBridgesOwnReads(t *testing.T) {
 	if _, err := s.kube.actor(context.Background(), "sess-abc"); err != nil {
 		t.Fatal(err)
 	}
-	f.out["logs -n ate-system ate-api-server-0"] = start.Add(time.Millisecond).Format(time.RFC3339Nano) + ` {"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc"}`
+	f.out["logs -n ate-system ate-api-server-0"] = start.Add(time.Millisecond).Format(time.RFC3339Nano) + ` {"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/GetActor","req":"sess-abc"}`
 	a := &activity{ID: 1, Op: "exec", Lane: "stateless", Session: "sess-abc", OK: true, Started: start.Add(-time.Second), DurationMS: 900}
 	tr := s.trace(context.Background(), a)
 	if tr.Nodes["ateapi"].State != "missing" {
@@ -446,8 +490,8 @@ func TestTraceKeepsTheDaemonsReadNextToTheBridges(t *testing.T) {
 	}
 	r := s.kube.ownReads([]string{"sess-abc"})[0]
 	started := r.to.Add(time.Millisecond)
-	f.out["logs -n ate-system ate-api-server-0"] = r.to.UTC().Format(time.RFC3339Nano) + ` {"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc"}
-` + started.Add(10*time.Millisecond).UTC().Format(time.RFC3339Nano) + ` {"msg":"Handle RPC","method":"/ateapi.Control/GetActor","req":"sess-abc","t":"daemon"}`
+	f.out["logs -n ate-system ate-api-server-0"] = r.to.UTC().Format(time.RFC3339Nano) + ` {"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/GetActor","req":"sess-abc"}
+` + started.Add(10*time.Millisecond).UTC().Format(time.RFC3339Nano) + ` {"msg":"Handle RPC","method":"/substrate.ateapi.v1.Control/GetActor","req":"sess-abc","t":"daemon"}`
 	a := &activity{ID: 2, Op: "exec", Lane: "stateless", Session: "sess-abc", OK: true, Started: started, DurationMS: 400}
 	tr := s.trace(context.Background(), a)
 	if ev := tr.Nodes["ateapi"]; ev.State != "observed" || ev.Method != "GetActor" || !strings.Contains(ev.Detail, "only GetActor") {
@@ -526,8 +570,8 @@ func memoryTier(t *testing.T, mutate func(*atepb.ActorTemplate)) ([]byte, string
 	tm := &atepb.ActorTemplate{
 		Metadata:       &atepb.ResourceMetadata{Atespace: "agentsuite-demo", Name: "support-desk-triage-1a2b3c4d"},
 		Containers:     []*atepb.Container{{Name: "harness", Image: "localhost:5001/h@sha256:" + strings.Repeat("0", 64)}},
-		SandboxConfig:  &atepb.SandboxConfig{SandboxClass: render.SandboxClassMicroVM},
-		SnapshotConfig: &atepb.SnapshotConfig{PreferredFidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, StorageLocation: "gs://ate-snapshots/agentsuite-demo/support-desk-triage-1a2b3c4d/"},
+		WorkerSelector: &atepb.Selector{MatchLabels: map[string]string{"workload": microVMPool}},
+		SnapshotConfig: &atepb.SnapshotConfig{PreferredFidelity: atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
 	}
 	if mutate != nil {
 		mutate(tm)
@@ -575,7 +619,7 @@ func TestVolumesTemplate(t *testing.T) {
 	if got.GetSnapshotConfig().GetPreferredFidelity() != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES {
 		t.Errorf("fidelity %s", got.GetSnapshotConfig().GetPreferredFidelity())
 	}
-	if loc := got.GetSnapshotConfig().GetStorageLocation(); loc != "gs://ate-snapshots/agentsuite-demo/support-desk-triage-1a2b3c4d-vol/" {
+	if loc := got.GetSnapshotConfig().GetStorageLocation(); loc != "" {
 		t.Errorf("storage location %q", loc)
 	}
 	if len(got.GetVolumes()) != 1 || got.GetVolumes()[0].GetDurableDir() == nil || len(got.GetContainers()[0].GetVolumeMounts()) != 1 {
@@ -594,19 +638,33 @@ func TestVolumesTemplate(t *testing.T) {
 	}
 }
 
+// The volumes lane recognizes the micro-VM memory tier by the pool its template selects, so that
+// label must be the one the micro-VM binding renders.
+func TestMicroVMPoolIsTheMicroVMBindingSelector(t *testing.T) {
+	b, err := render.LoadBinding("../../binding-microvm.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.WorkerSelector.MatchLabels["workload"]; got != microVMPool || b.Sandbox.Class != render.SandboxClassMicroVM {
+		t.Fatalf("binding-microvm.json selects %q on class %q, want %q on %q", got, b.Sandbox.Class, microVMPool, render.SandboxClassMicroVM)
+	}
+}
+
 func TestVolumesTemplateRefusals(t *testing.T) {
 	for name, mutate := range map[string]func(*atepb.ActorTemplate){
 		"not MEMORY": func(tm *atepb.ActorTemplate) {
 			tm.SnapshotConfig.PreferredFidelity = atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
 		},
-		"gVisor":   func(tm *atepb.ActorTemplate) { tm.SandboxConfig.SandboxClass = render.SandboxClassGVisor },
-		"no class": func(tm *atepb.ActorTemplate) { tm.SandboxConfig.SandboxClass = "" },
+		"gVisor pool": func(tm *atepb.ActorTemplate) {
+			tm.WorkerSelector.MatchLabels["workload"] = "agentsuite-demo-gvisor"
+		},
+		"no selector": func(tm *atepb.ActorTemplate) { tm.WorkerSelector = nil },
 		"volumes already": func(tm *atepb.ActorTemplate) {
 			tm.Volumes = []*atepb.Volume{{Name: "v", DurableDir: &atepb.DurableDirVolumeSource{}}}
 		},
 		"two containers": func(tm *atepb.ActorTemplate) { tm.Containers = append(tm.Containers, &atepb.Container{Name: "x"}) },
-		"storage elsewhere": func(tm *atepb.ActorTemplate) {
-			tm.SnapshotConfig.StorageLocation = "gs://ate-snapshots/other/"
+		"storage location": func(tm *atepb.ActorTemplate) {
+			tm.SnapshotConfig.StorageLocation = "gs://ate-snapshots/agentsuite-demo/support-desk-triage-1a2b3c4d/"
 		},
 	} {
 		b, flag := memoryTier(t, mutate)

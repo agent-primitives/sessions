@@ -14,7 +14,6 @@ import (
 	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
 	"github.com/agent-primitives/sessions/harness/echoagent"
-	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
@@ -47,7 +46,7 @@ func TestStatelessReplay(t *testing.T) {
 	backend := f.backend(t, echoTemplateSpec, desc)
 	session := uniqueUID("replay")
 	log := journal(t).Session(session)
-	p := placement.New(backend, echoagent.Model)
+	p := newPlacer(t, backend, echoagent.Model)
 
 	inc, err := p.Exec(ctx, log, session, []api.Message{*api.TextMessage("user", "hi")}, 0)
 	if inc.ID != "" {
@@ -63,7 +62,7 @@ func TestStatelessReplay(t *testing.T) {
 		t.Fatal("placed turn produced no output")
 	}
 
-	har, closeHar, err := dialActor(inc)
+	har, closeHar, err := dialActor(t, inc)
 	if err != nil {
 		t.Fatalf("replay dial %s: %v", inc.Address, err)
 	}

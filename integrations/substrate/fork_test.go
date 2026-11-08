@@ -11,7 +11,7 @@ import (
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/runtime/substrate"
-	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -47,7 +47,7 @@ type lifecycleControl struct {
 	// the actor in the window between the backend's check and its resume.
 	beforeResume func(a *atepb.Actor)
 	// runtime is the sandbox runtime ResumeActor binds a worker of; a capture is stamped with it.
-	runtime *atepb.SandboxRuntime
+	runtime *atepb.ActorSandboxRuntime
 }
 
 func newLifecycleControl() *lifecycleControl {
@@ -70,7 +70,7 @@ func (l *lifecycleControl) CreateActor(_ context.Context, in *atepb.CreateActorR
 		if !ok {
 			return nil, status.Errorf(codes.FailedPrecondition, "Tag %s not found", src.GetName())
 		}
-		snap := durableSnapshot(1, uri, atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+		snap := durableSnapshot(1, uri, atepb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED)
 		snap.Owner = atepb.SnapshotOwner_SNAPSHOT_OWNER_TAG
 		st.Snapshots = []*atepb.Snapshot{snap}
 		st.LastAssignedGeneration = 1
@@ -128,9 +128,9 @@ func (l *lifecycleControl) SuspendActor(_ context.Context, in *atepb.SuspendActo
 	}
 	if a.Status.State == atepb.ActorState_ACTOR_STATE_RUNNING {
 		gen := a.Status.LastAssignedGeneration + 1
-		st := atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING
+		st := atepb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_PENDING
 		if l.completeOnSuspend {
-			st = atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+			st = atepb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED
 		}
 		uri := fmt.Sprintf("gs://b/atespaces/space/actors/%s/snapshots/s%d", name, gen)
 		snap := durableSnapshot(gen, uri, st)
@@ -366,7 +366,7 @@ func TestRefusedCaptureStaysRefusedOverTheAdapter(t *testing.T) {
 			if foreign {
 				ctl.beforeSuspend = func(a *atepb.Actor) {
 					gen := a.Status.LastAssignedGeneration + 1
-					snap := durableSnapshot(gen, fmt.Sprintf("gs://b/atespaces/space/actors/parent/snapshots/s%d", gen), atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+					snap := durableSnapshot(gen, fmt.Sprintf("gs://b/atespaces/space/actors/parent/snapshots/s%d", gen), atepb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED)
 					snap.SandboxRuntime = rtA
 					a.Status.Snapshots = append(a.Status.Snapshots, snap)
 					a.Status.LastAssignedGeneration = gen
@@ -436,7 +436,7 @@ func (l *lifecycleControl) outsideSuspend(a *atepb.Actor) {
 	name := a.GetMetadata().GetName()
 	gen := a.Status.LastAssignedGeneration + 1
 	uri := fmt.Sprintf("gs://b/atespaces/space/actors/%s/snapshots/s%d", name, gen)
-	snap := durableSnapshot(gen, uri, atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+	snap := durableSnapshot(gen, uri, atepb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED)
 	snap.SandboxRuntime = a.Status.GetWorkerAssignment().GetSandboxRuntime()
 	a.Status.Snapshots = append(a.Status.Snapshots, snap)
 	a.Status.LastAssignedGeneration = gen
@@ -597,7 +597,7 @@ func TestResumeOfAnUnrecordedCaptureIsRefusedOverTheAdapter(t *testing.T) {
 			}
 			ctl.beforeResume = func(a *atepb.Actor) {
 				gen := a.Status.LastAssignedGeneration + 1
-				snap := durableSnapshot(gen, fmt.Sprintf("gs://b/atespaces/space/actors/parent/snapshots/s%d", gen), atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+				snap := durableSnapshot(gen, fmt.Sprintf("gs://b/atespaces/space/actors/parent/snapshots/s%d", gen), atepb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED)
 				snap.SandboxRuntime = rtB
 				a.Status.Snapshots = append(a.Status.Snapshots, snap)
 				a.Status.LastAssignedGeneration = gen
@@ -669,7 +669,7 @@ func TestForkOfACloneThatHoldsItsOwnCaptureIsRefusedOverTheAdapter(t *testing.T)
 		{name: "captured by another caller", says: "holds a capture of its own", not: "cannot show", beforeResume: func(ctl *lifecycleControl, a *atepb.Actor) {
 			gen := a.Status.LastAssignedGeneration + 1
 			uri := fmt.Sprintf("gs://b/atespaces/space/actors/child/snapshots/s%d", gen)
-			capture := durableSnapshot(gen, uri, atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+			capture := durableSnapshot(gen, uri, atepb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED)
 			capture.SandboxRuntime = rt
 			a.Status.Snapshots = append(a.Status.Snapshots, capture)
 			a.Status.LastAssignedGeneration = gen
@@ -753,7 +753,7 @@ func TestCreateOfANewActorCapturedBeforeItsResumeIsRefusedOverTheAdapter(t *test
 				ctl.beforeResume = func(a *atepb.Actor) {
 					gen := a.Status.LastAssignedGeneration + 1
 					uri := fmt.Sprintf("gs://b/atespaces/space/actors/sess/snapshots/s%d", gen)
-					capture := durableSnapshot(gen, uri, atepb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+					capture := durableSnapshot(gen, uri, atepb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED)
 					capture.SandboxRuntime = rt
 					a.Status.Snapshots = append(a.Status.Snapshots, capture)
 					a.Status.LastAssignedGeneration = gen

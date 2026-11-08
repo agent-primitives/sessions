@@ -5,11 +5,12 @@
 # this pool instead of the micro-VM one. CI keeps the micro-VM pool, which is the class the stateful
 # claim is made for.
 #
-# workerImage is a ko:// import path that the WorkerPool controller passes to its Pods unchanged:
-# build ateom-gvisor with ko and substitute its digest before applying (see the no-KVM recipe in
+# workerImage is a placeholder that the WorkerPool controller would pass to its Pods unchanged:
+# substitute the Substrate release's ateworker-gvisor, pinned to its digest by
+# `hack/substrate-image.sh ateworker-gvisor`, before applying (see the no-KVM recipe in
 # docs/substrate-conformance.md).
 
-apiVersion: ate.dev/v1alpha1
+apiVersion: ate.dev/v1
 kind: WorkerPool
 metadata:
   name: counter-gvisor
@@ -21,7 +22,7 @@ spec:
   replicas: 4
   sandboxClasses:
     - name: gvisor
-  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+  workerImage: ko://go.ate.dev/substrate/cmd/ateworker-gvisor
   template:
     resources:
       limits:

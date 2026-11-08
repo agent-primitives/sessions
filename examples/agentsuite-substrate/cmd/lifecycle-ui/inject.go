@@ -10,8 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/agent-primitives/sessions/examples/agentsuite-substrate/render"
-	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	atepb "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -21,13 +20,12 @@ import (
 // by design, so the template is derived from the memory tier's rendered one with three changes:
 //
 //   - snapshotConfig.preferredFidelity is VOLUMES, so a suspend completes a VOLUMES snapshot;
-//   - one durableDir volume is mounted in the container: at substrate v0.5.0 ateom-microvm
-//     refuses a VOLUMES checkpoint with no durable-dir or CSI volume (cmd/ateom-microvm/
+//   - one durableDir volume is mounted in the container: at substrate v1 ateworker-microvm
+//     refuses a VOLUMES checkpoint with no durable-dir or CSI volume (cmd/ateworker-microvm/
 //     checkpoint.go), and ate-api then marks the actor CRASHED (cmd/ateapi/internal/controlapi/
 //     crash.go, handleAteletError), which would show a substrate crash rather than the sessions
 //     refusal;
-//   - the name (and the storage location under it) gets volumesSuffix, so it never collides with
-//     the memory tier's template.
+//   - the name gets volumesSuffix, so it never collides with the memory tier's template.
 //
 // Golden snapshots stay on: a golden actor suspends at MEMORY, so a session's first placement
 // passes the fidelity check and only its first real suspend records VOLUMES. That is the order the
@@ -38,6 +36,10 @@ const (
 	volumesMountPath  = "/var/lib/lifecycle-data"
 	volumesDeployment = "agentsessionsd-volumes"
 	memoryDeployment  = "agentsessionsd-memory"
+	// microVMPool is the `workload` label of the micro-VM WorkerPool (deploy/workerpool-microvm.yaml)
+	// that binding-microvm.json selects. A substrate v1 template carries no sandbox class, so the
+	// pool it selects is what says it runs on a micro-VM.
+	microVMPool = "agentsuite-demo-microvm"
 )
 
 // runInject writes, from up.sh's rendered memory tier in -state, the VOLUMES template
@@ -106,8 +108,8 @@ func volumesTemplate(memoryTemplate []byte, memoryFlag string) (*derived, error)
 	if got := t.GetSnapshotConfig().GetPreferredFidelity(); got != atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
 		return nil, fmt.Errorf("memory-tier template prefers %s, want SNAPSHOT_FIDELITY_MEMORY", got)
 	}
-	if got := t.GetSandboxConfig().GetSandboxClass(); got != render.SandboxClassMicroVM {
-		return nil, fmt.Errorf("memory-tier template runs sandbox class %q; the volumes lane is derived for micro-VMs only", got)
+	if got := t.GetWorkerSelector().GetMatchLabels()["workload"]; got != microVMPool {
+		return nil, fmt.Errorf("memory-tier template selects pool %q, not the micro-VM pool %q; the volumes lane is derived for micro-VMs only", got, microVMPool)
 	}
 	if len(t.GetContainers()) != 1 {
 		return nil, fmt.Errorf("memory-tier template has %d containers, want 1", len(t.GetContainers()))
@@ -121,13 +123,13 @@ func volumesTemplate(memoryTemplate []byte, memoryFlag string) (*derived, error)
 	if err != nil {
 		return nil, err
 	}
-	loc := t.GetSnapshotConfig().GetStorageLocation()
-	if !strings.HasSuffix(loc, "/"+old+"/") {
-		return nil, fmt.Errorf("memory-tier storage location does not end in /%s/", old)
+	// substrate v1 refuses a template's storageLocation while PerTemplateSnapshotLocation is off,
+	// and emit render sets none; a template that has one did not come from it.
+	if loc := t.GetSnapshotConfig().GetStorageLocation(); loc != "" {
+		return nil, fmt.Errorf("memory-tier template sets storage location %q, which emit render never does", loc)
 	}
 	t.Metadata.Name = name
 	t.SnapshotConfig.PreferredFidelity = atepb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
-	t.SnapshotConfig.StorageLocation = strings.TrimSuffix(loc, old+"/") + name + "/"
 	t.Volumes = []*atepb.Volume{{Name: volumesVolume, DurableDir: &atepb.DurableDirVolumeSource{}}}
 	c := t.Containers[0]
 	c.VolumeMounts = append(c.VolumeMounts, &atepb.VolumeMount{Name: volumesVolume, MountPath: volumesMountPath})

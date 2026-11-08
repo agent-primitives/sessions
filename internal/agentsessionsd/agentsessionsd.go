@@ -134,9 +134,10 @@ type HarnessBackends interface {
 	// none. It must have no side effect: an error refuses the start before anything is dialed or
 	// opened.
 	Harnesses() ([]string, error)
-	// Backends builds one backend for each name Harnesses returned. Run calls closeBackends, when
-	// it is not nil, once: after the server stops or when a later startup step fails.
-	Backends(logger *slog.Logger) (backends map[string]placement.Backend, closeBackends func(), err error)
+	// Backends builds one backend for each name Harnesses returned, and the dialer that reaches
+	// their incarnations; a nil dial is placement.DefaultDial. Run calls closeBackends, when it is
+	// not nil, once: after the server stops or when a later startup step fails.
+	Backends(logger *slog.Logger) (backends map[string]placement.Backend, dial placement.Dialer, closeBackends func(), err error)
 }
 
 // WithHarnessBackends adds the harnesses h configures. Without it the daemon serves only the
@@ -281,8 +282,9 @@ func Run(args []string, opts ...Option) error {
 	}
 
 	var extraBackends map[string]placement.Backend
+	var extraOpts []placement.Option
 	if len(backendNames) > 0 {
-		backends, closeExtra, err := o.backends.Backends(logger)
+		backends, dial, closeExtra, err := o.backends.Backends(logger)
 		if err != nil {
 			return err
 		}
@@ -293,6 +295,9 @@ func Run(args []string, opts ...Option) error {
 			return fmt.Errorf("harness backends: built %q, want %q", got, backendNames)
 		}
 		extraBackends = backends
+		if dial != nil {
+			extraOpts = append(extraOpts, placement.WithDialer(dial))
+		}
 	}
 
 	store, err := sqlitelog.Open(*journal, sqlitelog.WithDefaultProject(*project))
@@ -301,7 +306,7 @@ func Run(args []string, opts ...Option) error {
 	}
 	defer func() { _ = store.Close() }()
 
-	registry, closeBackends, err := harnessRegistry(*model, remotes, modelFn, streamFn, logger, executors, extraBackends)
+	registry, closeBackends, err := harnessRegistry(*model, remotes, modelFn, streamFn, logger, executors, extraBackends, extraOpts...)
 	if err != nil {
 		return err
 	}
@@ -705,8 +710,9 @@ func toolExecutors(remotes remoteHarnesses, f ToolExecutorFunc, sessions *client
 //
 // executors holds the host tool executor for each -harness name that has one; the built-in
 // harnesses and the HarnessBackends ones get none. extra holds the HarnessBackends backends by
-// name, already built, whose names checkBackendHarnesses checked; the caller closes them.
-func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.ModelFunc, streamFn controller.StreamFunc, logger *slog.Logger, executors map[string]ToolExecutor, extra map[string]placement.Backend) (*placement.Registry, func(), error) {
+// name, already built, whose names checkBackendHarnesses checked; the caller closes them. extraOpts
+// apply to the extra backends' Placers only (their dialer).
+func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.ModelFunc, streamFn controller.StreamFunc, logger *slog.Logger, executors map[string]ToolExecutor, extra map[string]placement.Backend, extraOpts ...placement.Option) (*placement.Registry, func(), error) {
 	echo := local.New(echoagent.Harness{}, local.WithLogger(logger))
 	backends := []*local.Backend{echo}
 	var remoteBackends []*remote.Backend
@@ -766,7 +772,7 @@ func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.M
 			closeBackends()
 			return nil, nil, errNameTaken(name)
 		}
-		placers[name] = placement.New(extra[name], modelFn, opts...)
+		placers[name] = placement.New(extra[name], modelFn, append(slices.Clone(opts), extraOpts...)...)
 	}
 	// The -harness and HarnessBackends names are static entries, so ReserveStaticHarnessNames
 	// reserves them along with the built-in ones.

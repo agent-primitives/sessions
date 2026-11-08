@@ -218,7 +218,7 @@ func parseBundle(pemBytes []byte) (tls.Certificate, string, error) {
 //
 // A failure reaches session clients as the RPC's error, so a refusal of the files returns fixed
 // text and the logger gets the paths and OS error.
-func (c *Credentials) ClientHandshake(ctx context.Context, authority string, rawConn net.Conn) (net.Conn, credentials.AuthInfo, error) {
+func (c *Credentials) ClientHandshake(ctx context.Context, _ string, rawConn net.Conn) (net.Conn, credentials.AuthInfo, error) {
 	cfg, err := c.config()
 	if err != nil {
 		public := "router client credentials unusable"
@@ -228,7 +228,8 @@ func (c *Credentials) ClientHandshake(ctx context.Context, authority string, raw
 		c.cfg.Logger.WarnContext(ctx, "router client credentials unusable", "error", err)
 		return nil, nil, errors.New(public)
 	}
-	return credentials.NewTLS(cfg).ClientHandshake(ctx, authority, rawConn)
+	// grpc sets ServerName from its authority argument, so pass the configured name, not the caller's.
+	return credentials.NewTLS(cfg).ClientHandshake(ctx, c.cfg.ServerName, rawConn)
 }
 
 // ServerHandshake refuses: these credentials are for the router client only.

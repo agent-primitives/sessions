@@ -350,6 +350,54 @@ func TestHandshakeChecksTheConfiguredServerNameNotTheDialAddress(t *testing.T) {
 	}
 }
 
+// ClientHandshake called directly, or with the name a resolver put on the address, gets an authority
+// other than the router's; a certificate the same CA issued for that name must still be refused.
+func TestClientHandshakeIgnoresTheAuthority(t *testing.T) {
+	const other = "other.ate-system.svc"
+	p := newPKI(t)
+	otherCert, _ := p.serverCA.issue(t, leafOpts{dns: []string{other}})
+	cases := []struct {
+		name       string
+		serverCert tls.Certificate
+		authority  string
+		// wantErr is the text of the handshake error; empty means the handshake succeeds.
+		wantErr string
+	}{
+		{name: "another service's certificate, authority naming it", serverCert: otherCert, authority: other, wantErr: "not " + routerName},
+		{name: "another service's certificate, authority naming it with a port", serverCert: otherCert, authority: other + ":443", wantErr: "not " + routerName},
+		{name: "router's certificate, unrelated authority", serverCert: p.serverCert, authority: "evil.example:443"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := startRouter(t, tc.serverCert, p.clientCA, clientID)
+			conn, err := net.Dial("tcp", r.addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, info, err := p.load(t, nil).ClientHandshake(ctx, tc.authority, conn)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("ClientHandshake(%q) error = %v, want one containing %q", tc.authority, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ClientHandshake(%q): %v", tc.authority, err)
+			}
+			tlsInfo, ok := info.(credentials.TLSInfo)
+			if !ok {
+				t.Fatalf("ClientHandshake(%q) AuthInfo = %T, want credentials.TLSInfo", tc.authority, info)
+			}
+			if got := tlsInfo.State.ServerName; got != routerName {
+				t.Fatalf("ClientHandshake(%q) sent server name %q, want %q", tc.authority, got, routerName)
+			}
+		})
+	}
+}
+
 func TestHandshakeRefuses(t *testing.T) {
 	cases := []struct {
 		name  string

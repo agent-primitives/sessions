@@ -1,15 +1,19 @@
-# Dependabot keeps the two Go modules and the workflow actions current.
+# Dependabot keeps the Go modules and the workflow actions current.
 #
-# integrations/substrate consumes the root module through `replace ../..`, so a
-# root bump also changes its go.mod/go.sum. One entry with one group over both
-# directories turns such a bump into a single PR that updates both modules; /
-# is listed first so the nested module is updated against the bumped root.
+# The nested modules (integrations/substrate and the examples) are listed with
+# the root. integrations/substrate and examples/agentsuite-substrate consume the
+# root module through `replace ../..`, so a root bump also changes their
+# go.mod/go.sum. One entry with one group over every directory turns such a bump
+# into a single PR that updates all modules; / is listed first so the nested
+# modules are updated against the bumped root.
 version: 2
 updates:
   - package-ecosystem: gomod
     directories:
       - /
       - /integrations/substrate
+      - /examples/agentsuite-substrate
+      - /examples/substrate-kind
     schedule:
       interval: weekly
     groups:

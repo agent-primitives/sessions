@@ -356,7 +356,9 @@ func (p *Placer) Describe(ctx context.Context) (api.Descriptor, error) {
 // Exec rejects an owned unreceipted approval before runtime admission; otherwise it creates an
 // incarnation and drives the harness under a log-minted fence stamped on the returned incarnation.
 // A new approval gate closes the dial, snapshots and commits SUSPEND under that same fence before
-// returning *api.ApprovalParkedError. Handoff failures return the actual operational cause.
+// returning *api.ApprovalParkedError. Handoff failures return the actual operational cause. A
+// failure after Create returned compute that is then left running, not released, wraps that cause
+// in *ComputeLeftRunningError (RT-7).
 func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string, inputs []api.Message, expectedLastSeq int64, opts ...ExecOption) (inc api.Incarnation, err error) {
 	var cfg execConfig
 	for _, o := range opts {
@@ -414,6 +416,15 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	if err = p.refuseDuringCheckpoint(sessionUID); err != nil {
 		return api.Incarnation{}, err
 	}
+	// Refuse a known-stale cursor before waking compute, as Resume does. This is not the writer
+	// check: the controller's EXECUTION_START append still compares the cursor against the head.
+	headBefore, err := log.Head()
+	if err != nil {
+		return api.Incarnation{}, err
+	}
+	if err := checkCursor(headBefore, expectedLastSeq); err != nil {
+		return api.Incarnation{}, err
+	}
 	// The backend needs the started-turn count to tell a new session from one whose compute is gone:
 	// a memory-tier harness can be cold-started only for the former (api.ErrMemoryStateLost). Only
 	// turns this Placer ran count: a turn ExecRequest.harness sent to another harness left no state in
@@ -430,10 +441,16 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		}
 		return recordedCheckpoint(recs, sessionUID), nil
 	}}
+	guard := &computeGuard{p: p, log: log, sessionUID: sessionUID, headBefore: headBefore, override: cfg.override}
+	defer guard.settle(ctx, &err)
 	callCtx, createFinished := observability.BeginDebug(ctx, p.logger, "placement", "create_compute",
 		"session_uid", sessionUID)
 	inc, err = p.allocate(callCtx, log, "create", func() (api.Incarnation, error) {
-		return p.backend.Create(callCtx, spec)
+		in, err := p.backend.Create(callCtx, spec)
+		if err == nil {
+			guard.arm(in)
+		}
+		return in, err
 	})
 	if err != nil {
 		createFinished(err, "error_kind", "runtime_create_failed")
@@ -497,7 +514,8 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	if err := c.Exec(ctx, har, inputs, expectedLastSeq); err != nil {
 		var park *api.ApprovalParkedError
 		if errors.As(err, &park) && api.IsParkUnwind(err, park.Ref) {
-			return inc, p.handoffPark(operationCtx, log, sessionUID, fence, park, closeInvocation, cfg.observer)
+			// The park suspends or keeps the compute under the journal's approval gate.
+			return inc, p.handoffPark(operationCtx, log, sessionUID, fence, park, closeInvocation, cfg.observer, guard)
 		}
 		return inc, turnError(ctx, err)
 	}
@@ -1072,8 +1090,10 @@ func (p *Placer) suspend(ctx context.Context, log eventlog.Store, sessionUID str
 }
 
 // handoffPark releases the invocation connection before compute, keeping the same guard and
-// fence through the captured-head SUSPEND append. Only a fully committed handoff returns park.
-func (p *Placer) handoffPark(ctx context.Context, log eventlog.Store, sessionUID string, fence int64, park *api.ApprovalParkedError, closeInvocation func() error, observer controller.Observer) error {
+// fence through the captured-head SUSPEND append. Only a fully committed handoff returns park, and
+// only then is the compute guard disarmed: a handoff that fails before its SUSPEND commits leaves
+// the compute to the guard.
+func (p *Placer) handoffPark(ctx context.Context, log eventlog.Store, sessionUID string, fence int64, park *api.ApprovalParkedError, closeInvocation func() error, observer controller.Observer, guard *computeGuard) error {
 	if err := p.sessions.markCheckpoint(sessionUID); err != nil {
 		return err
 	}
@@ -1092,6 +1112,7 @@ func (p *Placer) handoffPark(ctx context.Context, log eventlog.Store, sessionUID
 	if _, err := p.suspend(ctx, log, sessionUID, &suspendCursor{head: state.Head, fence: fence, observer: observer}); err != nil {
 		return err
 	}
+	guard.disarm()
 	return park
 }
 
@@ -1102,7 +1123,9 @@ func (p *Placer) handoffPark(ctx context.Context, log eventlog.Store, sessionUID
 // Resume restores the recorded SnapshotRef (or the session handle when no owned SUSPEND exists),
 // mints a new fence, re-drives the turn and records RESUME on ordinary success. A new gate instead
 // closes the dial, snapshots and commits SUSPEND under that recovery fence, returning a typed park
-// without RESUME. Repair/handoff failures return their actual cause.
+// without RESUME. Repair/handoff failures return their actual cause. A failure after Restore
+// returned compute that is then left running, not released, wraps that cause in
+// *ComputeLeftRunningError (RT-7).
 func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID string, opts ...ResumeOption) error {
 	var cfg resumeConfig
 	for _, o := range opts {
@@ -1217,6 +1240,10 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	}
 	ref := lastSuspendRef(recs, sessionUID)
 	sourceFinished(nil, "memory_snapshot", ref.Memory)
+	guard := &computeGuard{p: p, log: log, sessionUID: sessionUID, override: cfg.override}
+	if len(recs) > 0 {
+		guard.headBefore = recs[len(recs)-1].Seq
+	}
 	if err := p.refuseDuringCheckpoint(sessionUID); err != nil {
 		return err
 	}
@@ -1231,7 +1258,13 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	// clone a fork child's FORK marker recorded, before its first turn). It can refuse a replacement
 	// before resume and classify permanent loss after a failure. Each callback reads the journal
 	// when the backend decides, so a turn another host journals between those checks is seen.
-	inc, err = p.allocate(ctx, log, "restore", func() (api.Incarnation, error) {
+	defer guard.settle(ctx, &err)
+	inc, err = p.allocate(ctx, log, "restore", func() (in api.Incarnation, err error) {
+		defer func() {
+			if err == nil {
+				guard.arm(in)
+			}
+		}()
 		if r, ok := p.backend.(api.InstanceRestorer); ok {
 			return r.RestoreInstance(ctx, ref, func() (string, error) {
 				recs, err := log.Read(1)
@@ -1300,7 +1333,8 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	if _, err := c.Resume(ctx, har); err != nil {
 		var park *api.ApprovalParkedError
 		if errors.As(err, &park) && api.IsParkUnwind(err, park.Ref) {
-			return p.handoffPark(operationCtx, log, sessionUID, fence, park, closeInvocation, cfg.observer)
+			// The park suspends or keeps the compute under the journal's approval gate.
+			return p.handoffPark(operationCtx, log, sessionUID, fence, park, closeInvocation, cfg.observer, guard)
 		}
 		return turnError(ctx, err)
 	}

@@ -39,7 +39,10 @@ type suspendControl struct {
 	// beforeResume, when set, runs once as ResumeActor starts: after the backend's check and
 	// before this resume acts.
 	beforeResume func()
-	created      int // actors created so far, for server-assigned UIDs
+	// beforeGet, when set, runs once as GetActor starts, before it reads the actor: the window
+	// between a caller's journal read and the backend's look at the actor.
+	beforeGet func()
+	created   int // actors created so far, for server-assigned UIDs
 }
 
 type suspendActor struct {
@@ -181,6 +184,11 @@ func (c *suspendControl) newUID() string {
 }
 
 func (c *suspendControl) GetActor(_ context.Context, ref substrate.ActorRef) (substrate.ActorInfo, error) {
+	if c.beforeGet != nil {
+		hook := c.beforeGet
+		c.beforeGet = nil
+		hook()
+	}
 	a, exists := c.actors[ref]
 	if !exists {
 		return substrate.ActorInfo{}, substrate.ErrActorNotFound
@@ -602,6 +610,71 @@ func TestSubstrateSuspendThenExecWithoutResume(t *testing.T) {
 			wantCalls := []string{"create:session", "resume:session", "suspend:session", "resume:session"}
 			if !reflect.DeepEqual(ctl.calls, wantCalls) {
 				t.Fatalf("lifecycle calls=%v want %v", ctl.calls, wantCalls)
+			}
+		})
+	}
+}
+
+// Hosts sharing a journal: this host's Exec or Resume reads the journal LIVE on its harness, then
+// another host suspends the session before the substrate backend looks at the actor, so Create or
+// Restore resumes an actor whose journal is COLD. When the dial then fails, nothing owns the
+// running actor and substrate has no api.CleanupRuntime, so the error must report it (RT-7)
+// rather than return the bare dial error.
+func TestPeerSuspendDuringAllocationReportsTheWokenActor(t *testing.T) {
+	for _, op := range []string{"exec", "resume"} {
+		t.Run(op, func(t *testing.T) {
+			ctx := context.Background()
+			ctl := newSuspendControl()
+			peer, _ := newSuspendPlacer(t, ctl, false)
+			log := newSuspendStore(t).Session("session")
+			execSuspendTurn(t, peer, log, "session", "first")
+			desc, err := (echoagent.Harness{}).Describe(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			errDial := errors.New("injected dial failure")
+			backend := substrate.New(ctl, "space", substrate.ObjectRef{Name: "echo"}, desc)
+			host := placement.New(backend, echoagent.Model,
+				placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
+					return nil, nil, errDial
+				}))
+			ctl.calls = nil
+			ctl.beforeGet = func() {
+				if _, err := peer.Suspend(ctx, log, "session"); err != nil {
+					t.Errorf("peer suspend: %v", err)
+				}
+			}
+			switch op {
+			case "exec":
+				head, herr := log.Head()
+				if herr != nil {
+					t.Fatal(herr)
+				}
+				input := []api.Message{*api.TextMessage("user", "second")}
+				_, err = host.Exec(ctx, log, "session", input, head)
+			case "resume":
+				err = host.Resume(ctx, log, "session")
+			}
+			if want := []string{"suspend:session", "resume:session"}; !reflect.DeepEqual(ctl.calls, want) {
+				t.Fatalf("lifecycle calls=%v want %v (the peer suspends, then the allocation wakes it)",
+					ctl.calls, want)
+			}
+			var left *placement.ComputeLeftRunningError
+			typed := errors.As(err, &left) && errors.Is(err, placement.ErrComputeLeftRunning)
+			if !typed || !errors.Is(err, errDial) {
+				t.Fatalf("%s = %v, want ComputeLeftRunningError wrapping the dial failure", op, err)
+			}
+			if left.Instance != "session" || !strings.Contains(left.Cleanup.Error(), "release skipped") {
+				t.Fatalf("report = %+v (cleanup %v), want the actor named and no release", left, left.Cleanup)
+			}
+			a := ctl.actors[substrate.ActorRef{Atespace: "space", Name: "session"}]
+			if a == nil || a.status != substrate.StatusRunning || !a.worker {
+				t.Fatalf("actor = %+v, want it left running", a)
+			}
+			recs := suspendRecords(t, log)
+			last := recs[len(recs)-1].Event
+			if last.Kind != api.EventLifecycle || last.Lifecycle.Kind != api.LifecycleSuspend {
+				t.Fatalf("last record = %+v, want the peer's SUSPEND", last)
 			}
 		})
 	}

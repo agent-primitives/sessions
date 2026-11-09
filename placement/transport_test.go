@@ -1060,9 +1060,10 @@ func TestForkAbortsBeforeSnapshotWhenAnEndedParentTurnDoesNotMintInTime(t *testi
 	p := placement.New(backend, echoagent.Model)
 
 	turnDone := make(chan struct{})
+	var execErr error
 	go func() {
 		defer close(turnDone)
-		_, _ = p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+		_, execErr = p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
 	}()
 	<-log.turnAtFence
 	ctx, cancel := context.WithTimeout(context.Background(), lateFenceDelay/6)
@@ -1085,5 +1086,71 @@ func TestForkAbortsBeforeSnapshotWhenAnEndedParentTurnDoesNotMintInTime(t *testi
 	}
 	if kinds := journalKinds(t, log); len(kinds) != 0 {
 		t.Fatalf("journal %v, want nothing recorded for the aborted fork", kinds)
+	}
+	// The turn's Create returned compute that nothing recorded and the aborted fork did not take.
+	if !errors.Is(execErr, placement.ErrComputeLeftRunning) || !errors.Is(execErr, placement.ErrCheckpointing) {
+		t.Fatalf("superseded turn returned %v, want ErrComputeLeftRunning wrapping ErrCheckpointing", execErr)
+	}
+}
+
+// A stateful fork that supersedes a turn and then fails before it suspends the parent leaves the
+// compute the turn's Create returned running, with nothing in the journal that owns it: on
+// runtime/substrate, Snapshot refuses an actor that is still transitioning after the turn's Create
+// woke it. The turn's error must report that compute (RT-7) instead of assuming the fork took it,
+// and nothing calls Stop.
+func TestTurnSupersededByAForkWhoseSnapshotFailsReportsItsCompute(t *testing.T) {
+	hs := startHarnessServer(t, echoagent.Harness{})
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := &lateFenceStore{
+		Store:       store.Session("s1"),
+		turnAtFence: make(chan struct{}),
+		release:     make(chan struct{}),
+		turnMinted:  make(chan struct{}),
+	}
+	errSnapshot := errors.New("injected: actor is transitioning")
+	stops := 0
+	backend := &routedBackend{address: hs.addr, desc: memDescriptor, snapshotErr: errSnapshot, onStop: func() { stops++ }}
+	p := placement.New(backend, echoagent.Model)
+
+	turnDone := make(chan struct{})
+	var execErr error
+	go func() {
+		defer close(turnDone)
+		_, execErr = p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+	}()
+	select {
+	case <-log.turnAtFence: // compute allocated and the stream registered, nothing journaled
+	case <-turnDone:
+		t.Fatalf("turn returned before minting its fence: %v", execErr)
+	}
+	child, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer child.Close()
+	err = p.Fork(context.Background(), log, "s1", []placement.ForkChild{{UID: "s1-child", Log: child.Session("s1-child")}}, 0)
+	if !errors.Is(err, errSnapshot) {
+		t.Fatalf("Fork returned %v, want the Snapshot failure", err)
+	}
+	<-turnDone
+	var left *placement.ComputeLeftRunningError
+	if !errors.As(execErr, &left) {
+		t.Fatalf("superseded turn returned %v, want a ComputeLeftRunningError", execErr)
+	}
+	if !errors.Is(execErr, placement.ErrCheckpointing) || !errors.Is(execErr, eventlog.ErrFenced) {
+		t.Fatalf("superseded turn returned %v, want its cause to stay ErrCheckpointing and eventlog.ErrFenced", execErr)
+	}
+	if left.Instance != "s1" {
+		t.Fatalf("Instance = %q, want the turn's incarnation", left.Instance)
+	}
+	if kinds := journalKinds(t, log); len(kinds) != 0 {
+		t.Fatalf("journal %v, want nothing recorded for the failed fork", kinds)
+	}
+	if stops != 0 {
+		t.Fatalf("Stop called %d times", stops)
 	}
 }

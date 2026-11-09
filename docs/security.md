@@ -499,8 +499,10 @@ to the policy. Existing unbound rows reach custom policies with a zero `Owner`; 
 denies them, but a custom policy can allow them. Unknown UIDs and policy refusals return the same
 generic `PERMISSION_DENIED` once the deletion probe permits lookup. Only
 `errors.Is(err, api.ErrPermissionDenied)` is a policy denial; unexpected policy/store failures and
-enforced RPC `INTERNAL` diagnostics are sanitized. Caller cancellation and deadlines retain their
-codes. Policies own their failure logs and metrics; the service never logs raw policy causes.
+enforced RPC `INTERNAL` diagnostics are sanitized; an `INTERNAL` Exec or Resume failure that left
+compute running keeps only its fixed RT-7 report after `internal error`. Caller cancellation and
+deadlines retain their codes. Policies own their failure logs and metrics; the service never logs
+raw policy causes.
 In enforced mode only, `INTERNAL` diagnostics include `request_id`, `method`, `error_kind` and a
 stable `error_category`. Known trusted host/store errors log the full cause with category `host`.
 Model/provider/harness and other unknown-origin errors never log message text: category is

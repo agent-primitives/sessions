@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -1271,7 +1272,7 @@ func resumeError(uid string, err error) error {
 	case errors.Is(err, api.ErrCheckpointPending):
 		return status.Errorf(codes.Unavailable, "resume: session %q: %v", uid, err)
 	default:
-		return status.Errorf(codes.Internal, "resume: %v", err)
+		return internalStatus(err, fmt.Sprintf("resume: %v", err))
 	}
 }
 
@@ -1319,8 +1320,41 @@ func execError(uid string, err error) error {
 	case errors.Is(err, api.ErrCheckpointPending):
 		return status.Errorf(codes.Unavailable, "exec: session %q: %v", uid, err)
 	default:
-		return status.Error(codes.Internal, err.Error())
+		return internalStatus(err, err.Error())
 	}
+}
+
+// internalStatus is the INTERNAL status with message msg for err, an Exec or Resume failure no
+// other case classifies. When err reports compute left running (*placement.ComputeLeftRunningError,
+// RT-7), the status carries that report, so internalError can keep it in the fixed message it
+// returns under WithAuthorization.
+func internalStatus(err error, msg string) error {
+	st := status.New(codes.Internal, msg)
+	var left *placement.ComputeLeftRunningError
+	if errors.As(err, &left) {
+		return &leftRunningStatus{status: st, left: left}
+	}
+	return st.Err()
+}
+
+// leftRunningStatus is an INTERNAL status whose failure left compute running. It has no Unwrap, so
+// errors.Is and errors.As callers other than internalError see what they saw on the plain status.
+type leftRunningStatus struct {
+	status *status.Status
+	left   *placement.ComputeLeftRunningError
+}
+
+func (e *leftRunningStatus) Error() string              { return e.status.Err().Error() }
+func (e *leftRunningStatus) GRPCStatus() *status.Status { return e.status }
+
+// report is the fixed text naming the compute: the incarnation and compute instance the runtime
+// returned, quoted, and no cause, cleanup or request text.
+func (e *leftRunningStatus) report() string {
+	instance := strconv.Quote(e.left.Instance)
+	if e.left.ComputeInstance != "" {
+		instance += " (uid " + strconv.Quote(e.left.ComputeInstance) + ")"
+	}
+	return "compute instance " + instance + " may still be running"
 }
 
 func serviceErrorKind(err error) string {

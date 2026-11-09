@@ -25,9 +25,10 @@ record. Stable fields are:
 | `error_kind` | Stable error category; logs do not depend on parsing error text |
 | `trace_id`, `span_id` | Present when the request has a valid span context, including one the caller propagated while tracing is off |
 
-Operations add bounded fields such as `runtime`, `incarnation_id`, `actor`, `atespace`,
-`expected_last_seq`, and record/effect counts. Placement records its capability decision and runtime
-backends record external lifecycle calls such as actor creation, resume, suspend, and deletion.
+Operations add bounded fields such as `runtime`, `incarnation_id`, `compute_instance`, `actor`,
+`atespace`, `expected_last_seq`, and record/effect counts. Placement records its capability decision
+and runtime backends record external lifecycle calls such as actor creation, resume, suspend, and
+deletion.
 
 ## Enabling logs
 

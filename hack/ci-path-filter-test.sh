@@ -69,6 +69,8 @@ expect substrate skip "docs only" edit docs/concepts.md docs/diagram.svg
 expect substrate skip "markdown outside docs" edit README.md controller/README.md
 expect substrate skip "site only" edit site/src/index.mdx site/package.json
 expect substrate skip "agentui and demos" edit cmd/agentui/main.go demos/demo.tape
+expect substrate skip "claudecode integration" edit integrations/claudecode/claudecode.go integrations/claudecode/go.mod
+expect substrate run "substrate integration" edit integrations/substrate/main.go
 expect substrate skip "license, codeowners, dependabot, copilot instructions" \
 	edit LICENSE .github/CODEOWNERS .github/dependabot.yml .github/copilot-instructions.md
 expect substrate skip "no changes" true

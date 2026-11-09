@@ -20,7 +20,7 @@ var errCheckFailed = errors.New("changelog check failed")
 // .github/copilot-instructions.md rule 6 asks a changelog entry for: spec.md, everything under
 // api/ (protos, generated stubs, the Go Runtime SPI), any .proto file, and the non-test Go source
 // of an importable package. Importable means outside internal/, testdata/ and cmd/ directories
-// (cmd/ holds main packages) and outside hack/ and examples/. integrations/substrate is a
+// (cmd/ holds main packages) and outside hack/ and examples/. Each integrations/* directory is a
 // published module, so its packages count too.
 func publicContract(p string) bool {
 	switch {

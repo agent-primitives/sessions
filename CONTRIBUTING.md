@@ -10,11 +10,13 @@ go build ./...
 go test -race -shuffle=on ./...
 ```
 
-`integrations/substrate` is a separate Go module and is not reached by `./...` from the root. If you
-touch it, test it on its own:
+Each module under `integrations/` (`integrations/substrate`, `integrations/claudecode`) is a
+separate Go module and is not reached by `./...` from the root. If you touch one, test it on its
+own:
 
 ```bash
 cd integrations/substrate && go test -race -shuffle=on ./...
+cd integrations/claudecode && go test -race -shuffle=on ./...
 ```
 
 ## What CI checks
@@ -26,7 +28,7 @@ Run these before pushing; they are the same gates the `ci` workflow enforces.
 | Formatting | `gofmt -l .` must print nothing |
 | Build and vet | `go build ./...`, `go vet ./...` |
 | Tests | `go test -race -shuffle=on ./...` (a failure prints the seed; rerun with `-shuffle=<seed>`) |
-| Vendor neutrality | `go list -deps ./... \| grep -c agent-substrate` must be `0` |
+| Vendor neutrality | `go list -deps ./... \| grep -c agent-substrate` and `go list -deps ./... \| grep -c '^github.com/agent-primitives/sessions/integrations/'` must be `0` |
 | Provenance self-check | `python3 hack/verify_chain.py --golden` |
 | Cross-language chain audit | `./hack/verify_chain.sh` (also audits every journal in `sqlitelog/testdata`) |
 | Daemon smoke test (local runtime, no substrate) | `go test ./cmd/agentsessionsd -run TestSessionLifecycleRealBinaries` (part of Tests) |
@@ -109,8 +111,9 @@ images to `ghcr.io/agent-primitives/sessions`, and signs a build-provenance atte
 notes are generated from the commits since the previous release tag, which is what conventional
 commit messages buy.
 
-Only `v<digit>...` tags without a `/` are root-module releases. The nested `integrations/substrate`
-module is tagged `integrations/substrate/vX.Y.Z`, which does not trigger the `release` workflow.
+Only `v<digit>...` tags without a `/` are root-module releases. A nested module such as
+`integrations/substrate` is tagged `integrations/substrate/vX.Y.Z`, which does not trigger the
+`release` workflow.
 goreleaser on its own would still take the nearest tag of either module as the version and as the
 start of the changelog, so both workflows set `GORELEASER_CURRENT_TAG` and `GORELEASER_PREVIOUS_TAG`
 from `hack/release-tags.sh`. Run goreleaser locally the same way, so that a failure of the script

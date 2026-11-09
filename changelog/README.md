@@ -85,7 +85,7 @@ editing a fragment. Public contract paths are:
   file;
 - the non-test Go source (`*.go` but not `*_test.go`) of an importable package: any directory
   outside `internal/`, `testdata/`, `cmd/`, `hack/` and `examples/`, including the
-  `integrations/substrate` module.
+  `integrations/*` modules.
 
 A change outside those paths still needs a fragment when users need to know about it, for example a
 changed `agentsessionsd` or `agentctl` flag, a new default, or a relicensing; reviewers check that.

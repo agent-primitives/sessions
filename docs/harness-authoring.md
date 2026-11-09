@@ -919,6 +919,12 @@ such as a transcript it reloads on the next turn. Such a harness is
 gives up, for the calls it makes itself, what depends on the host making the call, so choose it
 deliberately. The class is not declared in `Describe`: the host cannot see a model call that does
 not reach it, so say which class your harness is in its documentation.
+[`integrations/claudecode`](../integrations/claudecode) is an unmediated harness that runs Claude
+Code, in its own module so the root module names no model provider. Fork does not work with it yet.
+On a runtime that snapshots memory, forking a session that has run a turn creates a child, but the
+child holds no Claude Code session of its own, so every turn on it fails with
+`claudecode: session has earlier turns but this harness holds no state for it`. A follow-up issue
+tracks adopting the parent's Claude Code session on the child.
 
 What is different:
 
@@ -943,12 +949,13 @@ What is different:
   `sink.Output`.
 - **For the calls you make yourself, you give up replay, model-call audit and host-bounded
   spend.** Reconstructing your turns would call the provider again, so reconstruction replay is not
-  supported, though the journal stays readable and verifiable. The journal records your reports,
-  not what the provider received or returned. The host's model allowlist does not apply to those
-  calls, and the host does not check what they call against `Start.Model`; the egress and the
-  provider account are what bound their spend. A call you make through `sink.Model` is still
-  checked and journaled as a `MODEL_CALL`, and Rules 2, 5 and 6 apply to it as they do for a
-  mediated harness.
+  supported, though the journal stays readable and verifiable. The host does not refuse it:
+  `controller.Replay` does not know your class and re-runs your harness if pointed at it, so
+  document that it must not be. The journal records your reports, not what the provider received or
+  returned. The host's model allowlist does not apply to those calls, and the host does not check
+  what they call against `Start.Model`; the egress and the provider account are what bound their
+  spend. A call you make through `sink.Model` is still checked and journaled as a `MODEL_CALL`, and
+  Rules 2, 5 and 6 apply to it as they do for a mediated harness.
 - **Never continue an interrupted turn.** `Resume` recovers an unfinished or failed turn by calling
   `Run` again with the same `Start`, including `Start.ExecutionID`. The host serves the turn's
   recorded outputs against your new ones and then goes live, so a re-run either diverges at the
@@ -958,10 +965,12 @@ What is different:
   execution. This works only while that record survives a memory restore, or while the runtime
   refuses to restore memory older than the record: a record held only in memory, restored from a
   snapshot taken before the execution started, no longer names it, and the re-run looks new.
-  Whether a session can reach that state, and how a harness would recognize it, is an open
-  question in [spec §8.8](../spec.md#88-harness-classes); no harness in this repository implements
-  this check. The exception is a turn you left parked at an approval gate: recovery at the decided
-  gate continues it, and your first sink call must be the gated call (spec `APR-16`).
+  [`integrations/claudecode`](../integrations/claudecode) implements this check with an in-memory
+  record of the execution IDs it started, so that limit applies to it. Whether a session can reach
+  that state, and how a harness would recognize it, is an open question in
+  [spec §8.8](../spec.md#88-harness-classes). The exception is a turn you left parked at an approval
+  gate: recovery at the decided gate continues it, and your first sink call must be the gated call
+  (spec `APR-16`).
 - **Mid-turn memory loss fails the turn.** If your compute dies during a turn, the `Exec` fails and
   the host does not continue it. Once that compute is gone, or replaced on a backend that records
   `ComputeInstance` (spec `RT-4h`, for example `runtime/substrate`), the session refuses every

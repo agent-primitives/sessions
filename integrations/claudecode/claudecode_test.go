@@ -767,6 +767,61 @@ func TestTruncatedStreamClosesDanglingTool(t *testing.T) {
 	}
 }
 
+// TestMalformedToolResultLeavesToolPending: a tool_result whose content is malformed fails the turn,
+// and the tool it answers is still closed out as having no result, as if the line never came.
+func TestMalformedToolResultLeavesToolPending(t *testing.T) {
+	t.Parallel()
+	const (
+		useA = `{"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"toolu_a","name":"Bash","input":{"command":"ls"}}]}}`
+		useB = `{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"toolu_b","name":"Read","input":{"file_path":"a.txt"}}]}}`
+	)
+	bashIn, readIn := `{"command":"ls"}`, `{"file_path":"a.txt"}`
+	pending := func(id, tool, input string) api.ToolResult {
+		return api.ToolResult{ID: id, Output: map[string]any{"tool": tool, "input": input, "input_bytes": float64(len(input)), "truncated": false}, IsError: true, Error: "no result observed"}
+	}
+	for _, test := range []struct {
+		name  string
+		lines []string
+		want  []api.ToolResult
+	}{
+		{
+			name:  "null content",
+			lines: []string{useA, `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":null}]}}`},
+			want:  []api.ToolResult{pending("toolu_a", "Bash", bashIn)},
+		},
+		{
+			name:  "object content",
+			lines: []string{useA, `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":{}}]}}`},
+			want:  []api.ToolResult{pending("toolu_a", "Bash", bashIn)},
+		},
+		{
+			name: "valid result before a malformed one in the same message",
+			lines: []string{useA, useB,
+				`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"x"},{"type":"tool_result","tool_use_id":"toolu_b","content":null}]}}`},
+			want: []api.ToolResult{
+				{ID: "toolu_a", Output: map[string]any{"tool": "Bash", "input": bashIn, "input_bytes": float64(len(bashIn)), "truncated": false}, Content: []api.Part{{Text: &api.TextPart{Text: "x"}}}},
+				pending("toolu_b", "Read", readIn),
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			h := newTestHarness(t, Config{})
+			setScenario(t, h, scenario{Lines: append(append([]string{initLine}, test.lines...), successLine)})
+			sink := &recordingSink{t: t}
+			if err := h.Run(context.Background(), startFor("uid", "e1", nil, "go"), sink); !errors.Is(err, errMalformed) {
+				t.Fatalf("Run = %v, want %v", err, errMalformed)
+			}
+			if len(sink.outputs) != 0 || len(sink.usages) != 0 {
+				t.Fatalf("failed turn recorded outputs %q, usages %+v", sink.outputs, sink.usages)
+			}
+			if !reflect.DeepEqual(sink.reports, test.want) {
+				t.Fatalf("reports =\n%+v\nwant\n%+v", sink.reports, test.want)
+			}
+		})
+	}
+}
+
 func TestOutputChunked(t *testing.T) {
 	t.Parallel()
 	h := newTestHarness(t, Config{})

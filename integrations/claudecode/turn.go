@@ -566,15 +566,17 @@ func (t *turn) user(ctx context.Context, ev *streamLine) error {
 		if b.ToolUseID == "" {
 			return errMalformed
 		}
+		// Validate before taking the tool off the pending list, so a rejected result leaves it for
+		// finish to close out.
+		text, n, err := toolContent(b.Content)
+		if err != nil {
+			return err
+		}
 		use, ok := t.tools[b.ToolUseID]
 		if ok {
 			delete(t.tools, b.ToolUseID)
 		} else {
 			use = toolUse{parent: ev.ParentToolUseID} // orphan: reported with no tool name
-		}
-		text, n, err := toolContent(b.Content)
-		if err != nil {
-			return err
 		}
 		tr := t.receipt(b.ToolUseID, use, text, n)
 		tr.IsError = b.IsError

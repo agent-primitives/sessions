@@ -47,6 +47,20 @@ func (p *Placer) allocate(ctx context.Context, log eventlog.Store, operation str
 	return in, nil
 }
 
+// CallerContextError records the caller's outcome at failure, independently of any
+// context error in Cause. Both causes remain available to direct Go callers.
+type CallerContextError struct {
+	CallerErr error
+	Cause     error
+}
+
+func (e *CallerContextError) Error() string {
+	return fmt.Sprintf("%v: %v: %v", ErrAdmissionInterrupted, e.CallerErr, e.Cause)
+}
+func (e *CallerContextError) Unwrap() []error {
+	return []error{ErrAdmissionInterrupted, e.CallerErr, e.Cause}
+}
+
 // Only the caller's context during start is an admission interruption. Confirmation
 // uses an independent deadline, and checkpoint supersession remains ABORTED.
 func allocationStartError(ctx context.Context, err error) error {
@@ -54,7 +68,7 @@ func allocationStartError(ctx context.Context, err error) error {
 		return fmt.Errorf("%w (compute start ended with: %v)", errSuperseded, err)
 	}
 	if err != nil && ctx.Err() != nil {
-		return fmt.Errorf("%w: %w: %w", ErrAdmissionInterrupted, ctx.Err(), err)
+		return &CallerContextError{CallerErr: ctx.Err(), Cause: err}
 	}
 	return err
 }

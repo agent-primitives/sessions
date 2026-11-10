@@ -1448,7 +1448,7 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 	}
 	ref, release, err := p.forkSource(ctx, parent, parentUID, atSeq)
 	if err != nil {
-		return err
+		return allocationStartError(ctx, err)
 	}
 	defer release()
 	// A failed fan-out must not strand compute. The child UIDs are minted per request and returned
@@ -1456,6 +1456,8 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 	// unstoppable workers nobody can name.
 	created := make([]string, 0, len(children))
 	abort := func(err error) error {
+		// Sample the caller before detached rollback can outlive it.
+		err = allocationStartError(ctx, err)
 		// Release the parent first. Nothing in the teardown reads it, and holding the mark through
 		// up to MaxForkChildren × rollbackTimeout of Stops would refuse its turns for that long.
 		release()

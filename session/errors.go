@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/eventlog"
@@ -105,7 +104,7 @@ func runtimeFailureCode(err error) codes.Code {
 // A peer's independent deadline with a live caller is not a caller deadline.
 func runtimeContextError(ctx context.Context, err error) error {
 	if err != nil && ctx.Err() != nil {
-		return fmt.Errorf("%w: %w: %w", placement.ErrAdmissionInterrupted, ctx.Err(), err)
+		return &placement.CallerContextError{CallerErr: ctx.Err(), Cause: err}
 	}
 	return err
 }

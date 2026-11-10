@@ -95,6 +95,9 @@ func grpcErrorKind(err error) string {
 }
 
 func grpcCode(err error) codes.Code {
+	if st, ok := status.FromError(err); ok && err != nil {
+		return st.Code()
+	}
 	switch {
 	case err == nil:
 		return codes.OK

@@ -23,6 +23,7 @@ type failedStart struct {
 	cause  error
 	cancel context.CancelFunc
 	wait   bool
+	peer   bool
 }
 
 func (b *failedStart) Create(ctx context.Context, _ *api.SessionSpec) (api.Incarnation, error) {
@@ -31,6 +32,9 @@ func (b *failedStart) Create(ctx context.Context, _ *api.SessionSpec) (api.Incar
 	}
 	if b.wait {
 		<-ctx.Done()
+	}
+	if b.peer {
+		return api.Incarnation{}, fmt.Errorf("start peer: %w", b.cause)
 	}
 	if ctx.Err() != nil {
 		return api.Incarnation{}, fmt.Errorf("start: %w", ctx.Err())
@@ -51,6 +55,7 @@ func TestExecComputeStartReasonsAndCallerContexts(t *testing.T) {
 		{"capacity", api.ErrComputeResourceExhausted, codes.ResourceExhausted, "COMPUTE_RESOURCE_EXHAUSTED"},
 		{"configuration", api.ErrComputeConfigInvalid, codes.FailedPrecondition, "COMPUTE_CONFIG_INVALID"},
 		{"canceled", context.Canceled, codes.Canceled, ""},
+		{"canceled with peer deadline", context.DeadlineExceeded, codes.Canceled, ""},
 		{"deadline", context.DeadlineExceeded, codes.DeadlineExceeded, ""},
 		{"peer deadline", context.DeadlineExceeded, codes.Internal, ""},
 	} {
@@ -60,7 +65,8 @@ func TestExecComputeStartReasonsAndCallerContexts(t *testing.T) {
 			t.Cleanup(func() { _ = inner.Close() })
 			backend := &failedStart{Backend: inner, cause: tc.cause}
 			ctx := t.Context()
-			if tc.name == "canceled" {
+			if tc.name == "canceled" || tc.name == "canceled with peer deadline" {
+				backend.peer = tc.name == "canceled with peer deadline"
 				ctx, backend.cancel = context.WithCancel(ctx)
 				defer backend.cancel()
 			}
@@ -75,7 +81,7 @@ func TestExecComputeStartReasonsAndCallerContexts(t *testing.T) {
 			}
 			svc := session.NewService(store, echoRegistry(t, backend))
 			err := svc.Exec(&v1.ExecRequest{Session: "start"}, &rpcStream{ctx: ctx})
-			if status.Code(err) != tc.code || !errors.Is(err, tc.cause) {
+			if status.Code(err) != tc.code || !errors.Is(err, tc.cause) || tc.code == codes.Canceled && !errors.Is(err, context.Canceled) {
 				t.Fatalf("start=%v, want %s retaining %v", err, tc.code, tc.cause)
 			}
 			details := status.Convert(err).Details()

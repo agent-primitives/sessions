@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/eventlog"
@@ -87,10 +88,18 @@ func TestRuntimeContextClassification(t *testing.T) {
 	live := context.Background()
 	ended, cancel := context.WithCancel(live)
 	cancel()
+	expired, cancelExpired := context.WithDeadline(live, time.Time{})
+	defer cancelExpired()
 	for _, mapper := range []func(string, error) error{suspendError, forkError} {
 		peer := fmt.Errorf("peer: %w", context.DeadlineExceeded)
 		assertErrorInfo(t, mapper("uid", runtimeContextError(live, peer)), codes.Internal, "")
 		assertErrorInfo(t, mapper("uid", runtimeContextError(ended, context.Canceled)), codes.Canceled, "")
+		got := mapper("uid", runtimeContextError(ended, peer))
+		assertErrorInfo(t, got, codes.Canceled, "")
+		if !errors.Is(got, peer) || !errors.Is(got, context.Canceled) {
+			t.Fatalf("lost caller or backend cause: %v", got)
+		}
+		assertErrorInfo(t, mapper("uid", runtimeContextError(expired, context.Canceled)), codes.DeadlineExceeded, "")
 	}
 }
 

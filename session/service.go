@@ -1030,7 +1030,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	// The fan-out is all-or-nothing: Placer.Fork rolls back everything it provisioned on failure,
 	// so children_created stays 0 rather than reporting compute that no longer exists.
 	if err := placer.Fork(ctx, parent, req.GetSession(), children, atSeq); err != nil {
-		return nil, forkError(req.GetSession(), runtimeContextError(ctx, err))
+		return nil, forkError(req.GetSession(), err)
 	}
 	childrenCreated = len(children)
 	// Finalize metadata after the fan-out as before. Modern children already inherited admission
@@ -1282,6 +1282,10 @@ func resumeError(uid string, err error) error {
 // an admission or connected-harness Describe check. No new turn records were journaled, and the same
 // expired call cannot succeed. A deadline that interrupts Run keeps its existing code.
 func admissionInterruptedCode(err error) codes.Code {
+	var caller *placement.CallerContextError
+	if errors.As(err, &caller) {
+		err = caller.CallerErr
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return codes.DeadlineExceeded
 	}

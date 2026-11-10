@@ -10,12 +10,14 @@ category: Added
   (`EXE-39`); there is no `MODEL_CALL`, and spend, model-call audit and replay are given up
   (`EXE-41`). Claude Code's reported cost (`total_cost_usd`) is not recorded, because `USAGE` has
   no cost field. A turn that ends without a `result` records input tokens only, and a cancelled
-  turn records no `USAGE` and no `TOOL_RESULT` for a tool still running. The `claude` process gets
-  only an allowlist of the harness's environment (`PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, locale,
-  the `ANTHROPIC_*` key and base URL variables, `CLAUDE_CONFIG_DIR`, and `Config.EnvAllowlist`; a
-  deployment that needs proxy or CA variables must add them), and its key must be a placeholder
-  (`EXE-40`). Every turn passes `--setting-sources user --strict-mcp-config`, so settings, hooks and
-  `.mcp.json` in the work dir cannot widen the permission mode, and `bypassPermissions` also needs
+  turn records no `USAGE` and no `TOOL_RESULT` for a tool still running. A tool whose `tool_result`
+  is malformed fails the turn and is reported as `no result observed`, like a tool that never got a
+  result. The `claude` process gets only an allowlist of the harness's environment (`PATH`, `HOME`,
+  `USER`, `SHELL`, `TMPDIR`, locale, the `ANTHROPIC_*` key and base URL variables,
+  `CLAUDE_CONFIG_DIR`, and `Config.EnvAllowlist`; a deployment that needs proxy or CA variables must
+  add them), and its key must be a placeholder (`EXE-40`). Every turn passes
+  `--setting-sources user --strict-mcp-config`, so settings, hooks and `.mcp.json` in the work dir
+  cannot widen the permission mode, and `bypassPermissions` also needs
   `Config.AllowBypassPermissions`. A turn whose process fails before `system/init`, such as a
   `--resume` whose transcript is gone, logs its exit status and first stderr line. A turn's process
   group is killed before the turn returns, a successful turn included, so a background process a

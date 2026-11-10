@@ -167,10 +167,12 @@ func (a *authorization) internalError(ctx context.Context, logger *slog.Logger, 
 	if a != nil && status.Code(*err) == codes.Internal {
 		var sanitized *authorizationFailure
 		var host *hostFailure
+		var operation *leftRunningStatus
+		external := errors.As(*err, &operation)
 		switch {
-		case errors.As(*err, &sanitized):
+		case !external && errors.As(*err, &sanitized):
 			// Policy failures or an owner lookup already logged at its source.
-		case errors.As(*err, &host):
+		case !external && errors.As(*err, &host):
 			logHostError(ctx, logger, method, *err)
 		default:
 			category := "external"
@@ -185,7 +187,7 @@ func (a *authorization) internalError(ctx context.Context, logger *slog.Logger, 
 		}
 		msg := "internal error"
 		var left *leftRunningStatus
-		if errors.As(*err, &left) {
+		if errors.As(*err, &left) && left.left != nil {
 			msg += "; " + left.report()
 		}
 		*err = status.Error(codes.Internal, msg)

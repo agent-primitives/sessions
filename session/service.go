@@ -824,7 +824,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 				if err != nil {
 					refused = hostInternalError("head: %v", err)
 				} else if head != req.GetExpectedLastSeq() {
-					refused = status.Error(codes.Aborted, eventlog.ErrConflict.Error())
+					refused = withStatusCause(codes.Aborted, eventlog.ErrConflict)
 				}
 			}
 			if refused == nil {
@@ -1030,7 +1030,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	// The fan-out is all-or-nothing: Placer.Fork rolls back everything it provisioned on failure,
 	// so children_created stays 0 rather than reporting compute that no longer exists.
 	if err := placer.Fork(ctx, parent, req.GetSession(), children, atSeq); err != nil {
-		return nil, forkError(req.GetSession(), err)
+		return nil, forkError(req.GetSession(), runtimeContextError(ctx, err))
 	}
 	childrenCreated = len(children)
 	// Finalize metadata after the fan-out as before. Modern children already inherited admission
@@ -1072,25 +1072,25 @@ func forkError(parent string, err error) error {
 		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, eventlog.ErrTampered):
 		// The parent's copied prefix failed hash-chain verification (CHAIN-12).
-		return status.Error(codes.DataLoss, err.Error())
+		return statusError(codes.DataLoss, err, err.Error())
 	case errors.Is(err, placement.ErrSessionBusy):
-		return status.Error(codes.Aborted, err.Error())
+		return statusError(codes.Aborted, err, err.Error())
 	case errors.Is(err, api.ErrInvalidCheckpoint):
 		return checkpointRefusal("fork", parent, err)
 	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch),
 		errors.Is(err, api.ErrMemoryStateLost):
-		return status.Error(codes.FailedPrecondition, err.Error())
+		return statusError(codes.FailedPrecondition, err, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
-		return status.Error(codes.Unavailable, err.Error())
+		return statusError(codes.Unavailable, err, err.Error())
 	case errors.Is(err, placement.ErrAdmissionInterrupted):
-		return status.Error(admissionInterruptedCode(err), err.Error())
+		return statusError(admissionInterruptedCode(err), err, err.Error())
 	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing),
 		errors.Is(err, api.ErrSnapshotSuperseded), errors.Is(err, api.ErrComputeBusy):
-		return status.Error(codes.Aborted, err.Error())
+		return statusError(codes.Aborted, err, err.Error())
 	case errors.Is(err, api.ErrCheckpointPending):
-		return status.Errorf(codes.Unavailable, "fork: session %q: %v", parent, err)
+		return statusError(codes.Unavailable, err, fmt.Sprintf("fork: session %q: %v", parent, err))
 	default:
-		return status.Errorf(codes.Internal, "fork: %v", err)
+		return internalStatus(err, fmt.Sprintf("fork: %v", err))
 	}
 }
 
@@ -1134,7 +1134,7 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 		if refused != nil && err == refused {
 			return nil, refused
 		}
-		return nil, suspendError(uid, err)
+		return nil, suspendError(uid, runtimeContextError(ctx, err))
 	}
 	// The SUSPEND append already moved the stored compute_state projection, so re-reading is
 	// what keeps the response and a subsequent ListSessions from disagreeing.
@@ -1214,20 +1214,22 @@ func suspendError(uid string, err error) error {
 		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, placement.ErrCheckpointing), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced),
 		errors.Is(err, api.ErrComputeBusy):
-		return status.Error(codes.Aborted, err.Error())
+		return statusError(codes.Aborted, err, err.Error())
 	case errors.Is(err, api.ErrInvalidCheckpoint):
 		return checkpointRefusal("suspend", uid, err)
 	// api.ErrMemoryStateLost: the compute the session's turns ran on is gone or replaced; retrying
 	// cannot help.
 	case errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, controller.ErrReplayDiverged),
 		errors.Is(err, api.ErrMemoryStateLost):
-		return status.Errorf(codes.FailedPrecondition, "suspend: %v", err)
+		return statusError(codes.FailedPrecondition, err, fmt.Sprintf("suspend: %v", err))
 	case errors.Is(err, placement.ErrUnknownHarness):
 		return harnessError(err)
+	case errors.Is(err, placement.ErrAdmissionInterrupted):
+		return statusError(admissionInterruptedCode(err), err, err.Error())
 	case errors.Is(err, api.ErrCheckpointPending):
-		return status.Errorf(codes.Unavailable, "suspend: session %q: %v", uid, err)
+		return statusError(codes.Unavailable, err, fmt.Sprintf("suspend: session %q: %v", uid, err))
 	default:
-		return status.Errorf(codes.Internal, "suspend: %v", err)
+		return internalStatus(err, fmt.Sprintf("suspend: %v", err))
 	}
 }
 
@@ -1241,36 +1243,36 @@ func resumeError(uid string, err error) error {
 		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, eventlog.ErrTampered):
 		// The journal failed hash-chain verification (CHAIN-12); retrying cannot help.
-		return status.Error(codes.DataLoss, err.Error())
+		return statusError(codes.DataLoss, err, err.Error())
 	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
-		return status.Error(codes.Aborted, err.Error())
+		return statusError(codes.Aborted, err, err.Error())
 	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrToolPolicyRefused), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport):
-		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
+		return statusError(codes.FailedPrecondition, err, fmt.Sprintf("resume: %v", err))
 	case errors.Is(err, controller.ErrUnansweredToolCall):
-		return status.Errorf(codes.FailedPrecondition, "resume: %v; re-driving it needs a host executor that declares durable dedup for the tool, or Exec a new turn", err)
+		return statusError(codes.FailedPrecondition, err, fmt.Sprintf("resume: %v; re-driving it needs a host executor that declares durable dedup for the tool, or Exec a new turn", err))
 	case errors.Is(err, controller.ErrInheritedToolIntent):
-		return status.Errorf(codes.FailedPrecondition, "resume: %v; fork at or after the TOOL_RESULT, or Exec a new turn", err)
+		return statusError(codes.FailedPrecondition, err, fmt.Sprintf("resume: %v; fork at or after the TOOL_RESULT, or Exec a new turn", err))
 	case errors.Is(err, controller.ErrIncompleteInvocation):
-		return status.Errorf(codes.FailedPrecondition, "resume: %v; the incomplete turn never reached the harness and you should call Exec again with all inputs", err)
+		return statusError(codes.FailedPrecondition, err, fmt.Sprintf("resume: %v; the incomplete turn never reached the harness and you should call Exec again with all inputs", err))
 	case errors.Is(err, controller.ErrInvalidExecutionLog):
-		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
+		return statusError(codes.FailedPrecondition, err, fmt.Sprintf("resume: %v", err))
 	case errors.Is(err, api.ErrInvalidCheckpoint):
 		return checkpointRefusal("resume", uid, err)
 	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrStatefulOverride), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch),
 		errors.Is(err, api.ErrMemoryStateLost):
-		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
+		return statusError(codes.FailedPrecondition, err, fmt.Sprintf("resume: %v", err))
 	case errors.Is(err, placement.ErrUnknownHarness):
 		return harnessError(err)
 	case errors.Is(err, placement.ErrHarnessUnavailable):
-		return status.Errorf(codes.Unavailable, "resume: %v", err)
+		return statusError(codes.Unavailable, err, fmt.Sprintf("resume: %v", err))
 	case errors.Is(err, placement.ErrAdmissionInterrupted):
-		return status.Errorf(admissionInterruptedCode(err), "resume: %v", err)
+		return statusError(admissionInterruptedCode(err), err, fmt.Sprintf("resume: %v", err))
 	case errors.Is(err, placement.ErrCheckpointing), errors.Is(err, api.ErrComputeBusy):
 		// A stateful Fork of this session superseded this Resume's turn, or the session's compute
 		// is in the middle of another operation; retry once it completes.
-		return status.Errorf(codes.Aborted, "resume: %v", err)
+		return statusError(codes.Aborted, err, fmt.Sprintf("resume: %v", err))
 	case errors.Is(err, api.ErrCheckpointPending):
-		return status.Errorf(codes.Unavailable, "resume: session %q: %v", uid, err)
+		return statusError(codes.Unavailable, err, fmt.Sprintf("resume: session %q: %v", uid, err))
 	default:
 		return internalStatus(err, fmt.Sprintf("resume: %v", err))
 	}
@@ -1290,7 +1292,7 @@ func admissionInterruptedCode(err error) codes.Code {
 // FAILED_PRECONDITION. The runtime's error names the compute and the required and observed
 // fidelity; only the session layer knows the session, so it adds the UID here.
 func checkpointRefusal(op, uid string, err error) error {
-	return status.Errorf(codes.FailedPrecondition, "%s: session %q: %v", op, uid, err)
+	return statusError(codes.FailedPrecondition, err, fmt.Sprintf("%s: session %q: %v", op, uid, err))
 }
 
 // execError maps an Exec failure on session uid to its public status.
@@ -1302,50 +1304,44 @@ func execError(uid string, err error) error {
 		return withStatusCause(codes.FailedPrecondition, err)
 	case errors.Is(err, eventlog.ErrTampered):
 		// The journal failed hash-chain verification (CHAIN-12); retrying cannot help.
-		return status.Error(codes.DataLoss, err.Error())
+		return statusError(codes.DataLoss, err, err.Error())
 	case errors.Is(err, placement.ErrSessionBusy):
-		return status.Error(codes.Aborted, err.Error())
+		return statusError(codes.Aborted, err, err.Error())
 	case errors.Is(err, api.ErrInvalidCheckpoint):
 		return checkpointRefusal("exec", uid, err)
 	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrToolPolicyRefused), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport), errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrStatefulOverride), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch),
 		errors.Is(err, api.ErrMemoryStateLost):
-		return status.Error(codes.FailedPrecondition, err.Error())
+		return statusError(codes.FailedPrecondition, err, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
-		return status.Error(codes.Unavailable, err.Error())
+		return statusError(codes.Unavailable, err, err.Error())
 	case errors.Is(err, placement.ErrAdmissionInterrupted):
-		return status.Error(admissionInterruptedCode(err), err.Error())
+		return statusError(admissionInterruptedCode(err), err, err.Error())
 	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing),
 		errors.Is(err, api.ErrComputeBusy):
-		return status.Error(codes.Aborted, err.Error())
+		return statusError(codes.Aborted, err, err.Error())
 	case errors.Is(err, api.ErrCheckpointPending):
-		return status.Errorf(codes.Unavailable, "exec: session %q: %v", uid, err)
+		return statusError(codes.Unavailable, err, fmt.Sprintf("exec: session %q: %v", uid, err))
 	default:
 		return internalStatus(err, err.Error())
 	}
 }
 
-// internalStatus is the INTERNAL status with message msg for err, an Exec or Resume failure no
-// other case classifies. When err reports compute left running (*placement.ComputeLeftRunningError,
+// internalStatus handles a runtime failure no operation-specific case classifies. When err reports compute left running (*placement.ComputeLeftRunningError,
 // RT-7), the status carries that report, so internalError can keep it in the fixed message it
 // returns under WithAuthorization.
 func internalStatus(err error, msg string) error {
-	st := status.New(codes.Internal, msg)
+	mapped := statusError(runtimeFailureCode(err), err, msg)
 	var left *placement.ComputeLeftRunningError
-	if errors.As(err, &left) {
-		return &leftRunningStatus{status: st, left: left}
-	}
-	return st.Err()
+	errors.As(err, &left)
+	return &leftRunningStatus{statusCause: mapped, left: left}
 }
 
-// leftRunningStatus is an INTERNAL status whose failure left compute running. It has no Unwrap, so
-// errors.Is and errors.As callers other than internalError see what they saw on the plain status.
+// leftRunningStatus marks a runtime/execution boundary even when there is no leftover
+// compute. Its cause is available to Go callers, but is never a trusted host diagnostic.
 type leftRunningStatus struct {
-	status *status.Status
-	left   *placement.ComputeLeftRunningError
+	*statusCause
+	left *placement.ComputeLeftRunningError
 }
-
-func (e *leftRunningStatus) Error() string              { return e.status.Err().Error() }
-func (e *leftRunningStatus) GRPCStatus() *status.Status { return e.status }
 
 // report is the fixed text naming the compute: the incarnation and compute instance the runtime
 // returned, quoted, and no cause, cleanup or request text.
@@ -1361,11 +1357,13 @@ func serviceErrorKind(err error) string {
 	if err == nil {
 		return ""
 	}
-	if errors.Is(err, context.Canceled) {
-		return "canceled"
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return "deadline_exceeded"
+	if status.Code(err) == codes.Unknown {
+		if errors.Is(err, context.Canceled) {
+			return "canceled"
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "deadline_exceeded"
+		}
 	}
 	switch status.Code(err) {
 	case codes.Aborted:

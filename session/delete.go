@@ -43,19 +43,6 @@ func (s *Service) DeleteSession(ctx context.Context, req *v1.DeleteSessionReques
 	return sessionProto(info)
 }
 
-// statusCause chooses the boundary code without accepting an unrelated backend transport code,
-// while retaining the original store/context/sentinel cause for direct Go callers.
-type statusCause struct {
-	cause  error
-	status *status.Status
-}
-
-func (e *statusCause) Error() string              { return e.status.Err().Error() }
-func (e *statusCause) Unwrap() error              { return e.cause }
-func (e *statusCause) GRPCStatus() *status.Status { return e.status }
-func withStatusCause(code codes.Code, err error) error {
-	return &statusCause{cause: err, status: status.New(code, err.Error())}
-}
 func deleteError(err error, uid string) error {
 	code := codes.Internal
 	switch {

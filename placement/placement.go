@@ -498,7 +498,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	// A checkpoint may have begun while the fence was being minted. Stop before the controller writes
 	// anything under a fence the checkpoint's does not cover.
 	if err := live.checkSuperseded(ctx); err != nil {
-		return inc, err
+		return inc, allocationStartError(operationCtx, err)
 	}
 	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer),
 		controller.WithStart(cfg.config, cfg.resumeFromSeq),
@@ -1319,7 +1319,7 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	fenceFinished(nil)
 	inc.FenceToken = fence
 	if err := live.checkSuperseded(ctx); err != nil {
-		return err
+		return allocationStartError(operationCtx, err)
 	}
 	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer), controller.WithHarness(cfg.harness),
 		p.computeInstance(inc))

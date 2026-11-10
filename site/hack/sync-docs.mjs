@@ -88,6 +88,11 @@ const meta = {
     description:
       "What is protected, what is not, and how to deploy it accordingly. Read before exposing a host.",
   },
+  "session-data-model.md": {
+    title: "Session data model",
+    description:
+      "How durable sessions, journal records, runtime incarnations, Substrate actors, workers, snapshots, and forks relate.",
+  },
   "approval-gated-tool.md": {
     title: "Approval-gated tool example",
     description:

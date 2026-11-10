@@ -15,13 +15,15 @@ Start here. Each document is small and problem-scoped; this page is the index.
    SPI. The contract, the rules that keep replay exact, and two reference harnesses walked through.
 5. **[architecture.md](architecture.md)**: how the core is built. The three contracts, the durable
    event log, the controller and its determinism invariants, transport, placement, and runtime backends.
-6. **[substrate-conformance.md](substrate-conformance.md)**: running the neutral core on real
+6. **[session-data-model.md](session-data-model.md)**: how session metadata, journal records,
+   executions, runtime incarnations, Substrate actors, workers, snapshots, and forks relate.
+7. **[substrate-conformance.md](substrate-conformance.md)**: running the neutral core on real
    agent-substrate across both capability tiers, proven end to end in CI.
-7. **[observability.md](observability.md)**: structured operation logs, request correlation, and the
+8. **[observability.md](observability.md)**: structured operation logs, request correlation, and the
    data-safety contract.
-8. **[security.md](security.md)**: what the project protects, what it does not, and how to deploy it
+9. **[security.md](security.md)**: what the project protects, what it does not, and how to deploy it
    accordingly. Read this before exposing a host to anything.
-9. **[faq.md](faq.md)**: common questions about what this is, what it is not, and how it behaves.
+10. **[faq.md](faq.md)**: common questions about what this is, what it is not, and how it behaves.
 
 ## Reference
 
@@ -42,6 +44,7 @@ Start here. Each document is small and problem-scoped; this page is the index.
 | Try it on my machine | [quickstart.md](quickstart.md) |
 | Plug in my agent | [harness-authoring.md](harness-authoring.md) |
 | Understand the internals | [architecture.md](architecture.md) |
+| Understand the session, actor, and worker data model | [session-data-model.md](session-data-model.md) |
 | Run it on agent-substrate | [substrate-conformance.md](substrate-conformance.md) |
 | Deploy a durable kind example | [substrate-kind.md](substrate-kind.md) |
 | Operate and debug it | [observability.md](observability.md) |

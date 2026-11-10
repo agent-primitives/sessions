@@ -1500,6 +1500,9 @@ take precedence over these categories. A backend must have evidence for a config
 an arbitrary transport FAILED_PRECONDITION is not sufficient. No eligible capacity can include
 constraints other than full workers; freeing quota alone need not fix it. Concrete runtimes must
 opt into these sentinels; unclassified backend errors remain INTERNAL with no invented reason.
+Diagnostics wrapped with these sentinels are visible to RPC callers even with authorization
+active: the runtime must use credential-safe text, not raw provider bodies or credential-bearing
+URLs. The authorization sanitizer handles INTERNAL only; classification is not text sanitization.
 Backend transport codes, ErrorInfo and metadata are not copied as host-owned details.
 
 Caller cancellation/deadline is CANCELED/DEADLINE_EXCEEDED with no reason when it interrupts

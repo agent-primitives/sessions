@@ -6,15 +6,19 @@ import (
 )
 
 // ErrComputeUnavailable reports a temporary failure to reach or start compute. A runtime
-// should wrap this and its underlying cause; the host reports UNAVAILABLE.
+// should wrap this and its underlying cause; the host reports UNAVAILABLE. Wrapped diagnostics
+// are visible to RPC callers even with authorization enabled, so they must be credential-safe.
 var ErrComputeUnavailable = errors.New("runtime: compute is unavailable")
 
 // ErrComputeResourceExhausted reports that no eligible compute capacity is available.
-// This does not promise that freeing quota alone will make placement succeed.
+// This does not promise that freeing quota alone will make placement succeed. Wrapped diagnostics
+// are visible to RPC callers even with authorization enabled, so they must be credential-safe.
 var ErrComputeResourceExhausted = errors.New("runtime: compute capacity is exhausted")
 
 // ErrComputeConfigInvalid reports a known invalid compute configuration, not an ambiguous
 // lifecycle precondition. A runtime must have structured evidence for this classification.
+// Wrapped diagnostics are visible to RPC callers even with authorization enabled and must be
+// credential-safe; do not include raw provider response bodies or credential-bearing URLs.
 var ErrComputeConfigInvalid = errors.New("runtime: compute configuration is invalid")
 
 // ErrSnapshotSuperseded reports that a fork's source snapshot is no longer the one the parent holds,

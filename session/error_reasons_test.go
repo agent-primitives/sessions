@@ -78,6 +78,10 @@ func TestOperationErrorReasons(t *testing.T) {
 				cause := fmt.Errorf("phase: %w", tc.cause)
 				got := mapper("uid", cause)
 				assertErrorInfo(t, got, tc.code, tc.reason)
+				if tc.code == codes.Aborted || errors.Is(tc.cause, api.ErrCheckpointPending) {
+					interrupted := &placement.CallerContextError{CallerErr: context.Canceled, Cause: cause}
+					assertErrorInfo(t, mapper("uid", interrupted), tc.code, tc.reason)
+				}
 				if !errors.Is(got, tc.cause) || !strings.Contains(status.Convert(got).Message(), cause.Error()) {
 					t.Fatalf("lost cause/message: %v", got)
 				}

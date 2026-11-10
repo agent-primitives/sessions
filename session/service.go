@@ -1082,13 +1082,13 @@ func forkError(parent string, err error) error {
 		return statusError(codes.FailedPrecondition, err, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return statusError(codes.Unavailable, err, err.Error())
-	case errors.Is(err, placement.ErrAdmissionInterrupted):
-		return statusError(admissionInterruptedCode(err), err, err.Error())
 	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing),
 		errors.Is(err, api.ErrSnapshotSuperseded), errors.Is(err, api.ErrComputeBusy):
 		return statusError(codes.Aborted, err, err.Error())
 	case errors.Is(err, api.ErrCheckpointPending):
 		return statusError(codes.Unavailable, err, fmt.Sprintf("fork: session %q: %v", parent, err))
+	case errors.Is(err, placement.ErrAdmissionInterrupted):
+		return statusError(admissionInterruptedCode(err), err, err.Error())
 	default:
 		return internalStatus(err, fmt.Sprintf("fork: %v", err))
 	}
@@ -1224,10 +1224,10 @@ func suspendError(uid string, err error) error {
 		return statusError(codes.FailedPrecondition, err, fmt.Sprintf("suspend: %v", err))
 	case errors.Is(err, placement.ErrUnknownHarness):
 		return harnessError(err)
-	case errors.Is(err, placement.ErrAdmissionInterrupted):
-		return statusError(admissionInterruptedCode(err), err, err.Error())
 	case errors.Is(err, api.ErrCheckpointPending):
 		return statusError(codes.Unavailable, err, fmt.Sprintf("suspend: session %q: %v", uid, err))
+	case errors.Is(err, placement.ErrAdmissionInterrupted):
+		return statusError(admissionInterruptedCode(err), err, err.Error())
 	default:
 		return internalStatus(err, fmt.Sprintf("suspend: %v", err))
 	}
@@ -1265,14 +1265,14 @@ func resumeError(uid string, err error) error {
 		return harnessError(err)
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return statusError(codes.Unavailable, err, fmt.Sprintf("resume: %v", err))
-	case errors.Is(err, placement.ErrAdmissionInterrupted):
-		return statusError(admissionInterruptedCode(err), err, fmt.Sprintf("resume: %v", err))
 	case errors.Is(err, placement.ErrCheckpointing), errors.Is(err, api.ErrComputeBusy):
 		// A stateful Fork of this session superseded this Resume's turn, or the session's compute
 		// is in the middle of another operation; retry once it completes.
 		return statusError(codes.Aborted, err, fmt.Sprintf("resume: %v", err))
 	case errors.Is(err, api.ErrCheckpointPending):
 		return statusError(codes.Unavailable, err, fmt.Sprintf("resume: session %q: %v", uid, err))
+	case errors.Is(err, placement.ErrAdmissionInterrupted):
+		return statusError(admissionInterruptedCode(err), err, fmt.Sprintf("resume: %v", err))
 	default:
 		return internalStatus(err, fmt.Sprintf("resume: %v", err))
 	}
@@ -1318,13 +1318,13 @@ func execError(uid string, err error) error {
 		return statusError(codes.FailedPrecondition, err, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return statusError(codes.Unavailable, err, err.Error())
-	case errors.Is(err, placement.ErrAdmissionInterrupted):
-		return statusError(admissionInterruptedCode(err), err, err.Error())
 	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing),
 		errors.Is(err, api.ErrComputeBusy):
 		return statusError(codes.Aborted, err, err.Error())
 	case errors.Is(err, api.ErrCheckpointPending):
 		return statusError(codes.Unavailable, err, fmt.Sprintf("exec: session %q: %v", uid, err))
+	case errors.Is(err, placement.ErrAdmissionInterrupted):
+		return statusError(admissionInterruptedCode(err), err, err.Error())
 	default:
 		return internalStatus(err, err.Error())
 	}

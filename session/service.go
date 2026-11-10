@@ -1384,6 +1384,8 @@ func serviceErrorKind(err error) string {
 		return "deadline_exceeded"
 	case codes.Unavailable:
 		return "unavailable"
+	case codes.ResourceExhausted:
+		return "resource_exhausted"
 	case codes.NotFound:
 		return "not_found"
 	case codes.AlreadyExists:

@@ -30,6 +30,7 @@ func TestGRPCDiagnosticsPreferSelectedStatus(t *testing.T) {
 		kind string
 	}{
 		{"peer deadline", &selectedStatusCause{context.DeadlineExceeded, codes.Unavailable}, codes.Unavailable, "unavailable"},
+		{"capacity", &selectedStatusCause{context.DeadlineExceeded, codes.ResourceExhausted}, codes.ResourceExhausted, "resource_exhausted"},
 		{"peer canceled", &selectedStatusCause{context.Canceled, codes.Internal}, codes.Internal, "internal"},
 		{"explicit unknown", &selectedStatusCause{context.DeadlineExceeded, codes.Unknown}, codes.Unknown, "internal"},
 		{"wrapped status", fmt.Errorf("outer: %w", &selectedStatusCause{context.DeadlineExceeded, codes.Aborted}), codes.Aborted, "conflict"},

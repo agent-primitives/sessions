@@ -89,6 +89,8 @@ func grpcErrorKind(err error) string {
 		return "conflict"
 	case codes.Unavailable:
 		return "unavailable"
+	case codes.ResourceExhausted:
+		return "resource_exhausted"
 	default:
 		return "internal"
 	}

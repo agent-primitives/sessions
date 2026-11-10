@@ -12,7 +12,9 @@ import (
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/harness/echoagent"
 	"github.com/agent-primitives/sessions/placement"
+	"github.com/agent-primitives/sessions/runtime/local"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -103,6 +105,49 @@ func TestRuntimeContextClassification(t *testing.T) {
 			t.Fatalf("backend diagnostic leaked into caller status: %v", got)
 		}
 		assertErrorInfo(t, mapper("uid", runtimeContextError(expired, context.Canceled)), codes.DeadlineExceeded, "")
+	}
+}
+
+type canceledForkJournal struct {
+	eventlog.Store
+	cancel context.CancelFunc
+	cause  error
+}
+
+func (s canceledForkJournal) Append(int64, int64, api.Event) (eventlog.Record, error) {
+	s.cancel()
+	return eventlog.Record{}, s.cause
+}
+
+// A journal refusal is not a failed runtime operation; cancellation must not erase
+// the CAS/fence recovery reason when the already-created child is rolled back.
+func TestForkJournalFailureKeepsRecoveryReason(t *testing.T) {
+	for _, tc := range []struct {
+		cause  error
+		reason string
+	}{
+		{eventlog.ErrConflict, "STALE_CURSOR"}, {eventlog.ErrFenced, "FENCED"},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			backend := local.New(echoagent.Harness{})
+			t.Cleanup(func() { _ = backend.Close() })
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			child := canceledForkJournal{Store: eventlog.AsStore(eventlog.New()), cancel: cancel, cause: tc.cause}
+			err := placement.New(backend, echoagent.Model).Fork(ctx, eventlog.AsStore(eventlog.New()), "parent", []placement.ForkChild{{UID: "child", Log: child}}, 0)
+			got := forkError("parent", err)
+			assertErrorInfo(t, got, codes.Aborted, tc.reason)
+			if !errors.Is(got, tc.cause) {
+				t.Fatalf("journal cause lost: %v", got)
+			}
+		})
+	}
+}
+
+func TestCapacityFailureDiagnosticKind(t *testing.T) {
+	got := execError("uid", api.ErrComputeResourceExhausted)
+	if serviceErrorKind(got) != "resource_exhausted" {
+		t.Fatalf("capacity reported as %s", serviceErrorKind(got))
 	}
 }
 

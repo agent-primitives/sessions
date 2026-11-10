@@ -141,11 +141,13 @@ Session
 |- workload selection
 |  |- harness
 |  `- model
-|- status projections
+|- reporting projections
 |  |- exec_state
 |  |- compute_state
-|  |- deletion_state
 |  `- pending_approval
+|- permanent deletion barrier
+|  |- deletion_state
+|  `- deletion_requested_time
 |- journal cursor
 |  `- last_seq
 |- fork lineage
@@ -158,9 +160,16 @@ Session
    `- annotations
 ```
 
-The state projections are output-only summaries. Replay and recovery use verified journal evidence,
-not these fields as command authority. In particular, `EXEC_RUNNING` means unfinished or uncertain;
-it does not prove that a controller or worker is live.
+`exec_state`, `compute_state`, and `pending_approval` are output-only summaries. Replay and recovery
+use verified journal evidence rather than those reporting projections as command authority. In
+particular, `EXEC_RUNNING` means unfinished or uncertain; it does not prove that a controller or
+worker is live.
+
+`deletion_state` is different. `DeleteSession` atomically appends `LIFECYCLE_DELETE` and commits the
+permanent metadata tombstone. The store reads that state in `CheckWritable` before routing or runtime
+work and enforces it again in `Append` and `NewFence`. The wire field reports this durable barrier;
+clients cannot set it. `DELETION_PENDING` means irreversible deletion intent, not that compute or
+snapshots were reclaimed.
 
 The session has three independent state axes. The table includes declared wire values but omits each
 enum's `UNSPECIFIED` zero value:
@@ -359,7 +368,8 @@ The actor name and actor UID are intentionally different:
 | Parent UID and fork sequence | Yes | `sessions` row |
 | Execution and effect history | Yes | `events` table |
 | Sequence, hashes, and fence | Yes | `events` table |
-| Execution, compute, approval, and deletion summaries | Yes | Transactional projections |
+| Execution, compute, and approval summaries | Yes | Transactional reporting projections |
+| Deletion state and request time | Yes | `sessions` row, committed atomically with `LIFECYCLE_DELETE`; admission and write barrier |
 | Accepted checkpoint reference | Yes | `LIFECYCLE_SUSPEND` event |
 | Substrate actor UID | Memory tier only | `EXECUTION_START.compute_instance` and child `FORK` marker |
 | Runtime allocation intent and returned handle | Yes | `allocations` table |

@@ -49,13 +49,15 @@ func (p *Placer) allocate(ctx context.Context, log eventlog.Store, operation str
 
 // CallerContextError records the caller's outcome at failure, independently of any
 // context error in Cause. Both causes remain available to direct Go callers.
+// Error omits backend diagnostics: caller context statuses are not INTERNAL and
+// therefore do not pass through the authorization sanitizer.
 type CallerContextError struct {
 	CallerErr error
 	Cause     error
 }
 
 func (e *CallerContextError) Error() string {
-	return fmt.Sprintf("%v: %v: %v", ErrAdmissionInterrupted, e.CallerErr, e.Cause)
+	return fmt.Sprintf("%v: %v", ErrAdmissionInterrupted, e.CallerErr)
 }
 func (e *CallerContextError) Unwrap() []error {
 	return []error{ErrAdmissionInterrupted, e.CallerErr, e.Cause}

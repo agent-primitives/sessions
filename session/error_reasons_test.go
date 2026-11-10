@@ -99,6 +99,9 @@ func TestRuntimeContextClassification(t *testing.T) {
 		if !errors.Is(got, peer) || !errors.Is(got, context.Canceled) {
 			t.Fatalf("lost caller or backend cause: %v", got)
 		}
+		if strings.Contains(got.Error(), peer.Error()) {
+			t.Fatalf("backend diagnostic leaked into caller status: %v", got)
+		}
 		assertErrorInfo(t, mapper("uid", runtimeContextError(expired, context.Canceled)), codes.DeadlineExceeded, "")
 	}
 }

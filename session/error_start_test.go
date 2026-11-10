@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,13 +22,15 @@ import (
 
 type failedStart struct {
 	*local.Backend
-	cause  error
-	cancel context.CancelFunc
-	wait   bool
-	peer   bool
+	cause   error
+	cancel  context.CancelFunc
+	wait    bool
+	peer    bool
+	creates atomic.Int32
 }
 
 func (b *failedStart) Create(ctx context.Context, _ *api.SessionSpec) (api.Incarnation, error) {
+	b.creates.Add(1)
 	if b.cancel != nil {
 		b.cancel()
 	}
@@ -40,6 +44,28 @@ func (b *failedStart) Create(ctx context.Context, _ *api.SessionSpec) (api.Incar
 		return api.Incarnation{}, fmt.Errorf("start: %w", ctx.Err())
 	}
 	return api.Incarnation{}, fmt.Errorf("start: %w", b.cause)
+}
+
+// deadline_unix bounds compute start while the RPC itself stays live, so a client can
+// receive the host's context status rather than a locally canceled transport error.
+func TestExecStartDeadlineDoesNotExposeBackendDiagnostic(t *testing.T) {
+	const diagnostic = "backend-private-diagnostic"
+	backend := &failedStart{Backend: local.New(echoagent.Harness{}), cause: errors.New(diagnostic), wait: true, peer: true}
+	t.Cleanup(func() { _ = backend.Close() })
+	c := newClientWith(t, backend)
+	stream, err := c.Exec(t.Context(), &v1.ExecRequest{Session: mustCreate(t, c), DeadlineUnix: time.Now().Add(2 * time.Second).Unix()})
+	if err == nil {
+		err = drainExec(stream)
+	}
+	if backend.creates.Load() != 1 {
+		t.Fatalf("test did not reach compute start: creates=%d err=%v", backend.creates.Load(), err)
+	}
+	if status.Code(err) != codes.DeadlineExceeded || strings.Contains(err.Error(), diagnostic) {
+		t.Fatalf("deadline status exposed backend diagnostic: %v", err)
+	}
+	if len(status.Convert(err).Details()) != 0 {
+		t.Fatalf("caller deadline acquired a reason: %v", err)
+	}
 }
 
 // A start failure precedes EXECUTION_START. Returning INTERNAL or appending a turn would make

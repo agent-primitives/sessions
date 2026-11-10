@@ -284,7 +284,7 @@ erDiagram
   ACTOR_INSTANCE ||--|| HARNESS_SERVER : runs
   ROUTER ||--o{ HARNESS_SERVER : routes_to
   SNAPSHOT ||--o{ SNAPSHOT_TAG : may_be_tagged
-  SNAPSHOT_TAG ||--o{ ACTOR_INSTANCE : seeds_clone
+  SNAPSHOT_TAG o|--o{ ACTOR_INSTANCE : seeds_clone
 
   SESSION {
     string uid PK

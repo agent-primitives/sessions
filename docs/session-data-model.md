@@ -47,10 +47,11 @@ The diagrams use four categories:
 flowchart TB
   accTitle: Agent session data model
   accDescr {
-    A durable session owns a journal of log records grouped into executions and may have approval,
-    allocation, and fork-child state. Its harness route selects a runtime backend, which returns an
-    incarnation and may create a checkpoint. On Substrate, the incarnation maps to an actor named
-    after the session. A running actor is assigned to a worker and is reached through the router.
+    A durable session owns a journal whose execution-scoped records are grouped into turns; lifecycle
+    records may instead be session-scoped. The session may also have approval, allocation, and
+    fork-child state. Its harness route selects a runtime backend, which returns an incarnation and
+    may create a checkpoint. On Substrate, the incarnation maps to an actor named after the session.
+    A running actor is assigned to a worker and is reached through the router.
   }
 
   subgraph durable[Durable session data and journal-derived views]
@@ -66,7 +67,7 @@ flowchart TB
     session -->|owns one| journal
     journal -->|contains 0..N| record
     record -->|wraps one| event
-    event -->|grouped by| execution
+    event -->|when execution-scoped| execution
     execution -->|may await| approval
     session -->|tracks 0..N| allocation
     session -->|fork creates 0..N| child
@@ -176,7 +177,7 @@ enum's `UNSPECIFIED` zero value:
 erDiagram
   SESSION ||--o{ LOG_RECORD : owns
   LOG_RECORD ||--|| EVENT : wraps
-  EXECUTION ||--o{ EVENT : groups
+  EXECUTION o|--o{ EVENT : groups
   SESSION ||--o{ EXECUTION : contains
   EXECUTION o|--o| APPROVAL_REF : may_await
   SESSION o|--o{ SESSION : forks
@@ -278,7 +279,7 @@ erDiagram
   ACTOR_TEMPLATE ||--o{ ACTOR : creates
   SESSION ||--o| ACTOR_NAME : addresses
   ACTOR_NAME ||--o{ ACTOR_INSTANCE : may_resolve_to_over_time
-  WORKER ||--o{ ACTOR_INSTANCE : hosts
+  WORKER o|--o{ ACTOR_INSTANCE : hosts
   ACTOR_INSTANCE ||--o{ SNAPSHOT : captures
   ACTOR_INSTANCE ||--|| HARNESS_SERVER : runs
   ROUTER ||--o{ HARNESS_SERVER : routes_to

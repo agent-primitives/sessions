@@ -1,7 +1,7 @@
 # Session data model
 
 An agent session is a durable resource plus an append-only journal. Compute is attached through a
-runtime-neutral incarnation. An actor and its worker are Substrate-specific realizations of that
+runtime-neutral incarnation. Actors and workers are Substrate-specific realizations of that
 incarnation; they are not part of the core session schema.
 
 This document is a conceptual view of the current reference implementation, not a new normative
@@ -13,7 +13,7 @@ API resources or database rows.
 
 ```text
 Session (durable)
-  -> Harness route
+  -> Harness route (session default; a stateless turn may override it)
   -> Runtime backend
   -> Incarnation (runtime-neutral live compute handle)
        -> Actor, pod, or shared harness, depending on the runtime
@@ -47,11 +47,11 @@ The diagrams use four categories:
 flowchart TB
   accTitle: Agent session data model
   accDescr {
-    A durable session owns a journal whose execution-scoped records are grouped into turns; lifecycle
-    records may instead be session-scoped. The session may also have approval, allocation, and
-    fork-child state. Its harness route selects a runtime backend, which returns an incarnation and
-    may create a checkpoint. On Substrate, the incarnation maps to an actor named after the session.
-    A running actor is assigned to a worker and is reached through the router.
+    A durable session owns a journal whose execution-scoped records are grouped into turns;
+    lifecycle records may instead be session-scoped. The session may also have approval,
+    allocation, and fork-child state. Its harness route selects a runtime backend, which returns
+    an incarnation and may create a checkpoint. On Substrate, the incarnation maps to an actor
+    named after the session. A running actor is assigned to a worker and reached through the router.
   }
 
   subgraph durable[Durable session data and journal-derived views]
@@ -61,7 +61,7 @@ flowchart TB
     event[Typed event<br/>execution, effect, approval<br/>lifecycle or outcome]
     execution[Logical execution / turn<br/>execution_id<br/>harness and version<br/>model, config<br/>compute_instance]
     approval[Pending approval projection<br/>execution_id<br/>tool_call_id<br/>request_seq]
-    allocation[Allocation attempt<br/>backend, operation<br/>resource_id<br/>confirmed, released]
+    allocation[Create / Restore attempt<br/>backend, operation<br/>resource_id<br/>confirmed, released]
     child[Child session<br/>parent_uid<br/>fork_seq]
 
     session -->|owns one| journal
@@ -79,7 +79,7 @@ flowchart TB
     runtime{{Runtime backend<br/>local, remote, Substrate<br/>or another implementation}}
   end
 
-  session -->|selects by harness name| route
+  session -->|default harness; stateless turn may override| route
   route --> placer
   placer --> runtime
 
@@ -127,6 +127,10 @@ flowchart TB
 pending approval node is likewise a captured reporting projection; the durable request and decision
 remain events in the journal.
 
+The session's harness selects the default route. `ExecRequest.harness` may select another harness
+for one stateless turn, and `EXECUTION_START.harness` records the effective route. Registered routes
+are pinned, and memory-tier overrides are refused unless both names alias the same route.
+
 ## Durable session aggregate
 
 ```text
@@ -135,7 +139,6 @@ Session
 |  |- uid
 |  |- project
 |  |- name
-|  |- version
 |  |- create_time
 |  `- update_time
 |- workload selection
@@ -165,11 +168,11 @@ use verified journal evidence rather than those reporting projections as command
 particular, `EXEC_RUNNING` means unfinished or uncertain; it does not prove that a controller or
 worker is live.
 
-`deletion_state` is different. `DeleteSession` atomically appends `LIFECYCLE_DELETE` and commits the
-permanent metadata tombstone. The store reads that state in `CheckWritable` before routing or runtime
-work and enforces it again in `Append` and `NewFence`. The wire field reports this durable barrier;
-clients cannot set it. `DELETION_PENDING` means irreversible deletion intent, not that compute or
-snapshots were reclaimed.
+`deletion_state` is different. `DeleteSession` atomically appends `LIFECYCLE_DELETE` and commits
+the permanent metadata tombstone. The store reads that state in `CheckWritable` before routing or
+runtime work and enforces it again in `Append` and `NewFence`. The wire field reports this durable
+barrier; clients cannot set it. `DELETION_PENDING` means irreversible deletion intent, not that
+compute or snapshots were reclaimed.
 
 The session has three independent state axes. The table includes declared wire values but omits each
 enum's `UNSPECIFIED` zero value:
@@ -232,8 +235,8 @@ erDiagram
   }
 ```
 
-Every durable record contains a sequence number, previous hash, content hash, fence, and typed event.
-Events in one turn share an `execution_id`. The principal event kinds are:
+Every durable record contains a sequence number, previous hash, content hash, fence, and typed
+event. Events in one turn share an `execution_id`. The principal event kinds are:
 
 - `EXECUTION_START`
 - `INPUT` and `OUTPUT`
@@ -265,6 +268,10 @@ The core does not require actors or workers. It asks a runtime backend for an `I
 | `ComputeInstance` | Identity that distinguishes replacement compute using the same `ID` |
 | `FenceToken` | Monotonic token used to reject stale journal writers |
 | `RecordedCheckpoint` | Last checkpoint accepted by the session journal |
+
+The runtime supplies the identity, address, worker, routing, and compute-instance fields. The Placer
+sets `FenceToken` after minting the journal fence. It sets `RecordedCheckpoint` only on the
+incarnation passed to `Runtime.Snapshot`; `Create`, `Restore`, and `Fork` leave that field empty.
 
 This means the portable relationship is not `Session -> Worker`. It is:
 
@@ -339,8 +346,12 @@ The actor name and actor UID are intentionally different:
 - The actor **name** is a reusable session-scoped handle. It is currently the session UID.
 - The actor **UID** identifies one concrete actor instance and survives that actor's suspend/resume.
 - If an actor is deleted and recreated under the same name, its UID changes.
-- Memory-tier executions record the UID as `compute_instance` so replacement compute is refused
-  rather than allowed to continue with missing in-memory state.
+- Memory-tier executions record the UID as `compute_instance`, so a later turn or `Resume` on a
+  replacement actor is refused.
+- That check is not atomic with actor-name dispatch. The backend reads the UID before the router
+  dispatches by name, so a turn already placed when replacement occurs can run on the replacement
+  and record the old UID. See the
+  [Substrate placement-binding limits](substrate-conformance.md#substrate-placement-binding).
 - The worker is only a transient scheduling assignment. A suspended actor has no worker but retains
   its actor identity and snapshot.
 
@@ -351,13 +362,17 @@ The actor name and actor UID are intentionally different:
 | Session to log records | `1 : 0..N` | Ordered by session-local sequence |
 | Session to executions | `1 : 0..N` | Logical grouping by `execution_id` |
 | Parent session to children | `1 : 0..N` | Each fork child is an independent session |
-| Session to allocation attempts | `1 : 0..N` | Durable write-ahead allocation ledger |
+| Session to allocation attempts | `1 : 0..N` | Incomplete Create/Restore intent ledger |
 | ActorTemplate to actors | `1 : 0..N` | A template creates many session actors |
 | Session to current actor name | `1 : 0..1` | Current Substrate naming uses the session UID |
 | Actor name to actor UID | `1 : 0..N` over time | Replacement under the same name gets a new UID |
 | Actor instance to worker | `1 : 0..1` at an instant | Suspended actors hold no worker |
 | Worker to actor instances | `1 : 0..N` | A worker may host multiple actors |
 | Actor instance to snapshots | `1 : 0..N` over time | Accepted references are journaled on suspend |
+
+Allocation rows cover Create and Restore attempts, not Fork. Confirmation compacts duplicate
+session/backend/handle rows. The result is an incomplete intent ledger, not authoritative cleanup
+inventory or a per-call audit log; see [allocation ownership](allocation-ownership.md).
 
 ## Persistence boundary
 
@@ -372,13 +387,14 @@ The actor name and actor UID are intentionally different:
 | Deletion state and request time | Yes | `sessions` row, committed atomically with `LIFECYCLE_DELETE`; admission and write barrier |
 | Accepted checkpoint reference | Yes | `LIFECYCLE_SUSPEND` event |
 | Substrate actor UID | Memory tier only | `EXECUTION_START.compute_instance` and child `FORK` marker |
-| Runtime allocation intent and returned handle | Yes | `allocations` table |
+| Create/Restore allocation intent and returned handle | Yes | Incomplete `allocations` ledger; duplicate confirmations compact |
 | Current worker assignment | No | Ephemeral runtime response |
 | Router address and call-routing metadata | No | Runtime configuration and incarnation |
 | Substrate atespace and ActorTemplate binding | No | Daemon configuration |
 
-The public `Session.compute` shape exists in `api/session.proto`, but the reference host does not yet
-populate it. Clients currently receive `compute_state`, not actor, worker, or router details.
+The public `Session.compute` shape exists in `api/session.proto`, but the reference host does not
+yet populate it. Clients currently receive `compute_state`, not actor, worker, or router details.
+The reference host also leaves `ResourceMetadata.version` unset.
 
 ## Current Substrate constraint
 

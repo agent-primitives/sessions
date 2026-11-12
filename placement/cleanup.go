@@ -2,6 +2,7 @@ package placement
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -19,7 +20,8 @@ type allocationRecorder interface {
 func (p *Placer) allocate(ctx context.Context, log eventlog.Store, operation string, effect func() (api.Incarnation, error)) (api.Incarnation, error) {
 	recorder, tracked := log.(allocationRecorder)
 	if !tracked {
-		return effect()
+		in, err := effect()
+		return in, allocationStartError(ctx, err)
 	}
 	key := ""
 	if cleanup, ok := p.backend.(api.CleanupRuntime); ok {
@@ -29,11 +31,11 @@ func (p *Placer) allocate(ctx context.Context, log eventlog.Store, operation str
 	// falling back to a potentially destructive name-only Stop.
 	attempt, err := recorder.BeginAllocation(ctx, key, operation)
 	if err != nil {
-		return api.Incarnation{}, fmt.Errorf("placement: begin %s allocation: %w", operation, err)
+		return api.Incarnation{}, allocationStartError(ctx, fmt.Errorf("placement: begin %s allocation: %w", operation, err))
 	}
 	in, err := effect()
 	if err != nil {
-		return in, err
+		return in, allocationStartError(ctx, err)
 	}
 	// The runtime has returned a known handle. Persist it even if the caller stopped
 	// waiting, but bound the write independently so cancellation cannot strand this call.
@@ -43,4 +45,32 @@ func (p *Placer) allocate(ctx context.Context, log eventlog.Store, operation str
 		return in, fmt.Errorf("placement: confirm %s allocation: %w", operation, err)
 	}
 	return in, nil
+}
+
+// CallerContextError records the caller's outcome at failure, independently of any
+// context error in Cause. Both causes remain available to direct Go callers.
+// Error omits backend diagnostics: caller context statuses are not INTERNAL and
+// therefore do not pass through the authorization sanitizer.
+type CallerContextError struct {
+	CallerErr error
+	Cause     error
+}
+
+func (e *CallerContextError) Error() string {
+	return fmt.Sprintf("%v: %v", ErrAdmissionInterrupted, e.CallerErr)
+}
+func (e *CallerContextError) Unwrap() []error {
+	return []error{ErrAdmissionInterrupted, e.CallerErr, e.Cause}
+}
+
+// Only the caller's context during start is an admission interruption. Confirmation
+// uses an independent deadline, and checkpoint supersession remains ABORTED.
+func allocationStartError(ctx context.Context, err error) error {
+	if err != nil && errors.Is(context.Cause(ctx), errSuperseded) {
+		return fmt.Errorf("%w (compute start ended with: %v)", errSuperseded, err)
+	}
+	if err != nil && ctx.Err() != nil {
+		return &CallerContextError{CallerErr: ctx.Err(), Cause: err}
+	}
+	return err
 }

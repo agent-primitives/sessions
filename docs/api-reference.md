@@ -1750,6 +1750,21 @@ flattened lifecycle enum, because collapsing them loses which axis actually move
 <a name="agentsessions-v1-Sessions"></a>
 
 ### Sessions
+Exec, Resume, Suspend and Fork attach google.rpc.ErrorInfo for recognized lifecycle and
+compute-start failures. The domain is &#34;agentsessions&#34;, with no metadata:
+ABORTED: STALE_CURSOR, SESSION_BUSY, COMPUTE_BUSY, CHECKPOINT_IN_PROGRESS, FENCED,
+SNAPSHOT_SUPERSEDED (Fork only).
+FAILED_PRECONDITION: SESSION_DELETED, MEMORY_STATE_LOST, CHECKPOINT_INVALID,
+COMPUTE_CONFIG_INVALID.
+UNAVAILABLE: CHECKPOINT_PENDING, HARNESS_UNAVAILABLE (Exec/Resume/Fork), COMPUTE_UNAVAILABLE.
+RESOURCE_EXHAUSTED: COMPUTE_RESOURCE_EXHAUSTED.
+DeleteSession also reports SESSION_BUSY and SESSION_DELETED for the matching conditions.
+Unknown failures and caller CANCELED/DEADLINE_EXCEEDED have no reason. Other preconditions
+retain their codes without a reason; this is not an exhaustive taxonomy of failures.
+Clients must match both domain and reason; see spec.md section 11.9 for precedence and recovery.
+A runtime must explicitly classify compute-start failures; unclassified backend errors stay
+INTERNAL. ErrorInfo survives an Exec stream&#39;s terminal error after its first session frame.
+
 Default hosts do not authorize callers. Go hosts may opt into per-RPC authorization, requiring
 verified callers before validation and hiding unknown sessions and policy refusals uniformly as
 PERMISSION_DENIED (see docs/security.md#optional-go-rpc-authorization). Existing unbound rows

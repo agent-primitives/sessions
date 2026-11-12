@@ -8,6 +8,7 @@ import (
 	"slices"
 	"testing"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -221,6 +222,16 @@ func TestExecReturnsSessionAlongsideError(t *testing.T) {
 	}
 	if turn == nil || turn.Session.GetMetadata().GetUid() != uid {
 		t.Fatal("a failed turn did not report which session it ran against")
+	}
+	// The SDK drains the session frame before returning the terminal error. Losing
+	// trailers here would force callers back to parsing text for the recovery path.
+	details := status.Convert(err).Details()
+	if len(details) != 1 {
+		t.Fatalf("terminal details=%v, want ErrorInfo", details)
+	}
+	info, ok := details[0].(*errdetails.ErrorInfo)
+	if !ok || info.Domain != "agentsessions" || info.Reason != "STALE_CURSOR" {
+		t.Fatalf("terminal error lost its code/reason/domain: %v", err)
 	}
 }
 

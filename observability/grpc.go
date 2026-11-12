@@ -89,12 +89,17 @@ func grpcErrorKind(err error) string {
 		return "conflict"
 	case codes.Unavailable:
 		return "unavailable"
+	case codes.ResourceExhausted:
+		return "resource_exhausted"
 	default:
 		return "internal"
 	}
 }
 
 func grpcCode(err error) codes.Code {
+	if st, ok := status.FromError(err); ok && err != nil {
+		return st.Code()
+	}
 	switch {
 	case err == nil:
 		return codes.OK

@@ -498,7 +498,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	// A checkpoint may have begun while the fence was being minted. Stop before the controller writes
 	// anything under a fence the checkpoint's does not cover.
 	if err := live.checkSuperseded(ctx); err != nil {
-		return inc, err
+		return inc, allocationStartError(operationCtx, err)
 	}
 	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer),
 		controller.WithStart(cfg.config, cfg.resumeFromSeq),
@@ -1319,7 +1319,7 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	fenceFinished(nil)
 	inc.FenceToken = fence
 	if err := live.checkSuperseded(ctx); err != nil {
-		return err
+		return allocationStartError(operationCtx, err)
 	}
 	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer), controller.WithHarness(cfg.harness),
 		p.computeInstance(inc))
@@ -1465,7 +1465,8 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 	for _, child := range children {
 		inc, err := p.backend.Fork(ctx, ref, api.ForkOpts{ChildSessionUID: child.UID})
 		if err != nil {
-			return abort(err)
+			// Classify the runtime failure before rollback, not a later journal refusal.
+			return abort(allocationStartError(ctx, err))
 		}
 		created = append(created, child.UID)
 		_, copyFinished := observability.BeginDebug(ctx, p.logger, "placement", "copy_fork_log",
@@ -1583,7 +1584,7 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 		return api.SnapshotRef{}, nil, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
 	}
 	if err := p.endHarnesses(ctx, parentUID, open); err != nil {
-		return api.SnapshotRef{}, nil, err
+		return api.SnapshotRef{}, nil, allocationStartError(ctx, err)
 	}
 	// A turn ended above may have minted a newer fence after ours. It wrote nothing
 	// (checkSuperseded), but its fence would leave ours stale and fail the SUSPEND append after the
@@ -1620,7 +1621,7 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 		if errors.Is(err, api.ErrInvalidCheckpoint) {
 			return api.SnapshotRef{}, nil, fmt.Errorf("%w: %w", ErrUnplaceable, err)
 		}
-		return api.SnapshotRef{}, nil, err
+		return api.SnapshotRef{}, nil, allocationStartError(ctx, err)
 	}
 	// A backend may refuse an unusable checkpoint inside Snapshot, leaving compute cold without a
 	// ref. On success, record it before the Placer's independent cloneability check: SUSPEND keeps

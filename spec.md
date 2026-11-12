@@ -1471,10 +1471,47 @@ does not erase data or reclaim compute.
 | Harness `Describe` (admission `RT-1`, the `RT-3` recheck, or a `Describe` during the turn) could not reach the harness while the caller's context is live: the peer returned `UNAVAILABLE` or `DEADLINE_EXCEEDED`; or, on admission and the recheck, the host's own bound expired; or, during the turn, the error wraps `context.DeadlineExceeded` | `UNAVAILABLE` |
 | Any other `Describe` error on those paths, for example a peer `UNIMPLEMENTED` or `INTERNAL`, or a plain error from an in-process harness (during the turn, even one returned after the host's bound expired) | `INTERNAL` |
 | Any `Describe` error in the stored harness's half of the memory-tier override check (`OPS-7`) while the caller's context is live | `UNAVAILABLE` |
-| Caller deadline or cancellation during admission, any `Describe` above, or `DeleteSession` | `DEADLINE_EXCEEDED` or `CANCELLED` |
+| Caller deadline or cancellation during admission, compute allocation/start, any `Describe` above, `Suspend`, `Fork`, or `DeleteSession` | `DEADLINE_EXCEEDED` or `CANCELLED` |
 | Journal hash chain fails verification on `Exec`, `Resume` (including an `APR-13` park or request repair) or `Fork` (`CHAIN-12`) | `DATA_LOSS` |
 | `Cancel` | `UNIMPLEMENTED` |
 | Any other failure | `INTERNAL` |
+
+Known lifecycle failures on Exec, Resume, Suspend and Fork carry one `google.rpc.ErrorInfo`
+with domain `agentsessions`, the reason below and no metadata. DeleteSession reports only
+SESSION_BUSY and SESSION_DELETED from this table. Clients match domain and reason together;
+details are additive, and an older server or an unclassified error may supply none.
+
+| Code | Condition → reason (first matching condition within the code wins) |
+|---|---|
+| `ABORTED` | Append-CAS conflict → `STALE_CURSOR`; local session contention → `SESSION_BUSY`; compute contention → `COMPUTE_BUSY`; checkpoint in progress → `CHECKPOINT_IN_PROGRESS`; superseded writer fence → `FENCED`; fork snapshot superseded → `SNAPSHOT_SUPERSEDED` |
+| `FAILED_PRECONDITION` | Deleted session → `SESSION_DELETED`; lost memory-tier state → `MEMORY_STATE_LOST`; refused checkpoint → `CHECKPOINT_INVALID`; known invalid compute configuration → `COMPUTE_CONFIG_INVALID` |
+| `UNAVAILABLE` | Checkpoint uploading → `CHECKPOINT_PENDING`; unreachable harness → `HARNESS_UNAVAILABLE` (Exec/Resume/Fork); compute unavailable → `COMPUTE_UNAVAILABLE` |
+| `RESOURCE_EXHAUSTED` | No eligible compute capacity → `COMPUTE_RESOURCE_EXHAUSTED` |
+
+A stale cursor requires reading the head before retrying. Session/compute contention can be
+retried after the current operation finishes; a superseded fence needs a new writer. A checkpoint
+that fenced an in-flight turn reports CHECKPOINT_IN_PROGRESS rather than its incidental fence
+or canceled model call. Deleted sessions and lost memory state retain FAILED_PRECONDITION, not a
+retryable compute outage. Other existing preconditions retain their codes without a reason.
+
+The Go runtime SPI's `ErrComputeUnavailable`, `ErrComputeResourceExhausted` and
+`ErrComputeConfigInvalid` explicitly classify compute-start failures. Existing lifecycle refusals
+take precedence over these categories. A backend must have evidence for a configuration fault:
+an arbitrary transport FAILED_PRECONDITION is not sufficient. No eligible capacity can include
+constraints other than full workers; freeing quota alone need not fix it. Concrete runtimes must
+opt into these sentinels; unclassified backend errors remain INTERNAL with no invented reason.
+Diagnostics wrapped with these sentinels are visible to RPC callers even with authorization
+active: the runtime must use credential-safe text, not raw provider bodies or credential-bearing
+URLs. The authorization sanitizer handles INTERNAL only; classification is not text sanitization.
+Backend transport codes, ErrorInfo and metadata are not copied as host-owned details.
+
+Caller cancellation/deadline is CANCELED/DEADLINE_EXCEEDED with no reason when it interrupts
+compute start. A live caller's peer deadline is not a caller deadline; mid-turn model/Run
+classification is unchanged. An independent confirmation or cleanup timeout does not replace the
+primary failure's code or reason, and the RT-7 compute-left-running warning remains available.
+Direct Go calls retain wrapped causes with `errors.Is`/`errors.As`; causes do not cross RPCs, and
+authorization-enforced INTERNAL responses retain only their existing fixed, sanitized message.
+Exec's terminal status details survive after the first session frame, including through the Go SDK.
 
 ## 12. Harness wire protocol
 

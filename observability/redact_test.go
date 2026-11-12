@@ -70,7 +70,8 @@ func TestGRPCSpansDropStatusMessages(t *testing.T) {
 	if !strings.Contains(err.Error(), marker) {
 		t.Fatalf("the caller's error must be unchanged, got %v", err)
 	}
-	srv.Stop()
+	// Wait for the server's stats.End callback to finish recording its span.
+	srv.GracefulStop()
 
 	spans := rec.Ended()
 	if len(spans) != 2 {

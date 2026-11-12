@@ -291,8 +291,8 @@ Here, **actor** means a Substrate runtime sandbox. It is unrelated to `Event.act
 ```mermaid
 erDiagram
   ATESPACE ||--o{ ACTOR_TEMPLATE : contains
-  ATESPACE ||--o{ ACTOR : contains
-  ACTOR_TEMPLATE ||--o{ ACTOR : creates
+  ATESPACE ||--o{ ACTOR_INSTANCE : contains
+  ACTOR_TEMPLATE ||--o{ ACTOR_INSTANCE : creates
   SESSION ||--o| ACTOR_NAME : addresses
   ACTOR_NAME ||--o{ ACTOR_INSTANCE : may_resolve_to_over_time
   WORKER o|--o{ ACTOR_INSTANCE : hosts
@@ -363,7 +363,7 @@ The actor name and actor UID are intentionally different:
 | Session to executions | `1 : 0..N` | Logical grouping by `execution_id` |
 | Parent session to children | `1 : 0..N` | Each fork child is an independent session |
 | Session to allocation attempts | `1 : 0..N` | Incomplete Create/Restore intent ledger |
-| ActorTemplate to actors | `1 : 0..N` | A template creates many session actors |
+| ActorTemplate to actor instances | `1 : 0..N` | A template creates many session actors |
 | Session to current actor name | `1 : 0..1` | Current Substrate naming uses the session UID |
 | Actor name to actor UID | `1 : 0..N` over time | Replacement under the same name gets a new UID |
 | Actor instance to worker | `1 : 0..1` at an instant | Suspended actors hold no worker |

@@ -2,7 +2,7 @@ module github.com/agent-primitives/sessions/integrations/claudecode
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/agent-primitives/sessions v0.3.0

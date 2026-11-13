@@ -29,8 +29,10 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf16"
@@ -76,6 +78,11 @@ func main() {
 	if !ok {
 		usage()
 		os.Exit(2)
+	}
+	switch os.Args[1] {
+	case "create", "list", "get", "delete", "fork", "suspend", "resume", "approve", "deny", "harness":
+		// Return broken-pipe errors so committed mutations can still be reported on stderr.
+		signal.Ignore(syscall.SIGPIPE)
 	}
 	if err := traced(os.Args[1], func() error { return run(os.Args[2:]) }); err != nil {
 		printError(os.Stderr, err)

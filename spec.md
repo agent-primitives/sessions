@@ -97,6 +97,9 @@ Remote errors never fall back to embedded mode. Harness commands require a separ
 operator endpoint. See [CLI output and migration](docs/quickstart.md#cli-output-and-server-defaults).
 The embedded server writes warnings and errors, but not routine INFO logs, to stderr; command
 failures remain explicit. Standalone daemon logging is unchanged.
+On Unix, unary response commands report broken stdout pipes as output errors on stderr rather
+than exiting via SIGPIPE, noting that successful mutations remain committed. `exec` retains its
+existing streaming signal behavior.
 
 ## 2. Scope
 

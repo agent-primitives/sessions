@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"unicode"
 	"unicode/utf8"
@@ -25,6 +29,83 @@ import (
 	"github.com/agent-primitives/sessions/sqlitelog"
 	"github.com/agent-primitives/sessions/wire"
 )
+
+func TestMain(m *testing.M) {
+	// Embedded tests and their subprocesses must not inherit the operator's remote target.
+	if err := os.Unsetenv("AGENTSESSIONS_SERVER"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
+
+func TestResponseBrokenPipe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix SIGPIPE behavior")
+	}
+	binary := filepath.Join(t.TempDir(), "agentctl")
+	if out, err := exec.CommandContext(t.Context(), "go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build CLI: %s %v", out, err)
+	}
+	journal := filepath.Join(t.TempDir(), "journal.db")
+	run := func(args ...string) []byte {
+		t.Helper()
+		out, err := exec.CommandContext(t.Context(), binary, append(args, "--server=", "--journal", journal)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v: %s %v", args, out, err)
+		}
+		return out
+	}
+	parent := strings.TrimSpace(string(run("create")))
+	run("exec", "--session", parent, "--input", "hello")
+	for _, command := range []string{"create", "fork"} {
+		for _, jsonOutput := range []bool{false, true} {
+			args := []string{command, "--server=", "--journal", journal}
+			if command == "fork" {
+				args = append(args, "--session", parent)
+			}
+			if jsonOutput {
+				args = append(args, "--json")
+			}
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reader.Close()
+			cmd := exec.CommandContext(t.Context(), binary, args...)
+			cmd.Stdout = writer
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			err = cmd.Run()
+			writer.Close()
+			if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 1 || err == nil ||
+				!strings.Contains(stderr.String(), "successful operations remain committed") {
+				t.Fatalf("%v: state=%v stderr=%q err=%v", args, cmd.ProcessState, stderr.String(), err)
+			}
+		}
+	}
+	var response struct {
+		Sessions []json.RawMessage `json:"sessions"`
+	}
+	if err := json.Unmarshal(run("list", "--json"), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Sessions) != 5 {
+		t.Fatalf("got %d persisted sessions, want parent plus four committed mutations", len(response.Sessions))
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.Close()
+	cmd := exec.CommandContext(t.Context(), binary, "exec", "--server=", "--journal", journal, "--session", parent, "--input", "hello")
+	cmd.Stdout = writer
+	err = cmd.Run()
+	writer.Close()
+	if state, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); err == nil || !ok || state.Signal() != syscall.SIGPIPE {
+		t.Fatalf("exec SIGPIPE behavior changed: state=%v err=%v", cmd.ProcessState, err)
+	}
+}
 
 func TestGetAndListShowExecutionState(t *testing.T) {
 	for _, state := range []v1.ExecState{

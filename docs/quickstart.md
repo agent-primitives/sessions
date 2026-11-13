@@ -264,9 +264,11 @@ An explicit `--journal` with a remote target is an error rather than an ignored 
 for remote commands, or pass `--server=` to use the local journal.
 
 ```bash
-export AGENTSESSIONS_SERVER=127.0.0.1:8080
-agentctl list
-agentctl get --session "$SID"
+(
+  export AGENTSESSIONS_SERVER=127.0.0.1:8080
+  agentctl list
+  agentctl get --session "$SID"
+)
 ```
 
 `get` prints labeled details, including the independent execution, compute and deletion states:

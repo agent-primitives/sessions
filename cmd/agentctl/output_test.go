@@ -277,6 +277,41 @@ func TestHumanSessionOutput(t *testing.T) {
 	}
 }
 
+func TestSessionTableLongNamePadding(t *testing.T) {
+	longName := strings.Repeat("\u754c", 10000)
+	sessions := []*v1.Session{{
+		Metadata: &v1.ResourceMetadata{Uid: "long", Name: longName},
+		Harness:  "echo", ExecState: v1.ExecState_EXEC_COMPLETED,
+		ComputeState: v1.ComputeState_COMPUTE_LIVE, LastSeq: 5,
+	}}
+	for range 200 {
+		sessions = append(sessions, &v1.Session{
+			Metadata: &v1.ResourceMetadata{Uid: "short", Name: "brief"},
+			Harness:  "echo", ExecState: v1.ExecState_EXEC_COMPLETED,
+			ComputeState: v1.ComputeState_COMPUTE_LIVE, LastSeq: 5,
+		})
+	}
+	table := sessionTable(sessions)
+	lines := strings.Split(strings.TrimSuffix(table, "\n"), "\n")
+	if len(lines) != len(sessions)+1 {
+		t.Fatalf("got %d lines for %d sessions", len(lines), len(sessions))
+	}
+	if !strings.Contains(lines[1], longName) || !strings.HasSuffix(lines[1], "5") {
+		t.Fatal("long row lost its full name or subsequent columns")
+	}
+	for i, line := range lines {
+		if i == 1 {
+			continue
+		}
+		if len(line) > 256 {
+			t.Fatalf("long name inflated line %d to %d bytes", i, len(line))
+		}
+		if i > 1 && strings.Index(line, "COMPLETED") != strings.Index(lines[0], "EXECUTION") {
+			t.Fatalf("short row %d is not aligned with the header", i)
+		}
+	}
+}
+
 func TestListEmptyAndPageSize(t *testing.T) {
 	s := &outputServer{empty: true}
 	server := startOutputServer(t, s)

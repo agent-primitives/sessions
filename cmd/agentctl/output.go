@@ -68,6 +68,7 @@ func sessionDetails(s *v1.Session) string {
 }
 
 func sessionTable(sessions []*v1.Session) string {
+	const maxColumnWidth = 40
 	rows := [][]string{{"SESSION", "NAME", "EXECUTION", "COMPUTE", "HARNESS", "LAST SEQ"}}
 	for _, s := range sessions {
 		rows = append(rows, []string{
@@ -80,7 +81,7 @@ func sessionTable(sessions []*v1.Session) string {
 	widths := make([]int, len(rows[0]))
 	for _, row := range rows {
 		for i, value := range row {
-			widths[i] = max(widths[i], utf8.RuneCountInString(value))
+			widths[i] = min(maxColumnWidth, max(widths[i], utf8.RuneCountInString(value)))
 		}
 	}
 	var out strings.Builder
@@ -89,7 +90,7 @@ func sessionTable(sessions []*v1.Session) string {
 			width := utf8.RuneCountInString(value)
 			out.WriteString(value)
 			if i != len(row)-1 {
-				out.WriteString(strings.Repeat(" ", widths[i]-width+2))
+				out.WriteString(strings.Repeat(" ", max(0, widths[i]-width)+2))
 			}
 		}
 		out.WriteByte('\n')

@@ -290,6 +290,8 @@ Human state values omit the enum prefix everywhere (for example, `LIVE`, not `CO
 Unspecified values print `UNSPECIFIED`, not a guessed state. Names and other text are escaped so
 they cannot insert terminal controls or extra rows. Tables quote names containing spaces and show
 empty names as `""`.
+Column padding is capped at 40 characters. Longer values are printed in full but can shift
+subsequent columns without expanding the other rows.
 Table alignment assumes single-width characters; wide characters and combining marks can shift
 columns. Use `--json` when character widths matter to a consumer.
 

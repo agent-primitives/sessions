@@ -13,3 +13,5 @@ category: Fixed
   exiting via SIGPIPE, preserving the warning that successful mutations remain committed.
   `exec` streaming keeps its existing signal behavior.
 - `agentctl get` no longer pads labels with trailing spaces when their values are empty.
+- `agentctl list` caps column padding so one long value cannot inflate every other row; full
+  values remain visible even when they exceed the padded column width.

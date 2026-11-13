@@ -55,6 +55,7 @@ export default defineConfig({
             { label: "Writing a harness", slug: "harness-authoring" },
             { label: "Responses model adapter", slug: "responses-adapter" },
             { label: "Architecture", slug: "architecture" },
+            { label: "Session data model", slug: "session-data-model" },
             { label: "Running on agent-substrate", slug: "substrate-conformance" },
           ],
         },

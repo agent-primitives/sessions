@@ -193,11 +193,11 @@ agentctl resume  --journal /tmp/sr.db --session "$SID2"
 ```
 
 ```
-session sess-... suspend execution=COMPLETED compute=COLD last_seq=5
-session sess-... resume execution=COMPLETED compute=LIVE last_seq=6
+session sess-... suspend execution=COMPLETED compute=COLD last_seq=6
+session sess-... resume execution=COMPLETED compute=LIVE last_seq=7
 ```
 
-The first turn is seq 1 to 4, so `SUSPEND` lands at seq 5 and `RESUME` at seq 6. Both are `LIFECYCLE`
+The first turn is seq 1 to 5, so `SUSPEND` lands at seq 6 and `RESUME` at seq 7. Both are `LIFECYCLE`
 events in the log, so the compute history is auditable alongside the conversation.
 
 ## 6. List sessions
@@ -228,7 +228,7 @@ agentctl list --journal /tmp/sr.db --project default
 
 ```
 SESSION   NAME  EXECUTION  COMPUTE  HARNESS  LAST SEQ
-sess-...  ""    COMPLETED  LIVE     echo     6
+sess-...  ""    COMPLETED  LIVE     echo     7
 ```
 
 `compute` reflects what the log implies about compute, which is why the resumed session above reads

@@ -155,7 +155,11 @@ func dial(cfg *config) (*client.Client, func(), error) {
 			})
 		}
 		if journalExplicit {
-			return nil, nil, fmt.Errorf("--journal cannot be used with a remote server; omit --journal or use --server= for embedded mode")
+			source := ""
+			if cfg.flags != nil && !serverExplicit {
+				source = " selected by AGENTSESSIONS_SERVER"
+			}
+			return nil, nil, fmt.Errorf("--journal cannot be used with a remote server%s; omit --journal or use --server= for embedded mode", source)
 		}
 		if cfg.flags != nil && !serverExplicit {
 			if _, err := fmt.Fprintf(os.Stderr, "agentctl: using server %s from AGENTSESSIONS_SERVER\n", displayToken(cfg.server)); err != nil {

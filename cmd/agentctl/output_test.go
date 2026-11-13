@@ -367,13 +367,19 @@ func TestRemoteJournalRefusedBeforeDelete(t *testing.T) {
 	server := startOutputServer(t, s)
 	t.Setenv("AGENTSESSIONS_SERVER", server)
 	journal := filepath.Join(t.TempDir(), "unused.db")
-	for _, args := range [][]string{
-		{"--session", "uid", "--journal", journal},
-		{"--session", "uid", "--journal", "agentsessions.db", "--server", server},
+	for _, tc := range []struct {
+		args        []string
+		environment bool
+	}{
+		{[]string{"--session", "uid", "--journal", journal}, true},
+		{[]string{"--session", "uid", "--journal", "agentsessions.db", "--server", server}, false},
 	} {
-		out, diagnostics, err := captureCLIOutput(t, func() error { return cmdDelete(args) })
+		out, diagnostics, err := captureCLIOutput(t, func() error { return cmdDelete(tc.args) })
 		if err == nil || !strings.Contains(err.Error(), "--journal") || out != "" || diagnostics != "" || len(s.deletes) != 0 {
 			t.Fatalf("remote journal not refused: stdout=%q stderr=%q err=%v", out, diagnostics, err)
+		}
+		if !strings.Contains(err.Error(), "--server=") || strings.Contains(err.Error(), "AGENTSESSIONS_SERVER") != tc.environment {
+			t.Fatalf("refusal lost target source or embedded remedy: %v", err)
 		}
 	}
 	if _, err := os.Stat(journal); !errors.Is(err, os.ErrNotExist) {

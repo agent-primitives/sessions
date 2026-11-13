@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"unicode"
 	"unicode/utf8"
@@ -24,6 +29,83 @@ import (
 	"github.com/agent-primitives/sessions/sqlitelog"
 	"github.com/agent-primitives/sessions/wire"
 )
+
+func TestMain(m *testing.M) {
+	// Embedded tests and their subprocesses must not inherit the operator's remote target.
+	if err := os.Unsetenv("AGENTSESSIONS_SERVER"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
+
+func TestResponseBrokenPipe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix SIGPIPE behavior")
+	}
+	binary := filepath.Join(t.TempDir(), "agentctl")
+	if out, err := exec.CommandContext(t.Context(), "go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build CLI: %s %v", out, err)
+	}
+	journal := filepath.Join(t.TempDir(), "journal.db")
+	run := func(args ...string) []byte {
+		t.Helper()
+		out, err := exec.CommandContext(t.Context(), binary, append(args, "--server=", "--journal", journal)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v: %s %v", args, out, err)
+		}
+		return out
+	}
+	parent := strings.TrimSpace(string(run("create")))
+	run("exec", "--session", parent, "--input", "hello")
+	for _, command := range []string{"create", "fork"} {
+		for _, jsonOutput := range []bool{false, true} {
+			args := []string{command, "--server=", "--journal", journal}
+			if command == "fork" {
+				args = append(args, "--session", parent)
+			}
+			if jsonOutput {
+				args = append(args, "--json")
+			}
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reader.Close()
+			cmd := exec.CommandContext(t.Context(), binary, args...)
+			cmd.Stdout = writer
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			err = cmd.Run()
+			writer.Close()
+			if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 1 || err == nil ||
+				!strings.Contains(stderr.String(), "successful operations remain committed") {
+				t.Fatalf("%v: state=%v stderr=%q err=%v", args, cmd.ProcessState, stderr.String(), err)
+			}
+		}
+	}
+	var response struct {
+		Sessions []json.RawMessage `json:"sessions"`
+	}
+	if err := json.Unmarshal(run("list", "--json"), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Sessions) != 5 {
+		t.Fatalf("got %d persisted sessions, want parent plus four committed mutations", len(response.Sessions))
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.Close()
+	cmd := exec.CommandContext(t.Context(), binary, "exec", "--server=", "--journal", journal, "--session", parent, "--input", "hello")
+	cmd.Stdout = writer
+	err = cmd.Run()
+	writer.Close()
+	if state, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); err == nil || !ok || state.Signal() != syscall.SIGPIPE {
+		t.Fatalf("exec SIGPIPE behavior changed: state=%v err=%v", cmd.ProcessState, err)
+	}
+}
 
 func TestGetAndListShowExecutionState(t *testing.T) {
 	for _, state := range []v1.ExecState{
@@ -55,10 +137,64 @@ func TestGetAndListShowExecutionState(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				want := "exec=" + strings.TrimPrefix(state.String(), "EXEC_")
-				if !strings.Contains(out, want) || !strings.Contains(out, "compute=LIVE") {
-					t.Fatalf("%s hides execution/compute axes: %s", command.name, out)
+				want := strings.TrimPrefix(state.String(), "EXEC_")
+				if command.name == "get" {
+					if detailValue(out, "Execution") != want || detailValue(out, "Compute") != "LIVE" {
+						t.Fatalf("get hides execution/compute axes: %s", out)
+					}
+				} else {
+					lines := strings.Split(strings.TrimSpace(out), "\n")
+					if len(lines) != 2 {
+						t.Fatalf("unexpected list: %s", out)
+					}
+					fields := strings.Fields(lines[1])
+					if len(fields) != 6 || fields[2] != want || fields[3] != "LIVE" {
+						t.Fatalf("list hides execution/compute axes: %s", out)
+					}
 				}
+			}
+		})
+	}
+}
+
+func TestEmbeddedCommandLogging(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "agentctl")
+	if out, err := exec.CommandContext(t.Context(), "go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build CLI: %s %v", out, err)
+	}
+	journal := filepath.Join(t.TempDir(), "journal.db")
+	run := func(args ...string) (string, string, error) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), binary, append(args, "--server=", "--journal", journal)...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		return string(out), stderr.String(), err
+	}
+	out, stderr, err := run("create", "--name", "quiet")
+	if err != nil || stderr != "" {
+		t.Fatalf("create: stdout=%q stderr=%q err=%v", out, stderr, err)
+	}
+	uid := strings.TrimSpace(out)
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+		fail bool
+	}{
+		{"get", []string{"get", "--session", uid}, "quiet", false},
+		{"get JSON", []string{"get", "--session", uid, "--json"}, `"metadata"`, false},
+		{"exec", []string{"exec", "--session", uid, "--input", "hello"}, "echo:hello", false},
+		{"failure", []string{"get", "--session", "missing"}, "agentctl:", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, stderr, err := run(tc.args...)
+			if tc.fail {
+				if err == nil || !strings.Contains(stderr, tc.want) || strings.Contains(stderr, "INFO") || out != "" {
+					t.Fatalf("failure: stdout=%q stderr=%q err=%v", out, stderr, err)
+				}
+			} else if err != nil || stderr != "" || !strings.Contains(out, tc.want) {
+				t.Fatalf("command: stdout=%q stderr=%q err=%v", out, stderr, err)
 			}
 		})
 	}
@@ -92,21 +228,29 @@ func TestEmbeddedExecutionStateOutput(t *testing.T) {
 	uid := run("create")
 	assertState := func(want string) {
 		t.Helper()
-		for _, out := range []string{run("get", "--session", uid), run("list")} {
-			if !strings.Contains(out, "exec="+want) {
-				t.Fatalf("missing execution state %s: %s", want, out)
-			}
+		out := run("get", "--session", uid)
+		if detailValue(out, "Execution") != want {
+			t.Fatalf("missing execution state %s: %s", want, out)
+		}
+		out = run("list")
+		lines := strings.Split(out, "\n")
+		if len(lines) != 2 {
+			t.Fatalf("unexpected list: %s", out)
+		}
+		fields := strings.Fields(lines[1])
+		if len(fields) != 6 || fields[2] != want {
+			t.Fatalf("missing execution state %s: %s", want, out)
 		}
 	}
 	assertState("PENDING")
 	run("exec", "--session", uid, "--input", "hello")
 	assertState("COMPLETED")
 	for _, step := range []struct{ command, compute string }{
-		{"suspend", "COMPUTE_COLD"},
-		{"resume", "COMPUTE_LIVE"},
+		{"suspend", "COLD"},
+		{"resume", "LIVE"},
 	} {
 		out := run(step.command, "--session", uid)
-		if !strings.Contains(out, "exec=COMPLETED") || !strings.Contains(out, "compute="+step.compute) {
+		if !strings.Contains(out, "execution=COMPLETED") || !strings.Contains(out, "compute="+step.compute) {
 			t.Fatalf("%s hides independent execution/compute states: %s", step.command, out)
 		}
 		assertState("COMPLETED")

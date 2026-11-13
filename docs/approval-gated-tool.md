@@ -129,7 +129,7 @@ replays, re-emits the same call, and the daemon sends it to the executor once. U
 
 ```console
 $ bin/agentctl approve -server 127.0.0.1:8080 -reason "checked the text" sess-795307d5d3e863610eddda6b
-session sess-795307d5d3e863610eddda6b decision committed seq=8 approved=true compute=COMPUTE_LIVE last_seq=13
+session sess-795307d5d3e863610eddda6b decision committed seq=8 approved=true execution=COMPLETED compute=LIVE last_seq=13
 $ bin/agentctl replay -server 127.0.0.1:8080 -session sess-795307d5d3e863610eddda6b
 ...
 seq=8   EVENT_APPROVAL_RESULT

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"os"
@@ -68,6 +69,7 @@ func TestCLIApproval(t *testing.T) {
 		{"approve discover UID first", cmdApprove, []string{"uid", "--reason", "reviewed", "--actor", "human", "--identity-issuer", "issuer", "--identity-subject", "subject"}, true, false, true, false, "get,decision,resume", ""},
 		{"deny explicit JSON", cmdDeny, append([]string{"--session", "uid", "--json"}, full...), false, false, false, true, "decision,resume", ""},
 		{"committed recovery failure", cmdApprove, append([]string{"--session", "uid"}, full...), false, true, true, false, "decision,resume", "decision committed"},
+		{"committed recovery failure JSON", cmdApprove, append([]string{"--session", "uid", "--json"}, full...), false, true, true, true, "decision,resume", "decision committed"},
 		{"partial tuple", cmdApprove, []string{"--session", "uid", "--execution", "e"}, false, false, false, false, "", "full"},
 		{"nonpositive sequence", cmdApprove, []string{"--session", "uid", "--execution", "e", "--tool-call", "c", "--request-seq", "0"}, false, false, false, false, "", "positive"},
 		{"duplicate UID", cmdApprove, []string{"--session", "uid", "other"}, false, false, false, false, "", "exactly one"},
@@ -107,12 +109,22 @@ func TestCLIApproval(t *testing.T) {
 			if tc.fail && (status.Code(err) != codes.Unavailable || !strings.Contains(err.Error(), "offline")) {
 				t.Fatalf("lost committed cause: %v", err)
 			}
-			if tc.json {
+			if tc.fail && output != "" {
+				t.Fatalf("recovery failure printed success: %q", output)
+			}
+			if tc.json && !tc.fail {
 				var got v1.ApproveResponse
 				if err := protojson.Unmarshal([]byte(output), &got); err != nil || got.Decision.GetContentHash() != "original" || got.Session.GetLastSeq() != 15 || got.Session.GetExecState() != v1.ExecState_EXEC_COMPLETED {
 					t.Fatalf("JSON=%s err=%v", output, err)
 				}
-			} else if tc.errorText == "" && !strings.Contains(output, "exec=COMPLETED") {
+				var fields map[string]map[string]any
+				if err := json.Unmarshal([]byte(output), &fields); err != nil {
+					t.Fatal(err)
+				}
+				if fields["decision"]["content_hash"] != "original" || fields["session"]["last_seq"] != "15" || fields["decision"]["contentHash"] != nil {
+					t.Fatalf("approval JSON has wrong field names: %v", fields)
+				}
+			} else if tc.errorText == "" && !strings.Contains(output, "execution=COMPLETED") {
 				t.Fatalf("approval output hides execution state: %s", output)
 			}
 		})

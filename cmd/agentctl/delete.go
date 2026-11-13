@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
-	"strings"
+	"os"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -13,7 +13,7 @@ import (
 
 func cmdDelete(args []string) error {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
-	cfg := commonFlags(fs)
+	cfg := sessionFlags(fs)
 	var uid string
 	fs.StringVar(&uid, "session", "", "session UID to permanently tombstone (no data erasure or compute cleanup)")
 	_ = fs.Parse(args)
@@ -26,17 +26,15 @@ func cmdDelete(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("session %s %s\n", sess.GetMetadata().GetUid(), deletionFields(sess))
 	if sess.GetDeletionState() == v1.DeletionState_DELETION_PENDING {
-		fmt.Println("PENDING: durable intent only; compute and fork pins retained, not reclaimed.")
+		if _, err := fmt.Fprintln(os.Stderr, "PENDING: durable intent only; compute and fork pins retained, not reclaimed."); err != nil {
+			return fmt.Errorf("deletion intent committed for session %s but writing warning to stderr failed: %w", displayToken(sess.GetMetadata().GetUid()), err)
+		}
 	}
-	return nil
-}
-
-func deletionFields(s *v1.Session) string {
-	return fmt.Sprintf("deletion=%s deletion_requested=%s",
-		strings.TrimPrefix(s.GetDeletionState().String(), "DELETION_"),
-		deletionTime(s.GetDeletionRequestedTime()))
+	if cfg.json {
+		return writeJSON(sess)
+	}
+	return writeOutput(fmt.Sprintf("session %s %s\n", displayToken(sess.GetMetadata().GetUid()), deletionFields(sess)))
 }
 
 func deletionTime(t *timestamppb.Timestamp) string {

@@ -1494,8 +1494,10 @@ func (b *Backend) discardClone(ctx context.Context, cloner SnapshotCloner, ref A
 		return fmt.Errorf("%w: fork child %s/%s (clone %q) was deleted between its create and resume: %w",
 			ErrActorBusy, ref.Atespace, ref.Name, uid, cause)
 	default:
-		return fmt.Errorf("%w; fork child %s/%s (clone %q) could not be read for cleanup, so it and its tag %q were left in place: %v",
-			cause, ref.Atespace, ref.Name, uid, forkTag(ref.Name), err)
+		// The primary cause can select a non-INTERNAL response. Do not append
+		// untrusted cleanup diagnostics to that otherwise credential-safe message.
+		return fmt.Errorf("%w; fork child %s/%s (clone %q) could not be read for cleanup, so it and its tag %q were left in place",
+			cause, ref.Atespace, ref.Name, uid, forkTag(ref.Name))
 	}
 	return cause
 }

@@ -23,6 +23,28 @@ All of it runs in the `substrate-conformance suite` job (`.github/workflows/subs
 run on the micro-VM sandbox class, so the suite exercises the same isolation class in both and covers
 the micro-VM path end to end.
 
+## Compute-start errors
+
+The adapter classifies structured ate-api codes on `GetActor`, `CreateActor`, `ResumeActor`,
+`CreateTag` and `CreateActor{source_tag}`. Sessions returns fresh `google.rpc.ErrorInfo` details
+with domain `agentsessions` and no metadata:
+
+| ate-api code | Sessions code | Reason |
+|---|---|---|
+| `UNAVAILABLE` | `UNAVAILABLE` | `COMPUTE_UNAVAILABLE` |
+| `RESOURCE_EXHAUSTED` | `RESOURCE_EXHAUSTED` | `COMPUTE_RESOURCE_EXHAUSTED` |
+
+These replace INTERNAL for classified failures in cold Exec, attach, Resume and both Fork kinds.
+The same `GetActor` mapping applies to shared snapshot, status and cleanup reads, not only starts.
+Resource exhaustion includes no eligible worker, not just full workers; freeing quota need not fix it.
+Existing busy, missing-actor and lost-memory checks retain precedence, as does caller interruption.
+Peer messages and details are not copied into classified responses; direct Go callers retain the cause.
+Unclassified errors still return INTERNAL without a reason. In particular, FAILED_PRECONDITION can
+mean a missing template or a lifecycle prerequisite, and INVALID_ARGUMENT can mean a request bug:
+neither alone proves `COMPUTE_CONFIG_INVALID`. No message text is parsed. Direct ate-api `SuspendActor`,
+`DeleteActor` and `DeleteTag` errors remain unmapped. Fake control-plane tests cover this mapping;
+live capacity and configuration failures have not been qualified.
+
 ## Neutrality by construction
 
 The core must not depend on substrate. The seam is a `ControlClient` interface **defined in the core**

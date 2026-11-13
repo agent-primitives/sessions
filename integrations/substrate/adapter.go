@@ -67,7 +67,7 @@ func (ad *Adapter) CreateActor(ctx context.Context, actor substrate.ActorRef, te
 	if status.Code(err) == codes.AlreadyExists {
 		return fmt.Errorf("%w: %s/%s: %w", substrate.ErrActorExists, actor.Atespace, actor.Name, err)
 	}
-	return err
+	return computeError(err)
 }
 
 // ResumeActor schedules the actor onto a worker. Substrate restores the actor's own external
@@ -85,7 +85,7 @@ func (ad *Adapter) ResumeActor(ctx context.Context, actor substrate.ActorRef) (s
 		return substrate.ActorInfo{}, fmt.Errorf("%w: %s/%s: %w", substrate.ErrActorNotFound, actor.Atespace, actor.Name, err)
 	}
 	if err != nil {
-		return substrate.ActorInfo{}, busy(actor, err)
+		return substrate.ActorInfo{}, computeError(busy(actor, err))
 	}
 	return actorInfo(resp.GetActor()), nil
 }
@@ -149,7 +149,7 @@ func (ad *Adapter) GetActor(ctx context.Context, actor substrate.ActorRef) (subs
 		if status.Code(err) == codes.NotFound {
 			return substrate.ActorInfo{}, fmt.Errorf("%w: %s/%s", substrate.ErrActorNotFound, actor.Atespace, actor.Name)
 		}
-		return substrate.ActorInfo{}, err
+		return substrate.ActorInfo{}, computeError(err)
 	}
 	return actorInfo(a), nil
 }
@@ -178,7 +178,7 @@ func (ad *Adapter) TagActor(ctx context.Context, source substrate.ActorRef, tag 
 	if status.Code(err) == codes.AlreadyExists {
 		return fmt.Errorf("%w: %s/%s: %w", substrate.ErrTagExists, tag.Atespace, tag.Name, err)
 	}
-	return busy(source, err)
+	return computeError(busy(source, err))
 }
 
 // CreateActorFromTag creates an actor seeded from the snapshot behind tag. Substrate requires the
@@ -196,7 +196,7 @@ func (ad *Adapter) CreateActorFromTag(ctx context.Context, actor substrate.Actor
 		},
 	})
 	if err != nil {
-		return substrate.ActorInfo{}, err
+		return substrate.ActorInfo{}, computeError(err)
 	}
 	return actorInfo(a), nil
 }

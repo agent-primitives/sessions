@@ -290,6 +290,8 @@ Human state values omit the enum prefix everywhere (for example, `LIVE`, not `CO
 Unspecified values print `UNSPECIFIED`, not a guessed state. Names and other text are escaped so
 they cannot insert terminal controls or extra rows. Tables quote names containing spaces and show
 empty names as `""`.
+Table alignment assumes single-width characters; wide characters and combining marks can shift
+columns. Use `--json` when character widths matter to a consumer.
 
 For agents and scripts, use `--json` rather than parsing the human views:
 
@@ -309,9 +311,9 @@ matches CHAIN-1, but CLI JSON is not the RFC 8785 canonical byte representation 
 Harness commands retain their existing JSON format.
 
 ```bash
-agentctl get --session "$SID" --json | jq '.compute_state'
-agentctl list --json | jq -r '.sessions[]? | .metadata.uid'
-agentctl replay --session "$SID" --json > records.jsonl
+agentctl get --server= --journal /tmp/qs.db --session "$SID" --json | jq '.compute_state'
+agentctl list --server= --journal /tmp/qs.db --json | jq -r '.sessions[]? | .metadata.uid'
+agentctl replay --server= --journal /tmp/qs.db --session "$SID" --json > records.jsonl
 ```
 
 Replay JSON retains full hashes, sequence numbers and protobuf field presence; `--json` takes
@@ -321,6 +323,9 @@ as successful only when the command exits successfully.
 
 Human output is uncolored; color support is deferred. Diagnostics and the deletion PENDING warning
 go to stderr, including in JSON mode, so stdout remains parseable.
+On Unix, unary response commands report broken stdout pipes as output errors on stderr rather
+than exiting via SIGPIPE, noting that successful mutations remain committed. `exec` retains its
+existing streaming signal behavior.
 
 **Migration:** `get` no longer emits a single key/value line; `list` now has aligned columns and
 headings, even when empty. Lifecycle and approval summaries use short state values and include

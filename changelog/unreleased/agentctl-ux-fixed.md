@@ -12,3 +12,4 @@ category: Fixed
 - Broken stdout pipes on unary response commands report output failures on stderr instead of
   exiting via SIGPIPE, preserving the warning that successful mutations remain committed.
   `exec` streaming keeps its existing signal behavior.
+- `agentctl get` no longer pads labels with trailing spaces when their values are empty.

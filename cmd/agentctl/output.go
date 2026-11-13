@@ -58,6 +58,10 @@ func sessionDetails(s *v1.Session) string {
 			[2]string{"Fork seq", strconv.FormatInt(s.GetForkSeq(), 10)})
 	}
 	for _, field := range fields {
+		if field[1] == "" {
+			fmt.Fprintln(&out, field[0])
+			continue
+		}
 		fmt.Fprintf(&out, "%-20s%s\n", field[0], field[1])
 	}
 	return out.String()

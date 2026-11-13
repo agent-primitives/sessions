@@ -240,6 +240,9 @@ func TestHumanSessionOutput(t *testing.T) {
 		DeletionState: v1.DeletionState_DELETION_ACTIVE, LastSeq: 5,
 	}
 	details := sessionDetails(sess)
+	if !strings.Contains(details, "\nModel\n") {
+		t.Fatalf("empty model has trailing padding: %q", details)
+	}
 	for label, want := range map[string]string{
 		"Session": "uid", "Name": `name\n\x1b[8m`, "Project": "project", "Harness": "echo",
 		"Execution": "COMPLETED", "Compute": "LIVE", "Last seq": "5", "Deletion": "ACTIVE", "Deletion requested": "unset",

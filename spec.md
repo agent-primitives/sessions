@@ -65,16 +65,12 @@ Unless stated otherwise:
 - **Reconstruction replay**: re-running a harness against recorded effects, as distinct from the
   `Replay` RPC, which only reads records.
 
-### 1.2 Reference CLI presentation
-
-`agentctl get` renders labeled session details; `list` renders a headed table across all pages.
-Human execution, compute and deletion states omit their protobuf enum prefixes, with unspecified
-values shown as `UNSPECIFIED`. Human output is uncolored; color support is deferred.
+### 1.2 Reference CLI contracts
 
 `create`, `get`, `suspend`, `resume` and `delete` accept `--json` and return a protobuf `Session`;
 `list` returns an aggregated `ListSessionsResponse` with no next-page token, `fork` a `ForkResponse`,
 and `approve`/`deny` an `ApproveResponse` with the original decision and resumed session.
-All CLI JSON, including harness output, uses one protobuf JSON writer with proto field names:
+All CLI JSON, including harness output, uses protobuf JSON with proto field names:
 snake_case names, full enum names, string-encoded int64s,
 omitted default-valued fields and preserved message presence. `replay --json` emits JSON Lines,
 one full protobuf `LogRecord` per line in sequence order, with unshortened hashes; it overrides
@@ -95,11 +91,6 @@ An environment-selected target is announced on stderr before making requests; fa
 that notice refuses the operation. Explicit `--journal` with a remote target is an error.
 Remote errors never fall back to embedded mode. Harness commands require a separate explicit
 operator endpoint. See [CLI output and migration](docs/quickstart.md#cli-output-and-server-defaults).
-The embedded server writes warnings and errors, but not routine INFO logs, to stderr; command
-failures remain explicit. Standalone daemon logging is unchanged.
-On Unix, unary response commands report broken stdout pipes as output errors on stderr rather
-than exiting via SIGPIPE, noting that successful mutations remain committed. `exec` retains its
-existing streaming signal behavior.
 
 ## 2. Scope
 

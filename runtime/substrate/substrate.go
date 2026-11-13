@@ -11,7 +11,8 @@
 // Mapping: Create→CreateActor+ResumeActor; Snapshot(EXTERNAL)→SuspendActor; Restore→ResumeActor;
 // Stop→SuspendActor+DeleteActor; Status→GetActor; Fork→replay-fork for a stateless harness, or
 // CreateTag{source_actor}+CreateActor{source_tag}+ResumeActor to clone the parent's RAM for a
-// REQUIRES_MEMORY_SNAPSHOT harness.
+// REQUIRES_MEMORY_SNAPSHOT harness. With WithEgressPolicy, CreateActorEgressPolicy precedes every
+// ResumeActor of a SUSPENDED actor (EgressPolicyClient).
 //
 // Transport: the harness is reached through substrate's atenet-router, the only supported ingress
 // to an actor. Every incarnation addresses the router and carries the ate-target-actor metadata that
@@ -258,6 +259,9 @@ type Backend struct {
 	router      string         // host:port of the atenet-router ingress the harness is reached through
 	logger      *slog.Logger
 	volumesOnly bool
+	// egressPolicy, set by WithEgressPolicy, is the policy installed on an actor before its compute
+	// starts; nil installs none.
+	egressPolicy func(ctx context.Context, s *api.SessionSpec) (*EgressPolicy, error)
 	// memoryLostWarned maps an actor name to the UID memoryNotRestored last warned about.
 	memoryLostWarned sync.Map
 }
@@ -386,7 +390,8 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	}
 
 	ref := b.ref(sessionUID)
-	if inc, found, err := b.attach(ctx, ref, s.RecordedCheckpoint); found || err != nil {
+	egress := b.egressFor(sessionUID)
+	if inc, found, err := b.attach(ctx, ref, s.RecordedCheckpoint, egress); found || err != nil {
 		return inc, err
 	}
 
@@ -408,6 +413,11 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 		}
 	}
 
+	// Refuse a policy that cannot be installed before any actor exists, so the failure leaves nothing.
+	if err := egress.resolve(ctx); err != nil {
+		return api.Incarnation{}, err
+	}
+
 	callCtx, createFinished := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "create_actor",
 		"actor", ref.Name,
 		"atespace", ref.Atespace,
@@ -417,7 +427,7 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 			// Another host created the actor after this call looked. Use it as that host does; the
 			// host's compute-instance check still refuses it if it replaced a lost actor.
 			createFinished(nil, "actor_exists", true)
-			inc, found, aerr := b.attach(ctx, ref, s.RecordedCheckpoint)
+			inc, found, aerr := b.attach(ctx, ref, s.RecordedCheckpoint, egress)
 			if !found && aerr == nil {
 				// Deleted again since. A retry looks afresh, and refuses a lost memory-tier session.
 				aerr = fmt.Errorf("%w: actor %s/%s already existed at create and is now gone: %w", ErrActorBusy, ref.Atespace, ref.Name, err)
@@ -428,6 +438,12 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 		return api.Incarnation{}, fmt.Errorf("substrate: create actor: %w", err)
 	}
 	createFinished(nil)
+
+	// The actor is SUSPENDED until the resume, so its compute never runs without its policy. A
+	// failed install leaves it SUSPENDED; a retry finds it and installs again before resuming it.
+	if err := egress.install(ctx, ref); err != nil {
+		return api.Incarnation{}, err
+	}
 
 	callCtx, resumeFinished := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "resume_actor",
 		"actor", ref.Name,
@@ -465,7 +481,11 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 // refused) between the look and the resume, and ResumeActor restores whatever the actor holds by
 // then. A mismatch is api.ErrMemoryStateLost, and the actor is left running and not handed out
 // (see resumedNotHandedOut). A SUSPEND another host recorded in that window is read and accepted.
-func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api.SnapshotRef, error)) (inc api.Incarnation, found bool, err error) {
+//
+// A SUSPENDED actor gets the session's egress policy (WithEgressPolicy) before it is resumed; a
+// failed install is classified as a failed resume is (see resumeFailed) and nothing is resumed. A
+// RUNNING actor is attached to without any egress call.
+func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api.SnapshotRef, error), egress *egressInstall) (inc api.Incarnation, found bool, err error) {
 	info, err := b.ctl.GetActor(ctx, ref)
 	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
 	resumed := false
@@ -497,9 +517,15 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api
 				return api.Incarnation{}, true, err
 			}
 		}
+		if err := egress.resolve(ctx); err != nil {
+			return api.Incarnation{}, true, err
+		}
 		seen := info
+		if err := egress.install(ctx, ref); err != nil {
+			return b.resumeFailed(ctx, ref, seen, "its egress policy was being installed", err)
+		}
 		if info, err = b.ctl.ResumeActor(ctx, ref); err != nil {
-			return b.resumeFailed(ctx, ref, seen, err)
+			return b.resumeFailed(ctx, ref, seen, "it was being resumed", fmt.Errorf("substrate: resume suspended actor: %w", err))
 		}
 		resumed = true
 	case info.Status == StatusTransitioning:
@@ -560,26 +586,27 @@ func (b *Backend) requireAttachCheckpoint(ctx context.Context, name string, info
 	return b.requireRecordedCheckpoint(ctx, name, info, checkpoint, done)
 }
 
-// resumeFailed classifies a failed resume of the SUSPENDED actor attach found (seen). A resume that
-// reports the actor missing (ErrActorNotFound) is checked with GetActor, because the actor can be
-// deleted, or deleted and created again, between the look and the resume, and substrate also
-// answers NOT_FOUND for an actor that exists (a template volume it cannot find). Gone now, it is
-// reported as not found, so Create treats it as any missing actor: a memory-tier session with
-// started turns is refused with ErrMemoryStateLost, anything else gets a new actor. Replaced (another
-// UID), the resume is ErrActorBusy, which is retryable: the next attempt attaches to the replacement,
-// which the host refuses if it recorded another UID. Otherwise the resume error stands.
-func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo, resumeErr error) (api.Incarnation, bool, error) {
-	if errors.Is(resumeErr, ErrActorNotFound) {
+// resumeFailed classifies a failed step (cause) of resuming the SUSPENDED actor attach found
+// (seen): installing its egress policy or the resume itself; during says which, as "while ..."
+// reads it. A step that reports the actor missing (ErrActorNotFound) is checked with GetActor,
+// because the actor can be deleted, or deleted and created again, between the look and the step,
+// and substrate also answers NOT_FOUND for an actor that exists (a template volume it cannot find).
+// Gone now, it is reported as not found, so Create treats it as any missing actor: a memory-tier
+// session with started turns is refused with ErrMemoryStateLost, anything else gets a new actor.
+// Replaced (another UID), the step is ErrActorBusy, which is retryable: the next attempt attaches to
+// the replacement, which the host refuses if it recorded another UID. Otherwise cause stands.
+func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo, during string, cause error) (api.Incarnation, bool, error) {
+	if errors.Is(cause, ErrActorNotFound) {
 		now, err := b.ctl.GetActor(ctx, ref)
 		switch {
 		case errors.Is(err, ErrActorNotFound):
 			return api.Incarnation{}, false, nil
 		case err == nil && now.UID != seen.UID:
-			return api.Incarnation{}, true, fmt.Errorf("%w: actor %s/%s was replaced while it was being resumed: %w",
-				ErrActorBusy, ref.Atespace, ref.Name, resumeErr)
+			return api.Incarnation{}, true, fmt.Errorf("%w: actor %s/%s was replaced while %s: %w",
+				ErrActorBusy, ref.Atespace, ref.Name, during, cause)
 		}
 	}
-	return api.Incarnation{}, true, fmt.Errorf("substrate: resume suspended actor: %w", resumeErr)
+	return api.Incarnation{}, true, cause
 }
 
 // Snapshot suspends the actor to external storage, reporting Memory only for observed MEMORY
@@ -976,8 +1003,16 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 	if name == "" {
 		return api.Incarnation{}, fmt.Errorf("%w: %w: snapshot ref missing actor name", ErrSnapshotNotRestorable, api.ErrInvalidCheckpoint)
 	}
-	if err := b.requireRestoreSnapshot(ctx, ref, recorded); err != nil {
+	running, err := b.requireRestoreSnapshot(ctx, ref, recorded)
+	if err != nil {
 		return api.Incarnation{}, err
+	}
+	// A SUSPENDED actor gets the session's egress policy before it is resumed (normally it has one
+	// already and keeps it). A RUNNING one is left as it is: the resume below is a no-op for it.
+	if !running {
+		if err := b.restoreEgress(ctx, ref, recorded); err != nil {
+			return api.Incarnation{}, err
+		}
 	}
 	callCtx, resumeFinished := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "resume_actor",
 		"actor", name,
@@ -1004,33 +1039,47 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 	return inc, nil
 }
 
+// restoreEgress installs the session's egress policy on the actor Restore is about to resume. An
+// install that reports the actor missing is classified as a failed resume is (memoryActorGone), so a
+// memory-tier session whose actor is gone is ErrMemoryStateLost.
+func (b *Backend) restoreEgress(ctx context.Context, ref api.SnapshotRef, recorded func() (string, error)) error {
+	err := b.egressFor(ref.Local).install(ctx, b.ref(ref.Local))
+	if errors.Is(err, ErrActorNotFound) {
+		if lost := b.memoryActorGone(ctx, ref, recorded, err); lost != nil {
+			return lost
+		}
+	}
+	return err
+}
+
 // requireRestoreSnapshot checks the held checkpoint before ResumeActor, which otherwise selects
 // the actor's current snapshot itself (and is a no-op for RUNNING). This client-side check can race
 // a concurrent suspend/resume: only an atomic expected-snapshot precondition in Substrate can close
-// that window. SnapshotRef records memory vs non-memory, not ROOTFS vs VOLUMES.
-func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRef, recorded func() (string, error)) error {
+// that window. SnapshotRef records memory vs non-memory, not ROOTFS vs VOLUMES. running reports an
+// actor found RUNNING, for which ResumeActor is a no-op.
+func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRef, recorded func() (string, error)) (running bool, err error) {
 	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
 	info, err := b.ctl.GetActor(ctx, b.ref(ref.Local))
 	if err != nil {
 		if errors.Is(err, ErrActorNotFound) {
 			if lost := b.heldCheckpointGone(ref, memory, err); lost != nil {
-				return lost
+				return false, lost
 			}
 		}
-		return fmt.Errorf("%w: get restore actor: %w", ErrSnapshotNotRestorable, err)
+		return false, fmt.Errorf("%w: get restore actor: %w", ErrSnapshotNotRestorable, err)
 	}
 	if info.Status == StatusTransitioning {
-		return fmt.Errorf("%w: actor %s/%s is %s", ErrActorBusy, b.atespace, ref.Local, info.Status)
+		return false, fmt.Errorf("%w: actor %s/%s is %s", ErrActorBusy, b.atespace, ref.Local, info.Status)
 	}
 	// A proven replacement is permanent loss, even when its own snapshot is still uploading.
 	// Missing identity is not proof of replacement; incarnation and the host still check it.
 	if memory && recorded != nil && info.UID != "" {
 		instance, readErr := recorded()
 		if readErr != nil {
-			return fmt.Errorf("%w: read recorded compute instance: %w", ErrSnapshotNotRestorable, readErr)
+			return false, fmt.Errorf("%w: read recorded compute instance: %w", ErrSnapshotNotRestorable, readErr)
 		}
 		if instance != "" && info.UID != instance {
-			return fmt.Errorf("%w: %w: actor %s/%s has UID %q, not the recorded instance %q (replaced), so its in-RAM state cannot be restored",
+			return false, fmt.Errorf("%w: %w: actor %s/%s has UID %q, not the recorded instance %q (replaced), so its in-RAM state cannot be restored",
 				ErrSnapshotNotRestorable, ErrMemoryStateLost, b.atespace, ref.Local, info.UID, instance)
 		}
 	}
@@ -1039,10 +1088,10 @@ func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRe
 		// memory-tier actor was resumed from a snapshot the journal did not record.
 		if memory {
 			if err := b.requireRecordedCheckpoint(ctx, ref.Local, info, ref, "nothing was resumed"); err != nil {
-				return fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
+				return false, fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
 			}
 		}
-		return nil
+		return true, nil
 	}
 	// Admission follows the descriptor, not the legacy SnapshotRef.Memory capture bit.
 	if info.Status == StatusSuspended {
@@ -1050,21 +1099,21 @@ func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRe
 		// compared with the recorded checkpoint first, so an outside pause is ErrMemoryStateLost.
 		if memory && stuckNotReady(info) {
 			if err := b.requireRecordedCheckpoint(ctx, ref.Local, info, ref, "nothing was resumed"); err != nil {
-				return fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
+				return false, fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
 			}
 		}
 		// Preserve fidelity admission even for no-held interrupted-turn recovery.
 		err = b.requireResumeCheckpoint(ref.Local, info, memory, ref.ExternalURI == "" && !memory)
 		if err == nil && memory {
 			if err := b.requireRecordedCheckpoint(ctx, ref.Local, info, ref, "nothing was resumed"); err != nil {
-				return fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
+				return false, fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
 			}
 		}
 	}
 	if err == nil {
 		switch {
 		case !b.holdsCheckpoint(ref, memory):
-			return nil // no held checkpoint: default legacy refs or memory live recovery
+			return false, nil // no held checkpoint: default legacy refs or memory live recovery
 		case ref.ExternalURI == "":
 			err = fmt.Errorf("%w: snapshot ref missing external URI", api.ErrInvalidCheckpoint)
 		case info.Status != StatusSuspended:
@@ -1072,10 +1121,10 @@ func (b *Backend) requireRestoreSnapshot(ctx context.Context, ref api.SnapshotRe
 		case info.Snapshot == "" || info.Snapshot != ref.ExternalURI:
 			err = fmt.Errorf("%w: actor %s/%s does not hold the recorded snapshot", api.ErrInvalidCheckpoint, b.atespace, ref.Local)
 		default:
-			return nil
+			return false, nil
 		}
 	}
-	return fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
+	return false, fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
 }
 
 // holdsCheckpoint reports whether ref holds a checkpoint Restore must resume from, rather than
@@ -1261,6 +1310,11 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 	if ref.ExternalURI == "" {
 		return api.Incarnation{}, fmt.Errorf("%w: snapshot the parent before forking", ErrNoSnapshotToClone)
 	}
+	// Refuse a child policy that cannot be installed before the tag copies the parent's snapshot.
+	egress := b.egressFor(child)
+	if err := egress.resolve(ctx); err != nil {
+		return api.Incarnation{}, err
+	}
 
 	// Substrate clones only from a TAG, and a tag names the suspended parent ACTOR, capturing
 	// whichever snapshot it holds at that moment. Bracket the tag with checks that the parent still
@@ -1309,8 +1363,12 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 	}
 	// The child holds the tag's snapshot, so resuming it restores the cloned RAM. The clone is
 	// SUSPENDED until then, so it can be deleted and another actor created under its name, and
-	// ResumeActor resolves the name, not the UID: compare the UID it reports with the clone's.
+	// ResumeActor resolves the name, not the UID: compare the UID it reports with the clone's. It
+	// gets the child's egress policy first; a failed install is torn down as a failed resume is.
 	childRef := b.ref(child)
+	if err := egress.install(ctx, childRef); err != nil {
+		return api.Incarnation{}, b.discardClone(ctx, cloner, childRef, created.UID, err)
+	}
 	info, err := b.ctl.ResumeActor(ctx, childRef)
 	if err != nil {
 		return api.Incarnation{}, b.discardClone(ctx, cloner, childRef, created.UID, fmt.Errorf("substrate: resume cloned actor: %w", err))
@@ -1469,13 +1527,13 @@ func (b *Backend) destroyChild(ctx context.Context, child string) error {
 	return b.Stop(ctx, api.Incarnation{ID: child})
 }
 
-// discardClone cleans up after a fork whose clone (created with uid) failed to resume, and returns
-// cause. It reads the child's name first so it never tears down an actor this fork did not create:
-// the clone is destroyed only while the name still resolves to uid, and cause stands. Gone or
-// replaced, only the tag is released and the fork is ErrActorBusy, retryable: the parent still
-// holds its snapshot and a retry clones a new child. When the read fails, nothing is touched and
-// the error says so. Stop suspends and deletes by name, so an actor created between this read and
-// Stop's delete is not protected.
+// discardClone cleans up after a fork whose clone (created with uid) failed to get its egress
+// policy or to resume, and returns cause. It reads the child's name first so it never tears down an
+// actor this fork did not create: the clone is destroyed only while the name still resolves to uid,
+// and cause stands. Gone or replaced, only the tag is released and the fork is ErrActorBusy,
+// retryable: the parent still holds its snapshot and a retry clones a new child. When the read
+// fails, nothing is touched and the error says so. Stop suspends and deletes by name, so an actor
+// created between this read and Stop's delete is not protected.
 // TODO(spike): substrate's DeleteActorRequest.options.uid can make that delete UID-conditional, but
 // ControlClient.DeleteActor does not carry it and Stop's SuspendActor has no such precondition.
 func (b *Backend) discardClone(ctx context.Context, cloner SnapshotCloner, ref ActorRef, uid string, cause error) error {
@@ -1696,6 +1754,12 @@ func substrateErrorKind(err error) string {
 		return "snapshot_not_restorable"
 	case errors.Is(err, api.ErrComputeBusy):
 		return "actor_busy"
+	case errors.Is(err, ErrEgressPolicyUnsupported):
+		return "egress_policy_unsupported"
+	case errors.Is(err, errEgressPolicyFunc):
+		return "egress_policy_func_failed"
+	case errors.Is(err, errEgressPolicyInstall):
+		return "egress_policy_failed"
 	default:
 		return "runtime_operation_failed"
 	}

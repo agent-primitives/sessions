@@ -1070,7 +1070,12 @@ func (p *Placer) suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	inc := api.Incarnation{ID: sessionUID, ComputeInstance: instance, RecordedCheckpoint: recordedCheckpoint(recs, sessionUID)}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
 	if err != nil {
-		return api.SnapshotRef{}, callerContextError(ctx, err)
+		// Public Suspend classifies cancellation at the runtime boundary so a later journal failure
+		// cannot inherit it. Approval handoff retains its existing operational failure semantics.
+		if cursor == nil {
+			err = callerContextError(ctx, err)
+		}
+		return api.SnapshotRef{}, err
 	}
 	_, appendFinished := observability.BeginDebug(ctx, p.logger, "placement", "append_suspend_event", "session_uid", sessionUID)
 	lc := api.Lifecycle{Kind: api.LifecycleSuspend, Snapshot: &ref}

@@ -1533,11 +1533,12 @@ URLs. The authorization sanitizer handles INTERNAL only; classification is not t
 Backend transport codes, ErrorInfo and metadata are not copied as host-owned details.
 
 Caller cancellation/deadline is CANCELED/DEADLINE_EXCEEDED with no reason when it interrupts
-compute start or a Suspend/Fork runtime operation and no established lifecycle refusal applies.
-Lifecycle refusal precedence remains unchanged. A live caller's peer deadline is not a caller
-deadline; mid-turn model/Run classification is unchanged. A later journal, independent confirmation
-or cleanup failure is not reclassified from the caller context and does not replace the primary
-failure's code or reason; the RT-7 compute-left-running warning remains available.
+compute start or a public Suspend/Fork runtime operation and no established lifecycle refusal
+applies. An Exec/Resume approval handoff's automatic snapshot retains its operational failure
+classification. Lifecycle refusal precedence remains unchanged. A live caller's peer deadline is
+not a caller deadline; mid-turn model/Run classification is unchanged. A later journal, independent
+confirmation or cleanup failure is not reclassified from the caller context and does not replace
+the primary failure's code or reason; the RT-7 compute-left-running warning remains available.
 Direct Go calls retain wrapped causes with `errors.Is`/`errors.As`; causes do not cross RPCs, and
 authorization-enforced INTERNAL responses retain only their existing fixed, sanitized message.
 Exec's terminal status details survive after the first session frame, including through the Go SDK.

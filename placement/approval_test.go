@@ -200,7 +200,7 @@ func TestApprovalActivationBoundaries(t *testing.T) {
 }
 
 func TestPlacementApprovalHandoffPhases(t *testing.T) {
-	for _, mode := range []string{"success", "already parked", "request", "close", "snapshot", "append", "CAS", "fenced", "transport", "mismatched park"} {
+	for _, mode := range []string{"success", "already parked", "request", "close", "snapshot", "canceled snapshot", "append", "CAS", "fenced", "transport", "mismatched park"} {
 		t.Run(mode, func(t *testing.T) {
 			cause := errors.New(mode + " failed")
 			ctl := newSuspendControl()
@@ -214,7 +214,7 @@ func TestPlacementApprovalHandoffPhases(t *testing.T) {
 			if mode == "append" {
 				log.failSuspend, log.err = true, cause
 			}
-			if mode == "snapshot" {
+			if mode == "snapshot" || mode == "canceled snapshot" {
 				ctl.snapshotErr = cause
 			}
 			if mode == "transport" || mode == "mismatched park" {
@@ -231,6 +231,13 @@ func TestPlacementApprovalHandoffPhases(t *testing.T) {
 			}
 			desc, _ := har.Describe(t.Context())
 			b := &approvalBackend{Backend: substrate.New(ctl, "space", substrate.ObjectRef{Name: "gate"}, desc)}
+			ctx := t.Context()
+			if mode == "canceled snapshot" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				defer cancel()
+				b.beforeSnapshot = func(context.Context) { cancel() }
+			}
 			var pendingCheckpoint *placement.Placer
 			closes := 0
 			if mode == "success" || mode == "already parked" {
@@ -285,7 +292,7 @@ func TestPlacementApprovalHandoffPhases(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			_, err := p.Exec(t.Context(), log, "s", nil, 0)
+			_, err := p.Exec(ctx, log, "s", nil, 0)
 			if mode == "success" || mode == "already parked" {
 				if !errors.Is(err, api.ErrApprovalParked) || errors.Is(err, placement.ErrComputeLeftRunning) || closes != 1 || b.snapshots != 1 || b.stops != 0 || log.fences != 1 {
 					t.Fatalf("park=%v close=%d snapshot=%d stop=%d fences=%d", err, closes, b.snapshots, b.stops, log.fences)
@@ -313,7 +320,8 @@ func TestPlacementApprovalHandoffPhases(t *testing.T) {
 			}
 			// The parked turn's records leave the compute LIVE on this harness, so the journal owns it
 			// and the compute guard returns the cause unchanged.
-			if !errors.Is(err, want) || errors.Is(err, api.ErrApprovalParked) || errors.Is(err, placement.ErrComputeLeftRunning) {
+			if !errors.Is(err, want) || errors.Is(err, api.ErrApprovalParked) || errors.Is(err, placement.ErrComputeLeftRunning) ||
+				mode == "canceled snapshot" && errors.Is(err, placement.ErrAdmissionInterrupted) {
 				t.Fatalf("handoff=%v, want operational %v only", err, want)
 			}
 			if closes != 1 || b.stops != 0 || log.fences != 1 {

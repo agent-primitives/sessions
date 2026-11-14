@@ -63,11 +63,12 @@ var ErrHarnessUnavailable = errors.New("placement: harness unavailable")
 // answered in this long is treated as unavailable rather than left to hold the call.
 var describeTimeout = 10 * time.Second
 
-// ErrAdmissionInterrupted is returned when the caller's own deadline or cancellation ended a
-// Describe check before the harness answered. It also wraps the context's error, so errors.Is
-// reports context.DeadlineExceeded or context.Canceled. Like ErrHarnessUnavailable it is only raised
-// before the harness runs or journal records are appended; session.Service surfaces it as
-// codes.DeadlineExceeded or codes.Canceled. An interruption during Run does not wrap it.
+// ErrAdmissionInterrupted is returned when the caller's own deadline or cancellation ends an
+// admission check or runtime operation at the boundary that reports its failure. It also wraps the
+// context's error, so errors.Is reports context.DeadlineExceeded or context.Canceled.
+// session.Service surfaces it as codes.DeadlineExceeded or codes.Canceled. It is not inferred later
+// from the caller context for a journal, confirmation or cleanup failure, and an interruption during
+// Run does not wrap it.
 var ErrAdmissionInterrupted = errors.New("placement: admission interrupted")
 
 // ErrStatefulOverride is the memory-tier override rule: a turn on a harness other than the
@@ -1069,7 +1070,7 @@ func (p *Placer) suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	inc := api.Incarnation{ID: sessionUID, ComputeInstance: instance, RecordedCheckpoint: recordedCheckpoint(recs, sessionUID)}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
 	if err != nil {
-		return api.SnapshotRef{}, err
+		return api.SnapshotRef{}, callerContextError(ctx, err)
 	}
 	_, appendFinished := observability.BeginDebug(ctx, p.logger, "placement", "append_suspend_event", "session_uid", sessionUID)
 	lc := api.Lifecycle{Kind: api.LifecycleSuspend, Snapshot: &ref}

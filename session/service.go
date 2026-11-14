@@ -1134,7 +1134,7 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 		if refused != nil && err == refused {
 			return nil, refused
 		}
-		return nil, suspendError(uid, runtimeContextError(ctx, err))
+		return nil, suspendError(uid, err)
 	}
 	// The SUSPEND append already moved the stored compute_state projection, so re-reading is
 	// what keeps the response and a subsequent ListSessions from disagreeing.
@@ -1279,8 +1279,9 @@ func resumeError(uid string, err error) error {
 }
 
 // admissionInterruptedCode is the public code for a call whose own deadline or cancellation ended
-// an admission or connected-harness Describe check. No new turn records were journaled, and the same
-// expired call cannot succeed. A deadline that interrupts Run keeps its existing code.
+// an admission check or runtime operation. Operation mappers apply established lifecycle refusals
+// first; caller interruption is the fallback when no more specific recovery status applies. A
+// deadline that interrupts Run keeps its existing code.
 func admissionInterruptedCode(err error) codes.Code {
 	var caller *placement.CallerContextError
 	if errors.As(err, &caller) {

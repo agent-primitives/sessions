@@ -1,7 +1,6 @@
 package session
 
 import (
-	"context"
 	"errors"
 
 	"github.com/agent-primitives/sessions/api"
@@ -98,13 +97,4 @@ func runtimeFailureCode(err error) codes.Code {
 	default:
 		return codes.Internal
 	}
-}
-
-// runtimeContextError marks the caller's context at non-turn runtime boundaries.
-// A peer's independent deadline with a live caller is not a caller deadline.
-func runtimeContextError(ctx context.Context, err error) error {
-	if err != nil && ctx.Err() != nil {
-		return &placement.CallerContextError{CallerErr: ctx.Err(), Cause: err}
-	}
-	return err
 }

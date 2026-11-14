@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/eventlog"
@@ -90,25 +89,30 @@ func TestOperationErrorReasons(t *testing.T) {
 	}
 }
 
-func TestRuntimeContextClassification(t *testing.T) {
-	live := context.Background()
-	ended, cancel := context.WithCancel(live)
-	cancel()
-	expired, cancelExpired := context.WithDeadline(live, time.Time{})
-	defer cancelExpired()
+func TestCallerContextClassification(t *testing.T) {
+	peer := fmt.Errorf("peer: %w", context.DeadlineExceeded)
 	for _, mapper := range []func(string, error) error{suspendError, forkError} {
-		peer := fmt.Errorf("peer: %w", context.DeadlineExceeded)
-		assertErrorInfo(t, mapper("uid", runtimeContextError(live, peer)), codes.Internal, "")
-		assertErrorInfo(t, mapper("uid", runtimeContextError(ended, context.Canceled)), codes.Canceled, "")
-		got := mapper("uid", runtimeContextError(ended, peer))
-		assertErrorInfo(t, got, codes.Canceled, "")
-		if !errors.Is(got, peer) || !errors.Is(got, context.Canceled) {
-			t.Fatalf("lost caller or backend cause: %v", got)
+		assertErrorInfo(t, mapper("uid", peer), codes.Internal, "")
+		for _, tc := range []struct {
+			caller error
+			code   codes.Code
+		}{
+			{context.Canceled, codes.Canceled},
+			{context.DeadlineExceeded, codes.DeadlineExceeded},
+		} {
+			got := mapper("uid", &placement.CallerContextError{CallerErr: tc.caller, Cause: peer})
+			assertErrorInfo(t, got, tc.code, "")
+			if !errors.Is(got, peer) || !errors.Is(got, tc.caller) {
+				t.Fatalf("lost caller or backend cause: %v", got)
+			}
+			if strings.Contains(got.Error(), peer.Error()) {
+				t.Fatalf("backend diagnostic leaked into caller status: %v", got)
+			}
 		}
-		if strings.Contains(got.Error(), peer.Error()) {
-			t.Fatalf("backend diagnostic leaked into caller status: %v", got)
-		}
-		assertErrorInfo(t, mapper("uid", runtimeContextError(expired, context.Canceled)), codes.DeadlineExceeded, "")
+		// Established lifecycle refusals retain their recovery semantics when the caller context also
+		// ends; caller interruption is only the fallback for an otherwise unclassified operation.
+		interrupted := &placement.CallerContextError{CallerErr: context.Canceled, Cause: api.ErrMemoryStateLost}
+		assertErrorInfo(t, mapper("uid", interrupted), codes.FailedPrecondition, "MEMORY_STATE_LOST")
 	}
 }
 

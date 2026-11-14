@@ -63,14 +63,20 @@ func (e *CallerContextError) Unwrap() []error {
 	return []error{ErrAdmissionInterrupted, e.CallerErr, e.Cause}
 }
 
+// callerContextError records cancellation at the operation boundary that returned err. Callers
+// apply it before any later persistence or cleanup so those failures keep their own classification.
+func callerContextError(ctx context.Context, err error) error {
+	if err != nil && ctx.Err() != nil {
+		return &CallerContextError{CallerErr: ctx.Err(), Cause: err}
+	}
+	return err
+}
+
 // Only the caller's context during start is an admission interruption. Confirmation
 // uses an independent deadline, and checkpoint supersession remains ABORTED.
 func allocationStartError(ctx context.Context, err error) error {
 	if err != nil && errors.Is(context.Cause(ctx), errSuperseded) {
 		return fmt.Errorf("%w (compute start ended with: %v)", errSuperseded, err)
 	}
-	if err != nil && ctx.Err() != nil {
-		return &CallerContextError{CallerErr: ctx.Err(), Cause: err}
-	}
-	return err
+	return callerContextError(ctx, err)
 }

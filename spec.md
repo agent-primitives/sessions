@@ -1498,7 +1498,7 @@ does not erase data or reclaim compute.
 | Harness `Describe` (admission `RT-1`, the `RT-3` recheck, or a `Describe` during the turn) could not reach the harness while the caller's context is live: the peer returned `UNAVAILABLE` or `DEADLINE_EXCEEDED`; or, on admission and the recheck, the host's own bound expired; or, during the turn, the error wraps `context.DeadlineExceeded` | `UNAVAILABLE` |
 | Any other `Describe` error on those paths, for example a peer `UNIMPLEMENTED` or `INTERNAL`, or a plain error from an in-process harness (during the turn, even one returned after the host's bound expired) | `INTERNAL` |
 | Any `Describe` error in the stored harness's half of the memory-tier override check (`OPS-7`) while the caller's context is live | `UNAVAILABLE` |
-| Caller deadline or cancellation during admission, compute allocation/start, any `Describe` above, `Suspend`, `Fork`, or `DeleteSession` | `DEADLINE_EXCEEDED` or `CANCELLED` |
+| Caller deadline or cancellation that ends admission, compute allocation/start, any `Describe` above, a `Suspend` or `Fork` runtime operation, or `DeleteSession`, unless a more specific lifecycle refusal above applies | `DEADLINE_EXCEEDED` or `CANCELLED` |
 | Journal hash chain fails verification on `Exec`, `Resume` (including an `APR-13` park or request repair) or `Fork` (`CHAIN-12`) | `DATA_LOSS` |
 | `Cancel` | `UNIMPLEMENTED` |
 | Any other failure | `INTERNAL` |
@@ -1533,9 +1533,11 @@ URLs. The authorization sanitizer handles INTERNAL only; classification is not t
 Backend transport codes, ErrorInfo and metadata are not copied as host-owned details.
 
 Caller cancellation/deadline is CANCELED/DEADLINE_EXCEEDED with no reason when it interrupts
-compute start. A live caller's peer deadline is not a caller deadline; mid-turn model/Run
-classification is unchanged. An independent confirmation or cleanup timeout does not replace the
-primary failure's code or reason, and the RT-7 compute-left-running warning remains available.
+compute start or a Suspend/Fork runtime operation and no established lifecycle refusal applies.
+Lifecycle refusal precedence remains unchanged. A live caller's peer deadline is not a caller
+deadline; mid-turn model/Run classification is unchanged. A later journal, independent confirmation
+or cleanup failure is not reclassified from the caller context and does not replace the primary
+failure's code or reason; the RT-7 compute-left-running warning remains available.
 Direct Go calls retain wrapped causes with `errors.Is`/`errors.As`; causes do not cross RPCs, and
 authorization-enforced INTERNAL responses retain only their existing fixed, sanitized message.
 Exec's terminal status details survive after the first session frame, including through the Go SDK.

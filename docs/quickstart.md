@@ -14,8 +14,8 @@ The command output below is real, captured from a live run.
 
 ## Install
 
-Pick one. `agentctl` is the client CLI; `agentsessionsd` is the standalone server used from section
-8 onwards.
+Pick one. `agentctl` is the client CLI; `agentsessionsd` is the standalone server used by the
+server example in section 6 and from section 8 onwards.
 
 ```bash
 # Go toolchain
@@ -70,21 +70,23 @@ agentctl exec --journal /tmp/qs.db --input "hello world"
 ```
 
 ```
-session sess-6ff29e8d93d3a4c65f6f38bc
-seq=1   EVENT_INPUT  user: hello world
-seq=2   EVENT_MODEL_CALL
-seq=3   EVENT_OUTPUT  assistant: echo:hello world
-seq=4   EVENT_END
+session sess-a632fd215b69792f5eb8b359
+seq=1   EVENT_EXECUTION_START
+seq=2   EVENT_INPUT  user: hello world
+seq=3   EVENT_MODEL_CALL
+seq=4   EVENT_OUTPUT  assistant: echo:hello world
+seq=5   EVENT_END
 ```
 
-The first line is the new session UID. The four events are the durable, typed log of that turn: the
-input, the mediated model call, the output, and the terminal `END`. `echoagent` is a trivial harness
-whose "model" returns the input prefixed with `echo:`, so the loop is real without a provider key.
+The first line is the new session UID. The five events are the durable, typed log of that turn: the
+host's `EXECUTION_START` marker, the input, the mediated model call, the output, and the terminal
+`END`. `echoagent` is a trivial harness whose "model" returns the input prefixed with `echo:`, so
+the loop is real without a provider key.
 
 Keep the UID; the next steps use it.
 
 ```bash
-SID=sess-6ff29e8d93d3a4c65f6f38bc   # replace with your UID
+SID=sess-a632fd215b69792f5eb8b359   # replace with your UID
 ```
 
 ## 2. Continue the session
@@ -96,10 +98,11 @@ agentctl exec --journal /tmp/qs.db --session "$SID" --input "how are you"
 ```
 
 ```
-seq=5   EVENT_INPUT  user: how are you
-seq=6   EVENT_MODEL_CALL
-seq=7   EVENT_OUTPUT  assistant: echo:how are you
-seq=8   EVENT_END
+seq=6   EVENT_EXECUTION_START
+seq=7   EVENT_INPUT  user: how are you
+seq=8   EVENT_MODEL_CALL
+seq=9   EVENT_OUTPUT  assistant: echo:how are you
+seq=10  EVENT_END
 ```
 
 ## 3. Replay: reconstruct the session, model called zero times
@@ -113,14 +116,16 @@ agentctl replay --journal /tmp/qs.db --session "$SID"
 ```
 
 ```
-seq=1   EVENT_INPUT  user: hello world
-seq=2   EVENT_MODEL_CALL
-seq=3   EVENT_OUTPUT  assistant: echo:hello world
-seq=4   EVENT_END
-seq=5   EVENT_INPUT  user: how are you
-seq=6   EVENT_MODEL_CALL
-seq=7   EVENT_OUTPUT  assistant: echo:how are you
-seq=8   EVENT_END
+seq=1   EVENT_EXECUTION_START
+seq=2   EVENT_INPUT  user: hello world
+seq=3   EVENT_MODEL_CALL
+seq=4   EVENT_OUTPUT  assistant: echo:hello world
+seq=5   EVENT_END
+seq=6   EVENT_EXECUTION_START
+seq=7   EVENT_INPUT  user: how are you
+seq=8   EVENT_MODEL_CALL
+seq=9   EVENT_OUTPUT  assistant: echo:how are you
+seq=10  EVENT_END
 ```
 
 The same durable log is what a *different* process reconstructs after the original one dies. For the
@@ -132,14 +137,15 @@ Kubernetes version of this (exec on one pod, delete the pod, a fresh pod replays
 `fork --at N` creates a child session that inherits the parent's log up to seq `N`, then evolves
 independently. `echoagent` is a stateless-replay harness, so the child is rebuilt by replay and the
 parent is untouched. (A `REQUIRES_MEMORY_SNAPSHOT` harness checkpoints the parent instead — see the
-[FAQ](faq.md#what-are-fork-semantics).)
+[FAQ](faq.md#what-are-fork-semantics).) Fork at a turn's `END`, seq 5 here for the first turn: a
+child forked inside a turn inherits it unfinished.
 
 ```bash
-agentctl fork --journal /tmp/qs.db --session "$SID" --at 4
+agentctl fork --journal /tmp/qs.db --session "$SID" --at 5
 ```
 
 ```
-child sess-c63948fb24b628057b7b0920 parent=sess-6ff29e8d93d3a4c65f6f38bc fork_seq=4 name=
+child sess-0b8ad2edf255de2cb659f7e6 parent=sess-a632fd215b69792f5eb8b359 fork_seq=5 name=
 ```
 
 A child is unnamed unless you name it. It inherits the parent's project, harness and model, but not
@@ -147,35 +153,38 @@ its label, so a listing does not fill up with rows that all read the same thing.
 label a fan-out, one comma-separated name per child:
 
 ```bash
-agentctl fork --journal /tmp/qs.db --session "$SID" --at 4 --count 2 --names "optimistic,pessimistic"
+agentctl fork --journal /tmp/qs.db --session "$SID" --at 5 --count 2 --names "optimistic,pessimistic"
 ```
 
-Replay the child: it carries the parent's first four events, plus a `LIFECYCLE` record marking the fork.
+Replay the child: it carries the parent's first five events, plus a `LIFECYCLE` record marking the
+fork.
 
 ```bash
-CHILD=sess-c63948fb24b628057b7b0920   # replace with your child UID
+CHILD=sess-0b8ad2edf255de2cb659f7e6   # replace with your child UID
 agentctl replay --journal /tmp/qs.db --session "$CHILD"
 ```
 
 ```
-seq=1   EVENT_INPUT  user: hello world
-seq=2   EVENT_MODEL_CALL
-seq=3   EVENT_OUTPUT  assistant: echo:hello world
-seq=4   EVENT_END
-seq=5   EVENT_LIFECYCLE
+seq=1   EVENT_EXECUTION_START
+seq=2   EVENT_INPUT  user: hello world
+seq=3   EVENT_MODEL_CALL
+seq=4   EVENT_OUTPUT  assistant: echo:hello world
+seq=5   EVENT_END
+seq=6   EVENT_LIFECYCLE
 ```
 
-Now exec on the child. It diverges from the parent while the parent still ends at seq 8.
+Now exec on the child. It diverges from the parent while the parent still ends at seq 10.
 
 ```bash
 agentctl exec --journal /tmp/qs.db --session "$CHILD" --input "child-only turn"
 ```
 
 ```
-seq=6   EVENT_INPUT  user: child-only turn
-seq=7   EVENT_MODEL_CALL
-seq=8   EVENT_OUTPUT  assistant: echo:child-only turn
-seq=9   EVENT_END
+seq=7   EVENT_EXECUTION_START
+seq=8   EVENT_INPUT  user: child-only turn
+seq=9   EVENT_MODEL_CALL
+seq=10  EVENT_OUTPUT  assistant: echo:child-only turn
+seq=11  EVENT_END
 ```
 
 ## 5. Suspend and resume
@@ -184,21 +193,29 @@ Suspend frees compute and records the transition in the log; resume brings the s
 local filesystem-only backend, resume reconstructs the session by replay (no memory snapshot). On a
 memory-capable backend the same commands restore RAM instead. The CLI is identical either way.
 
-Use a fresh session so the sequence numbers are easy to follow:
+Use a fresh session so the sequence numbers are easy to follow. Take its UID from `create`, not by
+piping `exec` into `head -1`: `exec` streams records as they commit, and a reader that exits early
+stops it mid-turn with `SIGPIPE`.
 
 ```bash
-SID2=$(agentctl exec --journal /tmp/sr.db --input "before suspend" | head -1 | cut -d' ' -f2)
+SID2=$(agentctl create --journal /tmp/sr.db)
+agentctl exec    --journal /tmp/sr.db --session "$SID2" --input "before suspend"
 agentctl suspend --journal /tmp/sr.db --session "$SID2"
 agentctl resume  --journal /tmp/sr.db --session "$SID2"
 ```
 
 ```
+seq=1   EVENT_EXECUTION_START
+seq=2   EVENT_INPUT  user: before suspend
+seq=3   EVENT_MODEL_CALL
+seq=4   EVENT_OUTPUT  assistant: echo:before suspend
+seq=5   EVENT_END
 session sess-... suspend execution=COMPLETED compute=COLD last_seq=6
 session sess-... resume execution=COMPLETED compute=LIVE last_seq=7
 ```
 
-The first turn is seq 1 to 5, so `SUSPEND` lands at seq 6 and `RESUME` at seq 7. Both are `LIFECYCLE`
-events in the log, so the compute history is auditable alongside the conversation.
+The first turn is seq 1 to 5, so `SUSPEND` lands at seq 6 and `RESUME` at seq 7. Both are
+`LIFECYCLE` events in the log, so the compute history is auditable alongside the conversation.
 
 ## 6. List sessions
 
@@ -212,6 +229,7 @@ agentctl list   --journal /tmp/qs.db --project acme
 ```
 
 ```
+sess-0d879482...
 SESSION           NAME    EXECUTION  COMPUTE  HARNESS  LAST SEQ
 sess-0d879482...  triage  PENDING    NONE     echo     0
 ```
@@ -263,11 +281,22 @@ environment, the CLI prints it to stderr before making requests, including for `
 An explicit `--journal` with a remote target is an error rather than an ignored flag; omit it
 for remote commands, or pass `--server=` to use the local journal.
 
+To try it, start a standalone server in another terminal. It needs no model key; section 8 covers
+the model flags. Stop it before section 8, which starts its own on the same port.
+
+```bash
+agentsessionsd --addr 127.0.0.1:8080 --journal /tmp/server.db
+```
+
+Then run the client commands in a subshell, so the variable does not reach later sections:
+
 ```bash
 (
   export AGENTSESSIONS_SERVER=127.0.0.1:8080
+  TRIAGE=$(agentctl create --name triage)
+  agentctl exec --session "$TRIAGE" --input "hello"
   agentctl list
-  agentctl get --session "$SID"
+  agentctl get --session "$TRIAGE"
 )
 ```
 
@@ -413,10 +442,11 @@ Then drive it with the same CLI, using `--server` instead of a local journal:
 agentctl exec --server 127.0.0.1:8080 --input "name three prime numbers"
 ```
 
-The interesting part is what happens next. Replay the session and watch your provider dashboard:
+The interesting part is what happens next. Replay the chat session and watch your provider
+dashboard:
 
 ```bash
-agentctl replay --server 127.0.0.1:8080 --session "$SID"
+agentctl replay --server 127.0.0.1:8080 --session "$CHAT"
 ```
 
 The turn comes back byte-for-byte, and the provider is not called. Same for `fork`: branching a

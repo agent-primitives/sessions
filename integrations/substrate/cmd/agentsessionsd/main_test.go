@@ -8,6 +8,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/agent-primitives/sessions/runtime/substrate"
+
 	ateadapter "github.com/agent-primitives/sessions/integrations/substrate"
 )
 
@@ -27,7 +29,12 @@ func TestNewControlIsTheAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
-	if _, ok := newControl(conn).(*ateadapter.Adapter); !ok {
+	ctl := newControl(conn)
+	if _, ok := ctl.(*ateadapter.Adapter); !ok {
 		t.Fatal("newControl must return the ate-api adapter")
+	}
+	// -substrate-egress-policy-file needs it, or every substrate backend refuses to start.
+	if _, ok := ctl.(substrate.EgressPolicyClient); !ok {
+		t.Fatal("the ate-api adapter must implement substrate.EgressPolicyClient")
 	}
 }

@@ -300,9 +300,9 @@ func (m *mockCloner) DeleteTag(ctx context.Context, tag substrate.SnapshotID) er
 
 // newMemoryBackend builds a backend for a REQUIRES_MEMORY_SNAPSHOT harness (the counter tier), whose
 // live state exists only in RAM and therefore cannot be replay-forked.
-func newMemoryBackend(ctl substrate.ControlClient) *substrate.Backend {
+func newMemoryBackend(ctl substrate.ControlClient, opts ...substrate.Option) *substrate.Backend {
 	return substrate.New(ctl, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
-		api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}})
+		api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}}, opts...)
 }
 
 func TestCreateBootsActor(t *testing.T) {

@@ -2262,14 +2262,27 @@ The reference implementation protects the integrity of the record, not access to
   egress is a runtime capability this specification does not define, and the host cannot check
   that it is in place. A runtime that cannot inject the credential cannot host an unmediated
   harness under this invariant.
+- The runtime's egress policy, which hosts and ports the compute may reach and which credential
+  the egress injects, is runtime configuration, not session state: it is not journaled and plays
+  no part in replay. A runtime that applies one installs it before the compute first runs, so no
+  turn runs without it. The reference substrate backend does this with `WithEgressPolicy`
+  ([docs/security.md](docs/security.md#runtime-egress-policy)).
 - The invariant keeps the value out of the harness, not its use. An unmediated harness can send
   any request the egress allows with the injected credential, and the host neither bounds nor
   records that spend (`EXE-41`). Its prompts and outputs pass through the egress, which must see
   the request to inject the credential, so the egress is trusted with session content as well as
   the credential.
-- TODO(spike): Verify end to end that a runtime egress can inject a provider credential over a
-  placeholder for an unmediated harness (request header, retries, TLS trust in the actor), and
-  that no snapshot of the actor contains the value.
+- On Substrate v1.0.0 the reach of an installed policy follows from its source. The policy is
+  stored per actor name and deleted only with the actor, so a suspend and resume keeps it. The
+  egress gateway reads it per request by actor name through a cache of at most 10 seconds
+  (`cmd/atenet/internal/router/egress/policycache.go`) and denies an actor without one. A cached
+  "no policy" can therefore only deny, and only within 10 seconds of a lookup of the same actor
+  name made before the install; an actor deleted and recreated under its name can see the old
+  actor's policy for as long.
+- TODO(spike): Verify end to end, against a live gateway, that an installed policy is enforced
+  (an allowed host reachable, others denied), that the egress can inject a provider credential
+  over a placeholder for an unmediated harness (request header, retries, TLS trust in the actor),
+  and that no snapshot of the actor contains the value.
 - The harness does not authenticate the host, and a harness registered by address is whatever
   answers there. A forged harness or a forged host can inject content that the chain then records
   faithfully. A verified chain proves the log was not altered after writing, not that its content
@@ -2413,7 +2426,8 @@ Each item is also marked inline where it applies.
 - TODO(spike): Stream close without `EVENT_END` and ignored harness event kinds (§12.2).
 - TODO(spike): Session check and stickiness for model reply correlation failures (§12.2).
 - TODO(spike): Black-box conformance packaging (§16.2).
-- TODO(spike): End-to-end egress credential injection for an unmediated harness (§17).
+- TODO(spike): End-to-end egress credential injection and policy enforcement for an unmediated
+  harness (§17).
 
 ## 20. References
 

@@ -40,6 +40,7 @@ type approvalBackend struct {
 	placement.Backend
 	describes, creates, restores, snapshots, stops int
 	beforeSnapshot                                 func(context.Context)
+	snapshotErr                                    error
 }
 
 func (b *approvalBackend) Describe(ctx context.Context) (api.Descriptor, error) {
@@ -58,6 +59,9 @@ func (b *approvalBackend) Snapshot(ctx context.Context, inc api.Incarnation, kin
 	b.snapshots++
 	if b.beforeSnapshot != nil {
 		b.beforeSnapshot(ctx)
+	}
+	if b.snapshotErr != nil {
+		return api.SnapshotRef{}, b.snapshotErr
 	}
 	return b.Backend.Snapshot(ctx, inc, kind)
 }
@@ -353,6 +357,27 @@ func TestPlacementApprovalHandoffPhases(t *testing.T) {
 				t.Fatalf("retry Suspend=%v", err)
 			}
 		})
+	}
+}
+
+func TestResumeApprovalHandoffSnapshotFailureKeepsOperationalCause(t *testing.T) {
+	log := newSuspendStore(t).Session("s")
+	seedPlacementApproval(t, log, "gate", api.EventExecutionStart)
+	runtime := local.New(placementGateHarness{})
+	t.Cleanup(func() { _ = runtime.Close() })
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cause := errors.New("resume handoff snapshot failed")
+	b := &approvalBackend{Backend: runtime, snapshotErr: cause, beforeSnapshot: func(context.Context) { cancel() }}
+	p := placement.New(b, nil)
+
+	err := p.Resume(ctx, log, "s")
+	if !errors.Is(err, cause) || errors.Is(err, placement.ErrAdmissionInterrupted) ||
+		errors.Is(err, api.ErrApprovalParked) || errors.Is(err, placement.ErrComputeLeftRunning) {
+		t.Fatalf("Resume=%v, want operational %v only", err, cause)
+	}
+	if b.restores != 1 || b.snapshots != 1 || b.stops != 0 {
+		t.Fatalf("restore=%d snapshot=%d stop=%d, want 1/1/0", b.restores, b.snapshots, b.stops)
 	}
 }
 

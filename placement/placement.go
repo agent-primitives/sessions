@@ -64,8 +64,9 @@ var ErrHarnessUnavailable = errors.New("placement: harness unavailable")
 var describeTimeout = 10 * time.Second
 
 // ErrAdmissionInterrupted is returned when the caller's own deadline or cancellation ends an
-// admission check or runtime operation at the boundary that reports its failure. It also wraps the
-// context's error, so errors.Is reports context.DeadlineExceeded or context.Canceled.
+// admission or registration check, compute allocation/start, or public Suspend/Fork runtime
+// operation at the boundary that reports its failure. It also wraps the context's error, so
+// errors.Is reports context.DeadlineExceeded or context.Canceled.
 // session.Service surfaces it as codes.DeadlineExceeded or codes.Canceled. It is not inferred later
 // from the caller context for a journal, confirmation or cleanup failure, and an interruption during
 // Run does not wrap it.

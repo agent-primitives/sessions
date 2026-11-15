@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -856,6 +857,7 @@ func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 		onTag   func(ctl *actorControl, actor string)
 		tagErr  error
 		want    codes.Code
+		reason  string
 		wantMsg string
 	}{
 		{
@@ -876,6 +878,18 @@ func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 			},
 			tagErr:  errors.New("rpc error: code = Internal desc = copy failed"),
 			want:    codes.Aborted,
+			wantMsg: "want suspended holding",
+		},
+		{
+			name: "busy tag while parent is suspended again",
+			onTag: func(ctl *actorControl, actor string) {
+				ctl.mu.Lock()
+				ctl.snapshots[actor] = "snap-newer"
+				ctl.mu.Unlock()
+			},
+			tagErr:  substrate.ErrActorBusy,
+			want:    codes.Aborted,
+			reason:  "SNAPSHOT_SUPERSEDED",
 			wantMsg: "want suspended holding",
 		},
 		{
@@ -917,6 +931,16 @@ func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 			}
 			if msg := status.Convert(err).Message(); !strings.Contains(msg, tc.wantMsg) {
 				t.Errorf("error %q does not contain %q", msg, tc.wantMsg)
+			}
+			if tc.reason != "" {
+				details := status.Convert(err).Details()
+				if len(details) != 1 {
+					t.Fatalf("details=%v, want one agentsessions/%s ErrorInfo", details, tc.reason)
+				}
+				info, ok := details[0].(*errdetails.ErrorInfo)
+				if !ok || info.Domain != "agentsessions" || info.Reason != tc.reason || len(info.Metadata) != 0 {
+					t.Fatalf("details=%v, want agentsessions/%s without metadata", details, tc.reason)
+				}
 			}
 			ctl.mu.Lock()
 			gotCreated := ctl.created

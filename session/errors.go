@@ -51,12 +51,14 @@ func errorReason(code codes.Code, err error) string {
 		reasons = []mapping{
 			{eventlog.ErrConflict, "STALE_CURSOR"},
 			{placement.ErrSessionBusy, "SESSION_BUSY"},
+			// A failed stateful Fork may retain both the superseded source and TagActor's busy
+			// cause. Report the fork point that invalidated the operation.
+			{api.ErrSnapshotSuperseded, "SNAPSHOT_SUPERSEDED"},
 			{api.ErrComputeBusy, "COMPUTE_BUSY"},
 			// A checkpoint supersedes a live turn by fencing it; report the operation,
 			// not its incidental fence or canceled model call.
 			{placement.ErrCheckpointing, "CHECKPOINT_IN_PROGRESS"},
 			{eventlog.ErrFenced, "FENCED"},
-			{api.ErrSnapshotSuperseded, "SNAPSHOT_SUPERSEDED"},
 		}
 	case codes.FailedPrecondition:
 		reasons = []mapping{

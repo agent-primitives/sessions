@@ -14,14 +14,30 @@ The command output below is real, captured from a live run.
 
 ## Install
 
-Pick one. `agentctl` is the client CLI; `agentsessionsd` is the standalone server used by the
-server example in section 6 and from section 8 onwards.
+`agentctl` is the client CLI; `agentsessionsd` is the standalone server used by the server example
+in section 6 and from section 8 onwards. This walkthrough tracks `main`, so install both from it.
+Both options below give binaries that run every step.
 
 ```bash
 # Go toolchain
-go install github.com/agent-primitives/sessions/cmd/agentctl@v0.3.0
-go install github.com/agent-primitives/sessions/cmd/agentsessionsd@v0.3.0
+go install github.com/agent-primitives/sessions/cmd/agentctl@main
+go install github.com/agent-primitives/sessions/cmd/agentsessionsd@main
 ```
+
+To build from a checkout instead:
+
+```bash
+git clone https://github.com/agent-primitives/sessions
+cd sessions
+go build -o agentctl ./cmd/agentctl
+go build -o agentsessionsd ./cmd/agentsessionsd
+```
+
+Release archives and container images are published only for tagged releases. The release pinned
+below, v0.3.0, predates part of this walkthrough. With it, sections 1 to 4 and 7 to 10 work as
+shown, except that the embedded server also logs INFO lines to stderr. Section 5 prints an older
+suspend and resume summary. Section 6 needs `main`: v0.3.0 prints older `get` and `list` views
+with no execution state, has no `--json` or `verify`, and ignores `AGENTSESSIONS_SERVER`.
 
 ```bash
 # Release archive: both binaries, for linux/darwin on amd64/arm64.
@@ -42,15 +58,6 @@ docker run --rm ghcr.io/agent-primitives/sessions/agentsessionsd:v0.3.0 --help
 The images are multi-arch, built from the tagged source with no Dockerfile. `agentsessionsd` is the
 Sessions server; `harnessnode` is the in-sandbox harness the substrate manifests in
 `deploy/substrate/` reference. The server runs as uid 65532, so mount its journal path writable.
-
-To build from a checkout instead:
-
-```bash
-git clone https://github.com/agent-primitives/sessions
-cd sessions
-go build -o agentctl ./cmd/agentctl
-go build -o agentsessionsd ./cmd/agentsessionsd
-```
 
 The examples below assume both binaries are on your `PATH`; if you built them into the working
 directory, prefix the commands with `./`.
@@ -271,6 +278,10 @@ Each command reopens the same database, so this also checks persistence. With a 
 replace `--journal ...` on the client commands with `--server 127.0.0.1:8080`.
 
 ### CLI output and server defaults
+
+This subsection needs `agentctl` built from `main` (see [Install](#install)). v0.3.0 ignores
+`AGENTSESSIONS_SERVER` and silently uses a local `agentsessions.db`; with that release, pass
+`--server 127.0.0.1:8080` on each command of the example below instead.
 
 Session commands use `AGENTSESSIONS_SERVER` when `--server` is omitted. An explicit flag wins,
 including `--server=` to select the embedded, echo-only server. An unset or empty environment

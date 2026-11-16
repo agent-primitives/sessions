@@ -5,7 +5,7 @@ go 1.27.0
 toolchain go1.27.4
 
 require (
-	github.com/agent-primitives/sessions v0.3.0
+	github.com/agent-primitives/sessions v0.4.0
 	go.ate.dev/substrate v1.0.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0

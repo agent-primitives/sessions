@@ -4,6 +4,11 @@
 Create, run, suspend, resume, **fork**, and replay an agent session, with a Bring-Your-Own-Harness
 SPI on top and a pluggable compute backend underneath.
 
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/agent-primitives/sessions)](https://github.com/agent-primitives/sessions/releases)
+[![CI](https://github.com/agent-primitives/sessions/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/agent-primitives/sessions/actions/workflows/ci.yml?query=branch%3Amain)
+[![Go Reference](https://pkg.go.dev/badge/github.com/agent-primitives/sessions.svg)](https://pkg.go.dev/github.com/agent-primitives/sessions)
+
 [Docs site](https://sessions.agent-primitives.dev/) · [Quickstart](docs/quickstart.md) ·
 [Concepts](docs/concepts.md) · [Specification](spec.md) ·
 [Releases](https://github.com/agent-primitives/sessions/releases)

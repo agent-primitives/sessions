@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/internal/agentsessionsd"
@@ -24,7 +26,9 @@ import (
 	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/runtime/substrate"
 
+	ateadapter "github.com/agent-primitives/sessions/integrations/substrate"
 	"github.com/agent-primitives/sessions/integrations/substrate/routertls"
+	atepb "go.ate.dev/substrate/api/ateapi/v1"
 )
 
 // controlFunc turns a connection to the agent-substrate ate-api into the substrate backend's
@@ -114,6 +118,9 @@ type substrateFlags struct {
 	routerCert     *string
 	routerCA       *string
 	routerName     *string
+	egressFile     *string
+	// egressPolicy is the policy Harnesses read from -substrate-egress-policy-file, or nil.
+	egressPolicy *substrate.EgressPolicy
 	// routerCreds is the router client Harnesses loaded from -atenet-router-cert-file and
 	// -atenet-router-ca-file.
 	routerCreds *routertls.Credentials
@@ -150,6 +157,7 @@ func (f *substrateFlags) RegisterFlags(fs *flag.FlagSet) {
 	f.routerCert = fs.String("atenet-router-cert-file", "", "PEM credential bundle (private key and certificate chain) of this host's SPIFFE ID, from a podCertificate volume for signer podidentity.podcert.ate.dev/identity; required with -substrate-harness. Re-read on every connection, so a rotated certificate is picked up. The router's --ingress-allowed-spiffe-ids must list the ID")
 	f.routerCA = fs.String("atenet-router-ca-file", "", "PEM trust bundle the router's serving certificate must chain to, from a clusterTrustBundle volume for signer servicedns.podcert.ate.dev/identity; required with -substrate-harness. Re-read on every connection")
 	f.routerName = fs.String("atenet-router-server-name", routertls.DefaultServerName, "DNS name the router's serving certificate must carry. It does not follow -atenet-router: the servicedns signer issues only <service>.<namespace>.svc names")
+	f.egressFile = fs.String("substrate-egress-policy-file", "", "JSON file holding a substrate EgressPolicy (ateapi.v1, rules only, no metadata) installed on each session actor before its compute first starts. Read once at startup. An actor that already has a policy keeps it, so a changed file reaches only actors created after the restart. Empty installs none, and substrate leaves the actor deny-all")
 }
 
 // Harnesses runs every substrate flag check that needs no side effect, so agentsessionsd refuses a
@@ -200,6 +208,13 @@ func (f *substrateFlags) Harnesses() ([]string, error) {
 		if _, err := readToken(*f.tokenFile); err != nil {
 			return nil, fmt.Errorf("-ateapi-token-file: %w", err)
 		}
+	}
+	if *f.egressFile != "" {
+		policy, err := readEgressPolicy(*f.egressFile)
+		if err != nil {
+			return nil, fmt.Errorf("-substrate-egress-policy-file: %w", err)
+		}
+		f.egressPolicy = &policy
 	}
 	return slices.Sorted(maps.Keys(f.harnesses)), nil
 }
@@ -277,6 +292,19 @@ func (f *substrateFlags) Backends(logger *slog.Logger) (map[string]placement.Bac
 		return nil, nil, nil, fmt.Errorf("dial ate-api %s: %w", *f.ateapi, err)
 	}
 	ctl := f.newControl(conn)
+	opts := []substrate.Option{substrate.WithLogger(logger), substrate.WithRouter(*f.router)}
+	if f.egressPolicy != nil {
+		// The backend refuses each session the same way, but a control client that cannot install
+		// the policy is a build mistake, so refuse it before any session.
+		if _, ok := ctl.(substrate.EgressPolicyClient); !ok {
+			_ = conn.Close()
+			return nil, nil, nil, fmt.Errorf("-substrate-egress-policy-file: %w", substrate.ErrEgressPolicyUnsupported)
+		}
+		policy := *f.egressPolicy
+		opts = append(opts, substrate.WithEgressPolicy(func(context.Context, *api.SessionSpec) (*substrate.EgressPolicy, error) {
+			return &policy, nil
+		}))
+	}
 	backends := make(map[string]placement.Backend, len(f.harnesses))
 	for name, h := range f.harnesses {
 		// The declared tier is trusted as given; nothing compares it with the image's Describe, and
@@ -287,8 +315,7 @@ func (f *substrateFlags) Backends(logger *slog.Logger) (map[string]placement.Bac
 			resumability = api.ResumabilityRequiresMemorySnapshot
 		}
 		desc := api.Descriptor{ID: name, Capabilities: api.Capabilities{Resumability: resumability}}
-		backends[name] = substrate.New(ctl, *f.atespace, h.template, desc,
-			substrate.WithLogger(logger), substrate.WithRouter(*f.router))
+		backends[name] = substrate.New(ctl, *f.atespace, h.template, desc, opts...)
 	}
 	f.logConfig(logger)
 	stopProbe := f.startRouterProbe(logger)
@@ -316,8 +343,58 @@ func (f *substrateFlags) logConfig(logger *slog.Logger) {
 			"atenet_router_server_name", f.routerCreds.ServerName(),
 			"ateapi_token_file", *f.tokenFile,
 			"ateapi_insecure_skip_verify", *f.insecureVerify,
+			"egress_policy_file", *f.egressFile,
+			"egress_policy_rules", egressRules(f.egressPolicy),
 		)
 	}
+}
+
+// egressRules is the number of rules in policy, or -1 with no policy, so the log tells no policy
+// from a deny-all one without recording the rules.
+func egressRules(policy *substrate.EgressPolicy) int {
+	if policy == nil {
+		return -1
+	}
+	return len(policy.Rules)
+}
+
+// maxEgressPolicyFile bounds what readEgressPolicy reads, well above what substrate accepts in one
+// policy.
+const maxEgressPolicyFile = 1 << 20
+
+// readEgressPolicy reads the -substrate-egress-policy-file policy: a substrate ateapi.v1
+// EgressPolicy in protojson. Unknown fields are refused, so a misspelled rule field is not silently
+// dropped from what the actor is allowed. metadata is refused: the backend names the policy and the
+// actor it belongs to. Substrate validates the rules themselves when it creates each actor's
+// policy, so a rule it refuses passes startup and fails each Exec, Resume and Fork that would
+// start an actor's compute with FAILED_PRECONDITION (COMPUTE_CONFIG_INVALID). Errors name the
+// file. A parse error can quote the offending JSON token; it is a startup error, which only the
+// operator sees.
+func readEgressPolicy(path string) (substrate.EgressPolicy, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return substrate.EgressPolicy{}, err
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(io.LimitReader(file, maxEgressPolicyFile+1))
+	if err != nil {
+		return substrate.EgressPolicy{}, err
+	}
+	if len(data) > maxEgressPolicyFile {
+		return substrate.EgressPolicy{}, fmt.Errorf("%s: larger than %d bytes", path, maxEgressPolicyFile)
+	}
+	var p atepb.EgressPolicy
+	if err := protojson.Unmarshal(data, &p); err != nil {
+		return substrate.EgressPolicy{}, fmt.Errorf("%s: not an ateapi.v1 EgressPolicy in JSON: %w", path, err)
+	}
+	if p.GetMetadata() != nil {
+		return substrate.EgressPolicy{}, fmt.Errorf("%s: metadata is set: give rules only, the backend names each actor's policy", path)
+	}
+	policy, err := ateadapter.EgressPolicyFromProto(&p)
+	if err != nil {
+		return substrate.EgressPolicy{}, fmt.Errorf("%s: %w", path, err)
+	}
+	return policy, nil
 }
 
 // errTokenUnavailable is the error a call fails with when the token file cannot be read. gRPC

@@ -86,6 +86,7 @@ The substrate build of `agentsessionsd` adds these flags:
 | `-atenet-router` | Router address harnesses are reached through, over mTLS (default `atenet-router.ate-system.svc:443`). See [the transport](#the-transport-harnesswire-through-atenet-router). |
 | `-atenet-router-cert-file`, `-atenet-router-ca-file` | Required. The host's SPIFFE certificate bundle (private key and chain, from a `podCertificate` volume for signer `podidentity.podcert.ate.dev/identity`) and the router's trust bundle (a `clusterTrustBundle` volume for signer `servicedns.podcert.ate.dev/identity`). Both are re-read on every router connection. The daemon refuses to start if either is missing, the certificate has expired or is not yet valid, or it does not carry exactly one SPIFFE ID. |
 | `-atenet-router-server-name` | DNS name the router's certificate must carry (default `atenet-router.ate-system.svc`). It does not follow `-atenet-router`: the servicedns signer issues only `<service>.<namespace>.svc` names. |
+| `-substrate-egress-policy-file` | A Substrate `ateapi.v1` `EgressPolicy` in protojson, rules only (`metadata` is refused, as are unknown fields), installed on every session actor before its compute first starts. Read once at startup; a file that is missing or does not parse refuses the start. See [Actor egress policy](#actor-egress-policy). |
 
 The other flags only configure `-substrate-harness` entries; given without one, the daemon refuses
 to start rather than ignore them.
@@ -286,6 +287,48 @@ attached to as if it held the cloned RAM. The child now records the clone's UID 
   copied prefix without the fields, so the new child's chain verifies on its own but no longer
   shares the prefix hashes. This is the same as for `EXECUTION_START.compute_instance`, and the same
   rollout applies.
+
+### Actor egress policy
+
+Substrate denies all egress to an actor without an `EgressPolicy`. `substrate.WithEgressPolicy`
+installs one per session, and `-substrate-egress-policy-file` sets the same policy for every
+session. The backend calls `CreateActorEgressPolicy` before each `ResumeActor` it issues on a
+`SUSPENDED` actor:
+
+- **Create:** after `CreateActor` and before the first `ResumeActor`, and again when Create attaches
+  to an existing `SUSPENDED` actor.
+- **Restore:** before resuming a `SUSPENDED` actor.
+- **Fork (memory tier):** on the child's clone, after `CreateActor{source_tag}` and before its
+  `ResumeActor`. A clone does not inherit the parent's policy, so the child gets its own. A
+  stateless fork child is a Create.
+
+The rules:
+
+- **Fail closed.** A configured policy with a `ControlClient` that does not implement
+  `substrate.EgressPolicyClient` is refused (`ErrEgressPolicyUnsupported`) before any actor is
+  created; the daemon refuses it at startup. A failed install fails the call and leaves the actor
+  `SUSPENDED`. A fork's clone is deleted and its tag released, as for a failed resume.
+- **Configuration errors are `FAILED_PRECONDITION`.** The two refusals that repeat until the
+  configuration changes wrap `api.ErrComputeConfigInvalid`, so Exec, Resume and Fork report
+  `FAILED_PRECONDITION` with reason `COMPUTE_CONFIG_INVALID`: the missing `EgressPolicyClient`,
+  and a policy Substrate refuses with `INVALID_ARGUMENT` (or one the adapter cannot express),
+  which the adapter reports as `substrate.ErrEgressPolicyInvalid`. That error's text leaves out
+  Substrate's message, which can name a rejected hostname or credential reference; the log
+  records only `error_kind=egress_policy_invalid`. The daemon checks only the file's shape at
+  startup, so a rule Substrate refuses surfaces on the first call. Other install failures, and an
+  error from the `WithEgressPolicy` function, keep their codes (`INTERNAL` when unclassified).
+- **Existing policy kept.** `ALREADY_EXISTS` counts as installed, so the actor keeps the policy it
+  has. A changed policy reaches only actors created after the change; nothing updates an existing
+  actor's policy. Delete and recreate an actor, or update its policy in Substrate, to change it.
+- **Running compute is left alone.** The backend makes no egress call for an actor it finds
+  `RUNNING`. Such an actor without a policy, one running before the policy was configured, or one
+  woken by a routed request after a failed install, stays deny-all until it is suspended and the
+  backend resumes it.
+- **Not journaled.** The policy is runtime configuration. A session's journal does not record it,
+  and replay does not depend on it.
+
+Substrate stores the default port of a rule that names none (80 for `http`, 443 for `https`), so
+`GetActorEgressPolicy` returns it.
 
 ## SPI → substrate mapping
 
@@ -1305,6 +1348,20 @@ The counter's I4 contract is harness-side and unit-tested: it is increment-only 
 `Start.History` (the full prior log, also on a memory-restored sandbox). The neutrality contrast
 (`CanPlace` refuses the same capability on `runtime/local`, accepts on substrate) is `placement`'s
 `TestNeutralityThroughPlacer`.
+
+### `TestEgressPolicy*` — actor egress policy
+
+`TestEgressPolicyAtEveryInstallPoint` runs a counter session with `WithEgressPolicy` and reads the
+policy back with `GetActorEgressPolicy` after the first turn, after suspend and resume (the same
+stored policy, so the second install kept it), and on a fork child (its own policy).
+`TestEgressPolicyNotConfigured` checks that an actor created without the option has none.
+`TestEgressPolicyInstallFailure` uses a hostname Substrate refuses: Create fails twice with the actor
+still `SUSPENDED`, and a fork whose child policy is refused leaves no child actor and the parent's
+policy unchanged.
+
+These check that the policy is stored at each install point. The counter makes no egress call, so
+they do not check enforcement: that the first request and a request after resume are filtered, or
+that a credential is injected.
 
 ## CI
 

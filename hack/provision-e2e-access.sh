@@ -34,6 +34,7 @@ ATESPACES=(
 	e2e-delete-stateless
 	e2e-delete-microvm
 	e2e-execution-state
+	e2e-egress
 	agentsessions-templates # ACTORTEMPLATE_ATESPACE
 )
 ATE=("${KUBECTL_ATE:-kubectl-ate}" --context "kind-${KIND_CLUSTER_NAME:-kind}")

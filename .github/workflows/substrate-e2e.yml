@@ -432,10 +432,12 @@ jobs:
         # independently, the claim that a stateful fork clones RAM instead of silently cold-booting.
         # A stateful session whose actor was deleted must be refused, not cold-created.
         # Then two sessions' calls through the router at once, each of which must reach its own actor.
+        # The egress tests read back the policy installed at Create, resume and fork, and check that
+        # a policy substrate refuses leaves no running compute.
         if: needs.changes.outputs.decision != 'skip'
         env:
           COUNTER_SANDBOX_CLASS: microvm
-        run: hack/run-e2e-job.sh 'TestMemorySnapshotSuspendResume|TestMemorySessionWhoseActorIsLostIsRefused|TestFork|TestConcurrentSessionsReachTheirOwnActors|TestSessionDeletePendingOnMicroVM' "${E2E_IMAGE}" 2400
+        run: hack/run-e2e-job.sh 'TestMemorySnapshotSuspendResume|TestMemorySessionWhoseActorIsLostIsRefused|TestFork|TestConcurrentSessionsReachTheirOwnActors|TestSessionDeletePendingOnMicroVM|TestEgressPolicy' "${E2E_IMAGE}" 2400
 
       - name: Dump diagnostics on failure
         if: needs.changes.outputs.decision != 'skip' && failure()

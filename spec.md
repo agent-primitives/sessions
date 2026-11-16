@@ -1510,7 +1510,7 @@ details are additive, and an older server or an unclassified error may supply no
 
 | Code | Condition → reason (first matching condition within the code wins) |
 |---|---|
-| `ABORTED` | Append-CAS conflict → `STALE_CURSOR`; local session contention → `SESSION_BUSY`; compute contention → `COMPUTE_BUSY`; checkpoint in progress → `CHECKPOINT_IN_PROGRESS`; superseded writer fence → `FENCED`; fork snapshot superseded → `SNAPSHOT_SUPERSEDED` |
+| `ABORTED` | Append-CAS conflict → `STALE_CURSOR`; local session contention → `SESSION_BUSY`; fork snapshot superseded → `SNAPSHOT_SUPERSEDED`; compute contention → `COMPUTE_BUSY`; checkpoint in progress → `CHECKPOINT_IN_PROGRESS`; superseded writer fence → `FENCED` |
 | `FAILED_PRECONDITION` | Deleted session → `SESSION_DELETED`; lost memory-tier state → `MEMORY_STATE_LOST`; refused checkpoint → `CHECKPOINT_INVALID`; known invalid compute configuration → `COMPUTE_CONFIG_INVALID` |
 | `UNAVAILABLE` | Checkpoint uploading → `CHECKPOINT_PENDING`; unreachable harness → `HARNESS_UNAVAILABLE` (Exec/Resume/Fork); compute unavailable → `COMPUTE_UNAVAILABLE` |
 | `RESOURCE_EXHAUSTED` | No eligible compute capacity → `COMPUTE_RESOURCE_EXHAUSTED` |

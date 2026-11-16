@@ -1279,9 +1279,10 @@ func resumeError(uid string, err error) error {
 }
 
 // admissionInterruptedCode is the public code for a call whose own deadline or cancellation ended
-// an admission check or runtime operation. Operation mappers apply established lifecycle refusals
-// first; caller interruption is the fallback when no more specific recovery status applies. A
-// deadline that interrupts Run keeps its existing code.
+// an admission or registration check, compute allocation/start, or public Suspend/Fork runtime
+// operation. Operation mappers apply established lifecycle refusals first; caller interruption is
+// the fallback when no more specific recovery status applies. A deadline that interrupts Run keeps
+// its existing code.
 func admissionInterruptedCode(err error) codes.Code {
 	var caller *placement.CallerContextError
 	if errors.As(err, &caller) {

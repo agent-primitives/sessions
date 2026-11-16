@@ -1337,7 +1337,7 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 			// Read the parent again so those are api.ErrMemoryStateLost and ErrSnapshotSuperseded,
 			// as on either side of the tag.
 			if gone := b.requireSnapshot(ctx, parent, ref.ExternalURI); errors.Is(gone, api.ErrMemoryStateLost) || errors.Is(gone, ErrSnapshotSuperseded) {
-				return api.Incarnation{}, fmt.Errorf("%w; the tag of parent %q failed: %v", gone, parent.Name, err)
+				return api.Incarnation{}, fmt.Errorf("%w; the tag of parent %q failed: %w", gone, parent.Name, err)
 			}
 		}
 		return api.Incarnation{}, fmt.Errorf("substrate: tag parent %q: %w", parent.Name, err)

@@ -1191,6 +1191,39 @@ func TestFailedTagReleasesTheReservedTag(t *testing.T) {
 	}
 }
 
+// Reclassifying a failed tag from the parent's current lifecycle state must not discard the tag
+// failure: direct Go callers need both causes even though the lifecycle refusal wins at the API.
+func TestFailedTagRetainsCauseWhenParentIsGoneOrSuperseded(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		move func(*mockCloner)
+		want error
+	}{
+		{name: "deleted", move: func(m *mockCloner) { m.delete("parent") }, want: api.ErrMemoryStateLost},
+		{name: "superseded", move: func(m *mockCloner) { m.holds("parent", "snap-parent-2") }, want: api.ErrSnapshotSuperseded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newClonerWithSuspendedParent()
+			m.tagErr = errors.New("tag failed")
+			m.afterGet = func(string) {
+				m.afterGet = nil
+				tc.move(m)
+			}
+
+			_, err := newMemoryBackend(m).Fork(context.Background(),
+				api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
+				api.ForkOpts{ChildSessionUID: "child"})
+			if !errors.Is(err, tc.want) || !errors.Is(err, m.tagErr) {
+				t.Fatalf("err=%v, want %v retaining %v", err, tc.want, m.tagErr)
+			}
+			wantCalls := []string{"get:parent", "tag:parent->fork-child", "untag:fork-child", "get:parent"}
+			if !reflect.DeepEqual(m.calls, wantCalls) {
+				t.Fatalf("calls=%v want %v", m.calls, wantCalls)
+			}
+		})
+	}
+}
+
 // A tag that already existed was not reserved by this attempt, so the fork must leave it alone.
 func TestTagThatAlreadyExistsIsNotDeleted(t *testing.T) {
 	m := newClonerWithSuspendedParent()

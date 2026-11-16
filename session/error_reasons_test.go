@@ -186,6 +186,8 @@ func TestDeleteAndEarlyAdmissionReasons(t *testing.T) {
 		assertErrorInfo(t, withStatusCause(tc.code, tc.cause), tc.code, tc.reason)
 	}
 	assertErrorInfo(t, forkError("uid", api.ErrSnapshotSuperseded), codes.Aborted, "SNAPSHOT_SUPERSEDED")
+	supersededAndBusy := errors.Join(api.ErrSnapshotSuperseded, api.ErrComputeBusy)
+	assertErrorInfo(t, forkError("uid", supersededAndBusy), codes.Aborted, "SNAPSHOT_SUPERSEDED")
 	for _, mapper := range []func(string, error) error{execError, resumeError, forkError} {
 		// A live caller's peer timeout stays an outage, not the caller's deadline.
 		cause := errors.Join(placement.ErrHarnessUnavailable, context.DeadlineExceeded)

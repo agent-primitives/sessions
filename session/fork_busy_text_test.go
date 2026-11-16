@@ -50,7 +50,7 @@ func TestStatelessForkBusyOmitsSubstrateText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, forkErr := serveCapturingFork(t, store, r)
+	c, handled := serveCapturing(t, store, r)
 	sess := mustCreate(t, c)
 	if err := execHi(c, sess); err != nil {
 		t.Fatalf("first turn: %v", err)
@@ -78,30 +78,36 @@ func TestStatelessForkBusyOmitsSubstrateText(t *testing.T) {
 	if info, ok := details[0].(*errdetails.ErrorInfo); !ok || info.Domain != "agentsessions" || info.Reason != "COMPUTE_BUSY" {
 		t.Fatalf("details=%v, want agentsessions/COMPUTE_BUSY", details)
 	}
-	if handled := forkErr(); !errors.Is(handled, busy) || !errors.Is(handled, api.ErrComputeBusy) {
+	if handled := handled(v1.Sessions_Fork_FullMethodName); !errors.Is(handled, busy) || !errors.Is(handled, api.ErrComputeBusy) {
 		t.Fatalf("the Fork handler's error %v does not retain the resume's error %v", handled, busy)
 	}
 }
 
-// serveCapturingFork serves the Sessions API on store and registry as serveRegistry does, and also
-// returns the error the last Fork handler returned, before gRPC turns it into a status.
-func serveCapturingFork(t *testing.T, store *sqlitelog.Store, registry *placement.Registry) (v1.SessionsClient, func() error) {
+// serveCapturing serves the Sessions API on store and registry as serveRegistry does, and also
+// returns the error the last handler of a method (its full name, unary or streaming) returned,
+// before gRPC turns it into a status.
+func serveCapturing(t *testing.T, store *sqlitelog.Store, registry *placement.Registry) (v1.SessionsClient, func(method string) error) {
 	t.Helper()
 	var (
 		mu      sync.Mutex
-		handled error
+		handled = map[string]error{}
 	)
 	capture := func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		resp, err := handler(ctx, req)
-		if info.FullMethod == v1.Sessions_Fork_FullMethodName {
-			mu.Lock()
-			handled = err
-			mu.Unlock()
-		}
+		mu.Lock()
+		handled[info.FullMethod] = err
+		mu.Unlock()
 		return resp, err
 	}
+	captureStream := func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		err := handler(srv, ss)
+		mu.Lock()
+		handled[info.FullMethod] = err
+		mu.Unlock()
+		return err
+	}
 	lis := bufconn.Listen(1 << 20)
-	srv := grpc.NewServer(grpc.UnaryInterceptor(capture))
+	srv := grpc.NewServer(grpc.UnaryInterceptor(capture), grpc.StreamInterceptor(captureStream))
 	v1.RegisterSessionsServer(srv, session.NewService(store, registry))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
@@ -110,9 +116,9 @@ func serveCapturingFork(t *testing.T, store *sqlitelog.Store, registry *placemen
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return v1.NewSessionsClient(conn), func() error {
+	return v1.NewSessionsClient(conn), func(method string) error {
 		mu.Lock()
 		defer mu.Unlock()
-		return handled
+		return handled[method]
 	}
 }

@@ -889,9 +889,14 @@ func (b *Backend) requireCheckpoint(name string, info ActorInfo, memory bool) er
 // in requires a compute instance, or the harness is REQUIRES_MEMORY_SNAPSHOT (a fork child whose
 // FORK marker records no clone has no recorded instance before its first turn), the actor that
 // held the session's in-RAM state is gone for good, so the result wraps api.ErrMemoryStateLost as
-// well as err, the way Restore reports a missing memory-tier actor; any other error is only
-// wrapped.
+// well as err, the way Restore reports a missing memory-tier actor. A busy refusal is
+// busyRefusal. In both, err stays in the chain but not in the text (hiddenCause): Suspend, a
+// stateful Fork's checkpoint and the suspend of an Exec or Resume that parks for approval publish
+// them, and err can carry substrate's own message. Any other error is only wrapped.
 func (b *Backend) instanceGone(in api.Incarnation, op string, err error) error {
+	if errors.Is(err, api.ErrComputeBusy) {
+		return busyRefusal(fmt.Sprintf("substrate: %s %s/%s", op, b.atespace, in.ID), err)
+	}
 	memory := in.ComputeInstance != "" || b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
 	if !memory || !errors.Is(err, ErrActorNotFound) {
 		return fmt.Errorf("substrate: %s: %w", op, err)
@@ -900,9 +905,9 @@ func (b *Backend) instanceGone(in api.Incarnation, op string, err error) error {
 	if in.ComputeInstance != "" {
 		instance = fmt.Sprintf(", instance %q", in.ComputeInstance)
 	}
-	return fmt.Errorf("%w: actor %s/%s%s, which held the session's in-RAM state, no longer exists, "+
-		"so that state cannot be captured; nothing was snapshotted for the session: %s: %w",
-		api.ErrMemoryStateLost, b.atespace, in.ID, instance, op, err)
+	return &hiddenCause{err: fmt.Errorf("%w: actor %s/%s%s, which held the session's in-RAM state, no longer exists, "+
+		"so that state cannot be captured; nothing was snapshotted for the session (%s)",
+		api.ErrMemoryStateLost, b.atespace, in.ID, instance, op), cause: err}
 }
 
 // snapshotErrorKind is the debug error_kind for a failed step of Snapshot: memory_state_lost when
@@ -1254,10 +1259,11 @@ var ErrSnapshotSuperseded = fmt.Errorf("substrate: parent snapshot was supersede
 var ErrMemoryStateLost = fmt.Errorf("substrate: refusing to cold-create an actor: %w", api.ErrMemoryStateLost)
 
 // hiddenCause is err with cause added to its chain but not to its text. The session service
-// publishes Fork's typed refusals (api.ErrMemoryStateLost, api.ErrSnapshotSuperseded,
-// api.ErrComputeBusy) as their Error() text, and a ControlClient's error can carry substrate's own
-// message, which is not part of that contract. Go callers still reach cause through errors.Is and
-// errors.As.
+// publishes the typed refusals (api.ErrMemoryStateLost, api.ErrSnapshotSuperseded,
+// api.ErrComputeBusy) of Fork, Suspend, and an Exec or Resume that parks for approval, and any
+// failure of a stateful Fork's parent read (requireSnapshot), as their Error() text, and a
+// ControlClient's error can carry substrate's own message, which is not part of that contract. Go
+// callers still reach cause through errors.Is and errors.As.
 type hiddenCause struct {
 	err   error
 	cause error
@@ -1266,11 +1272,11 @@ type hiddenCause struct {
 func (e *hiddenCause) Error() string   { return e.err.Error() }
 func (e *hiddenCause) Unwrap() []error { return []error{e.err, e.cause} }
 
-// forkBusy is err, a busy refusal (api.ErrComputeBusy, which the session service publishes as
-// ABORTED) of the step msg names during a Fork, as msg followed by ErrActorBusy's own text, or by
-// api.ErrComputeBusy's when err is not ErrActorBusy. err stays in the chain but not in the text
-// (hiddenCause), since it can carry substrate's own message.
-func forkBusy(msg string, err error) error {
+// busyRefusal is err, a busy refusal (api.ErrComputeBusy, which the session service publishes as
+// ABORTED) of the step msg names during a Fork or a Snapshot, as msg followed by ErrActorBusy's own
+// text, or by api.ErrComputeBusy's when err is not ErrActorBusy. err stays in the chain but not in
+// the text (hiddenCause), since it can carry substrate's own message.
+func busyRefusal(msg string, err error) error {
 	busy := api.ErrComputeBusy
 	if errors.Is(err, ErrActorBusy) {
 		busy = ErrActorBusy
@@ -1279,10 +1285,10 @@ func forkBusy(msg string, err error) error {
 }
 
 // forkCallError is err, from the ControlClient call msg names during a stateful Fork: a busy
-// refusal is forkBusy, and any other error is wrapped as it is.
+// refusal is busyRefusal, and any other error is wrapped as it is.
 func forkCallError(msg string, err error) error {
 	if errors.Is(err, api.ErrComputeBusy) {
-		return forkBusy(msg, err)
+		return busyRefusal(msg, err)
 	}
 	return fmt.Errorf("%s: %w", msg, err)
 }
@@ -1338,7 +1344,7 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 				// substrate's own message (a busy ResumeActor's, or CreateActor's when the actor
 				// existed at create and is gone).
 				childRef := b.ref(child)
-				err = forkBusy(fmt.Sprintf("substrate: create fork child %s/%s", childRef.Atespace, childRef.Name), err)
+				err = busyRefusal(fmt.Sprintf("substrate: create fork child %s/%s", childRef.Atespace, childRef.Name), err)
 			}
 			return api.Incarnation{}, err
 		}
@@ -1538,8 +1544,10 @@ func (b *Backend) logForkCloneCaptured(ctx context.Context, ref ActorRef, info A
 
 // requireSnapshot fails with ErrSnapshotSuperseded unless the actor is SUSPENDED holding exactly
 // snapshot. A parent that no longer exists took the snapshot with it, so that is
-// api.ErrMemoryStateLost: no child can be cloned from it, and retrying cannot help. GetActor's
-// ErrActorNotFound stays in its chain but not in its text (hiddenCause).
+// api.ErrMemoryStateLost: no child can be cloned from it, and retrying cannot help. Every GetActor
+// error (ErrActorNotFound, a busy refusal as busyRefusal, and any other) stays in the chain, so
+// the session service still classifies it, but not in the text (hiddenCause). The refusals name
+// the parent and its status, never a snapshot URI.
 func (b *Backend) requireSnapshot(ctx context.Context, actor ActorRef, snapshot string) error {
 	info, err := b.ctl.GetActor(ctx, actor)
 	if errors.Is(err, ErrActorNotFound) {
@@ -1547,11 +1555,15 @@ func (b *Backend) requireSnapshot(ctx context.Context, actor ActorRef, snapshot 
 			api.ErrMemoryStateLost, actor.Atespace, actor.Name), cause: err}
 	}
 	if err != nil {
-		return fmt.Errorf("substrate: get fork parent %q: %w", actor.Name, err)
+		msg := fmt.Sprintf("substrate: get fork parent %q", actor.Name)
+		if errors.Is(err, api.ErrComputeBusy) {
+			return busyRefusal(msg, err)
+		}
+		return &hiddenCause{err: errors.New(msg + " failed"), cause: err}
 	}
 	if info.Status != StatusSuspended || info.Snapshot != snapshot {
-		return fmt.Errorf("%w: parent %q is %v holding %q, want suspended holding %q",
-			ErrSnapshotSuperseded, actor.Name, info.Status, info.Snapshot, snapshot)
+		return fmt.Errorf("%w: parent %q (%v) is no longer suspended holding the snapshot this fork took",
+			ErrSnapshotSuperseded, actor.Name, info.Status)
 	}
 	return nil
 }

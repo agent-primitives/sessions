@@ -31,6 +31,12 @@ type actorControl struct {
 	onResume  func(actor string)
 	onSuspend func(actor string)
 	onGet     func(actor string)
+	// getErr and suspendErr, when set and returning an error, fail GetActor (after onGet ran) and
+	// SuspendActor with it, as a racing delete or another operation holding the actor's lease does.
+	getErr     func(actor string) error
+	suspendErr func(actor string) error
+	// snapPrefix, when set, starts the name of every snapshot SuspendActor captures.
+	snapPrefix string
 	// onTag, when set, runs when TagActor tags actor; tagErr, when set, is what TagActor then returns.
 	onTag  func(actor string)
 	tagErr error
@@ -105,6 +111,11 @@ func (c *actorControl) ResumeActor(_ context.Context, a substrate.ActorRef) (sub
 }
 
 func (c *actorControl) SuspendActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
+	if c.suspendErr != nil {
+		if err := c.suspendErr(a.Name); err != nil {
+			return substrate.ActorInfo{}, err
+		}
+	}
 	c.mu.Lock()
 	if _, ok := c.status[a.Name]; !ok {
 		c.mu.Unlock()
@@ -118,7 +129,7 @@ func (c *actorControl) SuspendActor(_ context.Context, a substrate.ActorRef) (su
 		}
 		c.captures[a.Name]++
 		c.suspends++
-		snap = fmt.Sprintf("snap-%s-%d", a.Name, c.suspends)
+		snap = fmt.Sprintf("%ssnap-%s-%d", c.snapPrefix, a.Name, c.suspends)
 		c.status[a.Name], c.snapshots[a.Name] = substrate.StatusSuspended, snap
 	}
 	uid, lineage, noCapture := c.uids[a.Name], c.lineage(a.Name), c.captures[a.Name] == 0
@@ -143,6 +154,11 @@ func (c *actorControl) DeleteActor(_ context.Context, a substrate.ActorRef) erro
 func (c *actorControl) GetActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	if c.onGet != nil {
 		c.onGet(a.Name)
+	}
+	if c.getErr != nil {
+		if err := c.getErr(a.Name); err != nil {
+			return substrate.ActorInfo{}, err
+		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

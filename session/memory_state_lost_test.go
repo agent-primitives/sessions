@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -309,6 +308,12 @@ func (failingHarness) Run(context.Context, *api.Start, api.EventSink) error { re
 // agentsessionsd host would; the harness each turn reaches is har.
 func newMemoryHost(t *testing.T, ctl substrate.ControlClient, store *sqlitelog.Store, har api.Harness) v1.SessionsClient {
 	t.Helper()
+	return serveRegistry(t, store, memoryRegistry(t, ctl, har))
+}
+
+// memoryRegistry is newMemoryHost's registry: one REQUIRES_MEMORY_SNAPSHOT harness, "mem", on ctl.
+func memoryRegistry(t *testing.T, ctl substrate.ControlClient, har api.Harness) *placement.Registry {
+	t.Helper()
 	desc, err := echoagent.Harness{}.Describe(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -323,7 +328,7 @@ func newMemoryHost(t *testing.T, ctl substrate.ControlClient, store *sqlitelog.S
 	if err != nil {
 		t.Fatal(err)
 	}
-	return serveRegistry(t, store, r)
+	return r
 }
 
 // A turn that started and then failed may have changed the harness's RAM before it failed, so it
@@ -851,10 +856,11 @@ func TestForkWhoseParentIsDeletedAtTheTagIsRefused(t *testing.T) {
 // (api.ErrMemoryStateLost), one woken and suspended again holds another snapshot and is ABORTED
 // (api.ErrSnapshotSuperseded), and a tag refused because another operation holds the parent is
 // ABORTED (substrate.ErrActorBusy). Each creates no child. A classified refusal's message, which
-// the service publishes, names the parent but not substrate's own text from the tag's error.
+// the service publishes, names the parent but neither substrate's own text from the tag's error nor
+// a snapshot URI, and the Fork handler's error still wraps the tag's error and the typed reason.
 func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 	ctx := context.Background()
-	// substrateText stands for substrate's own message in the tag's error.
+	// substrateText stands for substrate's own message in the tag's error and in snapshot URIs.
 	const substrateText = "substrate-said: detail-7f3a"
 	for _, tc := range []struct {
 		name    string
@@ -863,6 +869,7 @@ func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 		want    codes.Code
 		reason  string
 		wantMsg string
+		typed   error
 	}{
 		{
 			name: "parent deleted during the tag",
@@ -871,30 +878,35 @@ func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 			},
 			tagErr:  errors.New("rpc error: code = FailedPrecondition desc = Actor space/x not found: " + substrateText),
 			want:    codes.FailedPrecondition,
+			reason:  "MEMORY_STATE_LOST",
 			wantMsg: "no longer exists",
+			typed:   api.ErrMemoryStateLost,
 		},
 		{
 			name: "parent suspended again during the tag",
 			onTag: func(ctl *actorControl, actor string) {
 				ctl.mu.Lock()
-				ctl.snapshots[actor] = "snap-newer"
+				ctl.snapshots[actor] = "snap-newer-" + substrateText
 				ctl.mu.Unlock()
 			},
 			tagErr:  errors.New("rpc error: code = Internal desc = copy failed: " + substrateText),
 			want:    codes.Aborted,
-			wantMsg: "want suspended holding",
+			reason:  "SNAPSHOT_SUPERSEDED",
+			wantMsg: "(suspended) is no longer suspended holding the snapshot this fork took",
+			typed:   api.ErrSnapshotSuperseded,
 		},
 		{
 			name: "busy tag while parent is suspended again",
 			onTag: func(ctl *actorControl, actor string) {
 				ctl.mu.Lock()
-				ctl.snapshots[actor] = "snap-newer"
+				ctl.snapshots[actor] = "snap-newer-" + substrateText
 				ctl.mu.Unlock()
 			},
 			tagErr:  fmt.Errorf("%w: space/x: rpc error: code = Aborted desc = %s", substrate.ErrActorBusy, substrateText),
 			want:    codes.Aborted,
 			reason:  "SNAPSHOT_SUPERSEDED",
-			wantMsg: "want suspended holding",
+			wantMsg: "(suspended) is no longer suspended holding the snapshot this fork took",
+			typed:   api.ErrSnapshotSuperseded,
 		},
 		{
 			name:    "tag contends for the parent's lease",
@@ -902,6 +914,7 @@ func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 			want:    codes.Aborted,
 			reason:  "COMPUTE_BUSY",
 			wantMsg: "is busy with another operation",
+			typed:   api.ErrComputeBusy,
 		},
 		{
 			name:    "any other tag failure stays internal",
@@ -911,13 +924,14 @@ func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+			// Every snapshot the parent's suspends capture carries substrateText in its URI.
+			ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}, snapPrefix: substrateText + "/"}
 			store, err := sqlitelog.Open(":memory:")
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = store.Close() })
-			c := newMemoryHost(t, ctl, store, echoagent.Harness{})
+			c, handled := serveCapturing(t, store, memoryRegistry(t, ctl, echoagent.Harness{}))
 			sess := mustCreate(t, c)
 			if err := execHi(c, sess); err != nil {
 				t.Fatalf("first turn: %v", err)
@@ -931,27 +945,16 @@ func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 			ctl.mu.Unlock()
 
 			_, err = c.Fork(ctx, &v1.ForkRequest{Session: sess, Count: 1})
-			if status.Code(err) != tc.want {
-				t.Fatalf("fork: want %v, got %v", tc.want, err)
-			}
-			msg := status.Convert(err).Message()
-			if !strings.Contains(msg, tc.wantMsg) {
-				t.Errorf("error %q does not contain %q", msg, tc.wantMsg)
-			}
-			if tc.want != codes.Internal {
-				if strings.Contains(msg, substrateText) || !strings.Contains(msg, strconv.Quote(sess)) {
-					t.Errorf("error %q names substrate's text or not the parent %q", msg, sess)
+			if tc.want == codes.Internal {
+				if status.Code(err) != tc.want {
+					t.Fatalf("fork: want %v, got %v", tc.want, err)
 				}
-			}
-			if tc.reason != "" {
-				details := status.Convert(err).Details()
-				if len(details) != 1 {
-					t.Fatalf("details=%v, want one agentsessions/%s ErrorInfo", details, tc.reason)
+				if msg := status.Convert(err).Message(); !strings.Contains(msg, tc.wantMsg) {
+					t.Errorf("error %q does not contain %q", msg, tc.wantMsg)
 				}
-				info, ok := details[0].(*errdetails.ErrorInfo)
-				if !ok || info.Domain != "agentsessions" || info.Reason != tc.reason || len(info.Metadata) != 0 {
-					t.Fatalf("details=%v, want agentsessions/%s without metadata", details, tc.reason)
-				}
+			} else {
+				requireHiddenText(t, err, handled(v1.Sessions_Fork_FullMethodName), substrateText, tc.want, tc.reason,
+					[]string{tc.wantMsg, strconv.Quote(sess)}, tc.tagErr, tc.typed)
 			}
 			ctl.mu.Lock()
 			gotCreated := ctl.created

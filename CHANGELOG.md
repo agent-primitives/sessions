@@ -9,6 +9,556 @@ Entries for the next release are fragments under [changelog/unreleased](changelo
 one file per pull request, which a release assembles into a section here. See
 [changelog/README.md](changelog/README.md).
 
+## v0.4.0 - 2026-11-17
+
+### Compatibility
+
+v0.4.0 migrates the SQLite journal to schema v9 with no downgrade path, records new approval
+receipt codes, which v0.3.0 harnesses reject, and a verified approver; v0.3.0 hosts cannot verify
+either. It moves the substrate adapter to Substrate v1.0.0 and returns new codes, reasons and
+messages on several failure paths. To upgrade from v0.3.0:
+
+1. Stop every v0.3.0 process that shares a journal, embedded `agentctl` included, and back the
+   journal up before v0.4.0 opens it. Custom runtimes must return a nonempty `Incarnation.ID`
+   ([Journal schema v9](#journal-schema-v9)).
+2. Upgrade every host sharing a journal before a host installs a tool policy hook, calls
+   `CloseApproval` or, authenticated, records an approval. Upgrade every harness before the first
+   two: harnesses receive the new receipt codes but not the verified approver
+   ([New receipt codes](#new-receipt-codes), [Journal schema v9](#journal-schema-v9)).
+3. Expect classified compute-start codes with `ErrorInfo` reasons, a "may still be running"
+   suffix when a failed `Exec` or `Resume` left compute running, a stale `expected_last_seq`
+   refused before compute starts, memory-tier approval gates that park, execution states other
+   than `COMPLETED`, and `Approve` retries bound to the verified approver. Hand-written
+   `HarnessRegistryClient` implementations must add `CreateHarness`
+   ([Sessions API errors](#sessions-api-errors)).
+4. Move scripts that parse `agentctl get` or `list` output, or approval JSON in lowerCamelCase, to
+   `--json` with snake_case names ([agentctl output](#agentctl-output)).
+5. On substrate, reinstall Substrate v1.0.0 with fresh state and deploy the adapter from this
+   release with it: every actor and its checkpoints are lost. Grant each `agentsessionsd` an
+   AccessPolicy and router ingress, mount its router certificate and trust bundle, and give
+   ActorTemplates and WorkerPools resource limits ([Substrate v1](#substrate-v1)). Expect new
+   refusals for egress policies, classified compute-start failures and fork clones
+   ([Substrate adapter refusals](#substrate-adapter-refusals)).
+
+As for v0.3.0, `v0.4.0` tags the root module. Follow-up PRs then bump the `integrations/substrate`
+and `integrations/claudecode` modules' require of `github.com/agent-primitives/sessions` from
+`v0.3.0` to `v0.4.0`, and `integrations/substrate/v0.4.0` tags the adapter module at that commit.
+The adapter builds against Substrate `v1.0.0`. As in v0.3.0, release archives (`agentctl`,
+`agentsessionsd`) and images (`agentsessionsd`, `harnessnode`) are built from the root module.
+Neither the substrate build (`integrations/substrate/cmd/agentsessionsd`) nor the Claude Code
+harness server (`integrations/claudecode/cmd/harnessnode`) is published as a release binary or
+image.
+
+#### Journal schema v9
+
+- <a name="sqlite-v9-rollout"></a>
+  The SQLite journal schema moves from version 6, which v0.3.0 writes, to version 9. The first open
+  by a v0.4.0 binary, `agentsessionsd` or any `agentctl` command on an embedded journal, migrates
+  the database in place in one transaction, as in the [v6 rollout](#sqlite-v6-rollout), even for a
+  metadata-only read. Events, canonical bytes, hashes and sequence numbers are not rewritten. The
+  version 9 step re-reads every session's journal inside that transaction to rebuild the
+  execution projection, so the first open of a large journal takes longer.
+  - v0.3.0 and older builds refuse the migrated database with "unsupported database schema", and
+    only when they open it. An older process that already has the journal open keeps writing; the
+    schema stamp does not fence it. The entries below say what such a writer gets wrong.
+  - Rollout: stop every older host and embedded `agentctl` process sharing the journal, back up the
+    database (with its `-wal` file, if present), then open it with v0.4.0, and upgrade all writers
+    before restarting them. There is no downgrade migration: rollback means restoring that backup
+    and losing what was written since.
+- Version 7 adds the allocation ledger and inventory completeness/evidence columns. Every
+  inventory, including fresh rows, stays incomplete until explicit operator reconciliation. See
+  [allocation ownership](docs/allocation-ownership.md).
+- Custom runtimes must return a nonempty `Incarnation.ID` from SQLite-tracked Create/Restore.
+  An empty ID now refuses placement after the runtime call and before dialing, retaining an
+  unresolved attempt. This handle is not compute-instance identity; non-recording logs are
+  unchanged.
+- Version 8 changes no table and rewrites no event; the stamp marks journals that can hold a
+  verified approver, so a build that writes schema v7 or older refuses them at Open. A writer built
+  before the verified approver (v0.3.0 and older, or an unreleased schema v7 build) that already
+  holds the journal open drops the approver on read: its `Exec`, `Resume`, `VerifyJournal` and
+  `controller.Replay` fail with `DATA_LOSS` on a session holding one, and its `Approve` RPC, like
+  the `Replay` RPC of v0.3.0, omits it.
+- Version 9 adds execution-state reporting. It extends the existing execution/approval projection
+  with an outcome maintained atomically during append, rebuilding from the journal without
+  rewriting events, canonical bytes, hashes, sequence numbers or fences. Read-only opens requiring
+  migration fail without partial changes; undecodable sessions report RUNNING without approval
+  references, and SQL faults roll back migration.
+- Already-open older writers (v0.3.0 and older, or an unreleased build before schema v9) can
+  advance the shared approval cursor without updating outcomes, making stale outcomes appear
+  current: journal-head comparison detects lagging projections, not all mixed-version writes.
+  Clients must handle RUNNING and FAILED rather than treating COMPLETED as a compatibility
+  fallback.
+- The SQLite store creates a `session_traces` table at Open, holding each session's latest trace
+  context for linking traces. It does not change `user_version`: the table is telemetry only,
+  outside the hash chain, never read by replay, and ignored by v0.3.0 and older builds. A read-only
+  Open of a journal without the table still succeeds and records no links.
+
+#### New receipt codes
+
+- `POLICY_DENIED` adds no SQLite schema version of its own; the spec moves to `0.4.0-draft`. Only a
+  host whose policy hook refuses a call definitively records the code. v0.3.0 and older refuse this
+  release's journal at open ([Journal schema v9](#journal-schema-v9)). A writer built before
+  `POLICY_DENIED` (v0.3.0 and older) that already holds the journal open still serves every session
+  without the code. For a session holding a `POLICY_DENIED` receipt, that writer's `VerifyJournal`
+  and controller `Exec`, `Resume` and `controller.Replay` refuse the session (`DATA_LOSS`). Its
+  Exec and Resume RPCs fail `INTERNAL` with a replay divergence when the receipt answers an
+  approved call, and `DATA_LOSS` when it answers an ungated call. Its `Sessions.Replay` RPC does not
+  verify and streams the record unverified, with the code as the unknown number 3. An unreleased
+  schema v7 build that already includes the code verifies and serves these receipts, and fails only
+  on a session holding a verified approver
+  ([Journal schema v9](#journal-schema-v9)). A harness built before `POLICY_DENIED` (v0.3.0 and
+  older) rejects the receipt instead of reading it. Upgrade every host sharing a journal and every
+  harness before installing such a hook; after one is recorded, rolling a host back leaves that
+  session unusable to it except through raw Replay.
+- `NOT_EXECUTED` and `OUTCOME_UNKNOWN` add no SQLite schema version. Only `CloseApproval` writes
+  them; journals without a close are unchanged. v0.3.0 and older refuse this release's journal at
+  open ([Journal schema v9](#journal-schema-v9)). A writer without the codes that already holds the
+  journal open, v0.3.0 and older or an unreleased schema v9 build, still serves every session
+  without a close. For a session holding a close receipt, that writer's `VerifyJournal` and
+  controller `Exec`, `Resume` and `controller.Replay` refuse the session (`DATA_LOSS`), its Exec
+  and Resume RPCs fail `INTERNAL` with a replay divergence, and its `Sessions.Replay` RPC streams
+  the record unverified with the code as the number 4 or 5. A harness built before these codes
+  (v0.3.0 and older) rejects the receipt instead of reading it, and receives the code as a number
+  in `Start.history`. Upgrade every host sharing a journal and every harness before calling
+  `CloseApproval`; after a close, rolling a host back leaves that session unusable to it except
+  through raw Replay.
+
+#### Sessions API errors
+
+- Compute-start failures explicitly classified by a runtime use UNAVAILABLE, RESOURCE_EXHAUSTED
+  or FAILED_PRECONDITION. Caller cancellation during compute start now keeps
+  CANCELED/DEADLINE_EXCEEDED based on the caller outcome at failure, before Fork rollback.
+  A public Suspend journal failure after a successful snapshot keeps its own status even if the
+  caller context has ended; an Exec/Resume approval handoff snapshot retains its existing
+  operational failure classification.
+  Request diagnostics honor the selected RPC status, not a nested peer timeout.
+  `CallerContextError` omits backend diagnostics from status text but retains Go causes.
+  Compute-category diagnostics are visible to RPC callers even with authorization enabled and
+  must be credential-safe; only INTERNAL responses receive the authorization sanitizer.
+- Public codes do not change. When an `Exec` or `Resume` fails after `Create` or `Restore`
+  succeeded, its message gains `; compute instance "<id>" may still be running: <reason>` unless the
+  journal, as read after the failure, owns the compute (a turn or resume on the same harness left it
+  `LIVE` and the runtime returned no replacement instance) or the host released the compute. This
+  check alone skips a `CloseApproval` receipt, which the host writes without compute; the stored
+  `compute_state` (spec `SES-8`) still reads `LIVE` after one. On a backend without
+  `api.CleanupRuntime` that is every other such failure; on any backend, it is a failure where
+  another owner may hold the compute (a checkpoint that superseded the turn included), the journal
+  cannot say who owns it (its hash chain cannot be verified, it is shorter than when the call began,
+  it holds a record replay rejects for which harness wrote a turn, such as two `EXECUTION_START`
+  records of one execution naming different harnesses or a record with an execution ID right after
+  an unfinished legacy turn, or a resume may have run on the call's harness or on another one), or
+  the release fails. A resume counts as possibly on another harness whenever a turn with a record
+  after the latest `FORK` marker ran on one (an `ExecRequest.harness` override), until the next turn
+  record. A release runs under the session guard for up to 30 seconds, so other calls on that
+  session can fail `ABORTED` (session busy) meanwhile; `runtime/local` and `runtime/remote` release
+  at once.
+- Under `session.WithAuthorization`, an `INTERNAL` `Exec` or `Resume` failure that left compute
+  running returns `internal error; compute instance "<id>" may still be running` (with
+  ` (uid "<instance>")` after the ID when the runtime returned a compute instance) instead of
+  `internal error`. It carries no cause or request text; other `INTERNAL` failures still return
+  `internal error`.
+- `Exec` refuses a stale `expected_last_seq` before the runtime's `Create`, so a stale cursor no
+  longer wakes compute. It still fails `ABORTED` (`eventlog.ErrConflict`), now with a message ending
+  `expected_last_seq N, head M`, and takes precedence over later failures such as the harness
+  `Describe` (spec `OPS-13`).
+- A `REQUIRES_MEMORY_SNAPSHOT` harness's `REQUIRES_APPROVAL` call now parks instead of failing with
+  `ErrApprovalUnavailable`, which remains for in-process harnesses with an empty or unknown tier (a
+  wire harness's omitted or unknown tier is read as `STATELESS_REPLAY`, which parks). The error's
+  message text is unchanged, so a journal in which a harness recorded that text still replays. A
+  v0.3.0 or older host still refuses the memory tier. Journals holding an earlier refusal replay
+  unchanged, and no journal schema or wire format changes. A mismatched memory-tier recovery at a
+  decided gate now reports `error_kind` `replay_diverged` rather than `approval_unavailable`, and
+  Exec and Resume return it as `INTERNAL` rather than `FAILED_PRECONDITION`, as they already do for
+  a stateless-tier divergence.
+- On a host with authentication, an `Approve` retry of a decision recorded without a verified
+  approver (before this release, or by an unauthenticated host) now fails `FAILED_PRECONDITION`
+  instead of returning the decision, as does a retry by any caller other than the recorded approver.
+  Decisions recorded without authentication still retry as before on a host without it.
+- `CreateHarness` is a new RPC, not a field on `RegisterHarnessRequest`, so a v0.3.0 or older
+  server refuses it with `UNIMPLEMENTED` and changes nothing, rather than ignoring a create-only
+  flag and reactivating the name. `RegisterHarness` is unchanged. The generated Go
+  `HarnessRegistryClient` and `HarnessRegistryServer` interfaces gain the method: a hand-written
+  client implementation must add it; servers embedding `UnimplementedHarnessRegistryServer`
+  compile unchanged. No journal schema change.
+
+#### agentctl output
+
+- `agentctl get` and `list` human formats have changed since v0.3.0; lifecycle and approval
+  summaries now use short state names and include execution state. Scripts parsing these views
+  should migrate to `--json`. Session JSON uses protobuf snake_case names, omits default-valued
+  fields and encodes int64 values as strings. Approval JSON changes from lowerCamelCase to
+  snake_case: use `decision.content_hash` instead of `decision.contentHash` and `session.last_seq`
+  instead of `session.lastSeq`. Harness JSON content is unchanged. JSON content, not bytes, is the
+  contract; whitespace and object-key order are not guaranteed. `create` still returns a bare UID
+  by default; `exec` and default replay output are unchanged. `--server=` explicitly selects
+  embedded mode even with `AGENTSESSIONS_SERVER` set; harness operator commands never inherit it.
+  Remote commands must omit an explicit `--journal`. Non-JSON diagnostics, including deletion
+  warnings, appear on stderr even in JSON mode. No wire, journal, hash-chain or Runtime SPI
+  changes.
+
+#### Substrate v1
+
+- The substrate adapter and examples require Substrate v1, pinned to the `v1.0.0` release
+  (module `go.ate.dev/substrate`, formerly `github.com/agent-substrate/substrate`; API
+  `go.ate.dev/substrate/api/ateapi/v1`, proto package `substrate.ateapi.v1`). Moving from v0.5.0
+  or v0.6.0 is a Substrate reinstall with fresh state, which loses every actor and its checkpoints:
+  v0.6.0 renumbered proto fields with no migration, and v1 moved the proto package under the same
+  service names, so an adapter and control plane on either side of the move fail every Control
+  call with `UNIMPLEMENTED`. Re-run the atespace provisioning afterwards, and upgrade
+  `agentsessionsd` together with Substrate; a mismatched pair is unsupported. Install a kind
+  cluster with substrate's `cmd/ate-setup` (`hack/install-ate-kind.sh` and
+  `hack/install-microvm-deps.sh` are gone); CI and both examples pass it
+  `--image-repo=ghcr.io/agent-substrate/substrate --image-tag=v1.0.0` to install the release's
+  published images instead of building them. The worker images are `ateworker-gvisor` and
+  `ateworker-microvm`, so a WorkerPool's `workerImage` is
+  `ghcr.io/agent-substrate/substrate/ateworker-<class>:v1.0.0`, best pinned to its digest
+  (`hack/substrate-image.sh ateworker-<class>` prints it). See
+  [Running on agent-substrate](docs/substrate-conformance.md#substrate-v1-asynchronous-suspends-suspend-durability-and-runtime-fallback).
+- Install Substrate with its default envoy router and list each `agentsessionsd`'s SPIFFE ID
+  (`spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`) in ate-setup's
+  `--ingress-allowed-spiffe-ids`. The substrate build of `agentsessionsd` now reaches harnesses
+  over mTLS on the router's :443 (`-atenet-router` and `runtime/substrate.DefaultRouterAddress`
+  default to `atenet-router.ate-system.svc:443`), and with `-substrate-harness` it refuses to start
+  without `-atenet-router-cert-file` and `-atenet-router-ca-file`: mount a `podCertificate` and a
+  `clusterTrustBundle` volume as `deploy/substrate/e2e-job.yaml` does. The plaintext h2c path to the
+  router's :80 is gone. Tools that port-forward the router from a laptop (`cmd/replay`, the
+  agentsuite `demo.sh` replay step, `demo/driver.sh`, `demo/smoke-microvm.sh` and the session
+  lifecycle UI) do not work on Substrate v1 yet; see
+  [the transport](docs/substrate-conformance.md#the-transport-harnesswire-through-atenet-router).
+- ActorTemplates need `spec.resources.limits` (`cpu_millicores` and `memory_bytes`, both
+  nonzero) and select their sandbox through the WorkerPool, not a per-template `SandboxConfig`,
+  so the substrate-kind example now refuses `SANDBOX_CONFIG` and the agentsuite renderer a
+  binding `sandbox.configName` other than the class default: name a custom config in the
+  WorkerPool's `sandboxClasses[].configRef` instead. WorkerPools need pod `resources.limits`,
+  which workers advertise as scheduling capacity; a pool with none admits no sized actor. The
+  agentsuite renderer converts a binding's `resources.cpu` and `resources.memory` to these
+  limits and refuses fractional quantities such as `0.5` CPU or `1.5Gi` memory: write whole
+  millicores or bytes instead (`500m`, `1536Mi`). Micro-VM workers book each actor's memory limit
+  plus 4MiB and 8MiB per GiB against their limits less a 64Mi reserve; the examples' 1Gi pools
+  still hold one 512Mi actor. See
+  [templates and worker pools](docs/substrate-conformance.md#substrate-v1-templates-and-worker-pools).
+- WorkerPools are `ate.dev/v1` (was `v1alpha1`). Substrate v1 refuses an ActorTemplate's
+  `snapshotConfig.storageLocation` unless its `PerTemplateSnapshotLocation` preview gate is on, so
+  the substrate-kind example refuses `SNAPSHOT_LOCATION` and no longer writes one, and the
+  agentsuite renderer refuses a binding's `snapshot.storageLocation`: snapshots go under the
+  cluster's `--snapshot-location`. Both examples install ate-system with only the gVisor class and
+  add the micro-VM `SandboxConfig` with `ate-setup deploy sandboxconfig` when they need it. See
+  [templates and worker pools](docs/substrate-conformance.md#substrate-v1-templates-and-worker-pools).
+- Each atespace needs an AccessPolicy that grants the `agentsessionsd` principal the `editor` role.
+  Without it Substrate denies every Control call with `PERMISSION_DENIED`; Sessions currently
+  reports a Resume denied this way as `INTERNAL`. See
+  [authorization](docs/substrate-conformance.md#substrate-v1-authorization-and-atespace-provisioning).
+- After a reinstall and re-provisioning, a session whose latest `SUSPEND` recorded a checkpoint has
+  lost it with its actor (an operator delete has the same effect; see
+  [a lost actor refuses Resume](docs/substrate-conformance.md#a-lost-actor-refuses-resume)):
+  - Resume is refused with `FAILED_PRECONDITION` (`api.ErrInvalidCheckpoint`), creates no actor and
+    journals nothing. A stateless session previously got an `INTERNAL` get-actor error.
+  - Exec starts new compute and replays the journal; files the checkpoint held are lost. Exec of a
+    `REQUIRES_MEMORY_SNAPSHOT` session that has run a turn is refused, since its in-RAM state is
+    gone.
+
+#### Substrate adapter refusals
+
+- `runtime/substrate`: with `WithEgressPolicy` set, a `ControlClient` that does not implement
+  `substrate.EgressPolicyClient` is refused (`ErrEgressPolicyUnsupported`) before any actor is
+  created, and a failed install fails the call with the actor left suspended. The missing
+  interface and a policy Substrate refuses as invalid (`substrate.ErrEgressPolicyInvalid`) reach
+  Sessions callers as `FAILED_PRECONDITION` with reason `COMPUTE_CONFIG_INVALID`. An actor that
+  already has a policy keeps it, so a changed policy reaches only actors created after the change,
+  and an actor found running is not given one: it stays deny-all until the backend next resumes
+  it. Without the option, the backend makes no egress call.
+- Substrate compute-start failures with ate-api UNAVAILABLE or RESOURCE_EXHAUSTED now return
+  the corresponding Sessions code and an `agentsessions` ErrorInfo reason instead of INTERNAL.
+  Classified messages omit peer diagnostics; direct Go callers retain the original cause.
+  Ambiguous configuration failures remain INTERNAL without a reason. See
+  [compute-start errors](docs/substrate-conformance.md#compute-start-errors).
+- A stateful substrate `Fork` now refuses a clone whose `ResumeActor` leaves `NoCapture` false but
+  shows no capture of its own with `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`), where v0.3.0
+  returned `ABORTED` (`substrate.ErrActorBusy`): a retry is refused the same way until the client
+  reports `NoCapture`, so the refusal no longer reads as retryable (`WARN` log `capture` `unknown`,
+  `error_kind` `memory_state_lost`). A clone holds a capture of its own, and stays `ABORTED`
+  (`capture` `held`, `error_kind` `actor_busy`) with a retried Fork cloning a new child, only when
+  `CreateActorFromTag` reported a `Snapshot` and the resume reports `SnapshotNotReady` or another,
+  non-empty `Snapshot`. A resume that reports neither a `Snapshot` nor `SnapshotNotReady`, which
+  v0.3.0 counted as held, is `unknown`. Either way the clone is torn down and the parent is
+  unaffected. See
+  [a refused capture stays refused](docs/substrate-conformance.md#substrate-v050-a-refused-capture-stays-refused).
+
+### Added
+
+- `agentctl` session commands support protobuf `--json`; `replay --json` emits one complete
+  `LogRecord` per line. `get` has labeled details, `list` has an aligned table with headings, and
+  human state values use consistent short names. The `list` table caps column padding at 40
+  characters, so one long value cannot widen every other row; longer values are still printed in
+  full. All CLI JSON uses one protobuf writer with snake_case field names, full enum names, omitted
+  default values and string-encoded int64s. `AGENTSESSIONS_SERVER` supplies the session endpoint
+  unless `--server` is explicit, and environment-selected targets are announced on stderr before
+  requests.
+- Durable allocation intent and session-scoped handle acknowledgements for SQLite-backed Create and
+  Restore, plus optional non-destructive release contracts for local and remote runtimes. No reaper
+  runs yet; Fork retains its existing allocation and rollback behavior.
+- `integrations/claudecode`: a new Go module with an unmediated (spec §8.8, `EXE-37`),
+  `REQUIRES_MEMORY_SNAPSHOT` (`EXE-38`) harness that runs one headless Claude Code turn
+  (`claude -p --output-format stream-json`) per execution and resumes the same Claude Code session
+  on later turns. It reports the turn's final text as `OUTPUT`, each tool Claude Code ran as a
+  reported `TOOL_RESULT` with a bounded receipt, and the turn's token counts as one `USAGE`
+  (`EXE-39`); there is no `MODEL_CALL`, and spend, model-call audit and replay are given up
+  (`EXE-41`). Claude Code's reported cost (`total_cost_usd`) is not recorded, because `USAGE` has
+  no cost field. A turn that ends without a `result` records input tokens only, and a cancelled
+  turn records no `USAGE` and no `TOOL_RESULT` for a tool still running. A tool whose `tool_result`
+  is malformed fails the turn and is reported as `no result observed`, like a tool that never got a
+  result. The `claude` process gets only an allowlist of the harness's environment (`PATH`, `HOME`,
+  `USER`, `SHELL`, `TMPDIR`, locale, the `ANTHROPIC_*` key and base URL variables,
+  `CLAUDE_CONFIG_DIR`, and `Config.EnvAllowlist`; a deployment that needs proxy or CA variables must
+  add them), and its key must be a placeholder (`EXE-40`). Every turn passes
+  `--setting-sources user --strict-mcp-config`, so settings, hooks and `.mcp.json` in the work dir
+  cannot widen the permission mode, and `bypassPermissions` also needs
+  `Config.AllowBypassPermissions`. A turn whose process fails before `system/init`, such as a
+  `--resume` whose transcript is gone, logs its exit status and first stderr line. A turn's process
+  group is killed before the turn returns, a successful turn included, so a background process a
+  tool started does not outlive the turn; that needs Unix process groups, so `New` refuses other
+  platforms such as Windows. A re-run of a started execution fails (`EXE-42`), a turn on an instance
+  that lost the session's memory fails rather than start an empty conversation (`EXE-43`), and a
+  wrapper that fails an execution before invoking this harness must omit that execution in full from
+  later `Start.History` (`EXE-44`). An execution with no Claude Code events is not proof that it
+  never ran, so uncertain delivery still fails closed as state loss. Approvals are not supported.
+  Fork does not work yet: on a runtime that snapshots memory, forking a session that has run a turn
+  creates a child, and every turn on the child fails with the same error, `claudecode: session has
+  earlier turns but this harness holds no state for it`; a follow-up issue tracks it.
+  `controller.Replay` does not refuse this harness and must not be pointed at it.
+- `integrations/claudecode/cmd/harnessnode`: a harness server that serves only this harness, built
+  on the root module's `harnessnode` and reading the same server settings. `HARNESS_KIND` must be
+  unset or `claudecode`. The harness is configured by `HARNESS_CLAUDE_WORKDIR` and
+  `HARNESS_CLAUDE_PERMISSION_MODE` (both required), and optionally `HARNESS_CLAUDE_BIN`,
+  `HARNESS_MODEL`, `HARNESS_CLAUDE_MAX_TURNS`, `HARNESS_CLAUDE_MAX_BUDGET_USD`,
+  `HARNESS_CLAUDE_ENV_ALLOWLIST` (further variable names `claude` receives) and
+  `HARNESS_CLAUDE_ALLOW_BYPASS_PERMISSIONS` (the second opt-in `bypassPermissions` requires).
+- `Sessions.CloseApproval` RPC and `client.CloseApproval` (new) close an approval gate the harness
+  can no longer re-issue, so the session can take a new turn. An undecided gate gets a host denial
+  (reason "approval closed", `verified_approver` set from the authenticated caller) and a
+  `NOT_EXECUTED` receipt, a denied gate gets `NOT_EXECUTED`, and an approved gate without a receipt
+  gets `OUTCOME_UNKNOWN`, because the journal cannot prove the executor never ran. A gate that
+  already has a receipt is returned unchanged, so retries are safe. The close calls no executor,
+  policy hook, harness or runtime and appends no `END`; `Exec` with input is admitted afterwards,
+  and `Resume` serves the decision and receipt to a harness that re-issues the call, except that a
+  `REQUIRES_MEMORY_SNAPSHOT` harness restored at the gate cannot continue there unless the gate is
+  the turn's first effect (spec `APR-16`, `APR-19`). Both codes are
+  new `ToolResult.Code` values only the host writes: a harness report or ordinary executor result
+  carrying one is rejected with `controller.ErrApprovalReceiptReport`, and an approved call's
+  executor result carrying one, whatever its `is_error`, is recorded as `EXECUTOR_ERROR`. With
+  authorization enabled the RPC checks `read` and then `api.ActionApprovalClose` (`approval.close`,
+  new), which `OwnerAuthorizer` grants the owner and `OwnerAllowlistAuthorizer` delegates unchanged;
+  `approve` does not imply it. Go hosts can call `controller.CloseApproval` or
+  `placement.Registry.CloseApproval` (new). See [spec §10.5](spec.md#105-close) and
+  [security](docs/security.md#approval-is-not-a-security-policy).
+- `HarnessRegistry.CreateHarness`: atomic create-only registration (spec `REG-3a`), needing the
+  `registry.register` action. A create that timed out may have committed: inspect with
+  `GetHarness` rather than retry. New in Go: `sqlitelog.Store.CreateHarness`,
+  `sqlitelog.Store.HarnessNameReserved` and `sqlitelog.ErrHarnessExists`.
+- `runtime/substrate`: `WithEgressPolicy` installs a Substrate egress policy on each session's actor
+  before its compute starts: after `CreateActor` and before the first `ResumeActor`, before every
+  later `ResumeActor` the backend issues, and on a fork child's clone before its resume. The policy
+  is a neutral `substrate.EgressPolicy` (`http`, `https` and `tls_passthrough` rules, with
+  credential-header effects from a credential URI or an actor JWT), installed through the new
+  optional `substrate.EgressPolicyClient`, which the ate-api adapter implements. See
+  [Actor egress policy](docs/substrate-conformance.md#actor-egress-policy).
+- `agentsessionsd` (substrate build): `-substrate-egress-policy-file` reads a Substrate `ateapi.v1`
+  `EgressPolicy` in protojson once at startup and installs it on every session actor.
+- `controller.ErrMissingModel`: a live model call on a controller with neither a `ModelFunc` nor
+  `WithStreamingModel` returns it (match with `errors.Is`) instead of dereferencing a nil model.
+  Replay and streaming-only controllers still accept a nil model.
+- Exec, Resume, Suspend, Fork and DeleteSession report recognized failure reasons in
+  `google.rpc.ErrorInfo` under the `agentsessions` domain. Neutral runtime sentinels classify
+  compute availability, capacity and configuration failures. Unknown backend failures stay
+  INTERNAL without a reason. Direct Go calls retain causes; RPC clients use details.
+- `cmd/harnessnode`: `HARNESS_MAX_RECV_MSG_SIZE` sets the largest message, in bytes, the harness
+  server accepts from the host. `Start` carries the session's whole prior journal, and a `Start`
+  over the limit is refused with `RESOURCE_EXHAUSTED` before the harness runs, so raise it for long
+  histories. Unset keeps gRPC's 4 MiB default; an invalid value stops harnessnode before it
+  listens. See the
+  [harness authoring guide](docs/harness-authoring.md#package-chat-for-a-remote-runtime).
+- `REQUIRES_MEMORY_SNAPSHOT` harnesses can request `REQUIRES_APPROVAL` tool calls. The call parks,
+  the turn is suspended with a memory snapshot, and after `Approve` the restored harness continues
+  from the gate: its first sink call must be the gated call, any other first call is
+  `ErrReplayDiverged`, and a denial returns the `APPROVAL_DENIED` receipt without dispatch. Approved
+  calls stay host-executed. Stateless replay is unchanged (spec `APR-16`).
+- OpenTelemetry tracing. Session, placement, controller, runtime, and harness-wire operations emit
+  spans, and gRPC clients and servers propagate W3C trace context, including into substrate. Each
+  session operation is linked to the session's previous one, so a session can be followed across
+  suspensions. The reference binaries export over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+  See [docs/observability.md](docs/observability.md#tracing). Spans follow the logging data
+  policy: gRPC status messages, error messages, panic values, and URL queries are redacted,
+  including from `otelgrpc` and `otelhttp` spans.
+- `observability.Begin` and `observability.BeginDebug`, which return the span's context. `Start`
+  and `StartDebug` are deprecated: they now also emit a span, but do not return its context, so
+  work done under the caller's ctx is not nested beneath it.
+- `placement.DefaultDialWith` (new): a `Dialer` that dials as `placement.DefaultDial` does plus
+  the host's `grpc.DialOption` values, for example
+  `grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(n))` to accept harness frames over gRPC's
+  4 MiB default. The incarnation's call metadata still replaces any value an interceptor among
+  those options sets in the outgoing context, and a `unix://` incarnation still dials its socket.
+  Nothing gRPC runs after the interceptors may set routing keys such as `ate-target-actor`:
+  per-RPC credentials and a load balancer's pick metadata are sent alongside the incarnation's
+  value, and a stats handler's `TagRPC` can replace it. `DefaultDial` is unchanged.
+- `session.SessionStore` and `session.HarnessStore`: `NewService` takes a `SessionStore`, and
+  `NewHarnessRegistry` and `ReserveStaticHarnessNames` take a `HarnessStore`, instead of
+  `*sqlitelog.Store`, so a host can supply another backend. `*sqlitelog.Store` implements both
+  through the new `SessionLog` and `ForkSessionLog` methods and stays the only backend; callers that
+  pass it compile and behave unchanged. Those methods return the new `eventlog.SessionJournal`, an
+  `eventlog.Store` that must also implement the `CheckWritable` deletion preflight, so a journal
+  wrapper cannot drop it; `eventlog.Store` is unchanged. `Replay` keeps the stored protobuf field
+  presence only for a journal that also implements `ReadProto`, as `*sqlitelog.Log` does. Another
+  backend's obligations are spec §6.7 (`STORE-1` to `STORE-7`).
+- A self-contained [durable Substrate kind example](examples/substrate-kind/README.md),
+  using the existing daemon and stock chat harness, declarative templates, persistent SQLite,
+  optional Ollama, and a pod-restart smoke.
+- `agentctl verify --session UID` verifies a session's committed hash chain locally from the
+  Sessions API, including protobuf field presence. It refuses missing records, changed content, and
+  broken links.
+- `integrations/substrate/routertls` (new): the mTLS client to substrate's `atenet-router` that the
+  substrate build of `agentsessionsd` uses, for hosts that embed `runtime/substrate` from another
+  module. `routertls.Load` reads the pod's SPIFFE credential bundle and the router's trust bundle,
+  re-reading both on every connection, and `routertls.Dialer` returns the `placement.Dialer` to
+  pass to `placement.WithDialer`. `Credentials.ClientHandshake` checks the router's certificate
+  against the configured server name whatever authority the caller passes.
+- Optional pre-dispatch tool policy hook, `controller.WithToolPolicy` and `placement.WithToolPolicy`
+  (new), for custom Go hosts. It runs right before the executor for ordinary host-executed calls,
+  live or re-driven by Resume, and for approved `REQUIRES_APPROVAL` calls on recovery, and returns
+  allow, a transient refusal or a definitive refusal. A call whose journaled arguments differ from
+  what the executor receives (an integer with more than 53 significant bits, such as 2^53+1, in any
+  spelling; a `json.Number` such as `0.30000000000000001` that the journal records as 0.3; a
+  `float32` such as 1e20 whose JSON text reads as a different float64; a string that is not valid
+  UTF-8) is refused transiently without asking the hook, as is an argument the guard
+  cannot compare: a Go struct that `encoding/json` writes field by field, or a value or non-string
+  map key whose type has a `MarshalJSON` or `MarshalText` method (`time.Time`, `big.Int`,
+  `json.RawMessage`). A transient refusal runs nothing and writes no receipt: an approved call's
+  Resume fails with `FAILED_PRECONDITION` (`controller.ErrToolPolicyRefused`, new) and its
+  decision stays recoverable. A definitive refusal records a `POLICY_DENIED` receipt (new
+  `ToolResult.Code`), which recovery and replay serve without asking again. Only the hook writes
+  the code: an executor result carrying it is rejected with
+  `controller.ErrApprovalReceiptReport` and no receipt, on ordinary and approved calls; an approved
+  call's Resume fails with `FAILED_PRECONDITION` and its decision stays recoverable. Without a hook,
+  nothing changes. The stock daemon installs none. See
+  [pre-dispatch tool policy](docs/security.md#pre-dispatch-tool-policy) and spec §9.4, now
+  version `0.4.0-draft`.
+- Spec §8.8 defines two harness classes. A mediated harness makes every model call through the
+  host, as before (`EXE-36`). An unmediated harness, such as an agent CLI that calls its provider
+  itself, makes some or all of its model calls through the runtime's egress instead (`EXE-37`); it
+  must declare `REQUIRES_MEMORY_SNAPSHOT` (`EXE-38`), holds only a placeholder provider key that
+  the egress replaces (`EXE-40`), and, for the calls outside the host, reports output and usage
+  with no `MODEL_CALL` (`EXE-39`) and gives up host-bounded spend and model-call audit; it also
+  gives up replay of its executions (`EXE-41`). It must not re-run an interrupted execution
+  (`EXE-42`), and a turn interrupted by memory loss fails and is re-prompted, in a new session
+  once the compute is gone (`EXE-43`). The provider credential invariant in spec §17 and
+  [security](docs/security.md#provider-credentials-and-harness-classes) now covers both
+  classes. No API, wire, storage or code change; the class is not advertised in `Describe`. See
+  [unmediated harnesses](docs/harness-authoring.md#unmediated-harnesses).
+- `APPROVAL_RESULT` records the verified approver: when the host's authentication interceptors
+  verified the caller, `Approve` journals its exact issuer and subject as the new
+  `ApprovalResult.verified_approver` (`CallerIdentity`, also new), never a request field. Exact
+  retries are bound to it (`APR-7`, `APR-8`). Harnesses do not receive it: the host clears it in the
+  decision frame, the receipt and every earlier decision sent in `Start.History` (`EXE-7`). A
+  pre-dispatch tool policy hook, which is host code, does: `controller.ToolPolicyApproval.Decision`
+  carries it (`TOOL-13`). New `api.ApprovalDecision.VerifiedApprover` is host-set; `client.Approve`
+  refuses a decision that sets it with the new `client.ErrVerifiedApproverNotSendable`.
+
+### Changed
+
+- After `EVENT_END` the reference host half-closes the harness Connect stream and waits up to 2
+  seconds for the harness to end the RPC, instead of cancelling it at once, so the harness can
+  flush its spans and return its own status. A harness that never closes costs at most the 2
+  seconds. The host waits the same way when a sink call fails on its side, such as a model
+  provider error, unless the caller has cancelled. A park already waited for the harness to close.
+
+### Fixed
+
+- Embedded `agentctl` servers suppress routine INFO logs so session views stay readable; warnings,
+  errors and command failure diagnostics remain visible on stderr. Standalone daemon logging is
+  unchanged.
+- `agentctl list --page-size` now actually controls page requests (negative values are refused,
+  large values clamped); both human and JSON views still include every page.
+- `agentctl` rejects an explicit `--journal` with a remote target instead of silently ignoring it.
+  Deletion warnings go to stderr, including with `--json`, keeping stdout machine-readable.
+- Broken stdout pipes on unary response commands report output failures on stderr instead of
+  exiting via SIGPIPE, preserving the warning that successful mutations remain committed.
+  `exec` streaming keeps its existing signal behavior.
+- A failed `Exec` or `Resume` no longer drops compute it allocated without a word (spec `RT-7`).
+  When `Create` or `Restore` succeeded and a later step failed before the journal recorded anything
+  that owns the compute, the host releases it through `api.CleanupRuntime.ReleaseSession`. When the
+  backend has no `api.CleanupRuntime` (`runtime/substrate`), the release fails, another owner may
+  hold the compute, or the journal cannot establish who owns it, the error is the new
+  `placement.ComputeLeftRunningError`, matched by the new `placement.ErrComputeLeftRunning`: it
+  names the incarnation and keeps the original error for `errors.Is` and `errors.As`, while the
+  cleanup outcome is in its `Cleanup` field and the message.
+- Session responses report the latest execution's journal-derived state instead of COMPLETED for
+  any nonempty journal: PENDING before execution, AWAITING for valid owned pending approval,
+  COMPLETED after END, FAILED after ERROR, and RUNNING for other progress or uncertain evidence.
+  RUNNING does not prove controller liveness and includes interrupted executions and historical
+  forks. Lifecycle records preserve the outcome. Modern executions may recover after FAILED;
+  ERROR finishes legacy ID-less executions for recovery purposes. ID-less execution records after
+  the legacy prefix mark reporting corruption, suppressing approval references and reporting
+  RUNNING during both append and migration. Cancellation remains unimplemented; liveness is
+  tracked in [#213](https://github.com/agent-primitives/sessions/issues/213).
+- `agentctl get` and `list`, plus suspend, resume, approve and deny status output, print the
+  execution state returned by the server alongside compute state.
+- The `ForkRequest.count`, `ForkRequest.child_names` and `Sessions.Fork` comments now describe what
+  the server does: a `count` of zero or less forks one child instead of being `INVALID_ARGUMENT`,
+  and `child_names` is checked against that effective count. A `REQUIRES_MEMORY_SNAPSHOT` parent is
+  checkpointed once for the whole fan-out; if the fan-out then fails, the checkpoint is not rolled
+  back (its `SUSPEND` stays committed) and the parent is not resumed automatically. Behavior is
+  unchanged.
+- Stateful Substrate `Fork` now retains the original `TagActor` failure in the Go error chain when
+  the parent disappeared or its snapshot was superseded while tagging. Lifecycle code and ErrorInfo
+  reason precedence are unchanged.
+- The durable Substrate kind example has its own live CI cluster, exercising fresh setup,
+  unchanged reruns, restart/persistence smoke and teardown through its public scripts instead
+  of borrowing the conformance cluster. Both live jobs gate `substrate-conformance`.
+- The Substrate kind example bootstraps and pins a new managed checkout before inspecting clusters,
+  so a first run does not require kind on `PATH`. Relative kubeconfig overrides resolve
+  consistently across setup commands; stale installations still refuse checkout changes.
+  Failed or interrupted bootstrap retains an explicit marker, preventing setup or teardown
+  from running an unpinned checkout on retry, including through equivalent checkout paths.
+- The Substrate kind example refuses leftover model credentials in Ollama/stub modes and
+  validates model routes before cluster operations, preserving a working deployment when a
+  rerun supplies invalid provider settings.
+- SQLite-backed `Replay` preserves the stored protobuf event's field presence, so audit clients
+  can detect presence-only tampering instead of verifying a normalized event. Stored bytes,
+  hashes, and journal/wire schemas are unchanged; no journal migration is required.
+- `agentctl verify` skips `Replay` for a captured empty prefix, avoiding false failures when a
+  concurrent turn appends after the session head was read.
+- Daemon startup logs identify the model without copying its provider endpoint, userinfo, or query.
+
+### Security
+
+- The toolchain moves to Go 1.26.11 for the root module, which builds the release binaries and
+  images, `integrations/claudecode` and the Substrate kind example, and to Go 1.27.4 for
+  `integrations/substrate` and the AgentSuite example, fixing
+  [GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859). Language versions are unchanged.
+- Substrate `Fork` and `Suspend` refusals, and those of an `Exec` or `Resume` that parks for
+  approval, published as `FAILED_PRECONDITION` or `ABORTED` no longer carry the Substrate control
+  plane's own error text or snapshot URIs. This covers the checkpoint that `Suspend`, a stateful
+  fork and the park's suspend take of the actor, when the actor is gone or busy at the look before
+  the suspend or at the suspend itself; a stateful fork whose parent is gone, superseded or busy
+  when it is read before or after the tag; a busy tag, create from tag, egress install or resume of
+  the clone; a clone deleted or replaced before its resume; a refused clone teardown; and a busy
+  create or resume of a replay-fork's (`STATELESS_REPLAY`) child. A stateful fork's read of its
+  parent that fails in any other way, published as `INTERNAL` or `UNAVAILABLE`, no longer carries
+  that text either. Each message names the typed reason and the actor, parent, tag, clone or child
+  involved, and a superseded parent's status. Go callers still reach the control client's error
+  through `errors.Is` and `errors.As`, except a failed clone teardown's, which the message names
+  only by its `error_kind` and which is logged at Warn. Removing the text changes no status code or
+  ErrorInfo reason. The codes and reasons these refusals carry in v0.4.0, where v0.3.0 attached no
+  ErrorInfo, are under [Added](#added), [Sessions API errors](#sessions-api-errors) and
+  [Substrate adapter refusals](#substrate-adapter-refusals).
+- The substrate build of `agentsessionsd` no longer reaches harnesses over the router's
+  unauthenticated plaintext :80. It authenticates to substrate's `atenet-router` with its pod's
+  SPIFFE certificate and verifies the router's serving certificate against the servicedns trust
+  bundle and the name `atenet-router.ate-system.svc` (`-atenet-router-cert-file`,
+  `-atenet-router-ca-file`, `-atenet-router-server-name`). Both files are re-read on every router
+  connection, so kubelet's rotations apply without a restart, and a startup probe logs whether the
+  router admits the daemon's ID, retrying for about five minutes while the router is unreachable.
+  See [security.md](docs/security.md) for what is and is not verified.
+
 ## v0.3.0 - 2026-10-22
 
 ### Compatibility
@@ -152,10 +702,10 @@ Release archives and images carry the neutral `agentsessionsd`, as in v0.2.0. Th
 #### model/openai changes
 
 - Chat Completions status errors, streaming and journaled ones included, no longer carry the
-  provider's message or response body (see [Security](#security)). A 4xx such as a wrong model ID
-  or a missing key now reads as the model and HTTP status plus bounded `error.code`/`error.param`
-  identifiers, so diagnose from those or from provider-side logs. Transport, body-read and decode
-  errors are unchanged.
+  provider's message or response body (see [Security](#v030-chat-completions-errors)). A 4xx such
+  as a wrong model ID or a missing key now reads as the model and HTTP status plus bounded
+  `error.code`/`error.param` identifiers, so diagnose from those or from provider-side logs.
+  Transport, body-read and decode errors are unchanged.
 - `model/openai` now refuses nonempty `ModelRequest.Params`, previously silently ignored. A turn
   interrupted under an older build whose harness sets Params fails if recovery must re-drive the
   model call; completed recorded model effects remain replayable without invoking the adapter.
@@ -178,10 +728,10 @@ Release archives and images carry the neutral `agentsessionsd`, as in v0.2.0. Th
 
 - `agentsessionsd` refuses positional arguments, naming them, and exits with status 2. It used to
   ignore them, along with every flag after the first one, since flag parsing stops there.
-- `integrations/substrate/cmd/agentsessionsd` (see [Added](#added)) is built from a source
-  checkout of that module; neither its binary nor an image is published with this release. The
-  neutral `cmd/agentsessionsd` in the release archives and images does not offer the substrate
-  flags.
+- `integrations/substrate/cmd/agentsessionsd` (see [Added](#v030-substrate-agentsessionsd)) is
+  built from a source checkout of that module; neither its binary nor an image is published with
+  this release. The neutral `cmd/agentsessionsd` in the release archives and images does not offer
+  the substrate flags.
 
 #### Substrate backend changes
 
@@ -439,7 +989,8 @@ Release archives and images carry the neutral `agentsessionsd`, as in v0.2.0. Th
   system/user text uses `input_text`. Model-call diagnostics retain categories, HTTP status and
   bounded provider `error.code`/`error.param` identifiers, not messages or transport URLs/details;
   see [mapping and limits](docs/responses-adapter.md).
-- `integrations/substrate/cmd/agentsessionsd` is `agentsessionsd` with the substrate backend linked
+- <a name="v030-substrate-agentsessionsd"></a>
+  `integrations/substrate/cmd/agentsessionsd` is `agentsessionsd` with the substrate backend linked
   in. `-substrate-harness name=atespace/template[,memory]` serves a harness as one actor per session
   in `-substrate-atespace`, controlled over the ate-api (`-ateapi-addr`, TLS, with
   `-ateapi-token-file` re-read on every call, `-ateapi-ca-file` or `-ateapi-insecure-skip-verify`)
@@ -509,7 +1060,8 @@ Release archives and images carry the neutral `agentsessionsd`, as in v0.2.0. Th
   writing a receipt. The executor receives a copy of the arguments. Before, an in-process harness
   on the in-memory store could change the approved arguments after the journal was verified,
   because the store kept the harness's argument map. Journals and receipts are unchanged.
-- Chat Completions status errors, including streaming calls and their journaled errors, now retain
+- <a name="v030-chat-completions-errors"></a>
+  Chat Completions status errors, including streaming calls and their journaled errors, now retain
   only the model, HTTP status and bounded `error.code`/`error.param` identifiers, never provider
   messages or raw response bodies. Identifier limits and ordering match the Responses adapter.
   This change does not alter transport, body-read or decode errors.

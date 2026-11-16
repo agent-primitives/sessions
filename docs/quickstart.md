@@ -34,15 +34,12 @@ go build -o agentsessionsd ./cmd/agentsessionsd
 ```
 
 Release archives and container images are published only for tagged releases. The release pinned
-below, v0.3.0, predates part of this walkthrough. With it, sections 1 to 4 and 7 to 10 work as
-shown, except that the embedded server also logs INFO lines to stderr. Section 5 prints an older
-suspend and resume summary. Section 6 needs `main`: v0.3.0 prints older `get` and `list` views
-with no execution state, has no `--json` or `verify`, and ignores `AGENTSESSIONS_SERVER`.
+below, v0.4.0, runs every section as shown.
 
 ```bash
 # Release archive: both binaries, for linux/darwin on amd64/arm64.
 # Checksums and SBOMs are published alongside it.
-VERSION=v0.3.0
+VERSION=v0.4.0
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 curl -sSL "https://github.com/agent-primitives/sessions/releases/download/${VERSION}/agentsessions_${VERSION#v}_${OS}_${ARCH}.tar.gz" \
@@ -52,7 +49,7 @@ curl -sSL "https://github.com/agent-primitives/sessions/releases/download/${VERS
 Container images are published for the server and the harness node:
 
 ```bash
-docker run --rm ghcr.io/agent-primitives/sessions/agentsessionsd:v0.3.0 --help
+docker run --rm ghcr.io/agent-primitives/sessions/agentsessionsd:v0.4.0 --help
 ```
 
 The images are multi-arch, built from the tagged source with no Dockerfile. `agentsessionsd` is the
@@ -279,7 +276,7 @@ replace `--journal ...` on the client commands with `--server 127.0.0.1:8080`.
 
 ### CLI output and server defaults
 
-This subsection needs `agentctl` built from `main` (see [Install](#install)). v0.3.0 ignores
+This subsection needs `agentctl` v0.4.0 or later (see [Install](#install)). v0.3.0 ignores
 `AGENTSESSIONS_SERVER` and silently uses a local `agentsessions.db`; with that release, pass
 `--server 127.0.0.1:8080` on each command of the example below instead.
 

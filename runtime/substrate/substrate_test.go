@@ -988,6 +988,43 @@ func TestForkIsReplayForkForStatelessHarness(t *testing.T) {
 	}
 }
 
+// A replay-fork's busy refusal reaches Sessions callers as ABORTED with its text, so the busy error
+// of the child's Create, which can carry substrate's own message, stays in the chain but not in the
+// text, whichever step of Create was refused and however the ControlClient wraps api.ErrComputeBusy.
+func TestStatelessForkBusyOmitsControlClientText(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		setup     func(m *mockControl) error // fails one call with the error it returns
+		actorBusy bool                       // the refusal is ErrActorBusy, not only api.ErrComputeBusy
+	}{
+		{name: "resume of the new child busy", actorBusy: true, setup: func(m *mockControl) error {
+			m.resumeErr = fmt.Errorf("%w: space/child: rpc error: code = Aborted desc = %s", substrate.ErrActorBusy, substrateText)
+			return m.resumeErr
+		}},
+		{name: "resume of an existing suspended child busy", actorBusy: true, setup: func(m *mockControl) error {
+			m.exists("child", substrate.StatusSuspended)
+			m.resumeErr = fmt.Errorf("%w: space/child: rpc error: code = Aborted desc = %s", substrate.ErrActorBusy, substrateText)
+			return m.resumeErr
+		}},
+		{name: "busy from a client that wraps api.ErrComputeBusy", setup: func(m *mockControl) error {
+			m.resumeErr = fmt.Errorf("%w: %s", api.ErrComputeBusy, substrateText)
+			return m.resumeErr
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockControl{info: running("worker-b")}
+			injected := tc.setup(m)
+			_, err := newBackend(m).Fork(context.Background(), api.SnapshotRef{Local: "parent"}, api.ForkOpts{ChildSessionUID: "child"})
+			if !errors.Is(err, api.ErrComputeBusy) || !errors.Is(err, injected) || errors.Is(err, substrate.ErrActorBusy) != tc.actorBusy {
+				t.Fatalf("err=%v, want api.ErrComputeBusy (ErrActorBusy %v) retaining %v", err, tc.actorBusy, injected)
+			}
+			if msg := err.Error(); strings.Contains(msg, substrateText) || !strings.Contains(msg, "create fork child space/child") {
+				t.Fatalf("err=%q, want the fork child named without the ControlClient's text", msg)
+			}
+		})
+	}
+}
+
 // newClonerWithSuspendedParent is a cloning control client whose "parent" actor is SUSPENDED holding
 // snap-parent-1, the state a stateful fork finds right after it checkpoints the parent.
 func newClonerWithSuspendedParent() *mockCloner {
@@ -1193,6 +1230,7 @@ func TestFailedTagReleasesTheReservedTag(t *testing.T) {
 
 // Reclassifying a failed tag from the parent's current lifecycle state must not discard the tag
 // failure: direct Go callers need both causes even though the lifecycle refusal wins at the API.
+// The session service publishes the refusal's text, so the tag failure's own text stays out of it.
 func TestFailedTagRetainsCauseWhenParentIsGoneOrSuperseded(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1204,7 +1242,7 @@ func TestFailedTagRetainsCauseWhenParentIsGoneOrSuperseded(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newClonerWithSuspendedParent()
-			m.tagErr = errors.New("tag failed")
+			m.tagErr = errors.New("rpc error: code = FailedPrecondition desc = " + substrateText)
 			m.afterGet = func(string) {
 				m.afterGet = nil
 				tc.move(m)
@@ -1216,9 +1254,72 @@ func TestFailedTagRetainsCauseWhenParentIsGoneOrSuperseded(t *testing.T) {
 			if !errors.Is(err, tc.want) || !errors.Is(err, m.tagErr) {
 				t.Fatalf("err=%v, want %v retaining %v", err, tc.want, m.tagErr)
 			}
+			if msg := err.Error(); strings.Contains(msg, substrateText) || !strings.Contains(msg, `the tag of parent "parent" failed`) {
+				t.Fatalf("err=%q, want the failed tag of parent named without the tag error's text", msg)
+			}
 			wantCalls := []string{"get:parent", "tag:parent->fork-child", "untag:fork-child", "get:parent"}
 			if !reflect.DeepEqual(m.calls, wantCalls) {
 				t.Fatalf("calls=%v want %v", m.calls, wantCalls)
+			}
+		})
+	}
+}
+
+// substrateText stands for the control plane's own message in a ControlClient error.
+const substrateText = "substrate-said: detail-7f3a"
+
+// A stateful Fork's typed refusals reach Sessions callers as their text (FAILED_PRECONDITION for
+// api.ErrMemoryStateLost, ABORTED for api.ErrComputeBusy), so a ControlClient error they carry
+// stays in the chain but its text, which can be substrate's own message, stays out.
+func TestForkRefusalsOmitControlClientText(t *testing.T) {
+	busy := fmt.Errorf("%w: space/x: rpc error: code = Aborted desc = %s", substrate.ErrActorBusy, substrateText)
+	for _, tc := range []struct {
+		name  string
+		setup func(m *mockCloner) error // fails one call with the error it returns
+		want  error
+	}{
+		{name: "parent gone before the tag", want: api.ErrMemoryStateLost, setup: func(m *mockCloner) error {
+			m.getErr = fmt.Errorf("%w: space/parent: %s", substrate.ErrActorNotFound, substrateText)
+			return m.getErr
+		}},
+		{name: "tag busy", want: api.ErrComputeBusy, setup: func(m *mockCloner) error {
+			m.tagErr = busy
+			return busy
+		}},
+		{name: "create from tag busy", want: api.ErrComputeBusy, setup: func(m *mockCloner) error {
+			m.cloneErr = busy
+			return busy
+		}},
+		{name: "resume of the clone busy", want: api.ErrComputeBusy, setup: func(m *mockCloner) error {
+			m.resumeErr = busy
+			return busy
+		}},
+		{name: "resume of the clone busy from a client that wraps api.ErrComputeBusy", want: api.ErrComputeBusy, setup: func(m *mockCloner) error {
+			m.resumeErr = fmt.Errorf("%w: %s", api.ErrComputeBusy, substrateText)
+			return m.resumeErr
+		}},
+		{name: "clone deleted before its resume", want: api.ErrComputeBusy, setup: func(m *mockCloner) error {
+			m.afterClone = func(name string) { m.delete(name) }
+			m.resumeErr = fmt.Errorf("%w: space/child: rpc error: code = NotFound desc = %s", substrate.ErrActorNotFound, substrateText)
+			return m.resumeErr
+		}},
+		{name: "clone replaced before its resume", want: api.ErrComputeBusy, setup: func(m *mockCloner) error {
+			m.afterClone = func(name string) { replace(m, name) }
+			m.resumeErr = errors.New("rpc error: code = Internal desc = " + substrateText)
+			return m.resumeErr
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newClonerWithSuspendedParent()
+			injected := tc.setup(m)
+			_, err := newMemoryBackend(m).Fork(context.Background(),
+				api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
+				api.ForkOpts{ChildSessionUID: "child"})
+			if !errors.Is(err, tc.want) || !errors.Is(err, injected) {
+				t.Fatalf("err=%v, want %v retaining %v", err, tc.want, injected)
+			}
+			if strings.Contains(err.Error(), substrateText) {
+				t.Fatalf("err=%q carries the ControlClient's text", err)
 			}
 		})
 	}
@@ -3155,7 +3256,7 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 		}},
 		{name: "captured, and the teardown is refused busy", refused: heldText, stuck: true, afterClone: func(m *mockCloner, name string) {
 			captured(m, name)
-			m.suspendErr = fmt.Errorf("lease held: %w", substrate.ErrActorBusy)
+			m.suspendErr = fmt.Errorf("%w: rpc error: code = Aborted desc = lease held", substrate.ErrActorBusy)
 		}},
 		{name: "captured, and the clone is deleted before the teardown", refused: heldText, gone: true, afterClone: func(m *mockCloner, name string) {
 			captured(m, name)
@@ -3252,8 +3353,13 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 					t.Fatal("the clone is gone although its teardown's suspend was refused")
 				}
 				if !strings.Contains(err.Error(), "the fork creates no child, but tearing the clone down failed") || !strings.Contains(err.Error(), `"fork-child"`) ||
-					!strings.Contains(err.Error(), "lease held") || strings.Contains(err.Error(), "tears the clone down") {
+					!strings.Contains(err.Error(), "(actor_busy)") || strings.Contains(err.Error(), "tears the clone down") {
 					t.Fatalf("refusal %q does not say, and only say, that the clone and its tag fork-child were left in place, and why", err)
+				}
+				// The refusal reaches Sessions callers: it names the teardown's failure by kind, not
+				// by the ControlClient's text.
+				if strings.Contains(err.Error(), "lease held") {
+					t.Fatalf("refusal %q carries the teardown's ControlClient text", err)
 				}
 				if !strings.Contains(logs, `"msg":"failed to tear down a refused fork clone"`) || !strings.Contains(logs, `"tag":"fork-child"`) {
 					t.Fatalf("the failed teardown was not logged for operators: %s", logs)

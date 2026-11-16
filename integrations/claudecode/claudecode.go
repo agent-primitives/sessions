@@ -58,7 +58,13 @@
 // no state for a session whose History already has turns (memory lost, a fork child, or a session
 // that started on another harness) refuses the turn rather than start an empty conversation
 // (EXE-43). A re-run of an execution this instance already started fails without starting Claude
-// Code; an interrupted turn is not retried (EXE-42).
+// Code; an interrupted turn is not retried (EXE-42). Every EXECUTION_START or INPUT is evidence that
+// Claude Code may already have run. The journal cannot distinguish a process that started and died
+// before its first event from an execution a wrapper failed before invoking this harness, so this
+// harness does not infer non-delivery from event shape. A wrapper that positively knows it did not
+// invoke this harness for an execution must omit all of that execution's records from the History it
+// passes on later (EXE-44). If delivery is uncertain, it must retain the execution and a fresh
+// harness fails closed with the state-loss error.
 //
 // Environment: the claude process gets only the allowlisted variables of the harness's environment,
 // read once when New runs: PATH, HOME, USER, SHELL, TMPDIR, LANG, LC_ALL, LC_CTYPE,

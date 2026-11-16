@@ -23,11 +23,14 @@ category: Added
   group is killed before the turn returns, a successful turn included, so a background process a
   tool started does not outlive the turn; that needs Unix process groups, so `New` refuses other
   platforms such as Windows. A re-run of a started execution fails (`EXE-42`), a turn on an instance
-  that lost the session's memory fails rather than start an empty conversation (`EXE-43`), and
-  approvals are not supported. Fork does not work yet: on a runtime that snapshots memory, forking a
-  session that has run a turn creates a child, and every turn on the child fails with the same
-  error, `claudecode: session has earlier turns but this harness holds no state for it`; a follow-up
-  issue tracks it. `controller.Replay` does not refuse this harness and must not be pointed at it.
+  that lost the session's memory fails rather than start an empty conversation (`EXE-43`), and a
+  wrapper that fails an execution before invoking this harness must omit that execution in full from
+  later `Start.History` (`EXE-44`). An execution with no Claude Code events is not proof that it
+  never ran, so uncertain delivery still fails closed as state loss. Approvals are not supported.
+  Fork does not work yet: on a runtime that snapshots memory, forking a session that has run a turn
+  creates a child, and every turn on the child fails with the same error, `claudecode: session has
+  earlier turns but this harness holds no state for it`; a follow-up issue tracks it.
+  `controller.Replay` does not refuse this harness and must not be pointed at it.
 - `integrations/claudecode/cmd/harnessnode`: a harness server that serves only this harness, built
   on the root module's `harnessnode` and reading the same server settings. `HARNESS_KIND` must be
   unset or `claudecode`. The harness is configured by `HARNESS_CLAUDE_WORKDIR` and

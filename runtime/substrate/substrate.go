@@ -1253,6 +1253,40 @@ var ErrSnapshotSuperseded = fmt.Errorf("substrate: parent snapshot was supersede
 // It wraps api.ErrMemoryStateLost, which the session service reports as FAILED_PRECONDITION.
 var ErrMemoryStateLost = fmt.Errorf("substrate: refusing to cold-create an actor: %w", api.ErrMemoryStateLost)
 
+// hiddenCause is err with cause added to its chain but not to its text. The session service
+// publishes Fork's typed refusals (api.ErrMemoryStateLost, api.ErrSnapshotSuperseded,
+// api.ErrComputeBusy) as their Error() text, and a ControlClient's error can carry substrate's own
+// message, which is not part of that contract. Go callers still reach cause through errors.Is and
+// errors.As.
+type hiddenCause struct {
+	err   error
+	cause error
+}
+
+func (e *hiddenCause) Error() string   { return e.err.Error() }
+func (e *hiddenCause) Unwrap() []error { return []error{e.err, e.cause} }
+
+// forkBusy is err, a busy refusal (api.ErrComputeBusy, which the session service publishes as
+// ABORTED) of the step msg names during a Fork, as msg followed by ErrActorBusy's own text, or by
+// api.ErrComputeBusy's when err is not ErrActorBusy. err stays in the chain but not in the text
+// (hiddenCause), since it can carry substrate's own message.
+func forkBusy(msg string, err error) error {
+	busy := api.ErrComputeBusy
+	if errors.Is(err, ErrActorBusy) {
+		busy = ErrActorBusy
+	}
+	return &hiddenCause{err: fmt.Errorf("%s: %w", msg, busy), cause: err}
+}
+
+// forkCallError is err, from the ControlClient call msg names during a stateful Fork: a busy
+// refusal is forkBusy, and any other error is wrapped as it is.
+func forkCallError(msg string, err error) error {
+	if errors.Is(err, api.ErrComputeBusy) {
+		return forkBusy(msg, err)
+	}
+	return fmt.Errorf("%s: %w", msg, err)
+}
+
 // Fork branches a session's compute into a child incarnation.
 //
 // Two realizations, chosen by the harness's declared resumability:
@@ -1299,8 +1333,16 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 			// minted per request and dropped on error, so a half-created actor here would be
 			// unreachable. Tear it down while its name is still known.
 			_ = b.destroyChild(ctx, child)
+			if errors.Is(err, api.ErrComputeBusy) {
+				// The session service publishes a busy refusal as ABORTED, and Create's can carry
+				// substrate's own message (a busy ResumeActor's, or CreateActor's when the actor
+				// existed at create and is gone).
+				childRef := b.ref(child)
+				err = forkBusy(fmt.Sprintf("substrate: create fork child %s/%s", childRef.Atespace, childRef.Name), err)
+			}
+			return api.Incarnation{}, err
 		}
-		return inc, err
+		return inc, nil
 	}
 
 	cloner, ok := b.ctl.(SnapshotCloner)
@@ -1335,12 +1377,13 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 			// The parent may have been deleted, or woken and suspended again, while the tag ran:
 			// substrate reports a missing source as FAILED_PRECONDITION, which says nothing typed.
 			// Read the parent again so those are api.ErrMemoryStateLost and ErrSnapshotSuperseded,
-			// as on either side of the tag.
+			// as on either side of the tag. The tag's error stays in the chain but not in the text
+			// (hiddenCause), since it can carry substrate's own message.
 			if gone := b.requireSnapshot(ctx, parent, ref.ExternalURI); errors.Is(gone, api.ErrMemoryStateLost) || errors.Is(gone, ErrSnapshotSuperseded) {
-				return api.Incarnation{}, fmt.Errorf("%w; the tag of parent %q failed: %w", gone, parent.Name, err)
+				return api.Incarnation{}, &hiddenCause{err: fmt.Errorf("%w; the tag of parent %q failed", gone, parent.Name), cause: err}
 			}
 		}
-		return api.Incarnation{}, fmt.Errorf("substrate: tag parent %q: %w", parent.Name, err)
+		return api.Incarnation{}, forkCallError(fmt.Sprintf("substrate: tag parent %q", parent.Name), err)
 	}
 	if err := b.requireSnapshot(ctx, parent, ref.ExternalURI); err != nil {
 		b.releaseForkTag(ctx, cloner, child)
@@ -1351,7 +1394,7 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 		// No actor exists yet, but the tag does. Release it: the tag name is derived from a child UID
 		// the caller is about to discard, so this is the last moment it can be named.
 		b.releaseForkTag(ctx, cloner, child)
-		return api.Incarnation{}, fmt.Errorf("substrate: create actor from tag %q: %w", tag.Name, err)
+		return api.Incarnation{}, forkCallError(fmt.Sprintf("substrate: create actor from tag %q", tag.Name), err)
 	}
 	if created.UID == "" {
 		// The host records the clone's UID on the child's FORK marker and refuses any other actor
@@ -1367,11 +1410,15 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 	// gets the child's egress policy first; a failed install is torn down as a failed resume is.
 	childRef := b.ref(child)
 	if err := egress.install(ctx, childRef); err != nil {
+		if errors.Is(err, api.ErrComputeBusy) {
+			// install's text names the call, but its busy cause carries the client's.
+			err = forkCallError(fmt.Sprintf("%v on actor %s/%s", errEgressPolicyInstall, childRef.Atespace, childRef.Name), err)
+		}
 		return api.Incarnation{}, b.discardClone(ctx, cloner, childRef, created.UID, err)
 	}
 	info, err := b.ctl.ResumeActor(ctx, childRef)
 	if err != nil {
-		return api.Incarnation{}, b.discardClone(ctx, cloner, childRef, created.UID, fmt.Errorf("substrate: resume cloned actor: %w", err))
+		return api.Incarnation{}, b.discardClone(ctx, cloner, childRef, created.UID, forkCallError(fmt.Sprintf("substrate: resume cloned actor %s/%s", childRef.Atespace, childRef.Name), err))
 	}
 	if info.UID != created.UID {
 		// ResumeActor has no UID precondition, so it may have resumed the replacement. That actor
@@ -1420,8 +1467,10 @@ func (b *Backend) refuseForkClone(ctx context.Context, ref ActorRef, created, in
 // tearDownForkClone tears a refused clone down (destroyChild) and returns what that left, for the
 // refusal's text: forkCloneTornDown, or, when Stop failed (another caller holds the clone's lease,
 // ErrActorBusy, or the call failed), that the clone and its tag may be left in place, which is also
-// logged at Warn naming them. A clone another caller already deleted (ErrActorNotFound) is torn
-// down: Stop returned before releasing the tag, so it is released here.
+// logged at Warn naming them with Stop's error. The text names that error by its error_kind only:
+// the refusal reaches Sessions callers, and Stop's error can carry substrate's own message. A clone
+// another caller already deleted (ErrActorNotFound) is torn down: Stop returned before releasing
+// the tag, so it is released here.
 func (b *Backend) tearDownForkClone(ctx context.Context, cloner SnapshotCloner, ref ActorRef, uid string) string {
 	err := b.destroyChild(ctx, ref.Name)
 	if err == nil {
@@ -1434,8 +1483,8 @@ func (b *Backend) tearDownForkClone(ctx context.Context, cloner SnapshotCloner, 
 	observability.Logger(ctx, b.logger).WarnContext(ctx, "failed to tear down a refused fork clone",
 		"component", "runtime.substrate", "atespace", ref.Atespace, "actor", ref.Name,
 		"actor_uid", uid, "tag", forkTag(ref.Name), "error", err)
-	return fmt.Sprintf("the fork creates no child, but tearing the clone down failed, so actor %s/%s (UID %q) and its tag %q may be left in place: %v",
-		ref.Atespace, ref.Name, uid, forkTag(ref.Name), err)
+	return fmt.Sprintf("the fork creates no child, but tearing the clone down failed (%s), so actor %s/%s (UID %q) and its tag %q may be left in place",
+		substrateErrorKind(err), ref.Atespace, ref.Name, uid, forkTag(ref.Name))
 }
 
 // forkCloneCaptured refuses a stateful Fork's clone whose ResumeActor reports no evidence that it
@@ -1489,12 +1538,13 @@ func (b *Backend) logForkCloneCaptured(ctx context.Context, ref ActorRef, info A
 
 // requireSnapshot fails with ErrSnapshotSuperseded unless the actor is SUSPENDED holding exactly
 // snapshot. A parent that no longer exists took the snapshot with it, so that is
-// api.ErrMemoryStateLost: no child can be cloned from it, and retrying cannot help.
+// api.ErrMemoryStateLost: no child can be cloned from it, and retrying cannot help. GetActor's
+// ErrActorNotFound stays in its chain but not in its text (hiddenCause).
 func (b *Backend) requireSnapshot(ctx context.Context, actor ActorRef, snapshot string) error {
 	info, err := b.ctl.GetActor(ctx, actor)
 	if errors.Is(err, ErrActorNotFound) {
-		return fmt.Errorf("%w: fork parent %s/%s no longer exists, so the snapshot it held cannot be cloned; no child was created: %w",
-			api.ErrMemoryStateLost, actor.Atespace, actor.Name, err)
+		return &hiddenCause{err: fmt.Errorf("%w: fork parent %s/%s no longer exists, so the snapshot it held cannot be cloned; no child was created",
+			api.ErrMemoryStateLost, actor.Atespace, actor.Name), cause: err}
 	}
 	if err != nil {
 		return fmt.Errorf("substrate: get fork parent %q: %w", actor.Name, err)
@@ -1531,9 +1581,10 @@ func (b *Backend) destroyChild(ctx context.Context, child string) error {
 // policy or to resume, and returns cause. It reads the child's name first so it never tears down an
 // actor this fork did not create: the clone is destroyed only while the name still resolves to uid,
 // and cause stands. Gone or replaced, only the tag is released and the fork is ErrActorBusy,
-// retryable: the parent still holds its snapshot and a retry clones a new child. When the read
-// fails, nothing is touched and the error says so. Stop suspends and deletes by name, so an actor
-// created between this read and Stop's delete is not protected.
+// retryable: the parent still holds its snapshot and a retry clones a new child; cause stays in its
+// chain but not in its text (hiddenCause), since it can carry substrate's own message. When the
+// read fails, nothing is touched and the error says so. Stop suspends and deletes by name, so an
+// actor created between this read and Stop's delete is not protected.
 // TODO(spike): substrate's DeleteActorRequest.options.uid can make that delete UID-conditional, but
 // ControlClient.DeleteActor does not carry it and Stop's SuspendActor has no such precondition.
 func (b *Backend) discardClone(ctx context.Context, cloner SnapshotCloner, ref ActorRef, uid string, cause error) error {
@@ -1545,12 +1596,12 @@ func (b *Backend) discardClone(ctx context.Context, cloner SnapshotCloner, ref A
 		_ = b.destroyChild(ctx, ref.Name)
 	case err == nil:
 		b.releaseForkTag(ctx, cloner, ref.Name)
-		return fmt.Errorf("%w: fork child %s/%s was replaced between its create and resume (clone %q, now %q); the replacement was left in place: %w",
-			ErrActorBusy, ref.Atespace, ref.Name, uid, now.UID, cause)
+		return &hiddenCause{err: fmt.Errorf("%w: fork child %s/%s was replaced between its create and resume (clone %q, now %q); the replacement was left in place",
+			ErrActorBusy, ref.Atespace, ref.Name, uid, now.UID), cause: cause}
 	case errors.Is(err, ErrActorNotFound):
 		b.releaseForkTag(ctx, cloner, ref.Name)
-		return fmt.Errorf("%w: fork child %s/%s (clone %q) was deleted between its create and resume: %w",
-			ErrActorBusy, ref.Atespace, ref.Name, uid, cause)
+		return &hiddenCause{err: fmt.Errorf("%w: fork child %s/%s (clone %q) was deleted between its create and resume",
+			ErrActorBusy, ref.Atespace, ref.Name, uid), cause: cause}
 	default:
 		// The primary cause can select a non-INTERNAL response. Do not append
 		// untrusted cleanup diagnostics to that otherwise credential-safe message.

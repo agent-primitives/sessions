@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -849,9 +850,12 @@ func TestForkWhoseParentIsDeletedAtTheTagIsRefused(t *testing.T) {
 // actor's lease as ABORTED: a parent deleted during the tag is FAILED_PRECONDITION
 // (api.ErrMemoryStateLost), one woken and suspended again holds another snapshot and is ABORTED
 // (api.ErrSnapshotSuperseded), and a tag refused because another operation holds the parent is
-// ABORTED (substrate.ErrActorBusy). Each creates no child.
+// ABORTED (substrate.ErrActorBusy). Each creates no child. A classified refusal's message, which
+// the service publishes, names the parent but not substrate's own text from the tag's error.
 func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 	ctx := context.Background()
+	// substrateText stands for substrate's own message in the tag's error.
+	const substrateText = "substrate-said: detail-7f3a"
 	for _, tc := range []struct {
 		name    string
 		onTag   func(ctl *actorControl, actor string)
@@ -865,7 +869,7 @@ func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 			onTag: func(ctl *actorControl, actor string) {
 				_ = ctl.DeleteActor(ctx, substrate.ActorRef{Atespace: "space", Name: actor})
 			},
-			tagErr:  errors.New("rpc error: code = FailedPrecondition desc = Actor space/x not found"),
+			tagErr:  errors.New("rpc error: code = FailedPrecondition desc = Actor space/x not found: " + substrateText),
 			want:    codes.FailedPrecondition,
 			wantMsg: "no longer exists",
 		},
@@ -876,7 +880,7 @@ func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 				ctl.snapshots[actor] = "snap-newer"
 				ctl.mu.Unlock()
 			},
-			tagErr:  errors.New("rpc error: code = Internal desc = copy failed"),
+			tagErr:  errors.New("rpc error: code = Internal desc = copy failed: " + substrateText),
 			want:    codes.Aborted,
 			wantMsg: "want suspended holding",
 		},
@@ -887,16 +891,17 @@ func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 				ctl.snapshots[actor] = "snap-newer"
 				ctl.mu.Unlock()
 			},
-			tagErr:  substrate.ErrActorBusy,
+			tagErr:  fmt.Errorf("%w: space/x: rpc error: code = Aborted desc = %s", substrate.ErrActorBusy, substrateText),
 			want:    codes.Aborted,
 			reason:  "SNAPSHOT_SUPERSEDED",
 			wantMsg: "want suspended holding",
 		},
 		{
 			name:    "tag contends for the parent's lease",
-			tagErr:  fmt.Errorf("%w: space/x: rpc error: code = Aborted desc = another operation is in progress", substrate.ErrActorBusy),
+			tagErr:  fmt.Errorf("%w: space/x: rpc error: code = Aborted desc = %s", substrate.ErrActorBusy, substrateText),
 			want:    codes.Aborted,
-			wantMsg: "another operation is in progress",
+			reason:  "COMPUTE_BUSY",
+			wantMsg: "is busy with another operation",
 		},
 		{
 			name:    "any other tag failure stays internal",
@@ -929,8 +934,14 @@ func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 			if status.Code(err) != tc.want {
 				t.Fatalf("fork: want %v, got %v", tc.want, err)
 			}
-			if msg := status.Convert(err).Message(); !strings.Contains(msg, tc.wantMsg) {
+			msg := status.Convert(err).Message()
+			if !strings.Contains(msg, tc.wantMsg) {
 				t.Errorf("error %q does not contain %q", msg, tc.wantMsg)
+			}
+			if tc.want != codes.Internal {
+				if strings.Contains(msg, substrateText) || !strings.Contains(msg, strconv.Quote(sess)) {
+					t.Errorf("error %q names substrate's text or not the parent %q", msg, sess)
+				}
 			}
 			if tc.reason != "" {
 				details := status.Convert(err).Details()

@@ -458,6 +458,16 @@ func TestForkCloneEgressInstallFailure(t *testing.T) {
 		}
 		wantCalls(t, c.calls, append(slices.Clone(head), "get:child"))
 	})
+	t.Run("busy install keeps the client's text out", func(t *testing.T) {
+		c := newEgressCloner()
+		busy := fmt.Errorf("%w: space/child: rpc error: code = Aborted desc = %s", substrate.ErrActorBusy, substrateText)
+		c.createErr = busy
+		err := forkMemory(newMemoryBackend(c, staticPolicy().option()), context.Background())
+		if !errors.Is(err, api.ErrComputeBusy) || !errors.Is(err, busy) || strings.Contains(err.Error(), substrateText) {
+			t.Fatalf("err=%q want ErrComputeBusy retaining the install error without its text", err)
+		}
+		wantCalls(t, c.calls, append(slices.Clone(head), "get:child", "suspend:child", "delete:child", "untag:fork-child"))
+	})
 	t.Run("clone gone releases the tag", func(t *testing.T) {
 		c := newEgressCloner()
 		c.beforeCreate = func(name string) { c.delete(name) }

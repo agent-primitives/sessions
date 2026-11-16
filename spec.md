@@ -904,7 +904,15 @@ cannot observe a model call that does not reach it. The class concerns model cal
   that records `ComputeInstance` (`RT-4h`, for example `runtime/substrate`), every later `Exec` and
   `Resume` on the session fails `FAILED_PRECONDITION`, so the re-prompt goes to a new session; the
   failed session's log stays readable. When the compute and its memory survive, for example when
-  only the host or the harness stream failed, the re-prompt is an `Exec` on the same session.
+  only the host or the harness stream failed, the re-prompt is an `Exec` on the same session. When
+  a host-side wrapper performs work before delegating to an unmediated harness, a recorded execution
+  that the wrapper positively knows was not delegated MUST be omitted in full from `Start.history`
+  on later calls to that underlying harness. This is a derived inner call: the outer journal and the
+  `Start.history` the host sends the wrapper remain unchanged under `EXE-7` and `EXE-17`. Absence of
+  an event emitted by the underlying harness is not proof that delegation did not occur: it may
+  have changed memory or called its provider before emitting one. If delegation or delivery is
+  uncertain, the wrapper MUST retain the execution and a fresh underlying harness MUST fail closed
+  as possible state loss rather than start an empty conversation.
 - TODO(spike): How long does a reference substrate `Exec` take to fail after the session's actor
   dies mid-turn, and is the failure the stream's end or a router timeout?
 

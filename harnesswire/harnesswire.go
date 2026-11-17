@@ -469,11 +469,12 @@ func (h *ClientHarness) PrepareRun(ctx context.Context) (api.PreparedHarnessRun,
 		cancel()
 		return nil, err
 	}
-	return &preparedClientRun{stream: stream, cancel: cancel}, nil
+	return &preparedClientRun{stream: stream, ctx: ctx, cancel: cancel}, nil
 }
 
 type preparedClientRun struct {
 	stream v1.Harness_ConnectClient
+	ctx    context.Context
 	cancel context.CancelFunc
 	state  atomic.Uint32 // 0 prepared, 1 used, 2 closed unused
 }
@@ -490,12 +491,19 @@ func (r *preparedClientRun) Run(ctx context.Context, start *api.Start, sink api.
 		return errors.New("harnesswire: prepared Connect stream is no longer available")
 	}
 	defer r.cancel()
-	if err := ctx.Err(); err != nil {
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+	stopPrepared := context.AfterFunc(r.ctx, runCancel)
+	defer stopPrepared()
+	if err := r.ctx.Err(); err != nil {
 		return err
 	}
-	stopCancel := context.AfterFunc(ctx, r.cancel)
+	if err := runCtx.Err(); err != nil {
+		return err
+	}
+	stopCancel := context.AfterFunc(runCtx, r.cancel)
 	defer stopCancel()
-	return runClientStream(ctx, r.stream, r.cancel, start, sink)
+	return runClientStream(runCtx, r.stream, r.cancel, start, sink)
 }
 
 // Run drives the remote harness over Connect, translating each emitted Event into a host-mediated

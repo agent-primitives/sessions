@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
@@ -89,6 +90,17 @@ func (noOpSink) ToolCall(context.Context, api.ToolCall) (api.ToolResult, error) 
 func (noOpSink) Report(context.Context, api.ToolResult) error { return nil }
 func (noOpSink) Usage(context.Context, api.Usage) error       { return nil }
 
+type blockingModelSink struct {
+	noOpSink
+	started chan struct{}
+}
+
+func (s blockingModelSink) Model(ctx context.Context, _ api.ModelRequest) (api.ModelResponse, error) {
+	close(s.started)
+	<-ctx.Done()
+	return api.ModelResponse{}, ctx.Err()
+}
+
 func TestPrepareRunOpensAndReusesOneConnectStream(t *testing.T) {
 	stream := &prepareClientStream{events: []*v1.Event{{ExecutionId: "e", Kind: v1.EventKind_EVENT_END, Body: &v1.Event_End{End: &v1.HarnessEnd{State: "COMPLETED"}}}}}
 	client := &prepareClient{stream: stream}
@@ -148,7 +160,7 @@ func TestPreparedRunCloseCancelsUnusedConnect(t *testing.T) {
 func TestPreparedRunCloseCancelsActiveRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	stream := &blockingPreparedStream{ctx: ctx, sent: make(chan struct{})}
-	prepared := &preparedClientRun{stream: stream, cancel: cancel}
+	prepared := &preparedClientRun{stream: stream, ctx: ctx, cancel: cancel}
 	done := make(chan error, 1)
 	go func() {
 		done <- prepared.Run(ctx, &api.Start{ExecutionID: "e"}, noOpSink{})
@@ -163,7 +175,7 @@ func TestPreparedRunCloseCancelsActiveRun(t *testing.T) {
 func TestPreparedRunHonorsIndependentRunCancellation(t *testing.T) {
 	prepareCtx, prepareCancel := context.WithCancel(context.Background())
 	stream := &blockingPreparedStream{ctx: prepareCtx, sent: make(chan struct{})}
-	prepared := &preparedClientRun{stream: stream, cancel: prepareCancel}
+	prepared := &preparedClientRun{stream: stream, ctx: prepareCtx, cancel: prepareCancel}
 	runCtx, runCancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() {
@@ -173,6 +185,31 @@ func TestPreparedRunHonorsIndependentRunCancellation(t *testing.T) {
 	runCancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run=%v, want Run context cancellation", err)
+	}
+}
+
+func TestPreparedRunCloseCancelsBlockedSinkWithIndependentContext(t *testing.T) {
+	prepareCtx, prepareCancel := context.WithCancel(context.Background())
+	stream := &prepareClientStream{events: []*v1.Event{{
+		ExecutionId: "e",
+		Kind:        v1.EventKind_EVENT_MODEL_CALL,
+		Body:        &v1.Event_Model{Model: &v1.ModelCall{Id: "m", Model: "model"}},
+	}}}
+	prepared := &preparedClientRun{stream: stream, ctx: prepareCtx, cancel: prepareCancel}
+	sink := blockingModelSink{started: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		done <- prepared.Run(context.Background(), &api.Start{ExecutionID: "e"}, sink)
+	}()
+	<-sink.started
+	prepared.Close()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run=%v, want Close cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not cancel blocked sink call")
 	}
 }
 

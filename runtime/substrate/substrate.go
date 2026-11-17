@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/internal/callerctx"
 	"github.com/agent-primitives/sessions/observability"
 )
 
@@ -1327,6 +1328,16 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 	defer func() {
 		finish(err, "error_kind", substrateErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
+	// The teardown below runs on detached contexts, so the caller's deadline can lapse during it.
+	// Report whether the caller was still waiting when it started, so the host keeps the primary
+	// failure instead of classifying it as an interruption.
+	failure := &forkFailure{}
+	ctx = context.WithValue(ctx, forkFailureKey{}, failure)
+	defer func() {
+		if err != nil && failure.sampled && failure.live {
+			err = callerctx.MarkLive(err)
+		}
+	}()
 
 	child := opts.ChildSessionUID
 	if child == "" {
@@ -1574,8 +1585,22 @@ const cleanupTimeout = 30 * time.Second
 // cleanupContext detaches teardown from the caller's context. The most likely reason a fork fails
 // midway is that the caller's deadline expired or it went away, which is exactly when a cleanup
 // inheriting that context would fail instantly and strand everything it was written to reclaim.
+//
+// The first call in a Fork also records whether the caller was still live as its teardown started.
 func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if f, ok := ctx.Value(forkFailureKey{}).(*forkFailure); ok && !f.sampled {
+		f.sampled, f.live = true, ctx.Err() == nil
+	}
 	return context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+}
+
+// forkFailureKey carries a Fork call's *forkFailure to cleanupContext.
+type forkFailureKey struct{}
+
+// forkFailure is the caller's context state when a failed Fork started its teardown, just after the
+// failing call returned. Fork tears down synchronously in its own goroutine, so it needs no lock.
+type forkFailure struct {
+	sampled, live bool
 }
 
 // destroyChild best-effort undoes everything a failed Fork provisioned for one child. Stop suspends

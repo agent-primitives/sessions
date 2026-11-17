@@ -8,6 +8,7 @@ import (
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/internal/callerctx"
 )
 
 // allocationRecorder is optional so standalone event logs retain their existing behavior.
@@ -73,8 +74,13 @@ func callerContextError(ctx context.Context, err error) error {
 }
 
 // Only the caller's context during start is an admission interruption. Confirmation
-// uses an independent deadline, and checkpoint supersession remains ABORTED.
+// uses an independent deadline, and checkpoint supersession remains ABORTED. A runtime
+// that tears down before returning marks a failure the caller was still live for, so a
+// context that ended during that teardown does not replace the primary failure.
 func allocationStartError(ctx context.Context, err error) error {
+	if callerctx.LiveAtFailure(err) {
+		return err
+	}
 	if err != nil && errors.Is(context.Cause(ctx), errSuperseded) {
 		return fmt.Errorf("%w (compute start ended with: %v)", errSuperseded, err)
 	}

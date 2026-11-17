@@ -7,6 +7,7 @@ import (
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/internal/callerctx"
 )
 
 type contextAllocationLog struct {
@@ -40,6 +41,8 @@ func TestAllocationContextFailureBoundaries(t *testing.T) {
 		{name: "independent confirmation deadline", tracked: true, confirmErr: context.DeadlineExceeded},
 		{name: "caller ended but confirmation failed", tracked: true, cancelCause: context.Canceled, confirmErr: context.DeadlineExceeded},
 		{name: "checkpoint superseded start", cancelCause: errSuperseded, effectErr: context.Canceled, superseded: true},
+		// The runtime's own teardown outlasted the caller after a failure the caller was live for.
+		{name: "caller ended during runtime teardown", cancelCause: context.Canceled, effectErr: callerctx.MarkLive(api.ErrComputeUnavailable)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancelCause(t.Context())

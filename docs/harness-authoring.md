@@ -142,7 +142,9 @@ before delegation. The host closes an unused preparation and calls a successful 
 once, after `EXECUTION_START` and every `INPUT` are durable. `harnesswire.ClientHarness` implements
 this for `Harness.Connect`. A wrapper around it must forward the optional interface to keep that
 pre-journal boundary. A failed `Send(Start)` or later receive is not proof of non-delivery and stays
-a durable failed execution (`EXE-45`).
+a durable failed execution (`EXE-45`). In particular, successfully opening a client stream does not
+prove that a router or harness will accept `Start`; a refusal surfaced by Send or Recv remains
+uncertain and is not filtered from later history.
 
 <!-- doccheck: skip excerpt of api.Start; the real definition is in api/harness.go -->
 ```go

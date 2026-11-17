@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -473,27 +474,45 @@ func (h *ClientHarness) PrepareRun(ctx context.Context) (api.PreparedHarnessRun,
 }
 
 type preparedClientRun struct {
-	stream v1.Harness_ConnectClient
-	ctx    context.Context
-	cancel context.CancelFunc
-	state  atomic.Uint32 // 0 prepared, 1 used, 2 closed unused
+	stream    v1.Harness_ConnectClient
+	ctx       context.Context
+	cancel    context.CancelFunc
+	mu        sync.Mutex
+	state     uint8 // 0 prepared, 1 used, 2 closed unused
+	runCancel context.CancelFunc
 }
 
 var _ api.PreparedHarnessRun = (*preparedClientRun)(nil)
 
 func (r *preparedClientRun) Close() {
-	r.state.CompareAndSwap(0, 2)
+	r.mu.Lock()
+	if r.state == 0 {
+		r.state = 2
+	}
+	runCancel := r.runCancel
+	r.mu.Unlock()
+	if runCancel != nil {
+		runCancel()
+	}
 	r.cancel()
 }
 
 func (r *preparedClientRun) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
-	if !r.state.CompareAndSwap(0, 1) {
+	r.mu.Lock()
+	if r.state != 0 {
+		r.mu.Unlock()
 		return errors.New("harnesswire: prepared Connect stream is no longer available")
 	}
-	defer r.cancel()
 	runCtx, runCancel := context.WithCancel(ctx)
+	r.state = 1
+	r.runCancel = runCancel
+	r.mu.Unlock()
 	defer runCancel()
-	stopPrepared := context.AfterFunc(r.ctx, runCancel)
+	defer r.cancel()
+	stopPrepared := context.AfterFunc(r.ctx, func() {
+		runCancel()
+		r.cancel()
+	})
 	defer stopPrepared()
 	if err := r.ctx.Err(); err != nil {
 		return err
@@ -503,7 +522,7 @@ func (r *preparedClientRun) Run(ctx context.Context, start *api.Start, sink api.
 	}
 	stopCancel := context.AfterFunc(runCtx, r.cancel)
 	defer stopCancel()
-	return runClientStream(runCtx, r.stream, r.cancel, start, sink)
+	return runClientStream(runCtx, r.ctx, r.stream, r.cancel, start, sink)
 }
 
 // Run drives the remote harness over Connect, translating each emitted Event into a host-mediated
@@ -521,7 +540,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 	return prepared.Run(ctx, start, sink)
 }
 
-func runClientStream(ctx context.Context, stream v1.Harness_ConnectClient, cancel context.CancelFunc, start *api.Start, sink api.EventSink) error {
+func runClientStream(ctx, streamCtx context.Context, stream v1.Harness_ConnectClient, cancel context.CancelFunc, start *api.Start, sink api.EventSink) error {
 	if start == nil || start.ExecutionID == "" {
 		return errors.New("harnesswire: Start requires execution_id")
 	}
@@ -651,7 +670,7 @@ func runClientStream(ctx context.Context, stream v1.Harness_ConnectClient, cance
 			return fmt.Errorf("harnesswire: harness emitted host-owned control event %s", ev.GetKind())
 		case v1.EventKind_EVENT_END:
 			endErr := endError(ev.GetEnd())
-			closeErr := awaitClose(stream, cancel)
+			closeErr := awaitClose(ctx, streamCtx, stream, cancel)
 			if endErr != nil {
 				return endErr
 			}
@@ -670,7 +689,7 @@ const closeGrace = 2 * time.Second
 // harness gets to flush its telemetry before the host can suspend it, and the RPC ends with the
 // harness's own status rather than a host-side cancellation. A harness that never closes the
 // stream costs at most closeGrace.
-func awaitClose(stream v1.Harness_ConnectClient, cancel context.CancelFunc) error {
+func awaitClose(ctx, streamCtx context.Context, stream v1.Harness_ConnectClient, cancel context.CancelFunc) error {
 	_ = stream.CloseSend()
 	var timedOut atomic.Bool
 	t := time.AfterFunc(closeGrace, func() {
@@ -683,7 +702,7 @@ func awaitClose(stream v1.Harness_ConnectClient, cancel context.CancelFunc) erro
 		if err == nil {
 			return fmt.Errorf("harnesswire: harness emitted %s after EVENT_END", ev.GetKind())
 		}
-		if err == io.EOF || timedOut.Load() {
+		if err == io.EOF || timedOut.Load() || ctx.Err() != nil || streamCtx.Err() != nil {
 			return nil
 		}
 		return err

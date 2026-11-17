@@ -1630,7 +1630,9 @@ sequenceDiagram
   the caller has already cancelled; the turn still fails with the host's error. After
   `EVENT_PARKED` it already waits for the harness to close (`APR-10`). A stream that closes cleanly
   before `EVENT_END`, or sends a host-owned or unsupported event kind, fails the execution as a
-  protocol error; it is never inferred as successful completion.
+  protocol error; it is never inferred as successful completion. After `EVENT_END{COMPLETED}`, a
+  non-OK final RPC status fails the turn while the caller remains live, but caller cancellation or
+  deadline during the bounded telemetry-flush wait does not replace the harness's completed result.
 - `WIRE-13`: Harness dials in the reference host use no transport security (§17).
 
 ### 12.3 Wire conversion

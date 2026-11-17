@@ -110,6 +110,48 @@ func (s *postEndStream) Recv() (*v1.Event, error) {
 
 func (*postEndStream) CloseSend() error { return nil }
 
+type endThenBlockClient struct {
+	v1.HarnessClient
+	waiting chan struct{}
+}
+
+func (endThenBlockClient) Describe(ctx context.Context, _ *v1.DescribeRequest, _ ...grpc.CallOption) (*v1.HarnessDescriptor, error) {
+	desc, err := (echoagent.Harness{}).Describe(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return harnesswire.DescriptorToProto(desc), nil
+}
+
+func (c endThenBlockClient) Connect(ctx context.Context, _ ...grpc.CallOption) (grpc.BidiStreamingClient[v1.ControllerFrame, v1.Event], error) {
+	return &endThenBlockStream{ctx: ctx, waiting: c.waiting}, nil
+}
+
+type endThenBlockStream struct {
+	grpc.ClientStream
+	ctx         context.Context
+	waiting     chan struct{}
+	executionID string
+	step        int
+}
+
+func (s *endThenBlockStream) Send(frame *v1.ControllerFrame) error {
+	s.executionID = frame.GetExecutionId()
+	return nil
+}
+
+func (s *endThenBlockStream) Recv() (*v1.Event, error) {
+	s.step++
+	if s.step == 1 {
+		return &v1.Event{ExecutionId: s.executionID, Kind: v1.EventKind_EVENT_END, Body: &v1.Event_End{End: &v1.HarnessEnd{State: "COMPLETED"}}}, nil
+	}
+	close(s.waiting)
+	<-s.ctx.Done()
+	return nil, s.ctx.Err()
+}
+
+func (*endThenBlockStream) CloseSend() error { return nil }
+
 func TestExecConnectPreparationFailureCanRetryFirstTurn(t *testing.T) {
 	store, err := sqlitelog.Open(":memory:")
 	if err != nil {
@@ -245,5 +287,44 @@ func TestExecFrameAfterEndIsDurableProtocolFailure(t *testing.T) {
 	}
 	if len(recs) != 2 || recs[0].Event.Kind != api.EventExecutionStart || recs[1].Event.Kind != api.EventError {
 		t.Fatalf("records=%+v, want durable start and error without END", recs)
+	}
+}
+
+func TestExecCancellationDuringPostEndFlushKeepsCompletedResult(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	backend := local.New(echoagent.Harness{})
+	t.Cleanup(func() { _ = backend.Close() })
+	waiting := make(chan struct{})
+	p := placement.New(backend, echoagent.Model, placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
+		return harnesswire.NewClientHarness(endThenBlockClient{waiting: waiting}), func() error { return nil }, nil
+	}))
+	registry, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := session.NewService(store, registry)
+	created, err := svc.CreateSession(t.Context(), &v1.CreateSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := created.GetMetadata().GetUid()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- svc.Exec(&v1.ExecRequest{Session: uid}, &rpcStream{ctx: ctx}) }()
+	<-waiting
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Exec=%v, want completed result after caller cancellation during telemetry flush", err)
+	}
+	recs, readErr := store.Session(uid).Read(1)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(recs) != 2 || recs[0].Event.Kind != api.EventExecutionStart || recs[1].Event.Kind != api.EventEnd {
+		t.Fatalf("records=%+v, want durable start and END without ERROR", recs)
 	}
 }

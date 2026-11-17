@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type prepareClient struct {
@@ -133,6 +136,28 @@ func TestPrepareRunFailureSendsNothing(t *testing.T) {
 	prepared, err := NewClientHarness(client).PrepareRun(t.Context())
 	if !errors.Is(err, cause) || prepared != nil || client.connects != 1 {
 		t.Fatalf("PrepareRun=(%v, %v), connects=%d; want nil, %v, 1", prepared, err, client.connects, cause)
+	}
+}
+
+func TestPrepareRunMissingUnixSocketFailsBeforeStart(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.sock")
+	conn, err := grpc.NewClient(
+		"passthrough:///missing-harness",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", missing)
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	prepared, err := NewClientHarness(v1.NewHarnessClient(conn)).PrepareRun(ctx)
+	if err == nil || prepared != nil {
+		t.Fatalf("PrepareRun=(%v, %v), want pre-Start Connect failure", prepared, err)
 	}
 }
 

@@ -18,6 +18,26 @@ type Harness interface {
 	Run(ctx context.Context, s *Start, sink EventSink) error
 }
 
+// HarnessRunPreparer optionally prepares the transport or other resources for one Run before the
+// host records its execution. PrepareRun must not invoke the harness, send Start, or perform any
+// model or tool effect. An error therefore proves that no execution was delegated.
+//
+// On error an implementation must release anything it acquired and return no prepared run. A
+// successful call transfers one prepared run to the caller. The host either calls Run exactly once
+// or closes it without running it.
+type HarnessRunPreparer interface {
+	PrepareRun(ctx context.Context) (PreparedHarnessRun, error)
+}
+
+// PreparedHarnessRun is one prepared Harness.Run. Run may be called exactly once. Close is
+// idempotent and may race with Run: if Close wins, Run must fail without invoking the harness; if
+// Run wins, Close cancels the active run. Close is also safe after Run returns. Implementations own
+// cleanup and cannot report a second cleanup error.
+type PreparedHarnessRun interface {
+	Run(ctx context.Context, s *Start, sink EventSink) error
+	Close()
+}
+
 // Descriptor is a harness's static contract.
 type Descriptor struct {
 	ID           string

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -445,6 +446,8 @@ type ClientHarness struct {
 	client v1.HarnessClient
 }
 
+var _ api.HarnessRunPreparer = (*ClientHarness)(nil)
+
 // NewClientHarness wraps client as an api.Harness.
 func NewClientHarness(client v1.HarnessClient) *ClientHarness { return &ClientHarness{client: client} }
 
@@ -457,18 +460,62 @@ func (h *ClientHarness) Describe(ctx context.Context) (api.Descriptor, error) {
 	return descriptorFromProto(d), nil
 }
 
+// PrepareRun opens the actual Connect stream without sending Start. A Connect failure therefore
+// proves that the remote harness did not receive an execution. The returned stream is one-shot.
+func (h *ClientHarness) PrepareRun(ctx context.Context) (api.PreparedHarnessRun, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	stream, err := h.client.Connect(ctx)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	return &preparedClientRun{stream: stream, cancel: cancel}, nil
+}
+
+type preparedClientRun struct {
+	stream v1.Harness_ConnectClient
+	cancel context.CancelFunc
+	state  atomic.Uint32 // 0 prepared, 1 used, 2 closed unused
+}
+
+var _ api.PreparedHarnessRun = (*preparedClientRun)(nil)
+
+func (r *preparedClientRun) Close() {
+	r.state.CompareAndSwap(0, 2)
+	r.cancel()
+}
+
+func (r *preparedClientRun) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	if !r.state.CompareAndSwap(0, 1) {
+		return errors.New("harnesswire: prepared Connect stream is no longer available")
+	}
+	defer r.cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	stopCancel := context.AfterFunc(ctx, r.cancel)
+	defer stopCancel()
+	return runClientStream(ctx, r.stream, r.cancel, start, sink)
+}
+
 // Run drives the remote harness over Connect, translating each emitted Event into a host-mediated
 // sink call and sending the result back. The sink (live or replay) is the controller's — the host
 // still mediates the model over the wire.
 func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel() // tear the Connect stream down (and the server's recv loop) when Run returns
 	if start == nil || start.ExecutionID == "" {
 		return errors.New("harnesswire: Start requires execution_id")
 	}
-	stream, err := h.client.Connect(ctx)
+	prepared, err := h.PrepareRun(ctx)
 	if err != nil {
 		return err
+	}
+	defer prepared.Close()
+	return prepared.Run(ctx, start, sink)
+}
+
+func runClientStream(ctx context.Context, stream v1.Harness_ConnectClient, cancel context.CancelFunc, start *api.Start, sink api.EventSink) error {
+	if start == nil || start.ExecutionID == "" {
+		return errors.New("harnesswire: Start requires execution_id")
 	}
 	if err := stream.Send(&v1.ControllerFrame{
 		Session:     start.SessionUID,
@@ -480,7 +527,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 	for {
 		ev, err := stream.Recv()
 		if err == io.EOF {
-			return nil
+			return errors.New("harnesswire: stream closed before EVENT_END")
 		}
 		if err != nil {
 			return err
@@ -595,9 +642,14 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 		case v1.EventKind_EVENT_APPROVAL_REQUEST, v1.EventKind_EVENT_APPROVAL_RESULT, v1.EventKind_EVENT_EXECUTION_START, v1.EventKind_EVENT_PARKED:
 			return fmt.Errorf("harnesswire: harness emitted host-owned control event %s", ev.GetKind())
 		case v1.EventKind_EVENT_END:
-			err := endError(ev.GetEnd())
-			awaitClose(stream, cancel)
-			return err
+			endErr := endError(ev.GetEnd())
+			closeErr := awaitClose(stream, cancel)
+			if endErr != nil {
+				return endErr
+			}
+			return closeErr
+		default:
+			return fmt.Errorf("harnesswire: harness emitted unsupported event %s", ev.GetKind())
 		}
 	}
 }
@@ -610,14 +662,23 @@ const closeGrace = 2 * time.Second
 // harness gets to flush its telemetry before the host can suspend it, and the RPC ends with the
 // harness's own status rather than a host-side cancellation. A harness that never closes the
 // stream costs at most closeGrace.
-func awaitClose(stream v1.Harness_ConnectClient, cancel context.CancelFunc) {
+func awaitClose(stream v1.Harness_ConnectClient, cancel context.CancelFunc) error {
 	_ = stream.CloseSend()
-	t := time.AfterFunc(closeGrace, cancel)
+	var timedOut atomic.Bool
+	t := time.AfterFunc(closeGrace, func() {
+		timedOut.Store(true)
+		cancel()
+	})
 	defer t.Stop()
 	for {
-		if _, err := stream.Recv(); err != nil {
-			return
+		ev, err := stream.Recv()
+		if err == nil {
+			return fmt.Errorf("harnesswire: harness emitted %s after EVENT_END", ev.GetKind())
 		}
+		if err == io.EOF || timedOut.Load() {
+			return nil
+		}
+		return err
 	}
 }
 
@@ -627,9 +688,23 @@ func awaitClose(stream v1.Harness_ConnectClient, cancel context.CancelFunc) {
 // returned unchanged. A cancelled caller ends the turn at once.
 func hostFailed(ctx context.Context, stream v1.Harness_ConnectClient, cancel context.CancelFunc, err error) error {
 	if ctx.Err() == nil {
-		awaitClose(stream, cancel)
+		drainClose(stream, cancel)
 	}
 	return err
+}
+
+// drainClose is the host-failure counterpart to awaitClose. The host's sink error is authoritative,
+// so discard the harness's failed END and any other frames while waiting for the RPC and its
+// telemetry flush to finish.
+func drainClose(stream v1.Harness_ConnectClient, cancel context.CancelFunc) {
+	_ = stream.CloseSend()
+	t := time.AfterFunc(closeGrace, cancel)
+	defer t.Stop()
+	for {
+		if _, err := stream.Recv(); err != nil {
+			return
+		}
+	}
 }
 
 // exchangePark accepts only the transport acknowledgement followed by actual

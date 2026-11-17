@@ -641,6 +641,13 @@ reads the catalog that registration writes; the reference daemon does.
 - `EXE-7`: `Start.history` for a new execution MUST be every event before its `EXECUTION_START`,
   with `ApprovalResult.verified_approver` left empty (`APR-8`). The reference host always sends the
   full prior log, including after a memory restore.
+- `EXE-45`: Before recording a new execution for a harness that supports run preparation, the host
+  MUST prepare the actual Run without invoking the harness or sending `Start`. A preparation failure
+  appends no execution records, so the caller may retry `Exec` at the same journal cursor. The
+  successful preparation MUST be used for that execution exactly once; only after
+  `EXECUTION_START` and every `INPUT` commit may the host send `Start`. Once sending `Start` is
+  attempted, a send or receive failure does not prove non-delivery: the execution remains durable
+  and visible in later history under `EXE-7` and `EXE-17`.
 
 ### 8.2 Effects
 
@@ -903,10 +910,12 @@ cannot observe a model call that does not reach it. The class concerns model cal
   re-prompts. Once the compute that held the memory is gone (`RT-4e`), or replaced on a backend
   that records `ComputeInstance` (`RT-4h`, for example `runtime/substrate`), every later `Exec` and
   `Resume` on the session fails `FAILED_PRECONDITION`, so the re-prompt goes to a new session; the
-  failed session's log stays readable. When the compute and its memory survive, for example when
-  only the host or the harness stream failed, the re-prompt is an `Exec` on the same session. An
-  unmediated harness with no state for a session whose history records an earlier execution MUST
-  fail the run as possible state loss rather than start an empty conversation.
+  failed session's log stays readable. When the compute and its memory are known to survive, or a
+  prepared harness Run failed before `Start` was sent (`EXE-45`), the re-prompt is an `Exec` on the
+  same session. A stream failure after sending begins does not prove that memory survived or that
+  the harness did no work. An unmediated harness with no state for a session whose history records
+  an earlier execution MUST fail the run as possible state loss rather than start an empty
+  conversation.
 - `EXE-44`: Wrapper delegation. When a host-side wrapper performs work before delegating to an
   unmediated harness, a recorded execution that the wrapper positively knows was not delegated MUST
   be omitted in full from `Start.history` on later calls to that underlying harness. This is a
@@ -1507,7 +1516,8 @@ does not erase data or reclaim compute.
 | Harness `Describe` (admission `RT-1`, the `RT-3` recheck, or a `Describe` during the turn) could not reach the harness while the caller's context is live: the peer returned `UNAVAILABLE` or `DEADLINE_EXCEEDED`; or, on admission and the recheck, the host's own bound expired; or, during the turn, the error wraps `context.DeadlineExceeded` | `UNAVAILABLE` |
 | Any other `Describe` error on those paths, for example a peer `UNIMPLEMENTED` or `INTERNAL`, or a plain error from an in-process harness (during the turn, even one returned after the host's bound expired) | `INTERNAL` |
 | Any `Describe` error in the stored harness's half of the memory-tier override check (`OPS-7`) while the caller's context is live | `UNAVAILABLE` |
-| Caller deadline or cancellation that ends admission, compute allocation/start, any `Describe` above, a `Suspend` or `Fork` runtime operation, or `DeleteSession`, unless a more specific lifecycle refusal above applies | `DEADLINE_EXCEEDED` or `CANCELLED` |
+| Preparing `Harness.Connect` for a new `Exec` fails with `UNAVAILABLE` or `DEADLINE_EXCEEDED` while the caller is live (`EXE-45`) | `UNAVAILABLE` |
+| Caller deadline or cancellation that ends admission, compute allocation/start, any `Describe` above, Connect preparation, a `Suspend` or `Fork` runtime operation, or `DeleteSession`, unless a more specific lifecycle refusal above applies | `DEADLINE_EXCEEDED` or `CANCELLED` |
 | Journal hash chain fails verification on `Exec`, `Resume` (including an `APR-13` park or request repair) or `Fork` (`CHAIN-12`) | `DATA_LOSS` |
 | `Cancel` | `UNIMPLEMENTED` |
 | Any other failure | `INTERNAL` |
@@ -1618,10 +1628,9 @@ sequenceDiagram
   seconds for the harness to end the RPC before cancelling it, so the harness can flush telemetry
   and return its own status. It waits the same way when a sink call fails on the host side, unless
   the caller has already cancelled; the turn still fails with the host's error. After
-  `EVENT_PARKED` it already waits for the harness to close (`APR-10`).
-- TODO(spike): The reference host client treats a stream that closes cleanly without `EVENT_END`
-  as success, and silently ignores harness-sent `EVENT_INPUT`, `EVENT_LIFECYCLE`, `EVENT_ERROR`,
-  and unspecified kinds. Should these be protocol errors, as the proto comment implies?
+  `EVENT_PARKED` it already waits for the harness to close (`APR-10`). A stream that closes cleanly
+  before `EVENT_END`, or sends a host-owned or unsupported event kind, fails the execution as a
+  protocol error; it is never inferred as successful completion.
 - `WIRE-13`: Harness dials in the reference host use no transport security (§17).
 
 ### 12.3 Wire conversion
@@ -2435,7 +2444,6 @@ Each item is also marked inline where it applies.
 - TODO(spike): Repeated `Suspend` and `Resume` without `Suspend` (§11.5).
 - TODO(spike): Fork journal atomicity and `at_seq > head` (§11.7).
 - TODO(spike): Unknown `Resumability` numbers read as `STATELESS_REPLAY` (§12.1).
-- TODO(spike): Stream close without `EVENT_END` and ignored harness event kinds (§12.2).
 - TODO(spike): Session check and stickiness for model reply correlation failures (§12.2).
 - TODO(spike): Black-box conformance packaging (§16.2).
 - TODO(spike): End-to-end egress credential injection and policy enforcement for an unmediated

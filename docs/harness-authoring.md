@@ -135,6 +135,15 @@ empty/`echo` fallback. Old sessions/journals stay unchanged; see
 
 The host hands you a `Start` and an `EventSink`.
 
+An out-of-process adapter can implement the optional Go interface `api.HarnessRunPreparer` to open
+the actual transport for one `Run` before the host records a new execution. Preparation must not
+invoke the harness or send `Start`; its only positive guarantee is that a preparation error happened
+before delegation. The host closes an unused preparation and calls a successful prepared run at most
+once, after `EXECUTION_START` and every `INPUT` are durable. `harnesswire.ClientHarness` implements
+this for `Harness.Connect`. A wrapper around it must forward the optional interface to keep that
+pre-journal boundary. A failed `Send(Start)` or later receive is not proof of non-delivery and stays
+a durable failed execution (`EXE-45`).
+
 <!-- doccheck: skip excerpt of api.Start; the real definition is in api/harness.go -->
 ```go
 type Start struct {

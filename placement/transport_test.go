@@ -393,6 +393,65 @@ func TestForkEndsTheParentsOpenHarnessStreamBeforeTheCheckpoint(t *testing.T) {
 	testCheckpointEndsOpenStream(t, forkCheckpoint)
 }
 
+type blockedPrepareHarness struct {
+	api.Harness
+	started chan struct{}
+	done    chan struct{}
+}
+
+func (h *blockedPrepareHarness) PrepareRun(ctx context.Context) (api.PreparedHarnessRun, error) {
+	close(h.started)
+	<-ctx.Done()
+	close(h.done)
+	return nil, ctx.Err()
+}
+
+func TestForkCancelsPreparedHarnessBeforeExecutionIsRecorded(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("s1")
+	h := &blockedPrepareHarness{Harness: echoagent.Harness{}, started: make(chan struct{}), done: make(chan struct{})}
+	backend := &routedBackend{desc: memDescriptor}
+	p := placement.New(backend, echoagent.Model, placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
+		return h, func() error { return nil }, nil
+	}))
+
+	execErr := make(chan error, 1)
+	go func() {
+		_, err := p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+		execErr <- err
+	}()
+	select {
+	case <-h.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("turn never began Connect preparation")
+	}
+
+	if err := forkCheckpoint(p, log, "s1"); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	select {
+	case <-h.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("checkpoint did not cancel prepared Connect")
+	}
+	select {
+	case err := <-execErr:
+		if !errors.Is(err, placement.ErrCheckpointing) || !errors.Is(err, eventlog.ErrFenced) {
+			t.Fatalf("turn returned %v, want ErrCheckpointing and ErrFenced", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("superseded turn did not return")
+	}
+	kinds := journalKinds(t, log)
+	if len(kinds) != 1 || kinds[0] != api.EventLifecycle {
+		t.Fatalf("journal=%v, want only checkpoint lifecycle record", kinds)
+	}
+}
+
 // The fork must end the turn's stream whichever Placer of the Registry runs the turn.
 func TestForkEndsAParentStreamOpenedByAnotherPlacerOfTheRegistry(t *testing.T) {
 	testCheckpointEndsOpenStream(t, forkCheckpoint, registryPair)

@@ -1,0 +1,258 @@
+package harnesswire
+
+import (
+	"context"
+	"errors"
+	"io"
+	"testing"
+
+	"github.com/agent-primitives/sessions/api"
+	v1 "github.com/agent-primitives/sessions/api/genpb"
+	"google.golang.org/grpc"
+)
+
+type prepareClient struct {
+	v1.HarnessClient
+	stream   *prepareClientStream
+	err      error
+	connects int
+	ctx      context.Context
+}
+
+func (c *prepareClient) Connect(ctx context.Context, _ ...grpc.CallOption) (grpc.BidiStreamingClient[v1.ControllerFrame, v1.Event], error) {
+	c.connects++
+	c.ctx = ctx
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.stream, nil
+}
+
+type prepareClientStream struct {
+	grpc.ClientStream
+	sent      []*v1.ControllerFrame
+	events    []*v1.Event
+	sendErr   error
+	recvErr   error
+	closeSend int
+}
+
+type blockingPreparedStream struct {
+	grpc.ClientStream
+	ctx  context.Context
+	sent chan struct{}
+}
+
+func (s *blockingPreparedStream) Send(*v1.ControllerFrame) error {
+	close(s.sent)
+	return nil
+}
+
+func (s *blockingPreparedStream) Recv() (*v1.Event, error) {
+	<-s.ctx.Done()
+	return nil, s.ctx.Err()
+}
+
+func (*blockingPreparedStream) CloseSend() error { return nil }
+
+func (s *prepareClientStream) Send(frame *v1.ControllerFrame) error {
+	s.sent = append(s.sent, frame)
+	return s.sendErr
+}
+
+func (s *prepareClientStream) Recv() (*v1.Event, error) {
+	if len(s.events) > 0 {
+		ev := s.events[0]
+		s.events = s.events[1:]
+		return ev, nil
+	}
+	if s.recvErr != nil {
+		return nil, s.recvErr
+	}
+	return nil, io.EOF
+}
+
+func (s *prepareClientStream) CloseSend() error {
+	s.closeSend++
+	return nil
+}
+
+type noOpSink struct{}
+
+func (noOpSink) Model(context.Context, api.ModelRequest) (api.ModelResponse, error) {
+	return api.ModelResponse{}, nil
+}
+func (noOpSink) Output(context.Context, string) error { return nil }
+func (noOpSink) ToolCall(context.Context, api.ToolCall) (api.ToolResult, error) {
+	return api.ToolResult{}, nil
+}
+func (noOpSink) Report(context.Context, api.ToolResult) error { return nil }
+func (noOpSink) Usage(context.Context, api.Usage) error       { return nil }
+
+func TestPrepareRunOpensAndReusesOneConnectStream(t *testing.T) {
+	stream := &prepareClientStream{events: []*v1.Event{{ExecutionId: "e", Kind: v1.EventKind_EVENT_END, Body: &v1.Event_End{End: &v1.HarnessEnd{State: "COMPLETED"}}}}}
+	client := &prepareClient{stream: stream}
+	h := NewClientHarness(client)
+	prepared, err := h.PrepareRun(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	if client.connects != 1 || len(stream.sent) != 0 {
+		t.Fatalf("after PrepareRun: connects=%d sent=%d, want 1/0", client.connects, len(stream.sent))
+	}
+	if err := prepared.Run(t.Context(), &api.Start{SessionUID: "s", ExecutionID: "e"}, noOpSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if client.connects != 1 || len(stream.sent) != 1 || stream.sent[0].GetStart() == nil {
+		t.Fatalf("after Run: connects=%d sent=%v, want one Start on prepared stream", client.connects, stream.sent)
+	}
+	if err := prepared.Run(t.Context(), &api.Start{SessionUID: "s", ExecutionID: "e"}, noOpSink{}); err == nil {
+		t.Fatal("second prepared Run succeeded")
+	}
+	if client.connects != 1 || len(stream.sent) != 1 {
+		t.Fatalf("second Run opened or sent again: connects=%d sent=%d", client.connects, len(stream.sent))
+	}
+}
+
+func TestPrepareRunFailureSendsNothing(t *testing.T) {
+	cause := errors.New("connect unavailable")
+	client := &prepareClient{err: cause}
+	prepared, err := NewClientHarness(client).PrepareRun(t.Context())
+	if !errors.Is(err, cause) || prepared != nil || client.connects != 1 {
+		t.Fatalf("PrepareRun=(%v, %v), connects=%d; want nil, %v, 1", prepared, err, client.connects, cause)
+	}
+}
+
+func TestPreparedRunCloseCancelsUnusedConnect(t *testing.T) {
+	client := &prepareClient{stream: &prepareClientStream{}}
+	prepared, err := NewClientHarness(client).PrepareRun(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.Close()
+	prepared.Close()
+	select {
+	case <-client.ctx.Done():
+	default:
+		t.Fatal("Close did not cancel prepared Connect")
+	}
+	if len(client.stream.sent) != 0 {
+		t.Fatal("Close sent a frame")
+	}
+	if err := prepared.Run(t.Context(), &api.Start{ExecutionID: "e"}, noOpSink{}); err == nil {
+		t.Fatal("Run after Close succeeded")
+	}
+}
+
+func TestPreparedRunCloseCancelsActiveRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	stream := &blockingPreparedStream{ctx: ctx, sent: make(chan struct{})}
+	prepared := &preparedClientRun{stream: stream, cancel: cancel}
+	done := make(chan error, 1)
+	go func() {
+		done <- prepared.Run(ctx, &api.Start{ExecutionID: "e"}, noOpSink{})
+	}()
+	<-stream.sent
+	prepared.Close()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run=%v, want Close cancellation", err)
+	}
+}
+
+func TestPreparedRunHonorsIndependentRunCancellation(t *testing.T) {
+	prepareCtx, prepareCancel := context.WithCancel(context.Background())
+	stream := &blockingPreparedStream{ctx: prepareCtx, sent: make(chan struct{})}
+	prepared := &preparedClientRun{stream: stream, cancel: prepareCancel}
+	runCtx, runCancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		done <- prepared.Run(runCtx, &api.Start{ExecutionID: "e"}, noOpSink{})
+	}()
+	<-stream.sent
+	runCancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run=%v, want Run context cancellation", err)
+	}
+}
+
+func TestClientRunInvalidStartDoesNotConnect(t *testing.T) {
+	client := &prepareClient{stream: &prepareClientStream{}}
+	err := NewClientHarness(client).Run(t.Context(), &api.Start{}, noOpSink{})
+	if err == nil || client.connects != 0 {
+		t.Fatalf("Run=%v connects=%d, want local validation before Connect", err, client.connects)
+	}
+}
+
+func TestPreparedSendAndRecvFailuresAreRunFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stream *prepareClientStream
+		cause  error
+	}{
+		{name: "send", cause: errors.New("send uncertain")},
+		{name: "recv", cause: errors.New("recv uncertain")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := &prepareClientStream{}
+			if tc.name == "send" {
+				stream.sendErr = tc.cause
+			} else {
+				stream.recvErr = tc.cause
+			}
+			prepared, err := NewClientHarness(&prepareClient{stream: stream}).PrepareRun(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Close()
+			err = prepared.Run(t.Context(), &api.Start{ExecutionID: "e"}, noOpSink{})
+			if !errors.Is(err, tc.cause) {
+				t.Fatalf("Run=%v, want %v", err, tc.cause)
+			}
+		})
+	}
+}
+
+func TestPreparedRunRequiresEndAndRejectsUnsupportedEvents(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		events []*v1.Event
+	}{
+		{name: "EOF before END"},
+		{name: "host-owned error", events: []*v1.Event{{ExecutionId: "e", Kind: v1.EventKind_EVENT_ERROR, Body: &v1.Event_Error{Error: &v1.Error{Description: "peer error"}}}}},
+		{name: "unspecified", events: []*v1.Event{{ExecutionId: "e", Kind: v1.EventKind_EVENT_KIND_UNSPECIFIED}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := &prepareClientStream{events: tc.events}
+			prepared, err := NewClientHarness(&prepareClient{stream: stream}).PrepareRun(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Close()
+			if err := prepared.Run(t.Context(), &api.Start{ExecutionID: "e"}, noOpSink{}); err == nil {
+				t.Fatal("Run accepted stream without EVENT_END")
+			}
+		})
+	}
+}
+
+func TestPreparedRunRejectsFramesAfterEnd(t *testing.T) {
+	for _, ev := range []*v1.Event{
+		{ExecutionId: "e", Kind: v1.EventKind_EVENT_ERROR, Body: &v1.Event_Error{Error: &v1.Error{Description: "peer error"}}},
+		{ExecutionId: "e", Kind: v1.EventKind_EVENT_KIND_UNSPECIFIED},
+		{ExecutionId: "e", Kind: v1.EventKind_EVENT_END, Body: &v1.Event_End{End: &v1.HarnessEnd{State: "COMPLETED"}}},
+	} {
+		stream := &prepareClientStream{events: []*v1.Event{
+			{ExecutionId: "e", Kind: v1.EventKind_EVENT_END, Body: &v1.Event_End{End: &v1.HarnessEnd{State: "COMPLETED"}}},
+			ev,
+		}}
+		prepared, err := NewClientHarness(&prepareClient{stream: stream}).PrepareRun(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := prepared.Run(t.Context(), &api.Start{ExecutionID: "e"}, noOpSink{}); err == nil {
+			t.Fatalf("Run accepted %s after EVENT_END", ev.GetKind())
+		}
+		prepared.Close()
+	}
+}

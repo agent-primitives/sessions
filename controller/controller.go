@@ -43,6 +43,11 @@ var ErrInvalidExecutionLog = errors.New("controller: invalid execution log")
 // The original cause is retained for callers to distinguish cancellation from endpoint failure.
 var ErrHarnessDescribeFailed = errors.New("controller: describe harness failed")
 
+// ErrHarnessPrepareFailed identifies failure to prepare a harness run before its execution is
+// recorded. The original cause is retained for callers to distinguish cancellation from endpoint
+// failure. No Start send was attempted.
+var ErrHarnessPrepareFailed = errors.New("controller: prepare harness run failed")
+
 // ErrHarnessMismatch rejects replay/recovery with a different resolved harness name.
 var ErrHarnessMismatch = errors.New("controller: harness does not match recorded invocation")
 
@@ -339,6 +344,22 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		}
 	}
 
+	run := har.Run
+	if preparer, ok := har.(api.HarnessRunPreparer); ok {
+		prepared, prepareErr := preparer.PrepareRun(ctx)
+		if prepareErr != nil {
+			if prepared != nil {
+				prepared.Close()
+			}
+			return fmt.Errorf("%w: %w", ErrHarnessPrepareFailed, prepareErr)
+		}
+		if prepared == nil {
+			return fmt.Errorf("%w: preparer returned nil", ErrHarnessPrepareFailed)
+		}
+		defer prepared.Close()
+		run = prepared.Run
+	}
+
 	// Record every invocation before inputs so recovery can detect partially committed turns.
 	config := bytes.Clone(c.startConfig)
 	last := expectedLastSeq
@@ -388,7 +409,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		ResumeFromSeq: c.startResumeFromSeq,
 	}
 	sink := &liveSink{c: c, executionID: executionID, modelDefault: model, modelPolicy: c.invocationPolicy(model), guard: &sinkGuard{}, desc: &desc, har: har, calls: make(map[string]bool), runCtx: runCtx}
-	runErr := har.Run(runCtx, start, sink)
+	runErr := run(runCtx, start, sink)
 	stop := sink.guard.close()
 	if stop != nil {
 		if runErr == nil || !errors.Is(stop, api.ErrApprovalParked) {

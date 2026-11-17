@@ -52,8 +52,9 @@ var ErrSessionBusy = errors.New("placement: another operation is in progress for
 var ErrDescriptorMismatch = errors.New("placement: harness is not the expected one")
 
 // ErrHarnessUnavailable is returned when the harness could not be reached to describe itself during
-// admission or the controller's connected-harness identity check. Neither check runs the harness or
-// appends journal records; the connected check may follow compute allocation and fence minting.
+// admission or the controller's connected-harness identity check, or to prepare its Connect stream
+// before a new execution. None runs the harness or appends execution records; the connected checks
+// may follow compute allocation and fence minting.
 // session.Service surfaces it as codes.Unavailable. If the caller's own deadline or cancellation
 // ended the check, it is ErrAdmissionInterrupted instead: the same expired call cannot succeed.
 var ErrHarnessUnavailable = errors.New("placement: harness unavailable")
@@ -166,7 +167,9 @@ func (s *sessionSet) busy() bool {
 // the connection. runtime/local passes a unix-socket address (unix://…); substrate passes the
 // atenet-router's host:port, dialed over h2c, plus CallMetadata naming the actor, which the client
 // must attach to every call. The default dialer handles both forms; WithDialer overrides it (tests).
-// This is the one transport seam the harness rides unchanged.
+// The closer may be called while PrepareRun or Run is blocked; it must interrupt the transport and
+// return promptly rather than wait for that call to finish. This is the one transport seam the
+// harness rides unchanged.
 type Dialer func(inc api.Incarnation) (api.Harness, func() error, error)
 
 // Option configures a Placer.
@@ -645,13 +648,18 @@ func (p *Placer) refuseOverrideRepair(ctx context.Context, sessionUID string, ov
 	return refuseStatefulOverride(desc, override)
 }
 
-// controllerError maps only the controller's Describe boundary. Run, model and runtime errors
-// with identical transport codes must keep their existing classification.
+// controllerError maps only the controller's pre-execution Describe and Connect-preparation
+// boundaries. Run, model and runtime errors with identical transport codes keep their existing
+// classification because Start delivery may already be uncertain.
 func controllerError(ctx context.Context, err error) error {
-	if !errors.Is(err, controller.ErrHarnessDescribeFailed) {
+	switch {
+	case errors.Is(err, controller.ErrHarnessDescribeFailed):
+		return describeError(ctx, err, errors.Is(err, context.DeadlineExceeded))
+	case errors.Is(err, controller.ErrHarnessPrepareFailed):
+		return prepareHarnessError(ctx, err)
+	default:
 		return err
 	}
-	return describeError(ctx, err, errors.Is(err, context.DeadlineExceeded))
 }
 
 // describeError is shared by admission and connected-harness identity checks.
@@ -662,11 +670,29 @@ func describeError(ctx context.Context, err error, timedOut bool) error {
 		// context error cannot change the service's cancellation/deadline classification.
 		return fmt.Errorf("%w: describe harness: %w: %v", ErrAdmissionInterrupted, ctx.Err(), err)
 	case timedOut || c == codes.Unavailable || c == codes.DeadlineExceeded:
-		// A refused connection or a harness timeout while the caller is live is a retryable outage.
 		return fmt.Errorf("%w: %w", ErrHarnessUnavailable, err)
 	default:
 		return err
 	}
+}
+
+func prepareHarnessError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return &CallerContextError{CallerErr: ctx.Err(), Cause: err}
+	}
+	if c := status.Code(err); c == codes.Unavailable || c == codes.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
+		// Connect setup can name a private endpoint or carry credential-provider diagnostics. Keep the
+		// cause for direct Go callers but publish only the fixed host-owned outage text.
+		return &harnessUnavailableError{cause: err}
+	}
+	return err
+}
+
+type harnessUnavailableError struct{ cause error }
+
+func (*harnessUnavailableError) Error() string { return ErrHarnessUnavailable.Error() }
+func (e *harnessUnavailableError) Unwrap() []error {
+	return []error{ErrHarnessUnavailable, e.cause}
 }
 
 // DefaultDial reaches a harnesswire server by address form over plaintext: a unix-socket address

@@ -29,6 +29,15 @@ func (h describeBoundaryHarness) Describe(ctx context.Context) (api.Descriptor, 
 	return h.describe(ctx)
 }
 
+type prepareBoundaryHarness struct {
+	api.Harness
+	prepare func(context.Context) (api.PreparedHarnessRun, error)
+}
+
+func (h prepareBoundaryHarness) PrepareRun(ctx context.Context) (api.PreparedHarnessRun, error) {
+	return h.prepare(ctx)
+}
+
 func TestControllerDescribeBoundaryUsesAdmissionClassification(t *testing.T) {
 	for _, operation := range []string{"Exec", "Resume"} {
 		for _, tc := range []struct {
@@ -117,5 +126,61 @@ func TestControllerDescribeBoundaryUsesAdmissionClassification(t *testing.T) {
 				synctest.Test(t, check)
 			})
 		}
+	}
+}
+
+func TestControllerPrepareBoundaryUsesAdmissionClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		peerErr   error
+		cancel    bool
+		want      error
+		wantCause error
+	}{
+		{name: "unavailable", peerErr: status.Error(codes.Unavailable, "peer unavailable"), want: placement.ErrHarnessUnavailable},
+		{name: "peer deadline", peerErr: status.Error(codes.DeadlineExceeded, "peer deadline"), want: placement.ErrHarnessUnavailable},
+		{name: "plain deadline", peerErr: context.DeadlineExceeded, want: placement.ErrHarnessUnavailable},
+		{name: "caller cancelled", peerErr: status.Error(codes.Unavailable, "peer unavailable"), cancel: true, want: placement.ErrAdmissionInterrupted, wantCause: context.Canceled},
+		{name: "internal", peerErr: status.Error(codes.Internal, "peer internal"), want: controller.ErrHarnessPrepareFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			log := store.Session("prepare-boundary")
+			base := &identityToolHarness{version: "v1"}
+			desc, err := base.Describe(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend := &routedBackend{desc: desc}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var closes atomic.Int32
+			h := prepareBoundaryHarness{Harness: base, prepare: func(context.Context) (api.PreparedHarnessRun, error) {
+				if tc.cancel {
+					cancel()
+				}
+				return nil, tc.peerErr
+			}}
+			p := placement.New(backend, nil, placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
+				return h, func() error { closes.Add(1); return nil }, nil
+			}))
+			_, err = p.Exec(ctx, log, "prepare-boundary", nil, 0)
+			if !errors.Is(err, tc.want) || tc.wantCause != nil && !errors.Is(err, tc.wantCause) {
+				t.Fatalf("error=%v want=%v cause=%v", err, tc.want, tc.wantCause)
+			}
+			if tc.want == controller.ErrHarnessPrepareFailed && (errors.Is(err, placement.ErrHarnessUnavailable) || errors.Is(err, placement.ErrAdmissionInterrupted)) {
+				t.Fatalf("non-outage preparation error misclassified: %v", err)
+			}
+			if base.runs.Load() != 0 || closes.Load() != 1 {
+				t.Fatalf("preparation failure ran harness or leaked connection: runs=%d closes=%d", base.runs.Load(), closes.Load())
+			}
+			if head, headErr := log.Head(); headErr != nil || head != 0 {
+				t.Fatalf("head=%d err=%v, want no execution records", head, headErr)
+			}
+		})
 	}
 }

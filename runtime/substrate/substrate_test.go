@@ -14,6 +14,7 @@ import (
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/controller"
+	"github.com/agent-primitives/sessions/internal/callerctx"
 	"github.com/agent-primitives/sessions/runtime/substrate"
 )
 
@@ -1477,6 +1478,56 @@ func TestForkCleanupSurvivesACancelledCaller(t *testing.T) {
 	// did NOT inherit the caller's context.
 	if !slices.Contains(m.calls, "untag:fork-child") {
 		t.Fatalf("cleanup must run on a detached context, calls=%v", m.calls)
+	}
+}
+
+// The host classifies a failed fork by the caller's context, but Fork tears down on detached
+// contexts before it returns, so the caller can end during that teardown. Fork marks a failure the
+// caller was still live for when the teardown started, so the host keeps the primary failure; one
+// the caller had already ended, or that needed no teardown, is left unmarked.
+func TestForkMarksAFailureItsCallerOutlived(t *testing.T) {
+	primary := fmt.Errorf("%w: worker pool drained", api.ErrComputeUnavailable)
+	for _, tc := range []struct {
+		name  string
+		ref   api.SnapshotRef
+		setup func(m *mockCloner, cancel context.CancelFunc)
+		live  bool
+	}{
+		{name: "caller ends during the clone's teardown", live: true, setup: func(m *mockCloner, cancel context.CancelFunc) {
+			m.resumeErr = primary
+			// discardClone reads the clone before it destroys it.
+			m.afterGet = func(name string) {
+				if name == "child" {
+					cancel()
+				}
+			}
+		}},
+		{name: "caller ended before the clone failed", setup: func(m *mockCloner, cancel context.CancelFunc) {
+			m.cloneErr = primary
+			cancel()
+		}},
+		{name: "no teardown", ref: api.SnapshotRef{Local: "parent", Memory: true}, setup: func(*mockCloner, context.CancelFunc) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newClonerWithSuspendedParent()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			tc.setup(m, cancel)
+			ref := tc.ref
+			if ref.Local == "" {
+				ref = api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true}
+			}
+			_, err := newMemoryBackend(m).Fork(ctx, ref, api.ForkOpts{ChildSessionUID: "child"})
+			if err == nil {
+				t.Fatal("expected the fork to fail")
+			}
+			if got := callerctx.LiveAtFailure(err); got != tc.live {
+				t.Fatalf("fork=%v: marked live=%v, want %v", err, got, tc.live)
+			}
+			if tc.live && !errors.Is(err, primary) {
+				t.Fatalf("fork=%v lost the primary failure", err)
+			}
+		})
 	}
 }
 

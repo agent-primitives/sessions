@@ -644,10 +644,11 @@ reads the catalog that registration writes; the reference daemon does.
 - `EXE-45`: Before recording a new execution for a harness that supports run preparation, the host
   MUST prepare the actual Run without invoking the harness or sending `Start`. A preparation failure
   appends no execution records, so the caller may retry `Exec` at the same journal cursor. The
-  successful preparation MUST be used for that execution exactly once; only after
-  `EXECUTION_START` and every `INPUT` commit may the host send `Start`. Once sending `Start` is
-  attempted, a send or receive failure does not prove non-delivery: the execution remains durable
-  and visible in later history under `EXE-7` and `EXE-17`.
+  successful preparation MUST be used for that execution at most once, and MUST be closed unused if
+  a record append fails. Only after `EXECUTION_START` and every `INPUT` commit may the host send
+  `Start`. Once preparation succeeds, a caller cancellation, send failure or receive failure does
+  not prove non-delivery: any recorded execution remains durable and visible in later history under
+  `EXE-7` and `EXE-17`.
 
 ### 8.2 Effects
 
@@ -910,11 +911,12 @@ cannot observe a model call that does not reach it. The class concerns model cal
   re-prompts. Once the compute that held the memory is gone (`RT-4e`), or replaced on a backend
   that records `ComputeInstance` (`RT-4h`, for example `runtime/substrate`), every later `Exec` and
   `Resume` on the session fails `FAILED_PRECONDITION`, so the re-prompt goes to a new session; the
-  failed session's log stays readable. When the compute and its memory are known to survive, or a
-  prepared harness Run failed before `Start` was sent (`EXE-45`), the re-prompt is an `Exec` on the
-  same session. A stream failure after sending begins does not prove that memory survived or that
-  the harness did no work. An unmediated harness with no state for a session whose history records
-  an earlier execution MUST fail the run as possible state loss rather than start an empty
+  failed session's log stays readable. When the compute and its memory are known to survive, or
+  preparing the harness Run failed so no execution was recorded (`EXE-45`), the re-prompt is an
+  `Exec` on the same session. Cancellation after a successful preparation, or a stream failure once
+  sending begins, does not prove that memory survived or that the harness did no work; any recorded
+  attempt remains in later history. An unmediated harness with no state for a session whose history
+  records an earlier execution MUST fail the run as possible state loss rather than start an empty
   conversation.
 - `EXE-44`: Wrapper delegation. When a host-side wrapper performs work before delegating to an
   unmediated harness, a recorded execution that the wrapper positively knows was not delegated MUST

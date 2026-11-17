@@ -3,7 +3,8 @@
 //
 //	claude -p --output-format stream-json --verbose --include-partial-messages \
 //	  --permission-mode <mode> --setting-sources user --strict-mcp-config \
-//	  (--session-id|--resume) <id> [--model m] [--max-turns n] [--max-budget-usd x]
+//	  (--session-id <id> | --resume <id> | --resume <from> --fork-session --session-id <id>) \
+//	  [--model m] [--max-turns n] [--max-budget-usd x]
 //
 // with the turn's text inputs on stdin, and maps its stream-json events onto the sink. The recorded
 // fixtures in testdata come from Claude Code 2.1.311; New does not check the installed version.
@@ -55,9 +56,41 @@
 // init moves to the next attempt, so a transcript left by a dead attempt cannot block the session.
 // Nothing extra is persisted: the memory snapshot carries the id, and the runtime's snapshot must
 // also preserve the filesystem that holds Claude Code's transcripts. A harness instance that holds
-// no state for a session whose History already has turns (memory lost, a fork child, or a session
-// that started on another harness) refuses the turn rather than start an empty conversation
-// (EXE-43). A re-run of an execution this instance already started fails without starting Claude
+// no state for a session whose History already has turns (memory lost, or a session that started
+// on another harness) refuses the turn rather than start an empty conversation (EXE-43).
+//
+// A fork child on a runtime that snapshots memory runs on a clone of its parent's compute, so its
+// harness memory holds the parent's entry, keyed by the parent's session UID, and none of its own.
+// Its first turn adopts the parent's Claude Code session when all of these hold: History ends with
+// a LIFECYCLE FORK marker and no EXECUTION_START or INPUT after it; the last execution before the
+// marker, the fork point, is one this instance started; and exactly one session entry, not running
+// a turn, has that execution as its last. The fork point is the execution of the last
+// EXECUTION_START or INPUT before the marker, so an execution journaled with no EXECUTION_START
+// (EXE-31) counts, and a legacy INPUT with no execution ID is not a known fork point. The child
+// then passes --resume <parent id> --fork-session --session-id <child id>: Claude Code copies the
+// parent's transcript under the child's own id and leaves the parent's untouched, and later child
+// turns pass --resume <child id>. The parent's entry is read, never changed. Until Claude Code
+// confirms the child's id, every child attempt, a retry of one cancelled before it ran or one that
+// failed before init included, rechecks that the parent is still idle at the fork point, so it
+// never copies a turn the parent began after the fork. While such an attempt runs, a turn of the
+// parent, and of any fork not yet confirmed between the child and the session it copies, is
+// refused with a fork-in-progress error, so the transcript cannot move on before Claude Code
+// copies it: on an instance that serves both, continuing the parent right after a fork fails
+// until the child's turn ends. A parent whose id Claude Code never confirmed has no conversation
+// to continue, so the child starts its own, as the parent's next turn would. Any other fork child
+// with no state refuses as above: a fork onto an instance that did not run the parent's last
+// turn, a parent that ran on after the fork point on a shared instance (before the child's id is
+// confirmed), or a child whose first turn was journaled but never reached this instance (a turn
+// after the marker that this instance holds no record of). Such a child stays refused for good,
+// and so does a fork of it: its unrecorded turn is the grandchild's fork point. A fork of a child
+// whose id is not confirmed yet is refused whenever a retry of that child would be. The same holds
+// for a fork whose fork point this instance refused before recording it as started (its ctx was
+// already done, another turn was running, or a fork of it was in progress): the instance cannot
+// tell that turn from one that ran elsewhere. A later parent turn that starts on the instance
+// gives a new fork a known fork point. The transcript directory (CLAUDE_CONFIG_DIR, default
+// HOME/.claude) must be on the filesystem the runtime clones with the memory.
+//
+// A re-run of an execution this instance already started fails without starting Claude
 // Code; an interrupted turn is not retried (EXE-42). Every EXECUTION_START or INPUT is evidence that
 // Claude Code may already have run. The journal cannot distinguish a process that started and died
 // before its first event from an execution a wrapper failed before invoking this harness, so this
@@ -201,6 +234,16 @@ type sessionState struct {
 	established bool // system/init confirmed the id for attempt; later turns resume it
 	pending     bool // the id for attempt was handed to a process that did not confirm it
 	running     bool // a turn is in flight
+	// lastExec is the execution ID of the last turn begin accepted. A fork child matches the
+	// session it forks from by it.
+	lastExec string
+	// forkParent and forkPoint name the session a fork child adopted and the execution it forked
+	// at, until Claude Code confirms the child's own id; empty when the session starts its own.
+	// Every attempt until then rechecks them (forkSource).
+	forkParent, forkPoint string
+	// forkReaders counts the fork-child attempts in flight that reserved this session (begin);
+	// while it is nonzero, a turn of this session is refused (errForkInFlight).
+	forkReaders int
 }
 
 // New validates cfg and returns a harness.
@@ -330,8 +373,9 @@ func argValue(v string) bool {
 }
 
 // Describe declares REQUIRES_MEMORY_SNAPSHOT (the Claude Code session id lives in harness memory
-// and the transcript on the compute's filesystem), not ForkSafe (a fork child holds no session of
-// its own), and Streaming.
+// and the transcript on the compute's filesystem), not ForkSafe (a fork by replay cannot rebuild
+// the conversation; a fork that clones memory adopts the parent's session, see the package doc),
+// and Streaming.
 func (h *Harness) Describe(context.Context) (api.Descriptor, error) {
 	var models []string
 	if h.cfg.Model != "" {
@@ -355,6 +399,7 @@ var (
 	errRerun         = errors.New("claudecode: execution already started on this harness; an interrupted turn is not retried")
 	errStateLost     = errors.New("claudecode: session has earlier turns but this harness holds no state for it (memory lost, fork, or harness switch)")
 	errBusy          = errors.New("claudecode: another turn is running for this session")
+	errForkInFlight  = errors.New("claudecode: a fork of this session is running a turn that may still read this session's conversation; retry when it ends")
 	errNoPrompt      = errors.New("claudecode: inputs carry no text")
 	errNonText       = errors.New("claudecode: inputs must be text only")
 	errPromptSize    = errors.New("claudecode: inputs exceed the 10 MB prompt limit")
@@ -370,11 +415,12 @@ func (h *Harness) Run(ctx context.Context, s *api.Start, sink api.EventSink) err
 	if s == nil || s.SessionUID == "" {
 		return errNoSession
 	}
-	if err := h.begin(ctx, s); err != nil {
+	forkFrom, reserved, err := h.begin(ctx, s)
+	if err != nil {
 		return err
 	}
 	established := false
-	defer func() { h.end(s.SessionUID, established) }()
+	defer func() { h.end(s.SessionUID, established, reserved) }()
 
 	prompt, err := promptText(s.Inputs)
 	if err != nil {
@@ -384,77 +430,198 @@ func (h *Harness) Run(ctx context.Context, s *api.Start, sink api.EventSink) err
 	if err != nil {
 		return err
 	}
-	flag, id := h.sessionArg(s.SessionUID)
+	flag, id, forkFrom := h.sessionArg(s.SessionUID, forkFrom)
 	t := &turn{
 		h:          h,
 		sink:       sink,
 		sessionUID: s.SessionUID,
 		flag:       flag,
 		sessionID:  id,
+		forkFrom:   forkFrom,
 		model:      model,
 		receipts:   h.receiptMode(s),
 	}
-	err = t.run(ctx, h.args(flag, id, model), prompt)
+	err = t.run(ctx, h.args(flag, id, forkFrom, model), prompt)
 	established = t.initSeen
 	return err
 }
 
 // begin applies the checks that need harness memory and marks the turn running. It creates the
 // session's state on the first turn, before input validation, so a first turn that fails
-// validation does not make every later turn look like lost memory. A turn whose ctx is already
-// done stops there, before the execution is recorded as started, so nothing runs and a retry of
-// it is not refused.
-func (h *Harness) begin(ctx context.Context, s *api.Start) error {
+// validation does not make every later turn look like lost memory; a fork child's first turn
+// adopts the session it forks from (adoptFork) or is refused. Until Claude Code confirms a fork
+// child's own id, every attempt, the first included, rechecks that the session it forks from is
+// still idle at the fork point and returns the id the attempt forks (forkFrom), or is refused: an
+// attempt cancelled or failed before init must not copy a transcript that has moved on since. A
+// turn whose ctx is already done stops there, before the execution is recorded as started, so
+// nothing runs and a retry of it is not refused; a fork taken right after it, with no later turn,
+// is refused.
+//
+// Such an attempt also reserves every session forkSource checked (sources) until end releases
+// them: Claude Code reads the source transcript some time after begin returns, so a turn of the
+// session it forks from, which appends to that transcript, is refused meanwhile with
+// errForkInFlight. Only the session whose confirmed id the attempt forks can move under it; the
+// unconfirmed forks in between and a source with no conversation are reserved too, deliberately
+// conservative, so one rule covers the chain. Every refusal comes before the reservation, so begin
+// never returns an error holding one. A turn refused this way, like one refused as busy, is not
+// recorded as started.
+func (h *Harness) begin(ctx context.Context, s *api.Start) (string, []string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	var (
+		forkFrom string
+		sources  []string
+	)
 	if _, ok := h.started[s.ExecutionID]; ok {
-		return errRerun
+		return "", nil, errRerun
 	}
 	st := h.sessions[s.SessionUID]
-	if st == nil {
-		if hasPriorTurn(s.History) {
-			return errStateLost
-		}
+	fresh := st == nil
+	if fresh {
 		st = &sessionState{}
+		if hasPriorTurn(s.History) {
+			parent, point, ok := h.adoptFork(s.History)
+			if !ok {
+				return "", nil, errStateLost
+			}
+			st.forkParent, st.forkPoint = parent, point
+		}
+	}
+	if !st.established && st.forkParent != "" {
+		var ok bool
+		if forkFrom, sources, ok = h.forkSource(st.forkParent, st.forkPoint); !ok {
+			return "", nil, errStateLost
+		}
+	}
+	if fresh {
 		h.sessions[s.SessionUID] = st
 	}
 	if err := ctx.Err(); err != nil {
-		return interruptedErr(err)
+		return "", nil, interruptedErr(err)
 	}
 	if st.running {
-		return errBusy
+		return "", nil, errBusy
+	}
+	if st.forkReaders > 0 {
+		return "", nil, errForkInFlight
 	}
 	h.started[s.ExecutionID] = struct{}{}
+	st.lastExec = s.ExecutionID
 	st.running = true
-	return nil
+	for _, uid := range sources {
+		h.sessions[uid].forkReaders++
+	}
+	return forkFrom, sources, nil
 }
 
-// end clears the running mark and records whether Claude Code confirmed the session id.
-func (h *Harness) end(sessionUID string, established bool) {
+// adoptFork decides whether a session with no state of its own is a fork child of a session this
+// instance holds, and returns that session's UID and the fork point; begin then checks the parent's
+// conversation with forkSource. ok is false, and the turn fails closed, unless history ends with a
+// FORK marker with no turn after it, the last execution before the marker (the fork point) is one
+// this instance started, and exactly one idle session's last begun execution is the fork point. The
+// last execution is the one of the last EXECUTION_START or INPUT before the marker, as hasPriorTurn
+// reads a turn: an execution with no EXECUTION_START (EXE-31) still counts, and a legacy INPUT with
+// no execution ID is not a known fork point. An execution this instance never started is not
+// skipped: it may have run elsewhere or on a process that died, and adopting an older execution's
+// session would continue an older conversation than the parent's last turn. That includes one begin
+// refused before recording it (ctx done, busy, a fork in progress). Executions a wrapper omitted
+// under EXE-44 are absent from history. The caller holds h.mu.
+func (h *Harness) adoptFork(history []api.Event) (parentUID, point string, ok bool) {
+	marker := -1
+	for i := len(history) - 1; i >= 0; i-- {
+		e := history[i]
+		if e.Kind == api.EventExecutionStart || e.Kind == api.EventInput {
+			return "", "", false // a turn after the fork that this instance holds no record of
+		}
+		if e.Kind == api.EventLifecycle && e.Lifecycle != nil && e.Lifecycle.Kind == api.LifecycleFork {
+			marker = i
+			break
+		}
+	}
+	if marker < 0 {
+		return "", "", false
+	}
+	for _, e := range slices.Backward(history[:marker]) {
+		if e.Kind == api.EventExecutionStart || e.Kind == api.EventInput {
+			point = e.ExecutionID
+			break
+		}
+	}
+	if _, ok := h.started[point]; point == "" || !ok {
+		return "", "", false // an execution this instance never started may have run: unknown state
+	}
+	found := false
+	for uid, st := range h.sessions {
+		if st.lastExec != point || st.running {
+			continue
+		}
+		if found {
+			return "", "", false // ambiguous: no execution begins under two sessions, so state is corrupt
+		}
+		parentUID, found = uid, true
+	}
+	return parentUID, point, found
+}
+
+// forkSource returns the Claude Code session id a fork of parentUID taken at execution point
+// continues: the parent's confirmed id; the id the parent, itself a fork child not yet confirmed,
+// still forks from; or "" when the parent never had a conversation. ok is false while the parent
+// is gone, running a turn, or has begun a turn after point: its conversation then holds more than
+// the fork point's, or may. The same holds up the chain of fork children not yet confirmed. chain
+// holds the UIDs of the sessions it checked, parentUID and every one up that chain, for begin to
+// reserve. The caller holds h.mu.
+func (h *Harness) forkSource(parentUID, point string) (from string, chain []string, ok bool) {
+	p := h.sessions[parentUID]
+	switch {
+	case p == nil || p.running || p.lastExec != point:
+		return "", nil, false
+	case p.established:
+		return sessionID(parentUID, p.attempt), []string{parentUID}, true
+	case p.forkParent == "":
+		return "", []string{parentUID}, true
+	}
+	if from, chain, ok = h.forkSource(p.forkParent, p.forkPoint); !ok {
+		return "", nil, false
+	}
+	return from, append(chain, parentUID), true
+}
+
+// end clears the running mark, releases the sessions begin reserved, and records whether Claude
+// Code confirmed the session id. Run defers it as soon as begin succeeds, so every path out of an
+// attempt releases its reservation.
+func (h *Harness) end(sessionUID string, established bool, reserved []string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	for _, uid := range reserved {
+		if r := h.sessions[uid]; r != nil { // never deleted; checked so a release cannot panic
+			r.forkReaders--
+		}
+	}
 	st := h.sessions[sessionUID]
 	st.running = false
 	if established {
 		st.established = true
 		st.pending = false
+		st.forkParent, st.forkPoint = "", ""
 	}
 }
 
 // sessionArg picks --resume for a confirmed session id, else --session-id with the current attempt,
 // moving to the next attempt when the previous one was handed to a process that never confirmed it.
-func (h *Harness) sessionArg(sessionUID string) (flag, id string) {
+// forkFrom, from begin, is set for a fork child until its own id is confirmed: the turn then forks
+// that session into the --session-id one.
+func (h *Harness) sessionArg(sessionUID, forkFrom string) (flag, id, from string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	st := h.sessions[sessionUID]
 	if st.established {
-		return "--resume", sessionID(sessionUID, st.attempt)
+		return "--resume", sessionID(sessionUID, st.attempt), ""
 	}
 	if st.pending {
 		st.attempt++
 	}
 	st.pending = true
-	return "--session-id", sessionID(sessionUID, st.attempt)
+	return "--session-id", sessionID(sessionUID, st.attempt), forkFrom
 }
 
 // hasPriorTurn reports whether History records an earlier turn: an execution start, or an input
@@ -510,8 +677,10 @@ func (h *Harness) turnModel(requested string) (string, error) {
 	return requested, nil
 }
 
-// args builds the claude argv after the binary. The prompt goes on stdin, out of argv and ps.
-func (h *Harness) args(flag, id, model string) []string {
+// args builds the claude argv after the binary. The prompt goes on stdin, out of argv and ps. A
+// nonempty forkFrom resumes that session and forks it into id, which Claude Code accepts only with
+// --session-id.
+func (h *Harness) args(flag, id, forkFrom, model string) []string {
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
@@ -521,8 +690,11 @@ func (h *Harness) args(flag, id, model string) []string {
 		// Only user settings, and no MCP server: the work dir cannot widen the permission mode.
 		"--setting-sources", "user",
 		"--strict-mcp-config",
-		flag, id,
 	}
+	if forkFrom != "" {
+		args = append(args, "--resume", forkFrom, "--fork-session")
+	}
+	args = append(args, flag, id)
 	if model != "" {
 		args = append(args, "--model", model)
 	}

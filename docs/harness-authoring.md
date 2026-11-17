@@ -920,11 +920,28 @@ gives up, for the calls it makes itself, what depends on the host making the cal
 deliberately. The class is not declared in `Describe`: the host cannot see a model call that does
 not reach it, so say which class your harness is in its documentation.
 [`integrations/claudecode`](../integrations/claudecode) is an unmediated harness that runs Claude
-Code, in its own module so the root module names no model provider. Fork does not work with it yet.
-On a runtime that snapshots memory, forking a session that has run a turn creates a child, but the
-child holds no Claude Code session of its own, so every turn on it fails with
-`claudecode: session has earlier turns but this harness holds no state for it`. A follow-up issue
-tracks adopting the parent's Claude Code session on the child.
+Code, in its own module so the root module names no model provider. Fork works on a runtime that
+snapshots memory: the child runs on a clone of its parent's compute, and its first turn adopts the
+parent's Claude Code session with `--resume <parent id> --fork-session --session-id <child id>`.
+Claude Code copies the parent's transcript under the child's own id and leaves the parent's
+untouched. The transcript directory (`CLAUDE_CONFIG_DIR`, default `$HOME/.claude`) must be on the
+filesystem the runtime clones. The child adopts only when its History ends with the fork marker, the
+harness started the last turn before the marker (a turn journaled without an execution start
+counts), and exactly one Claude Code session on the clone last ran that turn. Until Claude Code
+confirms the child's own session, every child attempt, a retry after a cancelled or failed one
+included, checks again that the parent has not started a turn since the fork. While that attempt
+runs, a turn of the parent, and of any fork not yet confirmed between the child and the session it
+copies, fails with `claudecode: a fork of this session is running a turn that may still read this
+session's conversation; retry when it ends`, so the parent's transcript cannot move on before Claude
+Code copies it. On an instance that serves both sessions, continuing the parent right after a fork
+therefore fails until the child's turn ends. If any adoption check fails, every turn on the child
+fails with `claudecode: session has earlier turns but this harness holds no state for it`. That
+covers a clone of a different instance, a parent that ran on after the fork on a shared instance, a
+child whose first turn was journaled but never reached the harness, and a fork of that child. It
+also covers a fork whose last turn the harness refused before starting it (the turn's context was
+already done, another turn was running, or a fork of it was in flight): the harness cannot tell that
+turn from one that ran elsewhere. A later parent turn that the harness runs lets a new fork adopt
+again.
 
 What is different:
 

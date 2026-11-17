@@ -86,10 +86,18 @@ func TestControllerOverWire(t *testing.T) {
 	}
 }
 
-// wireController serves h over gRPC and returns a controller-backed exec: each call sets the
-// fake's scenario to fixture and runs one Exec through Harness.Connect. model is the policy's only
-// model.
+// wireController serves h over gRPC and returns a controller-backed exec for session "uid": each
+// call sets the fake's scenario to fixture and runs one Exec through Harness.Connect. model is the
+// policy's only model.
 func wireController(t *testing.T, h *Harness, model string) (*eventlog.Log, eventlog.Store, func(fixture string) ([]eventlog.Record, error)) {
+	t.Helper()
+	log := eventlog.New()
+	store := eventlog.AsStore(log)
+	return log, store, wireExec(t, h, serveWire(t, h), log, "uid", model)
+}
+
+// serveWire serves h in a gRPC server and returns the host's client for it.
+func serveWire(t *testing.T, h *Harness) api.Harness {
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
@@ -105,22 +113,77 @@ func wireController(t *testing.T, h *Harness, model string) (*eventlog.Log, even
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	remote := harnesswire.NewClientHarness(v1.NewHarnessClient(conn))
+	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn))
+}
 
-	log := eventlog.New()
-	store := eventlog.AsStore(log)
-	c, err := controller.New(store, nil,
-		controller.WithSessionUID("uid"),
+// wireExec returns an exec for session uid's journal log, run over remote by a controller.
+func wireExec(t *testing.T, h *Harness, remote api.Harness, log *eventlog.Log, uid, model string) func(fixture string) ([]eventlog.Record, error) {
+	t.Helper()
+	c, err := controller.New(eventlog.AsStore(log), nil,
+		controller.WithSessionUID(uid),
 		controller.WithModelPolicy(api.ModelPolicy{Default: model, Allowed: []string{model}}),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return log, store, func(fixture string) ([]eventlog.Record, error) {
+	return func(fixture string) ([]eventlog.Record, error) {
 		setScenario(t, h, scenario{Fixture: fixture})
 		head := log.Head()
 		err := c.Exec(context.Background(), remote, []api.Message{*api.TextMessage("user", "go")}, head)
 		return log.Read(head + 1), err
+	}
+}
+
+// TestForkOverWire: a child forked from a real parent journal (controller.Fork) and driven over
+// harnesswire under its own UID gets the FORK marker in its Start.History, so its first turn forks
+// the parent's Claude Code session into its own; the parent still resumes its own session.
+func TestForkOverWire(t *testing.T) {
+	t.Parallel()
+	const model = "claude-test-model-1"
+	h := newTestHarness(t, Config{})
+	remote := serveWire(t, h)
+	parentLog := eventlog.New()
+	parent := wireExec(t, h, remote, parentLog, "parent", model)
+	if _, err := parent("tool_turn.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+
+	childLog := eventlog.New()
+	if err := controller.Fork(eventlog.AsStore(parentLog), eventlog.AsStore(childLog), parentLog.Head()); err != nil {
+		t.Fatal(err)
+	}
+	child := wireExec(t, h, remote, childLog, "child", model)
+	for i, want := range [][]string{
+		{"--resume", sessionID("parent", 0), "--fork-session", "--session-id", sessionID("child", 0)},
+		{"--resume", sessionID("child", 0)},
+	} {
+		recs, err := child("text_turn.jsonl")
+		if err != nil {
+			t.Fatalf("child turn %d: %v", i+1, err)
+		}
+		if got, wantKinds := kinds(recs), []api.EventKind{
+			api.EventExecutionStart, api.EventInput, api.EventUsage, api.EventOutput, api.EventEnd,
+		}; !slices.Equal(got, wantKinds) {
+			t.Fatalf("child turn %d kinds = %v, want %v", i+1, got, wantKinds)
+		}
+		got := starts(t, h)
+		args := got[len(got)-1].Args
+		if j := slices.Index(args, want[0]); j < 0 || !slices.Equal(args[j:j+len(want)], want) {
+			t.Fatalf("child turn %d args = %q, want %q", i+1, args, want)
+		}
+	}
+
+	if _, err := parent("text_turn.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+	got := starts(t, h)
+	if args := got[len(got)-1].Args; slices.Contains(args, "--fork-session") || !slices.Contains(args, sessionID("parent", 0)) {
+		t.Fatalf("parent turn args = %q, want --resume %s", args, sessionID("parent", 0))
+	}
+	for _, log := range []*eventlog.Log{parentLog, childLog} {
+		if err := eventlog.AsStore(log).Verify(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

@@ -48,7 +48,7 @@ func (r *testPreparedRun) Run(ctx context.Context, start *api.Start, sink api.Ev
 	if r.h.runErr != nil {
 		return r.h.runErr
 	}
-	return r.h.executionConfigHarness.Run(ctx, start, sink)
+	return r.h.Run(ctx, start, sink)
 }
 
 func (r *testPreparedRun) Close() {

@@ -697,16 +697,14 @@ func awaitClose(ctx, streamCtx context.Context, stream v1.Harness_ConnectClient,
 		cancel()
 	})
 	defer t.Stop()
-	for {
-		ev, err := stream.Recv()
-		if err == nil {
-			return fmt.Errorf("harnesswire: harness emitted %s after EVENT_END", ev.GetKind())
-		}
-		if err == io.EOF || timedOut.Load() || ctx.Err() != nil || streamCtx.Err() != nil {
-			return nil
-		}
-		return err
+	ev, err := stream.Recv()
+	if err == nil {
+		return fmt.Errorf("harnesswire: harness emitted %s after EVENT_END", ev.GetKind())
 	}
+	if err == io.EOF || timedOut.Load() || ctx.Err() != nil || streamCtx.Err() != nil {
+		return nil
+	}
+	return err
 }
 
 // hostFailed ends a turn whose sink call failed on the host side, such as a provider error. While

@@ -104,6 +104,7 @@ type turn struct {
 	sessionUID string
 	flag       string // --session-id or --resume
 	sessionID  string
+	forkFrom   string // with --session-id: the session the turn forks into sessionID
 	model      string
 	receipts   bool // full receipts; false once the session or turn budget is spent
 
@@ -360,6 +361,7 @@ func (t *turn) run(ctx context.Context, args []string, prompt string) error {
 		}
 		t.h.logger.Warn("claudecode: claude failed before system/init",
 			"session_uid", t.sessionUID, "flag", t.flag, "claude_session_id", t.sessionID,
+			"fork_from", t.forkFrom,
 			"exit_status", cmd.ProcessState.String(), "stderr", line)
 	}
 	return err

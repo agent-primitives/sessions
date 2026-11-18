@@ -904,7 +904,7 @@ func TestCancelledBeforeStart(t *testing.T) {
 	}
 	// A ctx cancelled after begin, while the inputs are checked, still launches nothing.
 	tr := &turn{h: h, sink: &recordingSink{t: t}, sessionUID: "uid", flag: "--resume", sessionID: sessionID("uid", 0)}
-	if err := tr.run(ctx, h.args(tr.flag, tr.sessionID, ""), "go"); !errors.Is(err, context.Canceled) {
+	if err := tr.run(ctx, h.args(tr.flag, tr.sessionID, "", ""), "go"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("run = %v", err)
 	}
 	if got := starts(t, h); len(got) != 1 {

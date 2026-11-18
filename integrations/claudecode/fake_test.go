@@ -23,7 +23,7 @@ import (
 // The test binary doubles as a fake claude: the harness runs it with "-p" first, which no go test
 // invocation passes. The fake reads its scenario from fake-claude.json in its working directory,
 // records what it saw in fake-claude-record.jsonl there, and replays stream-json lines with
-// {{SESSION_ID}} replaced by the id from --session-id or --resume. It never touches the network.
+// {{SESSION_ID}} replaced by the id from --session-id, else --resume. It never touches the network.
 
 const (
 	scenarioFile = "fake-claude.json"
@@ -89,11 +89,25 @@ func fakeClaude(args []string) int {
 		fmt.Fprintln(os.Stderr, sc.Stderr)
 	}
 
-	var id string
+	// The session the turn runs under: --session-id names it, also when --resume names the session
+	// a --fork-session copies. Claude Code 2.1.311 refuses --session-id with --resume unless
+	// --fork-session is also given, and so does the fake.
+	flags := make(map[string]string)
 	for i, a := range args {
-		if (a == "--session-id" || a == "--resume") && i+1 < len(args) {
-			id = args[i+1]
+		if a == "--fork-session" {
+			flags[a] = ""
+		} else if (a == "--session-id" || a == "--resume") && i+1 < len(args) {
+			flags[a] = args[i+1]
 		}
+	}
+	_, resume := flags["--resume"]
+	id, sessionID := flags["--session-id"]
+	if _, fork := flags["--fork-session"]; resume && sessionID && !fork {
+		fmt.Fprintln(os.Stderr, "Error: --session-id can only be used with --continue or --resume if --fork-session is also specified.")
+		return 1
+	}
+	if !sessionID {
+		id = flags["--resume"]
 	}
 	out := bufio.NewWriter(os.Stdout)
 	emit := func(line string) {

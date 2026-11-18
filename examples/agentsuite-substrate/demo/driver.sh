@@ -114,7 +114,7 @@ cleanup() {
 		rm -rf "${LOGS}/trace" && cp -r "${TRACE_DIR}" "${LOGS}/trace" 2>/dev/null || true
 	fi
 	for p in "${PIDS[@]}"; do kill "${p}" 2>/dev/null || true; done
-	rm -f "${TOKEN_FILE}"
+	rm -f "${TOKEN_FILE}" "${PRIVATE:-}"
 	# A failed setup deletes the cluster only if this invocation created it, so a run on a shared host
 	# leaves nothing behind; a cluster it reused (a rerun of setup on an installed cluster, say) keeps
 	# its daemons and their session journals, as up.sh does, and a failed show keeps it too, so either
@@ -383,8 +383,8 @@ reset() {
 # Every command on screen is the literal command line that runs: run prints it, evaluates it in this
 # shell (so $COPY, $IMAGE and the rest are this shell's variables, set by an earlier command on
 # screen or, for $IMAGE, $TEMPLATE, $MEMTEMPLATE, $API, $API_MEM and $ROUTER, from setup's state
-# before the title card; show.log records their values; $CHILD is read from the line agentctl fork
-# prints on screen, and the chapter's log records it), writes its complete output to the
+# before the title card; show.log records their values; $CHILD is the fork's child in agentctl
+# list --json, and the chapter's log records it), writes its complete output to the
 # chapter's log, and shows that output. A command must exit 0 (run -x: must fail) and write nothing
 # to stderr, which the screen would not show. A screen shows at most MAX_LINES output rows (run -n
 # raises it for the trace); a file screen (run -f) shows its output whole, in pages if it is taller
@@ -468,6 +468,10 @@ show_file() {
 # show_file); the command sees LINES and COLUMNS set to the rows and columns left for its output.
 # -n MAX: this screen may show up to MAX output rows.
 RAW="${WORK}/run.out" RAW_ERR="${WORK}/run.err"
+# PRIVATE (show only) holds agentctl JSON the logs must not carry: whole journals (with provider data
+# such as opaque reasoning bytes) and the session list (with every session's metadata). show creates
+# it with mktemp, readable by this user only; cleanup removes it.
+PRIVATE=""
 run() {
 	local what="" done="" expect_fail=false file=false max="${MAX_LINES}"
 	while (($#)); do
@@ -541,11 +545,53 @@ offscreen() {
 	log "(exit ${rc})"
 	return "${rc}"
 }
-# journal SERVER SESSION: the session's journal (agentctl replay) in RAW and the log.
-journal() { offscreen "the journal of $2" "${WORK}/bin/agentctl" replay --server "$1" --session "$2" || fail "agentctl replay $2 failed"; }
-# last_seq KIND: the seq of the last record of KIND in RAW's journal.
-last_seq() { python3 -c 'import re, sys; s = [int(m.group(1)) for m in re.finditer(r"^seq=(\d+) +" + sys.argv[1] + r"\b", open(sys.argv[2]).read(), re.M)]; print(s[-1] if s else "")' "$1" "${RAW}"; }
-count() { python3 -c 'import re, sys; print(len(re.findall(r"^seq=\d+ +" + sys.argv[1] + r"\b", open(sys.argv[2]).read(), re.M)))' "$1" "${RAW}"; }
+# journal SERVER SESSION: the session's journal (agentctl replay --json) in PRIVATE. The checks read it
+# as JSON, not as agentctl's human view, which can change. The log gets one "seq kind" line per record
+# instead of the JSON, which holds provider data (opaque reasoning bytes, for one) that redact cannot
+# inspect; anything else agentctl printed, such as an error, is logged as it is.
+journal() {
+	local rc=0
+	log "(off screen, the journal of $2: agentctl replay --json --server $1 --session $2)"
+	"${WORK}/bin/agentctl" replay --json --server "$1" --session "$2" >"${PRIVATE}" 2>&1 || rc=$?
+	python3 -c 'import json, sys
+for line in open(sys.argv[1]):
+    if line.startswith("{"):
+        r = json.loads(line)
+        print(r["seq"], r["event"]["kind"])
+    else:
+        print(line, end="")' "${PRIVATE}" | redact >>"${STEP_LOG}"
+	log "(exit ${rc})"
+	((rc == 0)) || fail "agentctl replay $2 failed"
+}
+# seqs [KIND]: the seqs of the journal's records of KIND, or of every record, in order.
+seqs() {
+	python3 -c 'import json, sys
+for line in open(sys.argv[2]):
+    if line.startswith("{"):
+        r = json.loads(line)
+        if sys.argv[1] in ("", r["event"]["kind"]):
+            print(r["seq"])' "${1:-}" "${PRIVATE}"
+}
+# last_seq [KIND]: the seq of the last record of KIND, or of the last record, in the journal.
+last_seq() { seqs "${1:-}" | tail -1; }
+count() { seqs "$1" | wc -l | tr -d ' '; }
+# journal_check EXPR [ARG...]: exits 0 when the Python expression EXPR holds of the journal, given
+# as rs (its records, decoded JSON, in order), text(r) (a message's text) and args (the ARGs).
+journal_check() {
+	python3 -c 'import json, sys
+rs = [json.loads(l) for l in open(sys.argv[1]) if l.startswith("{")]
+args = sys.argv[3:]
+def text(r):
+    return "".join(p.get("text", {}).get("text", "") for p in r["event"].get("message", {}).get("parts", []))
+sys.exit(0 if eval("(" + sys.argv[2] + ")") else 1)' "${PRIVATE}" "$@"
+}
+# hashes SEQ: the content hashes of the journal's records 1 to SEQ, one per line.
+hashes() {
+	python3 -c 'import json, sys
+for line in open(sys.argv[1]):
+    if line.startswith("{") and int(json.loads(line)["seq"]) <= int(sys.argv[2]):
+        print(json.loads(line).get("content_hash", ""))' "${PRIVATE}" "$1"
+}
 actor_json() { # session: its actor's record in RAW and the log
 	offscreen "the actor of $1" "${ATE[@]}" get actor "$1" -a "${ATESPACE}" -o json || fail "no actor for $1"
 }
@@ -585,6 +631,7 @@ diagram() {
 
 show() {
 	[[ -x "${WORK}/bin/agentctl" && -x "${WORK}/bin/replay" && -x "${WORK}/bin/emit" && -x "${WORK}/bin/harness" && -s "${EXPIRY_FILE}" ]] || fail "run driver.sh setup first"
+	PRIVATE="$(mktemp)"
 	rm -f "${LOGS}"/ch-*.log "${LOGS}/timeline.tsv"
 	# Exactly the paths the on-screen commands below write, never a glob: on a host /tmp is shared.
 	rm -rf "${LOGS}/trace" /tmp/render /tmp/render-memory /tmp/render-arm64 /tmp/tampered "${TRACE_DIR}"
@@ -837,11 +884,16 @@ EOF
 
 	# ---------------------------------------------------------------------------------------------
 	chapter 6 "The journal" "Every input, model call, answer and token count is a record that carries the previous record's hash"
+	journal "${SERVER}" "${COPY}"
 	seq="$(last_seq EVENT_USAGE)"
 	run <<EOF
 agentctl replay -v --server \$API --session \$COPY --from ${seq}
 EOF
-	[[ "${SHOWN}" == *"EVENT_USAGE"*"model=${model} input_tokens="*"EVENT_END"*"prev="* ]] || fail "the journal's last records lack the usage or the hash chain"
+	journal "${SERVER}" "${COPY}"
+	journal_check 'rs[-1]["event"]["kind"] == "EVENT_END"
+		and [r for r in rs if r["event"]["kind"] == "EVENT_USAGE"][-1]["event"]["usage"].get("model") == args[0]
+		and all(b.get("prev_hash") == a.get("content_hash") for a, b in zip(rs, rs[1:]))' "${model}" ||
+		fail "the journal's last records lack the usage or the hash chain"
 	offscreen "the whole journal, verbose" "${WORK}/bin/agentctl" replay -v --server "${SERVER}" --session "${COPY}" || fail "agentctl replay -v failed"
 
 	# ---------------------------------------------------------------------------------------------
@@ -904,25 +956,35 @@ EOF
 	run <<EOF
 agentctl replay --server \$API --session \$COPY --from ${seq}
 EOF
-	[[ "${SHOWN}" == "seq=${seq} "*EVENT_END ]] || fail "the replay appended to the journal"
+	journal "${SERVER}" "${COPY}"
+	[[ "$(last_seq)" == "${seq}" && "$(last_seq EVENT_END)" == "${seq}" ]] || fail "the replay appended to the journal"
 
 	# ---------------------------------------------------------------------------------------------
 	chapter 9 "Fork" "Fork copies a session's history up to a point into a new session with its own micro-VM"
 	journal "${SERVER}" "${COPY}"
-	seq="$(python3 -c 'import re, sys; s = [int(m.group(1)) for m in re.finditer(r"^seq=(\d+) +EVENT_END\b", open(sys.argv[1]).read(), re.M)]; print(s[0] if s else "")' "${RAW}")"
+	seq="$(seqs EVENT_END | sed -n 1p)"
 	[[ "${seq}" =~ ^[0-9]+$ ]] || fail "turn 1 has no end record"
 	run -w "copying the history and starting the child's micro-VM" "forked" <<EOF
 agentctl fork --server \$API --session \$COPY --at ${seq} --names haiku-branch
 EOF
-	# The child's UID, from the line on screen ("child <uid> parent=... fork_seq=... name=...").
-	CHILD="$(python3 -c 'import sys; w = sys.argv[1].split(); print(w[1] if len(w) > 1 and w[0] == "child" else "")' "${SHOWN}")"
-	[[ "${CHILD}" =~ ^sess-[0-9a-f]+$ ]] || fail "fork printed no child"
-	log "(CHILD=${CHILD}, read off screen from the line agentctl fork printed)"
+	# The child's UID, from the session list (agentctl list --json): its child of $COPY named
+	# haiku-branch, which must be the only one. Only the UID is logged, not the list, which holds
+	# every session on the server.
+	"${WORK}/bin/agentctl" list --json --server "${SERVER}" >"${PRIVATE}" 2>"${RAW_ERR}" ||
+		fail "agentctl list failed: $(redact <"${RAW_ERR}")"
+	CHILD="$(python3 -c 'import json, sys
+s = [x for x in json.load(open(sys.argv[1])).get("sessions", [])
+     if x.get("parent_uid") == sys.argv[2] and x.get("metadata", {}).get("name") == "haiku-branch"]
+print(s[0]["metadata"]["uid"] if len(s) == 1 else "")' "${PRIVATE}" "${COPY}")"
+	[[ "${CHILD}" =~ ^sess-[0-9a-f]+$ ]] || fail "fork made no child named haiku-branch"
+	log "(CHILD=${CHILD}, the fork's child in the session list)"
 	run -w "asking ${model} in the child" "answered" <<'EOF'
 agentctl exec --server $API --session $CHILD --input "Instead, rewrite the blurb as a haiku." >/tmp/child.txt
 EOF
 	offscreen "the child's turn 2" cat /tmp/child.txt
-	grep -q '^seq=[0-9]* *EVENT_OUTPUT  assistant: .' /tmp/child.txt || fail "the child's turn produced no answer"
+	journal "${SERVER}" "${CHILD}"
+	journal_check 'any(r["event"]["kind"] == "EVENT_OUTPUT" and int(r["seq"]) > int(args[0]) and text(r) for r in rs)' "${seq}" ||
+		fail "the child's turn produced no answer"
 	page "Both journals: the first turn they share (highlighted), then each one's own second turn"
 	run <<'EOF'
 agentctl replay --server $API --session $COPY >/tmp/parent.txt && agentctl replay --server $API --session $CHILD >/tmp/child.txt
@@ -930,15 +992,21 @@ EOF
 	run -f <<EOF
 demo/split-view.py /tmp/parent.txt:1-${seq} -- /tmp/child.txt:1-${seq}
 EOF
-	[[ "$(sed -n "1,${seq}p" /tmp/parent.txt)" == "$(sed -n "1,${seq}p" /tmp/child.txt)" ]] || fail "parent and child differ in the shared turn"
-	grep -q '^seq=[0-9]* *EVENT_INPUT  user: Instead, rewrite the blurb as a haiku.$' /tmp/child.txt || fail "the child's second turn is not its own"
-	! grep -q 'haiku' /tmp/parent.txt || fail "the child's turn reached the parent"
+	journal "${SERVER}" "${COPY}"
+	journal_check 'not any("haiku" in text(r) for r in rs)' || fail "the child's turn reached the parent"
+	local shared
+	shared="$(hashes "${seq}")"
+	journal "${SERVER}" "${CHILD}"
+	# The shared turn is the same records: equal content hashes cover every field and the chain.
+	[[ -n "${shared}" && "$(hashes "${seq}")" == "${shared}" ]] || fail "parent and child differ in the shared turn"
+	journal_check 'any(r["event"]["kind"] == "EVENT_INPUT" and int(r["seq"]) > int(args[0])
+		and text(r) == "Instead, rewrite the blurb as a haiku." for r in rs)' "${seq}" || fail "the child's second turn is not its own"
 
 	# ---------------------------------------------------------------------------------------------
 	chapter 10 "Guarding memory" "If a session's micro-VM is swapped behind AgentSessions' back, its next turn is refused"
 	journal "${MEMSERVER}" "${MEM}"
 	turns_before="$(count EVENT_END)"
-	seq="$(python3 -c 'import re, sys; print(re.findall(r"^seq=(\d+)", open(sys.argv[1]).read(), re.M)[-1])' "${RAW}")"
+	seq="$(last_seq)"
 	run -w "deleting the session's micro-VM out of band" "deleted" <<'EOF'
 kubectl ate delete actor $MEM -a agentsuite-demo --any-state
 EOF
@@ -968,7 +1036,7 @@ EOF
 agentctl replay --server \$API_MEM --session \$MEM --from ${seq}
 EOF
 	journal "${MEMSERVER}" "${MEM}"
-	[[ "$(count EVENT_END)" == "${turns_before}" && "$(python3 -c 'import re, sys; print(re.findall(r"^seq=(\d+)", open(sys.argv[1]).read(), re.M)[-1])' "${RAW}")" == "${seq}" ]] ||
+	[[ "$(count EVENT_END)" == "${turns_before}" && "$(last_seq)" == "${seq}" ]] ||
 		fail "the refused turn journaled something"
 
 	# ---------------------------------------------------------------------------------------------

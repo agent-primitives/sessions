@@ -112,6 +112,18 @@ control, format and other non-printing characters as escapes such as `\n`, `\x1b
 model's text cannot add a line that looks like a call, or use terminal escapes to hide part of the
 call.
 
+A script can run the same turn with `-json` and detect the pause: the command exits successfully,
+and its last line is a `session` update, a snapshot of the session as the stream closes. It holds
+the session UID that `approve` and `deny` take, and its `pending_approval` holds the execution ID,
+call ID and request sequence, unless a concurrent approval has already resolved the call; only a
+recorded `EVENT_END` shows that the turn completed:
+
+```bash
+set -o pipefail  # a failed exec fails the pipeline, not just jq
+bin/agentctl exec -server 127.0.0.1:8080 -harness publisher -input 'Publish the text: hello' -json |
+  jq -c 'select(.session.pending_approval) | {session: .session.metadata.uid, pending_approval: .session.pending_approval}'
+```
+
 Stop the daemon and the harness (Ctrl-C) and start them again with the same commands. Nothing
 has run, and the request is still pending; `replay` shows the exact call you are deciding on:
 

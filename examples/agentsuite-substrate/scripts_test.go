@@ -1648,32 +1648,59 @@ func TestUpRendersTheDaemon(t *testing.T) {
 }
 
 // demoStubs prepares s for demo.sh in real-provider mode: an agentctl that keeps each session's
-// journal in $STUB_DIR/j-<session> and prints records the way agentctl does, a kubectl-ate that
-// reports the actor states agentctl left and the actor's UID, a replay that counts the completed
-// turns in the journal, and the template name up.sh would have rendered. STUB_FAULT makes agentctl
-// or replay misbehave in one way (new-actor-on-resume: the resumed actor has another UID), so a
-// test can show demo.sh's checks catch it.
+// journal in $STUB_DIR/j-<session> and prints records the way agentctl does, as text or, with
+// --json, as JSON Lines, a kubectl-ate that reports the actor states agentctl left and the actor's
+// UID, a replay that counts the completed turns in the journal, and the template name up.sh would
+// have rendered. STUB_FAULT makes agentctl or replay misbehave in one way (new-actor-on-resume: the
+// resumed actor has another UID), so a test can show demo.sh's checks catch it.
 func demoStubs(t *testing.T, s *stubs) {
 	t.Helper()
 	bin := filepath.Join(s.work, "bin")
+	// demo.sh reads agentctl's JSON with jq. PATH holds only the stubs (s.dir/bin) and the system
+	// directories, so expose the test's jq, which may be installed elsewhere (Homebrew's
+	// /opt/homebrew/bin).
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq not found")
+	}
+	if err := os.Symlink(jq, filepath.Join(s.dir, "bin", "jq")); err != nil {
+		t.Fatal(err)
+	}
 	log := `echo "$(basename "$0") $*" >>"$STUB_DIR/calls"` + "\n"
 	stub(t, bin, "agentctl", log+`
 cmd=$1
 shift
-sess= input= at=
+sess= input= at= from=1 json=
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--session) sess=$2; shift ;;
 	--input) input=$2; shift ;;
 	--at) at=$2; shift ;;
+	--from) from=$2; shift ;;
+	--json) json=1 ;;
 	esac
 	shift
 done
-j="$STUB_DIR/j-$sess"
-rec() {
+j="$STUB_DIR/j-$sess" # one record per line: seq|kind|role|text
+line() { # seq kind role text: one record as replay prints it
+	if [ -n "$json" ] && [ -n "$3" ]; then
+		printf '{"seq":"%s","event":{"kind":"%s","message":{"role":"%s","parts":[{"text":{"text":"%s"}}]}}}\n' "$1" "$2" "$3" "$4"
+	elif [ -n "$json" ]; then
+		printf '{"seq":"%s","event":{"kind":"%s"}}\n' "$1" "$2"
+	elif [ -n "$3" ]; then
+		printf 'seq=%-3d %s  %s: %s\n' "$1" "$2" "$3" "$4"
+	else
+		printf 'seq=%-3d %s\n' "$1" "$2"
+	fi
+}
+rec() { # kind [role text]: append a record and print it as exec does
 	n=$(($(wc -l <"$j") + 1))
-	printf 'seq=%-3d %s\n' "$n" "$*" >>"$j"
-	printf 'seq=%-3d %s\n' "$n" "$*"
+	printf '%s|%s|%s|%s\n' "$n" "$1" "${2:-}" "${3:-}" >>"$j"
+	if [ -n "$json" ]; then
+		printf '{"record":%s}\n' "$(line "$n" "$1" "${2:-}" "${3:-}")"
+	else
+		line "$n" "$1" "${2:-}" "${3:-}"
+	fi
 }
 case "$cmd" in
 list) ;;
@@ -1683,35 +1710,44 @@ create)
 	;;
 get) echo "session $sess" ;;
 exec)
+	[ -z "$json" ] || printf '{"session":{"metadata":{"uid":"%s"}}}\n' "$sess"
 	turn=$(($(grep -c EVENT_END "$j") + 1))
-	[ "$STUB_FAULT $turn" = "lost-input 2" ] || rec "EVENT_INPUT  user: $input"
+	[ "$STUB_FAULT $turn" = "lost-input 2" ] || rec EVENT_INPUT user "$input"
 	[ "$STUB_FAULT $turn" = "no-model-call 2" ] || [ "$STUB_FAULT $turn" = "no-model-call-4 4" ] ||
-		[ "$STUB_FAULT $sess" = "no-child-model-call child-1" ] || rec "EVENT_MODEL_CALL"
-	rec "EVENT_OUTPUT  assistant: a real reply $turn"
-	rec "EVENT_END"
+		[ "$STUB_FAULT $sess" = "no-child-model-call child-1" ] || rec EVENT_MODEL_CALL
+	rec EVENT_OUTPUT assistant "a real reply $turn"
+	rec EVENT_END
 	echo ACTOR_STATE_RUNNING >"$STUB_DIR/state-$sess"
 	;;
 suspend)
-	[ "$STUB_FAULT" = no-lifecycle ] || rec "EVENT_LIFECYCLE"
+	[ "$STUB_FAULT" = no-lifecycle ] || rec EVENT_LIFECYCLE
 	echo ACTOR_STATE_SUSPENDED >"$STUB_DIR/state-$sess"
 	: >"$STUB_DIR/snap-$sess"
 	;;
 resume)
-	rec "EVENT_LIFECYCLE"
+	rec EVENT_LIFECYCLE
 	echo ACTOR_STATE_RUNNING >"$STUB_DIR/state-$sess"
 	[ "$STUB_FAULT" != new-actor-on-resume ] || echo "uid-$sess-2" >"$STUB_DIR/uid-$sess"
 	;;
-replay) cat "$j" ;;
+replay)
+	while IFS='|' read -r n kind role text; do
+		[ "$n" -lt "$from" ] || line "$n" "$kind" "$role" "$text"
+	done <"$j"
+	;;
 fork)
 	if [ "$STUB_FAULT" = whole-parent-fork ]; then
 		cp "$j" "$STUB_DIR/j-child-1"
 	else
-		awk -v at="$at" '{ s = $1; sub("seq=", "", s); if (s + 0 <= at + 0) print }' "$j" >"$STUB_DIR/j-child-1"
+		awk -F'|' -v at="$at" '$1 + 0 <= at + 0' "$j" >"$STUB_DIR/j-child-1"
 	fi
 	if [ "$STUB_FAULT" = fork-writes-parent ]; then
-		printf 'seq=%-3d %s\n' 99 "EVENT_INPUT  user: stray" >>"$j"
+		echo '99|EVENT_INPUT|user|stray' >>"$j"
 	fi
-	echo "child child-1 parent=$sess fork_seq=$at name=after-turn-1"
+	if [ -n "$json" ]; then
+		printf '{"children":[{"metadata":{"uid":"child-1","name":"after-turn-1"},"parent_uid":"%s","fork_seq":"%s"}]}\n' "$sess" "$at"
+	else
+		echo "child child-1 parent=$sess fork_seq=$at name=after-turn-1"
+	fi
 	;;
 *) exit 2 ;;
 esac

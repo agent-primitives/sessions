@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -22,6 +23,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
@@ -657,10 +660,12 @@ func TestExecStreamedTextEscaped(t *testing.T) {
 	}
 }
 
-// execStreamer answers Exec with fixed updates, as the daemon streams them.
+// execStreamer answers Exec with fixed updates, as the daemon streams them, then ends the stream with
+// err.
 type execStreamer struct {
 	v1.UnimplementedSessionsServer
 	updates []*v1.ExecUpdate
+	err     error
 }
 
 func (s *execStreamer) Exec(_ *v1.ExecRequest, stream v1.Sessions_ExecServer) error {
@@ -669,5 +674,128 @@ func (s *execStreamer) Exec(_ *v1.ExecRequest, stream v1.Sessions_ExecServer) er
 			return err
 		}
 	}
-	return nil
+	return s.err
+}
+
+// serveExec serves srv on a loopback port for the test and returns its address.
+func serveExec(t *testing.T, srv v1.SessionsServer) string {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := grpc.NewServer()
+	v1.RegisterSessionsServer(s, srv)
+	go func() { _ = s.Serve(lis) }()
+	t.Cleanup(s.Stop)
+	return lis.Addr().String()
+}
+
+// exec --json prints every session frame and committed record as one protobuf ExecUpdate per line,
+// with or without --session. Streamed deltas are left out, model text that could act on a terminal
+// stays escaped, and the final session frame carries an approval pause. If the stream fails, the
+// lines already written stay and the error is returned.
+func TestExecJSON(t *testing.T) {
+	sessionUpdate := func(s *v1.Session) *v1.ExecUpdate {
+		return &v1.ExecUpdate{Update: &v1.ExecUpdate_Session{Session: s}}
+	}
+	first := sessionUpdate(&v1.Session{Metadata: &v1.ResourceMetadata{Uid: "sess-json"}})
+	output := &v1.ExecUpdate{Update: &v1.ExecUpdate_Record{Record: &v1.LogRecord{Seq: 2, Event: &v1.Event{
+		Kind: v1.EventKind_EVENT_OUTPUT,
+		Body: &v1.Event_Message{Message: wire.MessageToProto(api.TextMessage("assistant", "hi\x1b[8m\u202e\u009b"))},
+	}}}}
+	delta := &v1.ExecUpdate{Update: &v1.ExecUpdate_Delta{Delta: &v1.Delta{Chunk: "hi\x1b"}}}
+	parked := sessionUpdate(&v1.Session{Metadata: &v1.ResourceMetadata{Uid: "sess-json"}, LastSeq: 2,
+		PendingApproval: &v1.ApprovalRef{ExecutionId: "exec-1", ToolCallId: "call_1", RequestSeq: 2}})
+	for _, tt := range []struct {
+		name    string
+		args    []string
+		updates []*v1.ExecUpdate
+		err     error
+		want    []*v1.ExecUpdate
+	}{{
+		name:    "new session",
+		updates: []*v1.ExecUpdate{first, delta, output, parked},
+		want:    []*v1.ExecUpdate{first, output, parked},
+	}, {
+		name:    "existing session",
+		args:    []string{"--session", "sess-json"},
+		updates: []*v1.ExecUpdate{first, delta, output, parked},
+		want:    []*v1.ExecUpdate{first, output, parked},
+	}, {
+		name:    "stream error",
+		updates: []*v1.ExecUpdate{first, output},
+		err:     status.Error(codes.Unavailable, "connection reset"),
+		want:    []*v1.ExecUpdate{first, output},
+	}} {
+		t.Run(tt.name, func(t *testing.T) {
+			addr := serveExec(t, &execStreamer{updates: tt.updates, err: tt.err})
+			var out bytes.Buffer
+			err := runExec(append([]string{"--server", addr, "--input", "hello", "--json"}, tt.args...), &out)
+			if status.Code(err) != status.Code(tt.err) {
+				t.Fatalf("exec error = %v, want code %v", err, status.Code(tt.err))
+			}
+			if !strings.HasSuffix(out.String(), "\n") {
+				t.Fatalf("output %q does not end its last line", out.String())
+			}
+			lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+			if len(lines) != len(tt.want) {
+				t.Fatalf("got %d lines, want %d: %q", len(lines), len(tt.want), lines)
+			}
+			for i, line := range lines {
+				assertOneSafeLine(t, line)
+				var got v1.ExecUpdate
+				if err := protojson.Unmarshal([]byte(line), &got); err != nil || !proto.Equal(&got, tt.want[i]) {
+					t.Fatalf("line %d = %s (%v), want %v", i, line, err, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// A failed stdout write ends exec with an error instead of a successful exit, in both output modes,
+// and nothing more is written after it. The error names the session to replay, and a stream error
+// that follows is reported with it rather than in place of it.
+func TestExecWriteError(t *testing.T) {
+	record := &v1.ExecUpdate{Update: &v1.ExecUpdate_Record{Record: &v1.LogRecord{Seq: 1,
+		Event: &v1.Event{Kind: v1.EventKind_EVENT_END}}}}
+	updates := []*v1.ExecUpdate{
+		{Update: &v1.ExecUpdate_Session{Session: &v1.Session{Metadata: &v1.ResourceMetadata{Uid: "sess-write"}}}},
+		{Update: &v1.ExecUpdate_Delta{Delta: &v1.Delta{Chunk: "hi"}}},
+		record,
+	}
+	for _, streamErr := range []error{nil, status.Error(codes.Unavailable, "connection reset")} {
+		for _, args := range [][]string{nil, {"--json"}} {
+			t.Run(fmt.Sprint(status.Code(streamErr), args), func(t *testing.T) {
+				addr := serveExec(t, &execStreamer{updates: updates, err: streamErr})
+				w := &failingWriter{err: errors.New("disk full")}
+				err := runExec(append([]string{"--server", addr, "--input", "hello"}, args...), w)
+				if !errors.Is(err, w.err) || streamErr != nil && status.Code(err) != status.Code(streamErr) {
+					t.Fatalf("exec error = %v, want the write error and code %v", err, status.Code(streamErr))
+				}
+				if !strings.Contains(err.Error(), "agentctl replay --session sess-write and the same --server or --journal") {
+					t.Fatalf("exec error = %v, want a hint naming the session and its store", err)
+				}
+				if streamErr == nil && !strings.Contains(err.Error(), "records are committed") {
+					t.Fatalf("exec error = %v, want it to say the records are committed", err)
+				}
+				if streamErr != nil && strings.Contains(err.Error(), "records are committed") {
+					t.Fatalf("exec error = %v claims the turn finished although the stream failed", err)
+				}
+				if w.calls != 1 {
+					t.Fatalf("got %d writes, want none after the failed one", w.calls)
+				}
+			})
+		}
+	}
+}
+
+type failingWriter struct {
+	err   error
+	calls int
+}
+
+func (w *failingWriter) Write([]byte) (int, error) {
+	w.calls++
+	return 0, w.err
 }

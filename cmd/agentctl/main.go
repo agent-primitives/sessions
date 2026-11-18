@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -338,7 +339,7 @@ func cmdExec(args []string) error { return runExec(args, os.Stdout) }
 // runExec runs one turn and writes it to w as it happens.
 func runExec(args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
-	cfg := commonFlags(fs)
+	cfg := sessionFlags(fs)
 	var sess, input, harness string
 	fs.StringVar(&sess, "session", "", "session UID (created if empty)")
 	fs.StringVar(&input, "input", "", "user input for this turn")
@@ -352,49 +353,112 @@ func runExec(args []string, w io.Writer) error {
 
 	// One call: an empty session is created by the server, and leaving ExpectedLastSeq nil appends
 	// at the head. Records print as they commit rather than after the turn.
-	out := &execOutput{w: w}
-	defer out.endStream()
-	_, err = c.Exec(cmdCtx, client.ExecOptions{
+	out := &execOutput{w: w, newSession: sess == ""}
+	opts := client.ExecOptions{
 		Session: sess,
 		Inputs:  []string{input},
 		Harness: harness,
-		OnSession: func(s *v1.Session) {
-			if sess == "" {
-				out.line(fmt.Sprintf("session %s", s.GetMetadata().GetUid()))
-			}
-		},
-		OnRecord: func(r *v1.LogRecord) { out.line(formatRecord(r)) },
-		OnDelta:  out.delta,
-	})
+	}
+	if cfg.json {
+		// Streamed deltas are left out: they are not committed, and a model call that completes
+		// records its complete response as an OUTPUT record.
+		opts.OnSession = out.jsonSession
+		opts.OnRecord = out.jsonRecord
+	} else {
+		opts.OnSession = out.textSession
+		opts.OnRecord = out.textRecord
+		opts.OnDelta = out.textDelta
+	}
+	result, err := c.Exec(cmdCtx, opts)
+	out.endStream()
+	if out.err != nil {
+		// Name the session and the store to read: replay with no --server or --journal would open the
+		// default local journal, not necessarily the one this turn used.
+		replay := "agentctl replay"
+		if result != nil && result.Session.GetMetadata().GetUid() != "" {
+			replay += " --session " + displayToken(result.Session.GetMetadata().GetUid())
+		}
+		replay += " and the same --server or --journal"
+		if err != nil {
+			return errors.Join(err, fmt.Errorf("write exec output (see what was recorded with %s): %w", replay, out.err))
+		}
+		return fmt.Errorf("write exec output (the turn was not interrupted and its records are committed; read them with %s): %w", replay, out.err)
+	}
 	return err
 }
 
 // execOutput writes an exec turn as it arrives: whole lines (the session UID, committed records)
-// and the model's streamed text. Streamed text is as untrusted as the committed message it
-// previews, so it prints through the same escapeText and on its own "stream:" line, closed before
-// the next whole line: a chunk cannot end the line, act on the terminal (hiding the tool call
-// record that follows), or pass for a record. Each rune is escaped on its own, so a terminal
-// sequence split across chunks (ESC in one, "[8m" in the next) is still inert.
+// and the model's streamed text, or one ExecUpdate JSON object per line. Streamed text is as
+// untrusted as the committed message it previews, so it prints through the same escapeText and on
+// its own "stream:" line, closed before the next whole line: a chunk cannot end the line, act on
+// the terminal (hiding the tool call record that follows), or pass for a record. Each rune is
+// escaped on its own, so a terminal sequence split across chunks (ESC in one, "[8m" in the next) is
+// still inert.
+//
+// After the first failed write it writes nothing more but keeps accepting updates, so the stream
+// is still read to its end and the turn is not cut short by a failing stdout.
 type execOutput struct {
-	w         io.Writer
-	streaming bool // a "stream:" line is open
+	w          io.Writer
+	newSession bool  // exec creates the session, so text output names it
+	streaming  bool  // a "stream:" line is open
+	err        error // the first write or encoding error
+}
+
+func (o *execOutput) write(s string) {
+	if o.err != nil {
+		return
+	}
+	if _, err := io.WriteString(o.w, s); err != nil {
+		o.err = err
+	}
 }
 
 func (o *execOutput) line(s string) {
 	o.endStream()
-	_, _ = fmt.Fprintln(o.w, s)
+	o.write(s + "\n")
 }
 
-// delta prints a chunk on the open stream line, opening one if needed, and closes the line when the
-// model's response is done. The done frame is not relied on to close it: a failed model call sends
-// none, so the next whole line or the end of the turn closes it instead.
-func (o *execOutput) delta(d *v1.Delta) {
+// jsonSession and jsonRecord write a session frame or a committed record as an ExecUpdate line.
+func (o *execOutput) jsonSession(s *v1.Session) {
+	o.jsonLine(&v1.ExecUpdate{Update: &v1.ExecUpdate_Session{Session: s}})
+}
+
+func (o *execOutput) jsonRecord(r *v1.LogRecord) {
+	o.jsonLine(&v1.ExecUpdate{Update: &v1.ExecUpdate_Record{Record: r}})
+}
+
+// jsonLine writes one ExecUpdate as a line of protobuf JSON.
+func (o *execOutput) jsonLine(u *v1.ExecUpdate) {
+	if o.err != nil {
+		return
+	}
+	text, err := protoJSON(u)
+	if err != nil {
+		o.err = fmt.Errorf("encode protobuf JSON: %w", err)
+		return
+	}
+	o.line(text)
+}
+
+// textSession names a session that exec created; textRecord prints a committed record's line.
+func (o *execOutput) textSession(s *v1.Session) {
+	if o.newSession {
+		o.line(fmt.Sprintf("session %s", s.GetMetadata().GetUid()))
+	}
+}
+
+func (o *execOutput) textRecord(r *v1.LogRecord) { o.line(formatRecord(r)) }
+
+// textDelta prints a chunk on the open stream line, opening one if needed, and closes the line when
+// the model's response is done. The done frame is not relied on to close it: a failed model call
+// sends none, so the next whole line or the end of the turn closes it instead.
+func (o *execOutput) textDelta(d *v1.Delta) {
 	if chunk := d.GetChunk(); chunk != "" {
 		if !o.streaming {
-			_, _ = io.WriteString(o.w, "stream: ")
+			o.write("stream: ")
 			o.streaming = true
 		}
-		_, _ = io.WriteString(o.w, escapeText(chunk))
+		o.write(escapeText(chunk))
 	}
 	if d.GetDone() {
 		o.endStream()
@@ -403,7 +467,7 @@ func (o *execOutput) delta(d *v1.Delta) {
 
 func (o *execOutput) endStream() {
 	if o.streaming {
-		_, _ = fmt.Fprintln(o.w)
+		o.write("\n")
 		o.streaming = false
 	}
 }

@@ -157,6 +157,59 @@ type CleanupRuntime interface {
 	ReleaseSession(ctx context.Context, sessionUID string) error
 }
 
+// CleanupResourceKind identifies a backend-owned resource Sessions may release.
+type CleanupResourceKind string
+
+const (
+	CleanupResourceActor CleanupResourceKind = "actor"
+	CleanupResourceTag   CleanupResourceKind = "tag"
+)
+
+// CleanupResource is opaque ownership evidence for one backend-owned resource. It is not
+// routing, authorization or diagnostic data. Namespace and Name identify the pre-I/O target;
+// UID becomes required before the resource may be treated as owned or released.
+type CleanupResource struct {
+	Kind      CleanupResourceKind
+	Namespace string
+	Name      string
+	UID       string
+}
+
+// ValidateTarget checks a resource target recorded before its backend call. UID may be empty.
+func (r CleanupResource) ValidateTarget() error {
+	if r.Kind != CleanupResourceActor && r.Kind != CleanupResourceTag {
+		return errors.New("cleanup resource: unknown kind")
+	}
+	if r.Namespace == "" {
+		return errors.New("cleanup resource: missing namespace")
+	}
+	if r.Name == "" {
+		return errors.New("cleanup resource: missing name")
+	}
+	return nil
+}
+
+// ValidateOwned checks evidence a caller may release without adopting a replacement by name.
+func (r CleanupResource) ValidateOwned() error {
+	if err := r.ValidateTarget(); err != nil {
+		return err
+	}
+	if r.UID == "" {
+		return errors.New("cleanup resource: missing uid")
+	}
+	return nil
+}
+
+// ResourceCleanupRuntime opts a runtime with dedicated resources into identity-bearing cleanup.
+// CleanupKey identifies the control-plane configuration. CleanupResource returns the UID-empty
+// target recorded before I/O. ReleaseResource must use the immutable UID precondition and must
+// never fall back to a name-only delete.
+type ResourceCleanupRuntime interface {
+	CleanupKey() string
+	CleanupResource(sessionUID string) CleanupResource
+	ReleaseResource(context.Context, CleanupResource) error
+}
+
 // SnapshotKind selects local (warm/pause) vs external (cold/suspend) storage.
 type SnapshotKind string
 
@@ -202,6 +255,11 @@ type Incarnation struct {
 	// fork pass that recorded instance to Snapshot, which refuses another one.
 	// Empty records nothing and skips the check.
 	ComputeInstance string
+	// CleanupResource is immutable backend ownership evidence for this incarnation. It is separate
+	// from routing fields and ComputeInstance, which identifies memory continuity rather than all
+	// dedicated compute. A runtime may return it with an error when a control-plane effect succeeded
+	// before a later placement step failed.
+	CleanupResource *CleanupResource
 	// RecordedCheckpoint, on the Incarnation passed to Snapshot, is the checkpoint the session's
 	// journal last recorded for the session (see SessionSpec.RecordedCheckpoint); the zero value
 	// means none. Suspend and a stateful fork set it. A backend whose compute can hold a snapshot

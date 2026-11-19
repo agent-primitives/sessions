@@ -55,6 +55,10 @@ message HarnessDescriptor {
   // in ExecutionStart and compare known recorded versions exactly on replay/recovery.
   // Empty is supported for older/unversioned harnesses and records an unknown version.
   string version = 5;
+  // Reconstruction replay refuses UNMEDIATED and unknown values before invoking the harness.
+  // UNSPECIFIED retains the legacy MEDIATED behavior. This declaration is not proof: a harness
+  // that calls a provider outside the model call operation is unmediated whatever it reports.
+  HarnessClass harness_class = 6;
 }
 
 message DescribeRequest {}
@@ -143,7 +147,13 @@ service Harness {
   // Describe returns the static contract; used to match the harness to a runtime.
   rpc Describe(DescribeRequest) returns (HarnessDescriptor);
 
-  // Connect drives ONE execution. The host sends Start (and optional control frames). Normally
+  // Connect drives ONE execution. The host normally sends Start first (and optional control
+  // frames). For reconstruction replay it first sends an empty ControllerFrame; a supporting
+  // server answers with an EVENT_RECONSTRUCTION_INFO carrying the class of the exact harness that
+  // will receive Start. The host sends Start only for MEDIATED or compatibility UNSPECIFIED. Older
+  // servers close that probe without invoking the harness, so reconstruction fails closed rather
+  // than sending Start.
+  // Normally
   // the harness streams Events terminated by exactly one EVENT_END. An unresolved approval
   // instead follows park -> correlated EVENT_PARKED -> stream closure, with no EVENT_END.
   // Durable requests/decisions belong to the host; this protocol applies to STATELESS_REPLAY and

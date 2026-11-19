@@ -236,7 +236,11 @@ type HarnessDescriptor struct {
 	// Change it when deterministic execution or config interpretation changes. Hosts record it
 	// in ExecutionStart and compare known recorded versions exactly on replay/recovery.
 	// Empty is supported for older/unversioned harnesses and records an unknown version.
-	Version       string `protobuf:"bytes,5,opt,name=version,proto3" json:"version,omitempty"`
+	Version string `protobuf:"bytes,5,opt,name=version,proto3" json:"version,omitempty"`
+	// Reconstruction replay refuses UNMEDIATED and unknown values before invoking the harness.
+	// UNSPECIFIED retains the legacy MEDIATED behavior. This declaration is not proof: a harness
+	// that calls a provider outside the model call operation is unmediated whatever it reports.
+	HarnessClass  HarnessClass `protobuf:"varint,6,opt,name=harness_class,json=harnessClass,proto3,enum=agentsessions.v1.HarnessClass" json:"harness_class,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -304,6 +308,13 @@ func (x *HarnessDescriptor) GetVersion() string {
 		return x.Version
 	}
 	return ""
+}
+
+func (x *HarnessDescriptor) GetHarnessClass() HarnessClass {
+	if x != nil {
+		return x.HarnessClass
+	}
+	return HarnessClass_HARNESS_CLASS_UNSPECIFIED
 }
 
 type DescribeRequest struct {
@@ -801,13 +812,14 @@ const file_harness_proto_rawDesc = "" +
 	"\bToolSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x129\n" +
-	"\tmediation\x18\x03 \x01(\x0e2\x1b.agentsessions.v1.MediationR\tmediation\"\xcb\x01\n" +
+	"\tmediation\x18\x03 \x01(\x0e2\x1b.agentsessions.v1.MediationR\tmediation\"\x90\x02\n" +
 	"\x11HarnessDescriptor\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06models\x18\x02 \x03(\tR\x06models\x120\n" +
 	"\x05tools\x18\x03 \x03(\v2\x1a.agentsessions.v1.ToolSpecR\x05tools\x12B\n" +
 	"\fcapabilities\x18\x04 \x01(\v2\x1e.agentsessions.v1.CapabilitiesR\fcapabilities\x12\x18\n" +
-	"\aversion\x18\x05 \x01(\tR\aversion\"\x11\n" +
+	"\aversion\x18\x05 \x01(\tR\aversion\x12C\n" +
+	"\rharness_class\x18\x06 \x01(\x0e2\x1e.agentsessions.v1.HarnessClassR\fharnessClass\"\x11\n" +
 	"\x0fDescribeRequest\"v\n" +
 	"\x0fIdentityContext\x12;\n" +
 	"\tprincipal\x18\x01 \x01(\v2\x1d.agentsessions.v1.IdentityRefR\tprincipal\x12&\n" +
@@ -869,40 +881,42 @@ var file_harness_proto_goTypes = []any{
 	(*ControllerFrame)(nil),   // 8: agentsessions.v1.ControllerFrame
 	(*ModelResult)(nil),       // 9: agentsessions.v1.ModelResult
 	(Mediation)(0),            // 10: agentsessions.v1.Mediation
-	(*IdentityRef)(nil),       // 11: agentsessions.v1.IdentityRef
-	(*Event)(nil),             // 12: agentsessions.v1.Event
-	(*Message)(nil),           // 13: agentsessions.v1.Message
-	(*ApprovalResult)(nil),    // 14: agentsessions.v1.ApprovalResult
-	(*ToolResult)(nil),        // 15: agentsessions.v1.ToolResult
-	(*ApprovalRef)(nil),       // 16: agentsessions.v1.ApprovalRef
-	(*Usage)(nil),             // 17: agentsessions.v1.Usage
+	(HarnessClass)(0),         // 11: agentsessions.v1.HarnessClass
+	(*IdentityRef)(nil),       // 12: agentsessions.v1.IdentityRef
+	(*Event)(nil),             // 13: agentsessions.v1.Event
+	(*Message)(nil),           // 14: agentsessions.v1.Message
+	(*ApprovalResult)(nil),    // 15: agentsessions.v1.ApprovalResult
+	(*ToolResult)(nil),        // 16: agentsessions.v1.ToolResult
+	(*ApprovalRef)(nil),       // 17: agentsessions.v1.ApprovalRef
+	(*Usage)(nil),             // 18: agentsessions.v1.Usage
 }
 var file_harness_proto_depIdxs = []int32{
 	0,  // 0: agentsessions.v1.Capabilities.resumability:type_name -> agentsessions.v1.Resumability
 	10, // 1: agentsessions.v1.ToolSpec.mediation:type_name -> agentsessions.v1.Mediation
 	2,  // 2: agentsessions.v1.HarnessDescriptor.tools:type_name -> agentsessions.v1.ToolSpec
 	1,  // 3: agentsessions.v1.HarnessDescriptor.capabilities:type_name -> agentsessions.v1.Capabilities
-	11, // 4: agentsessions.v1.IdentityContext.principal:type_name -> agentsessions.v1.IdentityRef
-	12, // 5: agentsessions.v1.Start.history:type_name -> agentsessions.v1.Event
-	13, // 6: agentsessions.v1.Start.inputs:type_name -> agentsessions.v1.Message
-	5,  // 7: agentsessions.v1.Start.identity:type_name -> agentsessions.v1.IdentityContext
-	6,  // 8: agentsessions.v1.ControllerFrame.start:type_name -> agentsessions.v1.Start
-	7,  // 9: agentsessions.v1.ControllerFrame.cancel:type_name -> agentsessions.v1.Cancel
-	14, // 10: agentsessions.v1.ControllerFrame.approval:type_name -> agentsessions.v1.ApprovalResult
-	15, // 11: agentsessions.v1.ControllerFrame.tool:type_name -> agentsessions.v1.ToolResult
-	9,  // 12: agentsessions.v1.ControllerFrame.model:type_name -> agentsessions.v1.ModelResult
-	16, // 13: agentsessions.v1.ControllerFrame.park:type_name -> agentsessions.v1.ApprovalRef
-	13, // 14: agentsessions.v1.ModelResult.message:type_name -> agentsessions.v1.Message
-	17, // 15: agentsessions.v1.ModelResult.usage:type_name -> agentsessions.v1.Usage
-	4,  // 16: agentsessions.v1.Harness.Describe:input_type -> agentsessions.v1.DescribeRequest
-	8,  // 17: agentsessions.v1.Harness.Connect:input_type -> agentsessions.v1.ControllerFrame
-	3,  // 18: agentsessions.v1.Harness.Describe:output_type -> agentsessions.v1.HarnessDescriptor
-	12, // 19: agentsessions.v1.Harness.Connect:output_type -> agentsessions.v1.Event
-	18, // [18:20] is the sub-list for method output_type
-	16, // [16:18] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	11, // 4: agentsessions.v1.HarnessDescriptor.harness_class:type_name -> agentsessions.v1.HarnessClass
+	12, // 5: agentsessions.v1.IdentityContext.principal:type_name -> agentsessions.v1.IdentityRef
+	13, // 6: agentsessions.v1.Start.history:type_name -> agentsessions.v1.Event
+	14, // 7: agentsessions.v1.Start.inputs:type_name -> agentsessions.v1.Message
+	5,  // 8: agentsessions.v1.Start.identity:type_name -> agentsessions.v1.IdentityContext
+	6,  // 9: agentsessions.v1.ControllerFrame.start:type_name -> agentsessions.v1.Start
+	7,  // 10: agentsessions.v1.ControllerFrame.cancel:type_name -> agentsessions.v1.Cancel
+	15, // 11: agentsessions.v1.ControllerFrame.approval:type_name -> agentsessions.v1.ApprovalResult
+	16, // 12: agentsessions.v1.ControllerFrame.tool:type_name -> agentsessions.v1.ToolResult
+	9,  // 13: agentsessions.v1.ControllerFrame.model:type_name -> agentsessions.v1.ModelResult
+	17, // 14: agentsessions.v1.ControllerFrame.park:type_name -> agentsessions.v1.ApprovalRef
+	14, // 15: agentsessions.v1.ModelResult.message:type_name -> agentsessions.v1.Message
+	18, // 16: agentsessions.v1.ModelResult.usage:type_name -> agentsessions.v1.Usage
+	4,  // 17: agentsessions.v1.Harness.Describe:input_type -> agentsessions.v1.DescribeRequest
+	8,  // 18: agentsessions.v1.Harness.Connect:input_type -> agentsessions.v1.ControllerFrame
+	3,  // 19: agentsessions.v1.Harness.Describe:output_type -> agentsessions.v1.HarnessDescriptor
+	13, // 20: agentsessions.v1.Harness.Connect:output_type -> agentsessions.v1.Event
+	19, // [19:21] is the sub-list for method output_type
+	17, // [17:19] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_harness_proto_init() }

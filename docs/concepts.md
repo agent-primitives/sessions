@@ -465,7 +465,7 @@ being placeable only on memory-capable compute.
 Where a harness's model calls originate is a second property of the harness, separate from tool
 mediation tiers ([spec §8.8](../spec.md#88-harness-classes)):
 
-- **Mediated** (every reference harness). Each model call goes through `sink.Model`: the host calls
+- **Mediated** (the root-module reference harnesses). Each model call goes through `sink.Model`: the host calls
   the provider with a credential it holds and records the call. This is what makes replay exact and
   spend visible to the host.
 - **Unmediated**. The harness makes some or all of its model calls from its own compute, through
@@ -478,9 +478,10 @@ mediation tiers ([spec §8.8](../spec.md#88-harness-classes)):
   interrupted by losing that compute's memory fails, and the user re-prompts; the host never
   continues it.
 
-The class is not advertised in `Describe`. The host cannot see a call that does not reach it, so
-the class is the harness author's declaration. See
-[unmediated harnesses](harness-authoring.md#unmediated-harnesses).
+The class is advertised in `Describe`, but it remains the harness author's trusted declaration: the
+host cannot see a call that does not reach it. Reconstruction replay rejects an explicitly
+unmediated harness before running it. An omitted class is treated as mediated for compatibility
+with older harnesses. See [unmediated harnesses](harness-authoring.md#unmediated-harnesses).
 
 ## Capability matching and `CanPlace`
 

@@ -83,6 +83,9 @@ func (s *liveSink) approvalDescriptor(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if err := api.ValidateDescriptor(desc); err != nil {
+			return err
+		}
 		s.desc = &desc
 	}
 	if !approvalTier(s.desc.Capabilities.Resumability) {

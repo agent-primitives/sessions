@@ -260,6 +260,59 @@ func (memSnapshotHarness) Describe(context.Context) (api.Descriptor, error) {
 }
 func (memSnapshotHarness) Run(context.Context, *api.Start, api.EventSink) error { return nil }
 
+type contradictoryClassHarness struct {
+	runs *atomic.Int32
+}
+
+func (h contradictoryClassHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "invalid", HarnessClass: api.HarnessClassUnmediated,
+		Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, nil
+}
+
+func (h contradictoryClassHarness) Run(context.Context, *api.Start, api.EventSink) error {
+	h.runs.Add(1)
+	return nil
+}
+
+func TestPlacerRejectsContradictoryUnmediatedDescriptorBeforeCompute(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("s")
+	var runs atomic.Int32
+	p := newLocalPlacer(t, contradictoryClassHarness{runs: &runs})
+	if _, err := p.Exec(t.Context(), log, "s", nil, 0); !errors.Is(err, api.ErrInvalidHarnessClass) {
+		t.Fatalf("Exec = %v; want ErrInvalidHarnessClass", err)
+	}
+	if head, err := log.Head(); err != nil || head != 0 || runs.Load() != 0 {
+		t.Fatalf("refused descriptor had effects: head=%d runs=%d err=%v", head, runs.Load(), err)
+	}
+	if err := p.Resume(t.Context(), log, "s"); !errors.Is(err, api.ErrInvalidHarnessClass) {
+		t.Fatalf("Resume = %v; want ErrInvalidHarnessClass", err)
+	}
+	if runs.Load() != 0 {
+		t.Fatalf("refused Resume ran harness %d times", runs.Load())
+	}
+}
+
+func TestDescriptorMismatchPrecedesInvalidHarnessClass(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var runs atomic.Int32
+	p := newLocalPlacer(t, contradictoryClassHarness{runs: &runs}, placement.WithDescriptorID("expected"))
+	if _, err := p.Exec(t.Context(), store.Session("s"), "s", nil, 0); !errors.Is(err, placement.ErrDescriptorMismatch) || errors.Is(err, api.ErrInvalidHarnessClass) {
+		t.Fatalf("Exec = %v; want descriptor mismatch precedence", err)
+	}
+	if runs.Load() != 0 {
+		t.Fatalf("mismatched harness ran %d times", runs.Load())
+	}
+}
+
 // stubControl is a no-op substrate.ControlClient so a substrate backend can be driven in tests
 // without a real ate-api-server.
 type stubControl struct{}

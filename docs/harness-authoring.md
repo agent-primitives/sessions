@@ -27,19 +27,22 @@ type Harness interface {
 }
 ```
 
-Two methods. `Describe` is static metadata. `Run` drives one turn. The host calls `Run` once per turn,
-gives you the inputs and (on the stateless path) the history, and records everything you emit.
+Two methods. `Describe` is side-effect-free static metadata. `Run` drives one turn. The host calls
+`Run` once per turn, gives you the inputs and (on the stateless path) the history, and records
+everything you emit. A wrapper must pass the supplied `Run` context, or one derived from it, to the
+underlying harness; reconstruction safety metadata and cancellation both travel with that context.
 
 ## Describe: declare your contract
 
 <!-- doccheck: skip excerpt of api.Descriptor; the real definition is in api/harness.go -->
 ```go
 type Descriptor struct {
-    ID           string
-    Version      string     // optional, opaque replay-compatibility version
-    Models       []string   // supported/required model ids (model-agnostic)
-    Tools        []ToolSpec
-    Capabilities Capabilities
+	ID           string
+	Version      string     // optional, opaque replay-compatibility version
+	Models       []string   // supported/required model ids (model-agnostic)
+	Tools        []ToolSpec
+	Capabilities Capabilities
+	HarnessClass HarnessClass // MEDIATED or UNMEDIATED
 }
 ```
 
@@ -49,8 +52,10 @@ advertised value, including empty, in `EXECUTION_START`. Known recorded versions
 on controller replay/interrupted recovery; served empty is a mismatch for a known version.
 Unversioned harnesses remain supported, and older markers without a version have no version guard.
 The reference echo, chat and counter harnesses advertise `"1"`. This is not a configuration digest
-or authentication: it is what the harness advertises. Remote `Describe` is not bound to `Connect`,
-so the existing operator-controlled endpoint/replica limitation still applies.
+or authentication: it is what the harness advertises. Ordinary remote placement still does not bind
+`Describe` to `Connect`, so the existing operator-controlled endpoint/replica limitation applies to
+identity, version and capabilities. Reconstruction performs an additional class handshake on each
+exact `Connect` stream before it sends `Start`.
 
 The recorded executing name is the host's resolved registry name, not necessarily `Descriptor.ID`.
 A per-turn override is resumed through that same registry entry (backend/model/executor); removing
@@ -897,7 +902,9 @@ Consequences of the host not owning your process:
   different harness takes over the address between `Describe` and `Connect` (a restart, a
   reconnect to another replica, or a proxy that balances each gRPC request separately), the turn
   runs on it and the host does not detect it. Every harness that can answer at the address must
-  therefore declare the same resumability; see [security](security.md).
+  therefore declare the same identity, version and capabilities. Reconstruction replay additionally
+  checks the class on the exact `Connect` stream before sending `Start`; see
+  [security](security.md).
 - Stopping a session does not stop your harness, because other sessions are using it: its lifetime
   is yours to manage. If nothing answers at the address when an exec, resume, or fork is admitted
   (the connection is refused, or the harness has not answered `Describe` within 10 seconds),
@@ -928,8 +935,9 @@ calls its provider itself and keeps its conversation in its compute, in process 
 such as a transcript it reloads on the next turn. Such a harness is
 **unmediated** ([spec §8.8](../spec.md#88-harness-classes)). It can run on `agentsessions`, but it
 gives up, for the calls it makes itself, what depends on the host making the call, so choose it
-deliberately. The class is not declared in `Describe`: the host cannot see a model call that does
-not reach it, so say which class your harness is in its documentation.
+deliberately. Declare `HarnessClassUnmediated` in `Describe` and document it. The host trusts that
+declaration because it cannot see a model call that does not reach it. An omitted class keeps the
+legacy mediated behavior for compatibility; new harnesses should declare their class explicitly.
 [`integrations/claudecode`](../integrations/claudecode) is an unmediated harness that runs Claude
 Code, in its own module so the root module names no model provider. Fork works on a runtime that
 snapshots memory: the child runs on a clone of its parent's compute, and its first turn adopts the
@@ -965,8 +973,9 @@ What is different:
 - **Declare `REQUIRES_MEMORY_SNAPSHOT`.** The journal holds no `MODEL_CALL` for the calls you make
   yourself, so it cannot rebuild your conversation; your compute is the state, even when your
   process exits between turns. Rule 3 applies: never rebuild state from `Start.History`. The host
-  places you only on compute that snapshots memory. The tier promises that memory comes back, not
-  every file: keep a conversation you hold on disk where your runtime's snapshot captures it.
+  rejects an explicit `HarnessClassUnmediated` paired with another tier, and otherwise places you
+  only on compute that snapshots memory. The tier promises that memory comes back, not every file:
+  keep a conversation you hold on disk where your runtime's snapshot captures it.
 - **Report what the model produced on the calls you make yourself.** Send assistant text through
   `sink.Output`, token accounting through `sink.Usage`, and tools your agent ran itself through
   `sink.Report` (`MEDIATION_IN_HARNESS_REPORTED`, Rule 4). Do not call `sink.Model` for a call you
@@ -977,13 +986,13 @@ What is different:
   `sink.Output`.
 - **For the calls you make yourself, you give up replay, model-call audit and host-bounded
   spend.** Reconstructing your turns would call the provider again, so reconstruction replay is not
-  supported, though the journal stays readable and verifiable. The host does not refuse it:
-  `controller.Replay` does not know your class and re-runs your harness if pointed at it, so
-  document that it must not be. The journal records your reports, not what the provider received or
-  returned. The host's model allowlist does not apply to those calls, and the host does not check
-  what they call against `Start.Model`; the egress and the provider account are what bound their
-  spend. A call you make through `sink.Model` is still checked and journaled as a `MODEL_CALL`, and
-  Rules 2, 5 and 6 apply to it as they do for a mediated harness.
+  supported, though the journal stays readable and verifiable. `controller.Replay` refuses an
+  explicitly unmediated harness before `Run`; raw `Sessions.Replay` and chain verification are
+  unaffected. The journal records your reports, not what the provider received or returned. The
+  host's model allowlist does not apply to those calls, and the host does not check what they call
+  against `Start.Model`; the egress and the provider account are what bound their spend. A call you
+  make through `sink.Model` is still checked and journaled as a `MODEL_CALL`, and Rules 2, 5 and 6
+  apply to it as they do for a mediated harness.
 - **Never continue an interrupted turn.** `Resume` recovers an unfinished or failed turn by calling
   `Run` again with the same `Start`, including `Start.ExecutionID`. The host serves the turn's
   recorded outputs against your new ones and then goes live, so a re-run either diverges at the
@@ -1022,6 +1031,8 @@ actually honor it, and what makes the system degrade honestly instead of silentl
 - [ ] `Describe` returns a stable `ID` and accurate `Capabilities`.
 - [ ] If `Version` is advertised, keep it stable for replay-compatible behavior and change it when
       deterministic execution/config interpretation changes; an empty version is supported.
+- [ ] `Describe` declares `HarnessClassMediated` or `HarnessClassUnmediated`; omission is only for
+      compatibility with harnesses built before the field existed.
 - [ ] Mediated: every model call goes through `sink.Model`, never a provider SDK directly.
 - [ ] In either class, you do not re-emit a `sink.Model` completion through `sink.Output`.
 - [ ] Unmediated: documented as such, `REQUIRES_MEMORY_SNAPSHOT`, a placeholder key only, and `Run`

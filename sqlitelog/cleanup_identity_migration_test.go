@@ -82,7 +82,7 @@ func TestCleanupIdentityPersistsAndRejectsReplacement(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "journal.db")
 	s := deletionStore(t, path)
 	target := api.CleanupResource{Kind: api.CleanupResourceActor, Namespace: "space", Name: "session-1"}
-	attempt, err := s.Session("session-1").BeginAllocation(t.Context(), "route-a", "create", target)
+	attempt, err := s.Session("session-1").BeginOwnedAllocation(t.Context(), "route-a", "create", target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestCleanupIdentityCompactionKeepsReplacementUID(t *testing.T) {
 	target := api.CleanupResource{Kind: api.CleanupResourceActor, Namespace: "space", Name: "session-1"}
 	for i, uid := range []string{"old-uid", "replacement-uid"} {
 		operation := []string{"create", "restore"}[i]
-		attempt, err := s.Session("session-1").BeginAllocation(t.Context(), "route", operation, target)
+		attempt, err := s.Session("session-1").BeginOwnedAllocation(t.Context(), "route", operation, target)
 		if err != nil {
 			t.Fatal(err)
 		}

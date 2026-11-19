@@ -72,18 +72,18 @@ func newLedgerID() (string, error) {
 	return hex.EncodeToString(id[:]), nil
 }
 
-// BeginAllocation durably records an intent before runtime IO. Implicit logs receive an incomplete
-// metadata row in the same transaction; a tombstone can never be resurrected by an attempt.
-func (l *Log) BeginAllocation(ctx context.Context, backend, operation string, targets ...api.CleanupResource) (string, error) {
+// BeginAllocation preserves the legacy session-handle recorder contract.
+func (l *Log) BeginAllocation(ctx context.Context, backend, operation string) (string, error) {
+	return l.BeginOwnedAllocation(ctx, backend, operation, api.CleanupResource{})
+}
+
+// BeginOwnedAllocation durably records an identity-bearing intent before runtime I/O. Implicit logs
+// receive an incomplete metadata row in the same transaction; a tombstone cannot be resurrected.
+func (l *Log) BeginOwnedAllocation(ctx context.Context, backend, operation string, target api.CleanupResource) (string, error) {
 	if l.session == "" || operation == "" {
 		return "", errors.New("sqlitelog: allocation requires session and operation")
 	}
-	if len(targets) > 1 {
-		return "", errors.New("sqlitelog: allocation accepts one resource target")
-	}
-	var target api.CleanupResource
-	if len(targets) == 1 {
-		target = targets[0]
+	if target != (api.CleanupResource{}) {
 		if err := target.ValidateTarget(); err != nil {
 			return "", fmt.Errorf("sqlitelog: allocation target: %w", err)
 		}

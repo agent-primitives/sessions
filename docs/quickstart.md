@@ -199,8 +199,8 @@ local filesystem-only backend, resume reconstructs the session by replay (no mem
 memory-capable backend the same commands restore RAM instead. The CLI is identical either way.
 
 Use a fresh session so the sequence numbers are easy to follow. Take its UID from `create`, not by
-piping `exec` into `head -1`: `exec` streams records as they commit, and a reader that exits early
-stops it mid-turn with `SIGPIPE`.
+piping `exec` into `head -1`: without `--json`, `exec` exits on `SIGPIPE` when a reader stops early,
+which cancels the turn mid-way.
 
 ```bash
 SID2=$(agentctl create --journal /tmp/sr.db)
@@ -359,8 +359,10 @@ set -o pipefail  # a failed agentctl fails the pipeline, not just jq
 agentctl get --server= --journal /tmp/qs.db --session "$SID" --json | jq '.compute_state'
 agentctl list --server= --journal /tmp/qs.db --json | jq -r '.sessions[]? | .metadata.uid'
 agentctl replay --server= --journal /tmp/qs.db --session "$SID" --json > records.jsonl
+# Model text is untrusted: -a keeps control and non-ASCII characters escaped in the quoted output.
+# Use -r only when the text goes to a program, not to a terminal.
 agentctl exec --server= --journal /tmp/qs.db --session "$SID" --input "hello again" --json |
-  jq -r 'select(.record.event.kind == "EVENT_OUTPUT") | [.record.event.message.parts[]?.text.text // empty] | join("")'
+  jq -a 'select(.record.event.kind == "EVENT_OUTPUT") | [.record.event.message.parts[]?.text.text // empty] | join("")'
 ```
 
 For example, a turn on a new session with the default `echo` harness, `agentctl exec --server=
@@ -415,8 +417,9 @@ that pauses for approval exits successfully and ends with a `session` update, a 
 session as the stream closes, whose `pending_approval` names the call unless a concurrent approval
 has already resolved it. Only a recorded `EVENT_END` shows that a turn completed. Ignore update
 kinds you do not expect, since later releases may add some. If the stream fails, the lines already
-written stay and the command exits with an error; it does not retry the turn. Read the stream to its
-end: on Unix, closing the pipe early ends `exec` with SIGPIPE, which can cut an embedded turn short.
+written stay and the command exits with an error; it does not retry the turn. A reader may stop
+early, for example with `| head -1`: `exec --json` then stops writing, keeps the turn running to its
+end, and exits with an error that says its records are committed, so the turn is not cancelled.
 
 Replay JSON retains full hashes, sequence numbers and protobuf field presence; `--json` takes
 precedence over `-v`. It only reads recorded events, never calls a model, and does not itself verify
@@ -424,12 +427,13 @@ the chain; use `agentctl verify` for verification. An empty replay writes no lin
 as successful only when the command exits successfully.
 
 Human output is uncolored; color support is deferred. Diagnostics and the deletion PENDING warning
-go to stderr, including in JSON mode, so stdout remains parseable.
-On Unix, unary response commands report broken stdout pipes as output errors on stderr rather
-than exiting via SIGPIPE, noting that successful mutations remain committed. `exec` retains its
-existing streaming signal behavior. Other stdout write errors no longer go unnoticed: `exec` stops
-writing, reads the turn to its end so it is not cut short, then exits with an error noting that the
-turn's records are committed.
+go to stderr, including in JSON mode, so stdout remains parseable. On Unix, unary response commands
+and `exec --json` report broken stdout pipes as output errors on stderr rather than exiting via
+SIGPIPE. For unary commands the error notes that successful mutations remain committed. `exec
+--json`, and `exec` for any other stdout write error, stops writing, reads the turn to its end so it
+is not cut short, then exits with an error noting that the turn's records are committed. Without
+`--json`, `exec` still exits via SIGPIPE when its pipe closes, which cancels the turn, embedded or
+remote.
 
 **Migration:** `get` no longer emits a single key/value line; `list` now has aligned columns and
 headings, even when empty. Lifecycle and approval summaries use short state values and include

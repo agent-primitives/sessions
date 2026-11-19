@@ -95,9 +95,10 @@ for approval exits successfully and ends with a `session` frame: a snapshot of t
 stream closes, which carries `pending_approval` unless a concurrent decision has already resolved
 it. Only a recorded `END` shows that a turn completed. Streamed `delta` chunks are not committed and
 are omitted; readers ignore update kinds they do not expect. A stream error leaves the lines already
-written and exits unsuccessfully, without retrying the turn. A failed stdout write ends the command
-unsuccessfully after the stream is read to its end, except that on Unix a closed pipe still ends
-`exec` with SIGPIPE, which can cut an embedded turn short; readers consume the whole stream.
+written and exits unsuccessfully, without retrying the turn. A failed stdout write, including a pipe
+whose reader has exited, ends the command unsuccessfully after the stream is read to its end, so the
+turn is not cut short. Without `--json`, `exec` keeps the default Unix behavior and exits on SIGPIPE
+when its pipe closes, which cancels the turn, embedded or remote.
 
 Without `--json`, `create` retains its bare UID output, and the human output of `exec`, `replay` and
 `fork` is not a stable contract; scripts use `--json`. Harness JSON content is unchanged. Approval

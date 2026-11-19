@@ -121,7 +121,7 @@ recorded `EVENT_END` shows that the turn completed:
 ```bash
 set -o pipefail  # a failed exec fails the pipeline, not just jq
 bin/agentctl exec -server 127.0.0.1:8080 -harness publisher -input 'Publish the text: hello' -json |
-  jq -c 'select(.session.pending_approval) | {session: .session.metadata.uid, pending_approval: .session.pending_approval}'
+  jq -ac 'select(.session.pending_approval) | {session: .session.metadata.uid, pending_approval: .session.pending_approval}'
 ```
 
 Stop the daemon and the harness (Ctrl-C) and start them again with the same commands. Nothing

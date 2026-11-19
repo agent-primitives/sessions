@@ -82,14 +82,20 @@ func main() {
 	}
 	switch os.Args[1] {
 	case "create", "list", "get", "delete", "fork", "suspend", "resume", "approve", "deny", "harness":
-		// Return broken-pipe errors so committed mutations can still be reported on stderr.
-		signal.Ignore(syscall.SIGPIPE)
+		reportBrokenPipe()
 	}
 	if err := traced(os.Args[1], func() error { return run(os.Args[2:]) }); err != nil {
 		printError(os.Stderr, err)
 		os.Exit(1)
 	}
 }
+
+// reportBrokenPipe turns a closed stdout pipe into an ordinary write error instead of a SIGPIPE that
+// kills the process. Unary commands then report on stderr that committed mutations remain
+// committed. exec --json calls it once its flags are parsed (main cannot see --json): killing exec
+// would close its stream and cancel the turn on the server, embedded or remote, while a write error
+// lets exec read the turn to its end. Human exec keeps the default signal behavior.
+func reportBrokenPipe() { signal.Ignore(syscall.SIGPIPE) }
 
 // printError writes the line agentctl prints for a failed command.
 func printError(w io.Writer, err error) {
@@ -345,6 +351,9 @@ func runExec(args []string, w io.Writer) error {
 	fs.StringVar(&input, "input", "", "user input for this turn")
 	fs.StringVar(&harness, "harness", "", "harness for a new session or override for this turn (default: the session's or host's)")
 	_ = fs.Parse(args)
+	if cfg.json {
+		reportBrokenPipe() // so exec --json | head -1 does not cancel the turn
+	}
 	c, cleanup, err := dial(cfg)
 	if err != nil {
 		return err

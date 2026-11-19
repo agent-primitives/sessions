@@ -62,15 +62,17 @@ agentctl() { "${WORK}/bin/agentctl" "$1" --server "${SERVER}" "${@:2}"; }
 # The checks below read agentctl's --json output, not its human views, which can change.
 # texts KIND ROLE: from agentctl JSON Lines on stdin (replay's LogRecords or exec's ExecUpdates),
 # the text of each KIND record whose message has ROLE, one per line. Newlines print as \n and other
-# control and format characters as \xNN or \uNNNN, as agentctl's human output prints them, so a
-# reply quoted in a failure message cannot act on the terminal.
+# non-graphic characters (controls, format characters, and the line and paragraph separators U+2028
+# and U+2029) as \xNN or \uNNNN, as agentctl's human output prints them, so a reply quoted in a
+# failure message cannot act on the terminal or start a new log line.
 texts() {
 	jq -r --arg kind "$1" --arg role "$2" '(.record // .) | .event // empty
 		| select(.kind == $kind and .message.role == $role)
 		| [.message.parts[]?.text.text // empty] | join("") | gsub("\n"; "\\n")' |
 		python3 -c 'import sys, unicodedata
 for line in sys.stdin:
-    print("".join(c if unicodedata.category(c)[0] != "C" else ("\\x%02x" if ord(c) < 128 else "\\u%04x") % ord(c)
+    print("".join(c if unicodedata.category(c)[0] != "C" and unicodedata.category(c) not in ("Zl", "Zp")
+                  else ("\\x%02x" if ord(c) < 128 else "\\u%04x") % ord(c)
                   for c in line.rstrip("\n")))'
 }
 inputs() { # session -> the user inputs its journal holds, in order, joined by '|'

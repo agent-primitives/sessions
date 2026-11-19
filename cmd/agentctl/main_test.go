@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -107,6 +108,29 @@ func TestResponseBrokenPipe(t *testing.T) {
 	writer.Close()
 	if state, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); err == nil || !ok || state.Signal() != syscall.SIGPIPE {
 		t.Fatalf("exec SIGPIPE behavior changed: state=%v err=%v", cmd.ProcessState, err)
+	}
+
+	// exec --json does not die on a closed pipe: it reports the write error after reading the turn
+	// to its end, so a reader that exits early does not cancel the turn.
+	reader, writer, err = os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.Close()
+	cmd = exec.CommandContext(t.Context(), binary, "exec", "--server=", "--journal", journal, "--session", parent, "--input", "closed pipe", "--json")
+	cmd.Stdout = writer
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	writer.Close()
+	if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 1 || err == nil ||
+		!strings.Contains(stderr.String(), "the turn was not interrupted and its records are committed") {
+		t.Fatalf("exec --json on a closed pipe: state=%v stderr=%q err=%v", cmd.ProcessState, stderr.String(), err)
+	}
+	var last v1.LogRecord
+	lines := strings.Split(strings.TrimSpace(string(run("replay", "--session", parent, "--json"))), "\n")
+	if err := protojson.Unmarshal([]byte(lines[len(lines)-1]), &last); err != nil || last.GetEvent().GetEnd().GetState() != "COMPLETED" {
+		t.Fatalf("the turn behind a closed pipe did not complete: last record %v (%v)", &last, err)
 	}
 }
 
@@ -700,6 +724,10 @@ func TestExecJSON(t *testing.T) {
 		return &v1.ExecUpdate{Update: &v1.ExecUpdate_Session{Session: s}}
 	}
 	first := sessionUpdate(&v1.Session{Metadata: &v1.ResourceMetadata{Uid: "sess-json"}})
+	input := &v1.ExecUpdate{Update: &v1.ExecUpdate_Record{Record: &v1.LogRecord{Seq: 1, Event: &v1.Event{
+		Kind: v1.EventKind_EVENT_INPUT,
+		Body: &v1.Event_Message{Message: wire.MessageToProto(api.TextMessage("user", "hello"))},
+	}}}}
 	output := &v1.ExecUpdate{Update: &v1.ExecUpdate_Record{Record: &v1.LogRecord{Seq: 2, Event: &v1.Event{
 		Kind: v1.EventKind_EVENT_OUTPUT,
 		Body: &v1.Event_Message{Message: wire.MessageToProto(api.TextMessage("assistant", "hi\x1b[8m\u202e\u009b"))},
@@ -715,18 +743,18 @@ func TestExecJSON(t *testing.T) {
 		want    []*v1.ExecUpdate
 	}{{
 		name:    "new session",
-		updates: []*v1.ExecUpdate{first, delta, output, parked},
-		want:    []*v1.ExecUpdate{first, output, parked},
+		updates: []*v1.ExecUpdate{first, input, delta, output, parked},
+		want:    []*v1.ExecUpdate{first, input, output, parked},
 	}, {
 		name:    "existing session",
 		args:    []string{"--session", "sess-json"},
-		updates: []*v1.ExecUpdate{first, delta, output, parked},
-		want:    []*v1.ExecUpdate{first, output, parked},
+		updates: []*v1.ExecUpdate{first, input, delta, output, parked},
+		want:    []*v1.ExecUpdate{first, input, output, parked},
 	}, {
 		name:    "stream error",
-		updates: []*v1.ExecUpdate{first, output},
+		updates: []*v1.ExecUpdate{first, input, output},
 		err:     status.Error(codes.Unavailable, "connection reset"),
-		want:    []*v1.ExecUpdate{first, output},
+		want:    []*v1.ExecUpdate{first, input, output},
 	}} {
 		t.Run(tt.name, func(t *testing.T) {
 			addr := serveExec(t, &execStreamer{updates: tt.updates, err: tt.err})
@@ -748,6 +776,30 @@ func TestExecJSON(t *testing.T) {
 				if err := protojson.Unmarshal([]byte(line), &got); err != nil || !proto.Equal(&got, tt.want[i]) {
 					t.Fatalf("line %d = %s (%v), want %v", i, line, err, tt.want[i])
 				}
+			}
+		})
+	}
+}
+
+// Text-mode exec names the session only when it created it: with --session the caller already
+// knows the UID, so no session line prints, even though the server still sends the session frame.
+func TestExecTextNamesOnlyANewSession(t *testing.T) {
+	updates := []*v1.ExecUpdate{
+		{Update: &v1.ExecUpdate_Session{Session: &v1.Session{Metadata: &v1.ResourceMetadata{Uid: "sess-text"}}}},
+		{Update: &v1.ExecUpdate_Record{Record: &v1.LogRecord{Seq: 1, Event: &v1.Event{Kind: v1.EventKind_EVENT_END}}}},
+	}
+	for _, tt := range []struct {
+		args []string
+		want bool
+	}{{want: true}, {args: []string{"--session", "sess-text"}}} {
+		t.Run(fmt.Sprint(tt.args), func(t *testing.T) {
+			addr := serveExec(t, &execStreamer{updates: updates})
+			var out bytes.Buffer
+			if err := runExec(append([]string{"--server", addr, "--input", "hello"}, tt.args...), &out); err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(strings.Split(out.String(), "\n"), "session sess-text"); got != tt.want {
+				t.Fatalf("session line printed = %v, want %v:\n%s", got, tt.want, out.String())
 			}
 		})
 	}

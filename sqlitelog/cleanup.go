@@ -32,8 +32,11 @@ var ErrAllocationConflict = errors.New("sqlitelog: allocation confirmation confl
 // Allocation is a write-ahead resource attempt. ResourceID retains the incarnation's
 // session-scoped handle, not its compute-instance identity, address, credentials or routing metadata.
 type Allocation struct {
-	ID, SessionUID, Backend, Operation, ResourceID string
-	Confirmed                                      bool
+	ID, SessionUID, Backend, Operation string
+	ResourceKind                       api.CleanupResourceKind
+	ResourceNamespace, ResourceID      string
+	ResourceUID                        string
+	Confirmed                          bool
 }
 
 // migrateCleanupInventory adds the allocation ledger and inventory completeness/evidence columns.
@@ -53,6 +56,14 @@ func migrateCleanupInventory(tx *sql.Tx) error {
 	return err
 }
 
+func migrateCleanupIdentity(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+		ALTER TABLE allocations ADD COLUMN resource_kind TEXT NOT NULL DEFAULT '';
+		ALTER TABLE allocations ADD COLUMN resource_namespace TEXT NOT NULL DEFAULT '';
+		ALTER TABLE allocations ADD COLUMN resource_uid TEXT NOT NULL DEFAULT '';`)
+	return err
+}
+
 func newLedgerID() (string, error) {
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
@@ -63,9 +74,19 @@ func newLedgerID() (string, error) {
 
 // BeginAllocation durably records an intent before runtime IO. Implicit logs receive an incomplete
 // metadata row in the same transaction; a tombstone can never be resurrected by an attempt.
-func (l *Log) BeginAllocation(ctx context.Context, backend, operation string) (string, error) {
+func (l *Log) BeginAllocation(ctx context.Context, backend, operation string, targets ...api.CleanupResource) (string, error) {
 	if l.session == "" || operation == "" {
 		return "", errors.New("sqlitelog: allocation requires session and operation")
+	}
+	if len(targets) > 1 {
+		return "", errors.New("sqlitelog: allocation accepts one resource target")
+	}
+	var target api.CleanupResource
+	if len(targets) == 1 {
+		target = targets[0]
+		if err := target.ValidateTarget(); err != nil {
+			return "", fmt.Errorf("sqlitelog: allocation target: %w", err)
+		}
 	}
 	id, err := newLedgerID()
 	if err != nil {
@@ -84,7 +105,9 @@ func (l *Log) BeginAllocation(ctx context.Context, backend, operation string) (s
 		ON CONFLICT(session) DO NOTHING`, l.session, l.store.defaultProject, now, now); err != nil {
 		return "", err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO allocations(id,session,backend,operation) VALUES(?,?,?,?)`, id, l.session, backend, operation); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO allocations(
+		id,session,backend,operation,resource_kind,resource_namespace,resource_id
+	) VALUES(?,?,?,?,?,?,?)`, id, l.session, backend, operation, target.Kind, target.Namespace, target.Name); err != nil {
 		return "", fmt.Errorf("sqlitelog: record allocation: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -98,7 +121,20 @@ func (l *Log) BeginAllocation(ctx context.Context, backend, operation string) (s
 // unreleased attempts for the same (session, backend, handle), regardless of operation. Identical retries
 // succeed while the attempt is retained; compacted IDs return ErrAllocationNotFound.
 func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Incarnation) error {
-	if in.ID == "" {
+	resourceID := in.ID
+	resourceKind := api.CleanupResourceKind("")
+	resourceNamespace, resourceUID := "", ""
+	if in.CleanupResource != nil {
+		resource := *in.CleanupResource
+		if err := resource.ValidateOwned(); err != nil {
+			return ErrAllocationConflict
+		}
+		resourceKind = resource.Kind
+		resourceNamespace = resource.Namespace
+		resourceID = resource.Name
+		resourceUID = resource.UID
+	}
+	if resourceID == "" {
 		return ErrAllocationConflict
 	}
 	tx, err := l.store.db.BeginTx(ctx, nil)
@@ -106,9 +142,11 @@ func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Inca
 		return err
 	}
 	defer tx.Rollback()
-	var id, backend string
+	var id, backend, namespace, uid string
+	var kind api.CleanupResourceKind
 	var confirmed, released bool
-	err = tx.QueryRowContext(ctx, `SELECT resource_id,backend,confirmed,released FROM allocations WHERE id=? AND session=?`, attempt, l.session).Scan(&id, &backend, &confirmed, &released)
+	err = tx.QueryRowContext(ctx, `SELECT resource_id,resource_kind,resource_namespace,resource_uid,backend,confirmed,released
+		FROM allocations WHERE id=? AND session=?`, attempt, l.session).Scan(&id, &kind, &namespace, &uid, &backend, &confirmed, &released)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrAllocationNotFound
 	}
@@ -116,7 +154,7 @@ func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Inca
 		return err
 	}
 	if confirmed {
-		if id != in.ID {
+		if id != resourceID || kind != resourceKind || namespace != resourceNamespace || uid != resourceUID {
 			return ErrAllocationConflict
 		}
 		return nil
@@ -124,11 +162,18 @@ func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Inca
 	if released {
 		return ErrAllocationConflict
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE allocations SET resource_id=?,confirmed=1 WHERE id=? AND session=?`, in.ID, attempt, l.session); err != nil {
+	if (resourceKind != "" && (kind != resourceKind || namespace != resourceNamespace || id != resourceID)) ||
+		(resourceKind == "" && (kind != "" || namespace != "" || uid != "")) {
+		return ErrAllocationConflict
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE allocations SET
+		resource_kind=?,resource_namespace=?,resource_id=?,resource_uid=?,confirmed=1
+		WHERE id=? AND session=?`, resourceKind, resourceNamespace, resourceID, resourceUID, attempt, l.session); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM allocations
-		WHERE session=? AND backend=? AND resource_id=? AND confirmed=1 AND released=0 AND id<>?`, l.session, backend, in.ID, attempt); err != nil {
+		WHERE session=? AND backend=? AND resource_kind=? AND resource_namespace=? AND resource_id=? AND resource_uid=?
+		AND confirmed=1 AND released=0 AND id<>?`, l.session, backend, resourceKind, resourceNamespace, resourceID, resourceUID, attempt); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -151,7 +196,7 @@ func (s *Store) AllocationPage(ctx context.Context, uid, after string, limit int
 	return s.allocations(ctx, uid, after, limit)
 }
 
-const allocationQuery = `SELECT id,session,backend,operation,resource_id,confirmed FROM allocations
+const allocationQuery = `SELECT id,session,backend,operation,resource_kind,resource_namespace,resource_id,resource_uid,confirmed FROM allocations
 	WHERE session=? AND released=0 AND id>? ORDER BY id LIMIT ?`
 
 func (s *Store) allocations(ctx context.Context, uid, after string, limit int) ([]Allocation, error) {
@@ -163,7 +208,8 @@ func (s *Store) allocations(ctx context.Context, uid, after string, limit int) (
 	var out []Allocation
 	for rows.Next() {
 		var a Allocation
-		if err := rows.Scan(&a.ID, &a.SessionUID, &a.Backend, &a.Operation, &a.ResourceID, &a.Confirmed); err != nil {
+		if err := rows.Scan(&a.ID, &a.SessionUID, &a.Backend, &a.Operation, &a.ResourceKind,
+			&a.ResourceNamespace, &a.ResourceID, &a.ResourceUID, &a.Confirmed); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

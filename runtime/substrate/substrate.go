@@ -1932,7 +1932,27 @@ func (b *Backend) Stop(ctx context.Context, in api.Incarnation) (err error) {
 		}
 	}
 	if actor == nil {
-		return fmt.Errorf("substrate: stop requires owned actor identity")
+		if b.cleanupKey != "" {
+			return fmt.Errorf("substrate: stop requires owned actor identity")
+		}
+		// Legacy direct Stop callers historically pass only the session handle. Preserve that
+		// compatibility without a name-only delete: resolve the current UID, then require it on
+		// the actual delete so a replacement between the read and delete survives.
+		info, err := b.ctl.GetActor(ctx, b.ref(in.ID))
+		if err != nil {
+			if errors.Is(err, ErrActorNotFound) {
+				return nil
+			}
+			return fmt.Errorf("substrate: read legacy stop actor: %w", err)
+		}
+		if info.UID == "" {
+			return fmt.Errorf("substrate: legacy stop actor reported no uid")
+		}
+		resource, err := b.cleanupResource("actor", b.atespace, in.ID, info.UID)
+		if err != nil {
+			return err
+		}
+		actor = &resource
 	}
 	if err := b.ReleaseResource(ctx, *actor); err != nil {
 		return fmt.Errorf("substrate: delete actor: %w", err)

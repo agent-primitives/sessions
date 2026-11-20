@@ -43,6 +43,18 @@ func TestCleanupKeyedCreateReturnsOwnedActorEvidence(t *testing.T) {
 	}
 }
 
+func TestCleanupKeylessStopByIDResolvesExactUID(t *testing.T) {
+	m := &mockControl{}
+	m.exists("sess-x", substrate.StatusRunning)
+	b := newBackend(m)
+	if err := b.Stop(context.Background(), api.Incarnation{ID: "sess-x"}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"get:sess-x", "delete:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("calls=%v want=%v", m.calls, want)
+	}
+}
+
 func TestCleanupCreateReturnsEvidenceWithResumeError(t *testing.T) {
 	cause := errors.New("resume failed")
 	m := &mockControl{info: running("worker-a"), resumeErr: cause}

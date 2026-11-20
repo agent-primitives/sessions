@@ -28,6 +28,31 @@ type failedForkWithRollback struct {
 	cleanupContextErr error
 }
 
+type invalidClassBackend struct {
+	*local.Backend
+}
+
+func (b invalidClassBackend) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "echo", HarnessClass: api.HarnessClassUnmediated,
+		Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, nil
+}
+
+func TestForkInvalidHarnessClassIsFailedPrecondition(t *testing.T) {
+	store := openStore(t, ":memory:")
+	if err := store.PutSession(sqlitelog.SessionMeta{UID: "parent", Harness: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+	backend := invalidClassBackend{Backend: local.New(echoagent.Harness{})}
+	t.Cleanup(func() { _ = backend.Close() })
+	_, err := session.NewService(store, echoRegistry(t, backend)).Fork(t.Context(), &v1.ForkRequest{Session: "parent", Count: 1})
+	if status.Code(err) != codes.FailedPrecondition || !errors.Is(err, api.ErrInvalidHarnessClass) {
+		t.Fatalf("Fork = %v; want FailedPrecondition retaining ErrInvalidHarnessClass", err)
+	}
+	if head, readErr := store.Session("parent").Head(); readErr != nil || head != 0 {
+		t.Fatalf("refused Fork changed parent: head=%d err=%v", head, readErr)
+	}
+}
+
 func (b *failedForkWithRollback) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOpts) (api.Incarnation, error) {
 	b.forks++
 	if b.forks == 2 {

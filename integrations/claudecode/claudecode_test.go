@@ -42,9 +42,10 @@ func TestDescribe(t *testing.T) {
 			// Version is the stable author-owned replay version: bump it only when execution
 			// behavior changes.
 			want := api.Descriptor{
-				ID:      "claudecode",
-				Version: "1",
-				Models:  test.want,
+				ID:           "claudecode",
+				Version:      "1",
+				Models:       test.want,
+				HarnessClass: api.HarnessClassUnmediated,
 				Capabilities: api.Capabilities{
 					Resumability: api.ResumabilityRequiresMemorySnapshot,
 					ForkSafe:     false,

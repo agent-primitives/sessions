@@ -341,12 +341,14 @@ no flattened lifecycle enum.
 | `EVENT_END` | `HarnessEnd` | host | Written with `state = "COMPLETED"` on success. |
 | `EVENT_ERROR` | `Error` | host | Best-effort record of a failed execution or recovery. |
 | `EVENT_PARKED` | `ApprovalRef` | harness | Transport only; never journaled (§10.3). |
+| `EVENT_RECONSTRUCTION_INFO` | `ReconstructionInfo` | harness | Stream-bound class metadata before reconstruction `Start`; transport only, never journaled (`WIRE-3a`). |
 
-- `LOG-5`: A host MUST NOT journal `EVENT_PARKED`. The host-side sink has no operation that
-  emits it, and the wire client accepts it only as the park acknowledgement (§10.3) and refuses it
-  as an ordinary harness event.
-- The reference SQLite store also refuses to append `EVENT_PARKED`. The in-memory reference store
-  (`eventlog.Log`) does not check the kind and appends it.
+- `LOG-5`: A host MUST NOT journal `EVENT_PARKED` or `EVENT_RECONSTRUCTION_INFO`. The host-side sink
+  has no operation that emits either. The wire client accepts the former only as the park
+  acknowledgement (§10.3) and the latter only before reconstruction `Start` (`WIRE-3a`), and
+  refuses either as an ordinary harness event.
+- The reference SQLite store refuses to append both transport-only kinds. The in-memory reference
+  store refuses `EVENT_RECONSTRUCTION_INFO`; it retains its legacy acceptance of `EVENT_PARKED`.
 - `LOG-6`: The reference host writes `EVENT_ERROR`, not `EVENT_END`, when an execution fails. It
   never writes `HarnessEnd.state` values other than `COMPLETED`.
 - `LOG-18`: `LIFECYCLE_DELETE` MUST be written only by the deletion transaction (`OPS-31`), never
@@ -868,11 +870,12 @@ invokes no harness and stays a no-op without one.
 
 ### 8.8 Harness classes
 
-Every harness belongs to one of two classes, set by where its model calls originate. The class is a
-property of the harness that its author declares in the harness's documentation. It is not a field
-of `HarnessDescriptor` or `api.Capabilities`, and the host neither reads nor enforces it: the host
-cannot observe a model call that does not reach it. The class concerns model calls only; tool
-`Mediation` (§9.1) is independent of it.
+Every harness belongs to one of two classes, set by where its model calls originate. The author
+declares the class in `HarnessDescriptor.harness_class`; the host trusts that declaration because it
+cannot observe a model call that does not reach it. `HARNESS_CLASS_UNSPECIFIED`, omitted by harnesses
+from before the field existed, is read as `MEDIATED` for compatibility. A new harness SHOULD declare
+its class. A wire value the host does not understand is not read as `MEDIATED`: reconstruction replay
+fails closed. The class concerns model calls only; tool `Mediation` (§9.1) is independent of it.
 
 - `EXE-36`: A **mediated** harness makes every model call through the model call operation
   (`EventSink.Model` in the Go SPI, `EVENT_MODEL_CALL` on the wire). The host makes the call with a
@@ -883,7 +886,12 @@ cannot observe a model call that does not reach it. The class concerns model cal
   egress. An agent CLI that calls its provider itself, such as Claude Code, is an example.
 - `EXE-38`: An unmediated harness MUST declare `REQUIRES_MEMORY_SNAPSHOT` (§13.1). Its conversation
   state lives in its compute, and the log, which holds no record of the model calls it makes outside
-  the model call operation, cannot rebuild that state.
+  the model call operation, cannot rebuild that state. The reference host rejects an explicitly
+  `UNMEDIATED` descriptor with any other tier before compute or `Harness.Run`, and before any record
+  of an execution it would start. An ordinary `APR-13` call-only repair may append
+  `APPROVAL_REQUEST` without admission; an override on a memory-capable backend performs the
+  override admission before repair. Admission after a decision still refuses the contradictory
+  descriptor before compute or `Harness.Run`.
 - `EXE-39`: An unmediated harness reports what its model produced on a call outside the model
   call operation through the output, reported tool result (`TOOL-2`), and usage operations. On the
   live path the host journals each report as given: no `MODEL_CALL` precedes such an `OUTPUT`, and
@@ -908,7 +916,10 @@ cannot observe a model call that does not reach it. The class concerns model cal
   - Replay. `I0`, `I1`, `EXE-13`, and the model cut rule (`EXE-22`) do not hold for those calls.
     Reconstruction replay (§8.5) of an unmediated execution is not supported: re-running the
     harness calls the provider again and diverges (`I0`) unless the new output repeats the recorded
-    text. Reading the log with the `Replay` RPC and verifying the chain (§7.3) are unaffected.
+    text. The reference controller reads the supplied harness's current declaration and refuses
+    `UNMEDIATED` before its first run; omission retains the legacy mediated behavior, so the
+    declaration must be truthful. Reading the log with the `Replay` RPC and verifying the chain
+    (§7.3) are unaffected.
 - `EXE-42`: An unmediated harness MUST NOT continue or re-run an interrupted execution. Recovery
   (§8.6) re-invokes the harness with that execution's `Start`, serves its recorded effects, then
   goes live (`EXE-21`); for an unmediated harness the live part calls the provider again and
@@ -1589,26 +1600,45 @@ Exec's terminal status details survive after the first session frame, including 
 ### 12.1 Describe
 
 - `WIRE-1`: `Describe` returns a `HarnessDescriptor`: `id`, `models`, `tools` (with default
-  mediation), `capabilities`, and an opaque `version`. The host MUST bound `Describe` (10 seconds
-  in the reference host, never extending an earlier caller deadline); a failure appends nothing.
+  mediation), `capabilities`, an opaque `version`, and `harness_class`. The host MUST bound
+  `Describe` (10 seconds in the reference host, never extending an earlier caller deadline); a
+  failure appends nothing.
 - `WIRE-2`: `version` is owned by the harness author and MUST change when deterministic execution
   or config interpretation changes. It round-trips verbatim, including empty.
 - `WIRE-3`: On the wire, the host reads `RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT` as that tier and
   every other value as `STATELESS_REPLAY`: `RESUMABILITY_UNSPECIFIED`, a number this host does not
   know, and an absent `capabilities` message.
+- `WIRE-3a`: The host reads `HARNESS_CLASS_UNMEDIATED` as unmediated and
+  `HARNESS_CLASS_UNSPECIFIED` as mediated for compatibility. Reconstruction replay MUST refuse
+  `UNMEDIATED` and an unknown `HarnessClass` number before the first `Harness.Run`; it does not
+  refuse `Exec` or recovery, and raw journal replay is unaffected. On `Harness.Connect`, the host
+  sends `ControllerFrame.reconstruction_probe` before `Start`; the server recognizes the probe by
+  that explicit `oneof` member with an empty `session` and `execution_id`, and MUST answer with
+  transport-only `EVENT_RECONSTRUCTION_INFO` carrying the class of the exact harness serving that
+  stream and MUST NOT invoke `Harness.Run` before it receives `Start`; `Describe` remains the
+  required side-effect-free metadata operation. The explicit member distinguishes the probe from a
+  malformed empty frame and gives non-Go servers a stable discriminator. The host sends `Start`
+  only for `MEDIATED` or compatibility `UNSPECIFIED`. A server that cannot determine its class MUST
+  return a non-OK status and MUST NOT accept `Start`. A missing, malformed, unmediated or unknown
+  response fails closed. The reference host bounds the stream metadata exchange to 10 seconds,
+  without extending an earlier caller deadline.
 - TODO(spike): Should an unknown `Resumability` number be refused instead of read as
   `STATELESS_REPLAY`? A harness declaring a tier added later is placed as the weakest one.
 
 ### 12.2 Connect
 
 `Connect` drives one execution. The host sends `ControllerFrame`s; the harness sends `Event`s.
-There is no protocol-version handshake; compatibility rests on `Describe` and
-`HarnessDescriptor.version`.
+There is no general protocol-version handshake; compatibility rests on `Describe` and
+`HarnessDescriptor.version`. Reconstruction alone has the class probe in `WIRE-3a`.
 
 ```mermaid
 sequenceDiagram
   participant H as Host
   participant N as Harness
+  opt reconstruction
+    H->>N: ControllerFrame{reconstruction_probe}
+    N->>H: Event RECONSTRUCTION_INFO {harness_class}
+  end
   H->>N: ControllerFrame{session, execution_id, start}
   N->>H: Event MODEL_CALL {id, messages, tools}
   Note over H: journal MODEL_CALL, call provider, journal OUTPUT
@@ -1620,7 +1650,8 @@ sequenceDiagram
 ```
 
 - `WIRE-4`: The first frame MUST carry `start` and a non-empty `execution_id`. The harness MUST take
-  the session and execution id from the frame envelope.
+  the session and execution id from the frame envelope. The reconstruction probe in `WIRE-3a` is
+  the only exception; `Start` remains the first execution frame.
 - `WIRE-5`: The host sends exactly one `Start` with `config`, `history`, `inputs`, and
   `resume_from_seq`. The reference host does not set `Start.identity`.
 - `WIRE-6`: A model call is `EVENT_MODEL_CALL` with `model`, `params`, `messages`, `tools`,
@@ -2172,6 +2203,9 @@ involved, and `TestApprovalRawProtocol` uses neither controller nor journal.
 | `TestStreamingDoesNotChangeTheJournal` | Streamed turn journals one finalized `OUTPUT` | `EXE-12` |
 | `TestReplayEmitsNoDeltas` | Reconstruction emits no deltas and makes 0 model calls | `EXE-12`, `I1` |
 | `TestWireDescribeRoundTrip` | Descriptor survives the gRPC round trip | `WIRE-1` |
+| `TestWireReplayRefusesUnmediatedHarnessBeforeConnect` | An unmediated descriptor is refused before opening `Connect` or invoking `Run` | `EXE-41`, `WIRE-3a` |
+| `TestWireReplayBindsClassToConnectPeer` | A mediated `Describe` cannot authorize an unmediated peer selected for `Connect`, including through a harness decorator | `EXE-41`, `WIRE-3a` |
+| `TestWireReplayPropagatesClassCheckThroughDelegatingServer` | A server delegating to another wire harness preserves reconstruction intent, so the inner stream also checks its class before `Start` | `EXE-41`, `WIRE-3a` |
 | `TestWirePropagatesExecutionID` | Remote `Start` execution id equals the journal's | `WIRE-4` |
 | `TestWireFailedHarnessSurfacesError` | Remote failure journaled as `ERROR`, not `END` | `EXE-5`, `WIRE-12` |
 | `TestWireSinkErrorEndsInvocation` | A harness that handles a provider error completes in process but fails over the wire | `EXE-33` |

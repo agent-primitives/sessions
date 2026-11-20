@@ -30,6 +30,20 @@ func TestSingleWriterCAS(t *testing.T) {
 	}
 }
 
+func TestTransportOnlyEventsAreNotJournaled(t *testing.T) {
+	log := New()
+	fence := log.NewFence()
+	if _, err := log.Append(0, fence, api.Event{Kind: api.EventReconstructionInfo}); err == nil {
+		t.Fatal("Append accepted transport-only reconstruction metadata")
+	}
+	if log.Head() != 0 || len(log.Read(1)) != 0 {
+		t.Fatal("refused reconstruction metadata changed log")
+	}
+	if rec, err := log.Append(0, fence, out("ok")); err != nil || rec.Seq != 1 {
+		t.Fatalf("valid append after refusal = %+v, %v", rec, err)
+	}
+}
+
 // §5: incarnation fencing — a superseded incarnation (older token) cannot write.
 func TestFencing(t *testing.T) {
 	l := New()

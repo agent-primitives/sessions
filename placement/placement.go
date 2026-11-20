@@ -602,6 +602,16 @@ func (p *Placer) gate(ctx context.Context, sessionUID, op string, describe func(
 		)
 		return api.Descriptor{}, err
 	}
+	if err = api.ValidateDescriptor(desc); err != nil {
+		resolveFinished(err,
+			"error_kind", "invalid_harness_class",
+			"decision", "refused",
+			"harness_id", desc.ID,
+			"harness_class", desc.HarnessClass,
+			"resumability", desc.Capabilities.Resumability,
+		)
+		return api.Descriptor{}, err
+	}
 	if !controller.CanPlace(desc.Capabilities, p.backend.Capabilities()) {
 		err = fmt.Errorf("%w: harness %q needs %s but the runtime provides MemorySnapshot=%v",
 			ErrUnplaceable, desc.ID, desc.Capabilities.Resumability, p.backend.Capabilities().MemorySnapshot)
@@ -1404,6 +1414,8 @@ func placementErrorKind(err error) string {
 		return ""
 	case errors.Is(err, ErrUnplaceable):
 		return "unplaceable"
+	case errors.Is(err, api.ErrInvalidHarnessClass):
+		return "invalid_harness_class"
 	case errors.Is(err, ErrDescriptorMismatch):
 		return "descriptor_mismatch"
 	case errors.Is(err, ErrStatefulOverride):

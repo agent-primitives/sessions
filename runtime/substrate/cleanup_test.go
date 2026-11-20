@@ -117,6 +117,13 @@ func TestForkClaimsTagAndChild(t *testing.T) {
 		t.Fatalf("calls=%v, want the tag still released by name", m.calls)
 	}
 
+	// A tag another caller already holds is never claimed.
+	m = newClonerWithSuspendedParent()
+	m.tagErr = substrate.ErrTagExists
+	if _, inc, err = fork(m); !errors.Is(err, substrate.ErrTagExists) || len(inc.Cleanup.Resources()) != 0 {
+		t.Fatalf("taken tag: err=%v claim=%+v, want no claim", err, inc.Cleanup.Resources())
+	}
+
 	// A stateless fork is a Create; when it fails, its claim is returned, not dropped.
 	sm := &mockControl{info: running("worker-a"), resumeErr: errors.New("resume failed")}
 	stateless := newBackend(sm, key)

@@ -1486,6 +1486,9 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 		return api.Incarnation{}, err
 	}
 	tagged, err := cloner.TagActor(ctx, parent, tag)
+	if errors.Is(err, ErrTagExists) {
+		tagged = TagInfo{} // another caller's tag: never claim it
+	}
 	// Every later return reports the tag and child this call created, so placement records their UIDs
 	// even when the best-effort teardown below fails.
 	owned := b.forkEvidence(child, tagged.UID, "")

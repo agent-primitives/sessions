@@ -267,10 +267,8 @@ type mockCloner struct {
 
 func (m *mockCloner) TagActor(ctx context.Context, source substrate.ActorRef, tag substrate.SnapshotID) (substrate.TagInfo, error) {
 	m.calls = append(m.calls, "tag:"+source.Name+"->"+tag.Name)
-	if m.tagErr != nil {
-		return substrate.TagInfo{}, m.tagErr
-	}
-	return substrate.TagInfo{UID: "uid-" + tag.Name}, nil
+	// The UID comes back even with an error, the worst case a control client could report.
+	return substrate.TagInfo{UID: "uid-" + tag.Name}, m.tagErr
 }
 
 func (m *mockCloner) CreateActorFromTag(ctx context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {

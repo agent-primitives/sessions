@@ -450,7 +450,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	defer guard.settle(ctx, &err)
 	callCtx, createFinished := observability.BeginDebug(ctx, p.logger, "placement", "create_compute",
 		"session_uid", sessionUID)
-	inc, err = p.allocate(callCtx, log, "create", func() (api.Incarnation, error) {
+	inc, err = p.allocate(callCtx, log, sessionUID, "create", func() (api.Incarnation, error) {
 		in, err := p.backend.Create(callCtx, spec)
 		if err == nil {
 			guard.arm(in)
@@ -1292,7 +1292,7 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	// before resume and classify permanent loss after a failure. Each callback reads the journal
 	// when the backend decides, so a turn another host journals between those checks is seen.
 	defer guard.settle(ctx, &err)
-	inc, err = p.allocate(ctx, log, "restore", func() (in api.Incarnation, err error) {
+	inc, err = p.allocate(ctx, log, sessionUID, "restore", func() (in api.Incarnation, err error) {
 		defer func() {
 			if err == nil {
 				guard.arm(in)
@@ -1473,6 +1473,39 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 			return fmt.Errorf("placement: fork child %q: %w", child.UID, err)
 		}
 	}
+	var ownedResourceCleanup api.ResourceCleanupRuntime
+	cleanupKey := ""
+	if cleanup, ok := p.backend.(api.ResourceCleanupRuntime); ok && cleanup.CleanupKey() != "" {
+		ownedResourceCleanup = cleanup
+		cleanupKey = cleanup.CleanupKey()
+	}
+	type preparedForkAllocation struct {
+		child     ForkChild
+		resources []api.CleanupResource
+		recorder  forkAllocationRecorder
+		attempt   string
+	}
+	prepared := make([]preparedForkAllocation, len(children))
+	if ownedResourceCleanup != nil {
+		for i, child := range children {
+			recorder, ok := child.Log.(forkAllocationRecorder)
+			if !ok {
+				return fmt.Errorf("%w: fork child %q has no unpublished cleanup recorder", ErrUnplaceable, child.UID)
+			}
+			resources := append([]api.CleanupResource(nil), ownedResourceCleanup.CleanupResources(api.CleanupFork, child.UID)...)
+			if err := api.ValidateCleanupPlan(resources); err != nil {
+				return fmt.Errorf("%w: fork child %q cleanup plan: %v", ErrUnplaceable, child.UID, err)
+			}
+			prepared[i] = preparedForkAllocation{child: child, resources: resources, recorder: recorder}
+		}
+		for i := range prepared {
+			attempt, err := prepared[i].recorder.BeginUnpublishedAllocation(ctx, cleanupKey, "fork", prepared[i].resources...)
+			if err != nil {
+				return fmt.Errorf("placement: begin fork child %q allocation: %w", prepared[i].child.UID, err)
+			}
+			prepared[i].attempt = attempt
+		}
+	}
 	// Check the records the children inherit before admission, the parent's checkpoint or any child
 	// compute (CHAIN-12): a memory-tier fork appends SUSPEND to the parent in forkSource, before
 	// ForkWithComputeInstance would see the tamper.
@@ -1487,7 +1520,7 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 	// A failed fan-out must not strand compute. The child UIDs are minted per request and returned
 	// only on success, so anything provisioned before the failure would otherwise be unreachable —
 	// unstoppable workers nobody can name.
-	created := make([]string, 0, len(children))
+	created := make([]api.Incarnation, 0, len(children))
 	abort := func(err error) error {
 		// Release the parent first. Nothing in the teardown reads it, and holding the mark through
 		// up to MaxForkChildren × rollbackTimeout of Stops would refuse its turns for that long.
@@ -1495,13 +1528,32 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 		p.rollbackFork(ctx, created)
 		return err
 	}
-	for _, child := range children {
-		inc, err := p.backend.Fork(ctx, ref, api.ForkOpts{ChildSessionUID: child.UID})
-		if err != nil {
-			// Classify the runtime failure before rollback, not a later journal refusal.
-			return abort(allocationStartError(ctx, err))
+	for i, child := range children {
+		inc, effectErr := p.backend.Fork(ctx, ref, api.ForkOpts{ChildSessionUID: child.UID})
+		var confirmErr error
+		if ownedResourceCleanup != nil {
+			confirmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			confirmErr = prepared[i].recorder.ConfirmAllocation(confirmCtx, prepared[i].attempt, inc)
+			cancel()
+			if confirmErr != nil {
+				confirmErr = fmt.Errorf("placement: confirm fork child %q allocation: %w", child.UID, confirmErr)
+			}
 		}
-		created = append(created, child.UID)
+		if effectErr != nil {
+			primary := allocationStartError(ctx, effectErr)
+			if len(inc.Cleanup.Resources()) != 0 {
+				created = append(created, inc)
+			}
+			if confirmErr != nil {
+				primary = errors.Join(primary, confirmErr)
+			}
+			return abort(primary)
+		}
+		if confirmErr != nil {
+			created = append(created, inc)
+			return abort(confirmErr)
+		}
+		created = append(created, inc)
 		_, copyFinished := observability.BeginDebug(ctx, p.logger, "placement", "copy_fork_log",
 			"parent_session_uid", parentUID,
 			"child_session_uid", child.UID,
@@ -1534,16 +1586,16 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 // MaxForkChildren × rollbackTimeout. Shared deletion admission stays held through rollback,
 // excluding Delete but allowing new parent turns; no database handle is held. An overall
 // cap tight enough to matter would abandon the tail, stranding the workers this exists to reclaim.
-func (p *Placer) rollbackFork(ctx context.Context, childUIDs []string) {
-	for _, uid := range childUIDs {
-		p.stopOrphan(ctx, uid)
+func (p *Placer) rollbackFork(ctx context.Context, incarnations []api.Incarnation) {
+	for _, in := range incarnations {
+		p.stopOrphan(ctx, in)
 	}
 }
 
-func (p *Placer) stopOrphan(ctx context.Context, uid string) {
+func (p *Placer) stopOrphan(ctx context.Context, in api.Incarnation) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
 	defer cancel()
-	_ = p.backend.Stop(ctx, api.Incarnation{ID: uid})
+	_ = p.backend.Stop(ctx, in)
 }
 
 // rollbackTimeout bounds the best-effort teardown of ONE child of a failed fan-out.

@@ -55,9 +55,9 @@ func (c *countingControl) SuspendActor(ctx context.Context, a substrate.ActorRef
 	return c.actorControl.SuspendActor(ctx, a)
 }
 
-func (c *countingControl) DeleteActor(ctx context.Context, a substrate.ActorRef, uid ...string) error {
+func (c *countingControl) DeleteActor(ctx context.Context, a substrate.ActorRef) error {
 	c.record("DeleteActor", a.Name)
-	return c.actorControl.DeleteActor(ctx, a, uid...)
+	return c.actorControl.DeleteActor(ctx, a)
 }
 
 func (c *countingControl) GetActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -75,9 +75,9 @@ func (c *countingControl) CreateActorFromTag(ctx context.Context, a substrate.Ac
 	return c.actorControl.CreateActorFromTag(ctx, a, t, tag)
 }
 
-func (c *countingControl) DeleteTag(ctx context.Context, tag substrate.SnapshotID, uid ...string) error {
+func (c *countingControl) DeleteTag(ctx context.Context, tag substrate.SnapshotID) error {
 	c.record("DeleteTag", tag.Name)
-	return c.actorControl.DeleteTag(ctx, tag, uid...)
+	return c.actorControl.DeleteTag(ctx, tag)
 }
 
 // A permanently deleted memory-tier session is refused before runtime/substrate touches its actor:

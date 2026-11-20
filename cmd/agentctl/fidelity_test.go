@@ -51,7 +51,7 @@ func (v *volumesTemplate) CreateActor(_ context.Context, a substrate.ActorRef, _
 		return substrate.ActorInfo{}, fmt.Errorf("%w: %q", substrate.ErrActorExists, a.Name)
 	}
 	v.actors[a.Name] = substrate.StatusUnknown
-	return substrate.ActorInfo{Status: substrate.StatusUnknown, UID: "uid-" + a.Name}, nil
+	return substrate.ActorInfo{}, nil
 }
 
 func (v *volumesTemplate) ResumeActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -78,7 +78,7 @@ func (v *volumesTemplate) transition(name string, st substrate.ActorStatus) (sub
 	return v.info(name), nil
 }
 
-func (v *volumesTemplate) DeleteActor(_ context.Context, a substrate.ActorRef, _ ...string) error {
+func (v *volumesTemplate) DeleteActor(_ context.Context, a substrate.ActorRef) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	delete(v.actors, a.Name)

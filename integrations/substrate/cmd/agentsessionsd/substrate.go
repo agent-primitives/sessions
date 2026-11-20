@@ -256,10 +256,8 @@ func ateapiDeadline(timeout time.Duration) grpc.UnaryClientInterceptor {
 	}
 }
 
-// Backends dials the ate-api once and builds the substrate backend for the -substrate-harness, and
-// the router client's dialer for its incarnations. The returned close function releases the
-// connection. grpc.NewClient does not connect, so nothing is sent before the first session is
-// placed; the router probe runs in the background and only logs.
+// substrateCleanupKey names the control plane and atespace whose resources the ledger records. It
+// uses the TLS server name, or the host without its port, so a changed port keeps the same key.
 func substrateCleanupKey(address, serverName, atespace string) string {
 	if atespace == "" || address == "" {
 		return ""
@@ -276,6 +274,10 @@ func substrateCleanupKey(address, serverName, atespace string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// Backends dials the ate-api once and builds the substrate backend for the -substrate-harness, and
+// the router client's dialer for its incarnations. The returned close function releases the
+// connection. grpc.NewClient does not connect, so nothing is sent before the first session is
+// placed; the router probe runs in the background and only logs.
 func (f *substrateFlags) Backends(logger *slog.Logger) (map[string]placement.Backend, placement.Dialer, func(), error) {
 	if f.routerCreds == nil {
 		return nil, nil, nil, errors.New("substrate router client not loaded: Harnesses must succeed first")

@@ -95,9 +95,8 @@ func (c *suspendControl) CreateActor(_ context.Context, ref substrate.ActorRef, 
 	if _, exists := c.actors[ref]; exists {
 		return substrate.ActorInfo{}, fmt.Errorf("%w: %s", substrate.ErrActorExists, ref.Name)
 	}
-	uid := c.newUID()
-	c.actors[ref] = &suspendActor{status: substrate.StatusSuspended, template: template, uid: uid}
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, UID: uid}, nil
+	c.actors[ref] = &suspendActor{status: substrate.StatusSuspended, template: template, uid: c.newUID()}
+	return substrate.ActorInfo{}, nil
 }
 
 func (c *suspendControl) ResumeActor(_ context.Context, ref substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -165,14 +164,14 @@ func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef)
 	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, SnapshotFidelity: c.snapshotFidelity, UID: a.uid, CaptureLineage: a.lineage(), NoCapture: a.captures == 0}, nil
 }
 
-func (c *suspendControl) DeleteActor(_ context.Context, ref substrate.ActorRef, uids ...string) error {
+func (c *suspendControl) DeleteActor(_ context.Context, ref substrate.ActorRef) error {
 	c.calls = append(c.calls, "delete:"+ref.Name)
 	a, exists := c.actors[ref]
 	if !exists {
 		return status.Error(codes.NotFound, "actor does not exist")
 	}
-	if len(uids) != 1 || a.uid != uids[0] {
-		return status.Error(codes.Aborted, "actor uid changed")
+	if a.worker || a.status != substrate.StatusSuspended {
+		return status.Error(codes.FailedPrecondition, "actor must be suspended before deletion")
 	}
 	delete(c.actors, ref)
 	return nil
@@ -226,7 +225,7 @@ func (c *suspendControl) TagActor(_ context.Context, ref substrate.ActorRef, tag
 		return substrate.TagInfo{}, fmt.Errorf("%w: %s", substrate.ErrTagExists, tag.Name)
 	}
 	c.tags[tag] = a.snapshot
-	return substrate.TagInfo{UID: "tag-" + tag.Name}, nil
+	return substrate.TagInfo{}, nil
 }
 
 func (c *suspendControl) CreateActorFromTag(_ context.Context, ref substrate.ActorRef, template substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {
@@ -254,7 +253,7 @@ func (c *suspendControl) CreateActorFromTag(_ context.Context, ref substrate.Act
 	return c.info(ref, a), nil
 }
 
-func (c *suspendControl) DeleteTag(_ context.Context, tag substrate.SnapshotID, _ ...string) error {
+func (c *suspendControl) DeleteTag(_ context.Context, tag substrate.SnapshotID) error {
 	c.calls = append(c.calls, "untag:"+tag.Name)
 	if _, exists := c.tags[tag]; !exists {
 		return status.Error(codes.NotFound, "tag does not exist")
@@ -301,8 +300,7 @@ func newSuspendPlacer(t *testing.T, ctl *suspendControl, memory bool) (*placemen
 	if memory {
 		desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
 	}
-	backend := substrate.New(ctl, "space", substrate.ObjectRef{Name: "echo"}, desc,
-		substrate.WithCleanupKey("test-control/space"))
+	backend := substrate.New(ctl, "space", substrate.ObjectRef{Name: "echo"}, desc)
 	p := placement.New(backend, echoagent.Model, placement.WithDialer(func(inc api.Incarnation) (api.Harness, func() error, error) {
 		// Every incarnation addresses the router; the call metadata names the actor.
 		target := inc.CallMetadata[substrate.TargetActorHeader]
@@ -732,14 +730,7 @@ func TestSuspendRetainsForkPinUntilExplicitStop(t *testing.T) {
 	assertSuspendOutputs(t, child, []string{"echo:parent:1", "echo:child:2"})
 
 	ctl.calls = nil
-	resources := backend.CleanupResources(api.CleanupFork, "child")
-	resources[0].UID = "tag-" + childTag.Name
-	resources[1].UID = a.uid
-	evidence, err := api.NewCleanupEvidence(resources)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := backend.Stop(ctx, api.Incarnation{ID: "child", Cleanup: evidence}); err != nil {
+	if err := backend.Stop(ctx, api.Incarnation{ID: "child"}); err != nil {
 		t.Fatalf("explicit stop: %v", err)
 	}
 	if _, exists := ctl.actors[childActor]; exists {
@@ -748,7 +739,7 @@ func TestSuspendRetainsForkPinUntilExplicitStop(t *testing.T) {
 	if _, exists := ctl.tags[childTag]; exists {
 		t.Fatal("explicit Stop must release the child's own pin")
 	}
-	if want := []string{"delete:child", "untag:fork-child"}; !reflect.DeepEqual(ctl.calls, want) {
+	if want := []string{"suspend:child", "delete:child", "untag:fork-child"}; !reflect.DeepEqual(ctl.calls, want) {
 		t.Fatalf("destructive teardown=%v want %v", ctl.calls, want)
 	}
 	if _, err := backend.Restore(ctx, ref); !errors.Is(err, substrate.ErrSnapshotNotRestorable) || !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound) {
@@ -1325,7 +1316,7 @@ func TestForkRefusesACloneCapturedBeforeItsResumeAndJournalsNoChild(t *testing.T
 		t.Fatalf("refusal %q does not name the clone %q", err, cloneUID)
 	}
 	want := []string{"suspend:parent", "tag:parent->fork-child", "clone:child:from=fork-child", "resume:child",
-		"delete:child", "untag:fork-child"}
+		"suspend:child", "delete:child", "untag:fork-child"}
 	if !reflect.DeepEqual(ctl.calls, want) {
 		t.Fatalf("calls=%v want %v", ctl.calls, want)
 	}

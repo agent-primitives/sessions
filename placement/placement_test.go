@@ -264,8 +264,8 @@ func (memSnapshotHarness) Run(context.Context, *api.Start, api.EventSink) error 
 // without a real ate-api-server.
 type stubControl struct{}
 
-func (stubControl) CreateActor(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef) (substrate.ActorInfo, error) {
-	return substrate.ActorInfo{UID: "uid-" + a.Name}, nil
+func (stubControl) CreateActor(context.Context, substrate.ActorRef, substrate.ObjectRef) (substrate.ActorInfo, error) {
+	return substrate.ActorInfo{}, nil
 }
 func (stubControl) ResumeActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
 	return substrate.ActorInfo{}, nil
@@ -273,7 +273,7 @@ func (stubControl) ResumeActor(context.Context, substrate.ActorRef) (substrate.A
 func (stubControl) SuspendActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
 	return substrate.ActorInfo{}, nil
 }
-func (stubControl) DeleteActor(context.Context, substrate.ActorRef, ...string) error { return nil }
+func (stubControl) DeleteActor(context.Context, substrate.ActorRef) error { return nil }
 func (stubControl) GetActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
 	return substrate.ActorInfo{}, nil
 }
@@ -439,7 +439,7 @@ func (c *cloningControl) GetActor(_ context.Context, a substrate.ActorRef) (subs
 
 func (c *cloningControl) TagActor(_ context.Context, source substrate.ActorRef, tag substrate.SnapshotID) (substrate.TagInfo, error) {
 	c.calls = append(c.calls, "tag:"+source.Name+"->"+tag.Name)
-	return substrate.TagInfo{UID: "tag-" + tag.Name}, nil
+	return substrate.TagInfo{}, nil
 }
 
 func (c *cloningControl) CreateActorFromTag(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {
@@ -453,7 +453,7 @@ func (c *cloningControl) CreateActorFromTag(_ context.Context, a substrate.Actor
 	return substrate.ActorInfo{Status: substrate.StatusSuspended, UID: "uid-" + a.Name}, nil
 }
 
-func (c *cloningControl) DeleteTag(ctx context.Context, tag substrate.SnapshotID, _ ...string) error {
+func (c *cloningControl) DeleteTag(ctx context.Context, tag substrate.SnapshotID) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -461,32 +461,15 @@ func (c *cloningControl) DeleteTag(ctx context.Context, tag substrate.SnapshotID
 	return nil
 }
 
-func (c *cloningControl) DeleteActor(ctx context.Context, a substrate.ActorRef, _ ...string) error {
+func (c *cloningControl) DeleteActor(ctx context.Context, a substrate.ActorRef) error {
 	if err := ctx.Err(); err != nil {
 		return err
-	}
-	if dl, ok := ctx.Deadline(); ok {
-		c.budgets = append(c.budgets, time.Until(dl))
-	}
-	if c.suspendCost > 0 {
-		select {
-		case <-time.After(c.suspendCost):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
 	}
 	c.calls = append(c.calls, "delete:"+a.Name)
 	return nil
 }
 
 func memorySubstratePlacer(ctl substrate.ControlClient) *placement.Placer {
-	return placement.New(substrate.New(ctl, "space", substrate.ObjectRef{Name: "counter"},
-		api.Descriptor{ID: "mem", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}},
-		substrate.WithCleanupKey("test-control/space")),
-		echoagent.Model)
-}
-
-func legacyMemorySubstratePlacer(ctl substrate.ControlClient) *placement.Placer {
 	return placement.New(substrate.New(ctl, "space", substrate.ObjectRef{Name: "counter"},
 		api.Descriptor{ID: "mem", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}}),
 		echoagent.Model)
@@ -942,16 +925,15 @@ func TestForkFanOutRollsBackProvisionedChildren(t *testing.T) {
 	// c1 was fully provisioned before c2 failed, so it must have been torn down — including the
 	// retention pin its clone placed on the parent snapshot, which nothing can name once the child
 	// UID is discarded.
-	if !slices.Contains(ctl.calls, "delete:c1") {
+	if !slices.Contains(ctl.calls, "suspend:c1") || !slices.Contains(ctl.calls, "delete:c1") {
 		t.Fatalf("the already-provisioned child must be rolled back, calls=%v", ctl.calls)
 	}
 	if !slices.Contains(ctl.calls, "untag:fork-c1") {
 		t.Fatalf("rolling back a child must release its fork tag, calls=%v", ctl.calls)
 	}
-	// c2's clone response is ambiguous, so its exact tag stays for durable reconciliation rather
-	// than risking an unknown-UID child that may still borrow it.
-	if slices.Contains(ctl.calls, "untag:fork-c2") {
-		t.Fatalf("an ambiguous clone released its retained tag, calls=%v", ctl.calls)
+	// c2's own retention pin must not survive its failed clone either.
+	if !slices.Contains(ctl.calls, "untag:fork-c2") {
+		t.Fatalf("a failed clone must release the tag it created, calls=%v", ctl.calls)
 	}
 }
 
@@ -990,7 +972,7 @@ func TestForkRollbackSurvivesACancelledCaller(t *testing.T) {
 	}
 	// Every control call refuses a cancelled context, so recording these proves the rollback ran on a
 	// context detached from the caller's.
-	for _, want := range []string{"delete:c1", "untag:fork-c1"} {
+	for _, want := range []string{"suspend:c1", "delete:c1", "untag:fork-c1"} {
 		if !slices.Contains(ctl.calls, want) {
 			t.Fatalf("rollback must survive the caller's cancellation, missing %q in %v", want, ctl.calls)
 		}

@@ -20,8 +20,8 @@ import (
 // Resume does. Resume and suspend fail with err.
 type conflictControl struct{ err error }
 
-func (conflictControl) CreateActor(_ context.Context, ref substrate.ActorRef, _ substrate.ObjectRef) (substrate.ActorInfo, error) {
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, UID: "uid-" + ref.Name}, nil
+func (conflictControl) CreateActor(context.Context, substrate.ActorRef, substrate.ObjectRef) (substrate.ActorInfo, error) {
+	return substrate.ActorInfo{}, nil
 }
 
 func (c conflictControl) ResumeActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -32,7 +32,7 @@ func (c conflictControl) SuspendActor(context.Context, substrate.ActorRef) (subs
 	return substrate.ActorInfo{}, c.err
 }
 
-func (conflictControl) DeleteActor(context.Context, substrate.ActorRef, ...string) error { return nil }
+func (conflictControl) DeleteActor(context.Context, substrate.ActorRef) error { return nil }
 
 func (conflictControl) GetActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
 	return substrate.ActorInfo{Status: substrate.StatusSuspended}, nil

@@ -9,7 +9,6 @@ import (
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/eventlog"
 	"github.com/agent-primitives/sessions/harness/echoagent"
-	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
 // These doubles expose the allocation boundary; journal operations use the real in-memory store.
@@ -20,21 +19,15 @@ type allocationLog struct {
 	cause                                error
 	backend, operation, confirmedAttempt string
 	confirmed                            api.Incarnation
-	resources                            []api.CleanupResource
-	unpublished                          bool
 }
 
-func (l *allocationLog) BeginAllocation(_ context.Context, backend, operation string, resources ...api.CleanupResource) (string, error) {
+func (l *allocationLog) BeginAllocation(_ context.Context, backend, operation string, _ ...api.CleanupResource) (string, error) {
 	*l.trace = append(*l.trace, "begin")
-	l.backend, l.operation, l.resources = backend, operation, append([]api.CleanupResource(nil), resources...)
+	l.backend, l.operation = backend, operation
 	if l.fail == "begin" {
 		return "", l.cause
 	}
 	return "attempt-1", nil
-}
-func (l *allocationLog) BeginUnpublishedAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error) {
-	l.unpublished = true
-	return l.BeginAllocation(ctx, backend, operation, resources...)
 }
 func (l *allocationLog) ConfirmAllocation(_ context.Context, attempt string, in api.Incarnation) error {
 	*l.trace = append(*l.trace, "confirm")
@@ -97,38 +90,6 @@ func (b *allocationBackend) Fork(_ context.Context, _ api.SnapshotRef, opts api.
 	return in, err
 }
 func (b *allocationBackend) Stop(context.Context, api.Incarnation) error { b.stops++; return nil }
-
-type ownedAllocationBackend struct {
-	*allocationBackend
-	key       string
-	planCalls int
-	plans     map[api.CleanupOperation][]api.CleanupResource
-	released  []api.CleanupResource
-	observed  []api.CleanupResource
-	forkErr   error
-}
-
-func (b *ownedAllocationBackend) CleanupKey() string { return b.key }
-func (b *ownedAllocationBackend) CleanupResources(op api.CleanupOperation, _ string) []api.CleanupResource {
-	b.planCalls++
-	return append([]api.CleanupResource(nil), b.plans[op]...)
-}
-func (b *ownedAllocationBackend) ReleaseResource(_ context.Context, resource api.CleanupResource) error {
-	b.released = append(b.released, resource)
-	return nil
-}
-func (b *ownedAllocationBackend) Fork(_ context.Context, _ api.SnapshotRef, opts api.ForkOpts) (api.Incarnation, error) {
-	b.forks++
-	inc, _ := b.allocate(opts.ChildSessionUID, "fork")
-	if len(b.observed) > 0 {
-		evidence, err := api.NewCleanupEvidence(b.observed)
-		if err != nil {
-			return inc, err
-		}
-		inc.Cleanup = evidence
-	}
-	return inc, b.forkErr
-}
 
 type safeAllocationBackend struct {
 	*allocationBackend
@@ -200,154 +161,6 @@ func TestAllocationWriteAheadAndAcknowledgement(t *testing.T) {
 					t.Errorf("tracked allocation called generic Stop %d times", backend.stops)
 				}
 			})
-		}
-	}
-}
-
-func TestAllocationResourcesRecordedOnBackendError(t *testing.T) {
-	var trace []string
-	plan := []api.CleanupResource{{Reference: "opaque:actor:s", Borrower: ""}}
-	log := &allocationLog{Store: eventlog.AsStore(eventlog.New()), trace: &trace}
-	backendErr := errors.New("backend failed after effect")
-	backend := &ownedAllocationBackend{
-		allocationBackend: &allocationBackend{trace: &trace},
-		key:               "control-plane-A",
-		plans:             map[api.CleanupOperation][]api.CleanupResource{api.CleanupCreate: plan},
-	}
-	owned, err := api.NewCleanupEvidence([]api.CleanupResource{{Reference: plan[0].Reference, UID: "actor-uid"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := New(backend, nil)
-	_, err = p.allocate(t.Context(), log, "s", "create", func() (api.Incarnation, error) {
-		trace = append(trace, "effect")
-		return api.Incarnation{ID: "s", Cleanup: owned}, backendErr
-	})
-	if !errors.Is(err, backendErr) {
-		t.Fatalf("error=%v, want backend error", err)
-	}
-	if !reflect.DeepEqual(log.resources, plan) || log.backend != "control-plane-A" {
-		t.Fatalf("recorded plan=%+v backend=%q", log.resources, log.backend)
-	}
-	if log.confirmedAttempt != "attempt-1" || !reflect.DeepEqual(log.confirmed.Cleanup.Resources(), owned.Resources()) {
-		t.Fatalf("confirmed attempt=%q cleanup=%+v", log.confirmedAttempt, log.confirmed.Cleanup.Resources())
-	}
-	if want := []string{"begin", "effect", "confirm"}; !reflect.DeepEqual(trace, want) {
-		t.Fatalf("trace=%v want=%v", trace, want)
-	}
-}
-
-func TestAllocationResourcesJoinRuntimeAndConfirmationErrors(t *testing.T) {
-	var trace []string
-	backendErr := errors.New("backend")
-	confirmErr := errors.New("confirm")
-	plan := []api.CleanupResource{{Reference: "opaque:actor:s"}}
-	log := &allocationLog{Store: eventlog.AsStore(eventlog.New()), trace: &trace, fail: "confirm", cause: confirmErr}
-	backend := &ownedAllocationBackend{
-		allocationBackend: &allocationBackend{trace: &trace},
-		key:               "route",
-		plans:             map[api.CleanupOperation][]api.CleanupResource{api.CleanupCreate: plan},
-	}
-	evidence, err := api.NewCleanupEvidence([]api.CleanupResource{{Reference: plan[0].Reference, UID: "uid"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := New(backend, nil)
-	_, err = p.allocate(t.Context(), log, "s", "create", func() (api.Incarnation, error) {
-		trace = append(trace, "effect")
-		return api.Incarnation{Cleanup: evidence}, backendErr
-	})
-	if !errors.Is(err, backendErr) || !errors.Is(err, confirmErr) {
-		t.Fatalf("joined error=%v", err)
-	}
-}
-
-func TestAllocationResourcesEmptyKeyUsesLegacyPath(t *testing.T) {
-	var trace []string
-	log := &allocationLog{Store: eventlog.AsStore(eventlog.New()), trace: &trace}
-	backend := &ownedAllocationBackend{
-		allocationBackend: &allocationBackend{trace: &trace},
-		plans: map[api.CleanupOperation][]api.CleanupResource{
-			api.CleanupCreate: {{Reference: "opaque:actor:s"}},
-		},
-	}
-	p := New(backend, nil)
-	if _, err := p.allocate(t.Context(), log, "s", "create", func() (api.Incarnation, error) {
-		return api.Incarnation{ID: "legacy-handle"}, nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if backend.planCalls != 0 || len(log.resources) != 0 {
-		t.Fatalf("empty key requested owned plan: calls=%d resources=%+v", backend.planCalls, log.resources)
-	}
-	if log.confirmed.ID != "legacy-handle" {
-		t.Fatalf("legacy confirmation=%+v", log.confirmed)
-	}
-}
-
-func TestForkCleanupRequiresUnpublishedRecorderForOwnedBackend(t *testing.T) {
-	var trace []string
-	backend := &ownedAllocationBackend{
-		allocationBackend: &allocationBackend{trace: &trace},
-		key:               "route",
-		plans:             map[api.CleanupOperation][]api.CleanupResource{api.CleanupFork: {{Reference: "opaque:actor:child"}}},
-	}
-	p := New(backend, echoagent.Model)
-	parent := eventlog.AsStore(eventlog.New())
-	child := eventlog.AsStore(eventlog.New())
-	if err := p.Fork(t.Context(), parent, "parent", []ForkChild{{UID: "child", Log: child}}, 0); err == nil {
-		t.Fatal("owned Fork accepted a child log without unpublished recorder")
-	}
-	if backend.forks != 0 {
-		t.Fatalf("runtime Fork called %d times", backend.forks)
-	}
-}
-
-func TestForkCleanupRecordsPartialEvidenceBeforeRollback(t *testing.T) {
-	s, err := sqlitelog.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	var trace []string
-	forkErr := errors.New("child actor response lost")
-	plan := []api.CleanupResource{
-		{Reference: "opaque:tag:child", Borrower: "opaque:actor:child"},
-		{Reference: "opaque:actor:child"},
-	}
-	backend := &ownedAllocationBackend{
-		allocationBackend: &allocationBackend{trace: &trace},
-		key:               "route",
-		plans:             map[api.CleanupOperation][]api.CleanupResource{api.CleanupFork: plan},
-		observed:          []api.CleanupResource{{Reference: "opaque:tag:child", UID: "tag-uid", Borrower: "opaque:actor:child"}},
-		forkErr:           forkErr,
-	}
-	p := New(backend, echoagent.Model)
-	child := s.ForkSession(sqlitelog.SessionMeta{UID: "child", ParentUID: "parent"})
-	if err := p.Fork(t.Context(), s.Session("parent"), "parent", []ForkChild{{UID: "child", Log: child}}, 0); !errors.Is(err, forkErr) {
-		t.Fatalf("fork=%v want %v", err, forkErr)
-	}
-	if _, err := s.SessionInfo("child"); !errors.Is(err, sqlitelog.ErrSessionNotFound) {
-		t.Fatalf("failed fork published child: %v", err)
-	}
-	allocations, err := s.Allocations(t.Context(), "child")
-	if err != nil || len(allocations) != 1 {
-		t.Fatalf("allocations=%+v err=%v", allocations, err)
-	}
-	resources, err := s.AllocationResources(t.Context(), "child", allocations[0].ID)
-	if err != nil || len(resources) != 2 {
-		t.Fatalf("resources=%+v err=%v", resources, err)
-	}
-	for _, resource := range resources {
-		switch resource.Reference {
-		case "opaque:tag:child":
-			if !resource.Confirmed || resource.UID != "tag-uid" {
-				t.Fatalf("tag evidence=%+v", resource)
-			}
-		case "opaque:actor:child":
-			if resource.Confirmed {
-				t.Fatalf("unobserved actor confirmed: %+v", resource)
-			}
 		}
 	}
 }

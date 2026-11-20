@@ -446,7 +446,7 @@ func TestForkCloneEgressInstallFailure(t *testing.T) {
 		if !errors.Is(err, denied) {
 			t.Fatalf("err=%v want the install error", err)
 		}
-		wantCalls(t, c.calls, append(slices.Clone(head), "get:child", "delete:child", "untag:fork-child"))
+		wantCalls(t, c.calls, append(slices.Clone(head), "get:child", "suspend:child", "delete:child", "untag:fork-child"))
 	})
 	t.Run("clone unreadable is left in place", func(t *testing.T) {
 		c := newEgressCloner()
@@ -466,7 +466,7 @@ func TestForkCloneEgressInstallFailure(t *testing.T) {
 		if !errors.Is(err, api.ErrComputeBusy) || !errors.Is(err, busy) || strings.Contains(err.Error(), substrateText) {
 			t.Fatalf("err=%q want ErrComputeBusy retaining the install error without its text", err)
 		}
-		wantCalls(t, c.calls, append(slices.Clone(head), "get:child", "delete:child", "untag:fork-child"))
+		wantCalls(t, c.calls, append(slices.Clone(head), "get:child", "suspend:child", "delete:child", "untag:fork-child"))
 	})
 	t.Run("clone gone releases the tag", func(t *testing.T) {
 		c := newEgressCloner()
@@ -488,7 +488,7 @@ func TestForkCloneEgressInstallFailure(t *testing.T) {
 		}
 		// Suspend, delete and untag refuse a cancelled context, so seeing them proves the cleanup
 		// ran detached from the caller.
-		wantCalls(t, c.calls, append(slices.Clone(head), "get:child", "delete:child", "untag:fork-child"))
+		wantCalls(t, c.calls, append(slices.Clone(head), "get:child", "suspend:child", "delete:child", "untag:fork-child"))
 	})
 }
 

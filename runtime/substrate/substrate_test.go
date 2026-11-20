@@ -40,7 +40,6 @@ type mockControl struct {
 	// resumeErr, when set, fails ResumeActor; getErr fails GetActor.
 	resumeErr error
 	getErr    error
-	deleteErr error
 	// uids is each actor's server-assigned UID, minted the first time the actor exists and dropped
 	// when it is deleted, so an actor created again under a name reports a new one.
 	uids    map[string]string
@@ -132,7 +131,7 @@ func (m *mockControl) CreateActor(ctx context.Context, a substrate.ActorRef, _ s
 	if m.afterCreate != nil {
 		m.afterCreate(a.Name)
 	}
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, UID: m.uid(a.Name)}, nil
+	return substrate.ActorInfo{UID: m.uid(a.Name)}, nil
 }
 func (m *mockControl) ResumeActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	m.calls = append(m.calls, "resume:"+a.Name)
@@ -206,23 +205,11 @@ func (m *mockControl) holds(name, snapshot string) {
 	}
 	m.snapshots[name] = snapshot
 }
-func (m *mockControl) DeleteActor(ctx context.Context, a substrate.ActorRef, uids ...string) error {
+func (m *mockControl) DeleteActor(ctx context.Context, a substrate.ActorRef) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if len(uids) != 1 || uids[0] == "" {
-		return errors.New("mock delete actor requires uid")
-	}
-	if current := m.uids[a.Name]; current != "" && current != uids[0] {
-		return fmt.Errorf("%w: replacement uid", substrate.ErrActorBusy)
-	}
 	m.calls = append(m.calls, "delete:"+a.Name)
-	if m.deleteErr != nil {
-		return m.deleteErr
-	}
-	if _, exists := m.actors[a.Name]; !exists {
-		return substrate.ErrActorNotFound
-	}
 	m.delete(a.Name)
 	return nil
 }
@@ -283,7 +270,7 @@ func (m *mockCloner) TagActor(ctx context.Context, source substrate.ActorRef, ta
 	if m.tagErr != nil {
 		return substrate.TagInfo{}, m.tagErr
 	}
-	return substrate.TagInfo{UID: "tag-uid-" + tag.Name}, nil
+	return substrate.TagInfo{UID: "uid-" + tag.Name}, nil
 }
 
 func (m *mockCloner) CreateActorFromTag(ctx context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {
@@ -307,12 +294,9 @@ func (m *mockCloner) CreateActorFromTag(ctx context.Context, a substrate.ActorRe
 	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: snap, UID: m.uid(a.Name)}, nil
 }
 
-func (m *mockCloner) DeleteTag(ctx context.Context, tag substrate.SnapshotID, uids ...string) error {
+func (m *mockCloner) DeleteTag(ctx context.Context, tag substrate.SnapshotID) error {
 	if err := ctx.Err(); err != nil {
 		return err
-	}
-	if len(uids) != 1 || uids[0] == "" {
-		return errors.New("mock delete tag requires uid")
 	}
 	m.calls = append(m.calls, "untag:"+tag.Name)
 	return nil
@@ -342,7 +326,6 @@ func TestCreateBootsActor(t *testing.T) {
 		Address:      substrate.DefaultRouterAddress,
 		CallMetadata: map[string]string{"ate-target-actor": "space/sess-x"},
 		Runtime:      "substrate",
-		Cleanup:      in.Cleanup,
 	}
 	if !reflect.DeepEqual(in, want) {
 		t.Fatalf("incarnation=%+v want %+v", in, want)
@@ -968,23 +951,13 @@ func TestSnapshotLocalUnsupported(t *testing.T) {
 	}
 }
 
-func TestStopDeletesOwnedActorDirectly(t *testing.T) {
+func TestStopSuspendsThenDeletes(t *testing.T) {
 	m := &mockControl{}
-	b := newBackend(m, substrate.WithCleanupKey("route"))
-	resource := b.CleanupResources(api.CleanupCreate, "sess-x")[0]
-	resource.UID = "actor-uid"
-	evidence, err := api.NewCleanupEvidence([]api.CleanupResource{resource})
-	if err != nil {
+	if err := newBackend(m).Stop(context.Background(), api.Incarnation{ID: "sess-x"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Stop(context.Background(), api.Incarnation{ID: "sess-x", Cleanup: evidence}); err != nil {
-		t.Fatal(err)
-	}
-	if want := []string{"delete:sess-x"}; !reflect.DeepEqual(m.calls, want) {
-		t.Fatalf("stop calls=%v want %v", m.calls, want)
-	}
-	if err := b.Stop(context.Background(), api.Incarnation{ID: "sess-x"}); err == nil {
-		t.Fatal("Stop deleted a name without actor ownership")
+	if want := []string{"suspend:sess-x", "delete:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("stop calls=%v want %v (delete requires SUSPENDED first)", m.calls, want)
 	}
 }
 
@@ -1223,9 +1196,9 @@ func TestTwoBackendNeutrality(t *testing.T) {
 	}
 }
 
-// A lost/failed child-create response is ambiguous: the exact tag can be retained safely because an
-// actor may already borrow it, and the durable owner record will reconcile the unknown child.
-func TestFailedCloneKeepsPotentialBorrowedTag(t *testing.T) {
+// A tag owns a full copy of the parent's snapshot, so a fork that fails after tagging must delete
+// it. Otherwise every failed fork attempt strands one more snapshot copy in object storage.
+func TestFailedCloneReleasesItsTag(t *testing.T) {
 	m := newClonerWithSuspendedParent()
 	m.cloneErr = errors.New("template mismatch")
 	_, err := newMemoryBackend(m).Fork(context.Background(),
@@ -1234,15 +1207,17 @@ func TestFailedCloneKeepsPotentialBorrowedTag(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the clone to fail")
 	}
-	want := []string{"get:parent", "tag:parent->fork-child", "get:parent"}
+	want := []string{"get:parent", "tag:parent->fork-child", "get:parent", "untag:fork-child"}
 	if !reflect.DeepEqual(m.calls, want) {
-		t.Fatalf("calls=%v want the tag retained %v", m.calls, want)
+		t.Fatalf("calls=%v want the tag to be released %v", m.calls, want)
 	}
 }
 
-// A failed TagActor response with no UID is not proof that this attempt owns the current name. The
-// fork leaves it for reconciliation and still rereads the parent to classify the failure.
-func TestFailedTagWithoutUIDKeepsReservedName(t *testing.T) {
+// Substrate reserves a tag before copying the snapshot into it, so a tag whose copy failed is left
+// pending, holding partial data, and blocks deleting the atespace. The fork must release it. It then
+// reads the parent again to classify the failure; a parent that still holds the snapshot leaves the
+// tag's own error, untyped.
+func TestFailedTagReleasesTheReservedTag(t *testing.T) {
 	m := newClonerWithSuspendedParent()
 	m.tagErr = errors.New("while copying the external snapshot: object store unavailable")
 	_, err := newMemoryBackend(m).Fork(context.Background(),
@@ -1251,7 +1226,7 @@ func TestFailedTagWithoutUIDKeepsReservedName(t *testing.T) {
 	if !errors.Is(err, m.tagErr) || errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, api.ErrSnapshotSuperseded) {
 		t.Fatalf("err=%v, want the tag error alone", err)
 	}
-	want := []string{"get:parent", "tag:parent->fork-child", "get:parent"}
+	want := []string{"get:parent", "tag:parent->fork-child", "untag:fork-child", "get:parent"}
 	if !reflect.DeepEqual(m.calls, want) {
 		t.Fatalf("calls=%v want the reserved tag released %v", m.calls, want)
 	}
@@ -1286,7 +1261,7 @@ func TestFailedTagRetainsCauseWhenParentIsGoneOrSuperseded(t *testing.T) {
 			if msg := err.Error(); strings.Contains(msg, substrateText) || !strings.Contains(msg, `the tag of parent "parent" failed`) {
 				t.Fatalf("err=%q, want the failed tag of parent named without the tag error's text", msg)
 			}
-			wantCalls := []string{"get:parent", "tag:parent->fork-child", "get:parent"}
+			wantCalls := []string{"get:parent", "tag:parent->fork-child", "untag:fork-child", "get:parent"}
 			if !reflect.DeepEqual(m.calls, wantCalls) {
 				t.Fatalf("calls=%v want %v", m.calls, wantCalls)
 			}
@@ -1383,7 +1358,7 @@ func TestForkTearsDownACloneThatIsNotRunning(t *testing.T) {
 	}
 	want := []string{
 		"get:parent", "tag:parent->fork-child", "get:parent", "clone:child:from=fork-child", "resume:child",
-		"delete:child", "untag:fork-child",
+		"suspend:child", "delete:child", "untag:fork-child",
 	}
 	if !reflect.DeepEqual(m.calls, want) {
 		t.Fatalf("calls=%v want the stranded clone torn down %v", m.calls, want)
@@ -1422,13 +1397,13 @@ func TestForkRefusesACloneReplacedBeforeItsResume(t *testing.T) {
 			resumeErr: notFound, wantCalls: append(slices.Clone(head), "get:child", "untag:fork-child"), wantBusy: true,
 			wantErr: notFound, wantMsg: "was deleted between its create and resume"},
 		{name: "resume fails on the clone: the clone is torn down", resumeErr: resumeFailed,
-			wantCalls: append(slices.Clone(head), "get:child", "delete:child", "untag:fork-child"), wantErr: resumeFailed},
+			wantCalls: append(slices.Clone(head), "get:child", "suspend:child", "delete:child", "untag:fork-child"), wantErr: resumeFailed},
 		{name: "the cleanup read fails: nothing is touched",
 			afterClone: func(m *mockCloner, _ string) { m.getErr = errRead }, resumeErr: resumeFailed,
 			wantCalls: append(slices.Clone(head), "get:child"), wantErr: resumeFailed, wantMsg: "were left in place"},
-		{name: "a clone reported without a UID is left unresolved with its tag retained", noUID: true,
-			wantCalls: []string{"get:parent", "tag:parent->fork-child", "get:parent", "clone:child:from=fork-child"},
-			wantMsg:   "reported no actor UID"},
+		{name: "a clone reported without a UID is torn down before its resume", noUID: true,
+			wantCalls: []string{"get:parent", "tag:parent->fork-child", "get:parent", "clone:child:from=fork-child",
+				"suspend:child", "delete:child", "untag:fork-child"}, wantMsg: "reported no actor UID"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newClonerWithSuspendedParent()
@@ -1490,9 +1465,9 @@ func (m *mockControl) delete(name string) {
 	delete(m.stamps, name)
 }
 
-// An ambiguous clone response cannot be torn down by name. Cancellation must not make that exact
-// tag disappear while an unknown-UID child may borrow it.
-func TestForkCancellationKeepsAmbiguousTag(t *testing.T) {
+// The likeliest reason a fork fails partway is that the caller's deadline expired or it went away.
+// Cleanup bound to that same context would do nothing in exactly that case, so it must be detached.
+func TestForkCleanupSurvivesACancelledCaller(t *testing.T) {
 	m := newClonerWithSuspendedParent()
 	m.cloneErr = errors.New("deadline exceeded")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1502,8 +1477,10 @@ func TestForkCancellationKeepsAmbiguousTag(t *testing.T) {
 		api.ForkOpts{ChildSessionUID: "child"}); err == nil {
 		t.Fatal("expected the fork to fail")
 	}
-	if slices.Contains(m.calls, "untag:fork-child") || slices.Contains(m.calls, "delete:child") {
-		t.Fatalf("ambiguous child must retain its exact tag and avoid name-only cleanup: %v", m.calls)
+	// The mock refuses any call carrying a cancelled context, so recording this proves the release
+	// did NOT inherit the caller's context.
+	if !slices.Contains(m.calls, "untag:fork-child") {
+		t.Fatalf("cleanup must run on a detached context, calls=%v", m.calls)
 	}
 }
 
@@ -2485,7 +2462,7 @@ func TestMemoryNotRestoredWarnsOncePerActor(t *testing.T) {
 	m.exists("sess-x", substrate.StatusRunning)
 	b := substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
 		api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}},
-		substrate.WithLogger(logger), substrate.WithCleanupKey("route"))
+		substrate.WithLogger(logger))
 	refuse := func() {
 		t.Helper()
 		if _, err := b.Create(t.Context(), &api.SessionSpec{SessionUID: "sess-x"}); !errors.Is(err, api.ErrMemoryStateLost) {
@@ -2532,13 +2509,7 @@ func TestMemoryNotRestoredWarnsOncePerActor(t *testing.T) {
 		t.Fatalf("warnings=%v, want a second one for the replacement", got)
 	}
 
-	resource := b.CleanupResources(api.CleanupCreate, "sess-x")[0]
-	resource.UID = "uid-replacement"
-	evidence, err := api.NewCleanupEvidence([]api.CleanupResource{resource})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Stop(t.Context(), api.Incarnation{ID: "sess-x", Cleanup: evidence}); err != nil {
+	if err := b.Stop(t.Context(), api.Incarnation{ID: "sess-x"}); err != nil {
 		t.Fatal(err)
 	}
 	m.exists("sess-x", substrate.StatusRunning)
@@ -3339,11 +3310,11 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 		}},
 		{name: "captured, and the teardown is refused busy", refused: heldText, stuck: true, afterClone: func(m *mockCloner, name string) {
 			captured(m, name)
-			m.deleteErr = fmt.Errorf("%w: rpc error: code = Aborted desc = lease held", substrate.ErrActorBusy)
+			m.suspendErr = fmt.Errorf("%w: rpc error: code = Aborted desc = lease held", substrate.ErrActorBusy)
 		}},
 		{name: "captured, and the clone is deleted before the teardown", refused: heldText, gone: true, afterClone: func(m *mockCloner, name string) {
 			captured(m, name)
-			m.deleteErr = fmt.Errorf("deleted: %w", substrate.ErrActorNotFound)
+			m.suspendErr = fmt.Errorf("deleted: %w", substrate.ErrActorNotFound)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3429,7 +3400,7 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 				t.Fatalf("the log names a snapshot URI: %s", logs)
 			}
 			if tc.stuck {
-				if want := append(slices.Clone(head), "delete:child"); !reflect.DeepEqual(m.calls, want) {
+				if want := append(slices.Clone(head), "suspend:child"); !reflect.DeepEqual(m.calls, want) {
 					t.Fatalf("calls=%v want %v", m.calls, want)
 				}
 				if _, ok := m.actors["child"]; !ok {
@@ -3452,10 +3423,10 @@ func TestForkRefusesACloneThatHoldsItsOwnCapture(t *testing.T) {
 			if strings.Contains(err.Error(), "tearing the clone down failed") || strings.Contains(logs, "failed to tear down") {
 				t.Fatalf("refusal %q reports a failed teardown: %s", err, logs)
 			}
-			want := append(slices.Clone(head), "delete:child", "untag:fork-child")
+			want := append(slices.Clone(head), "suspend:child", "delete:child", "untag:fork-child")
 			if tc.gone {
-				m.delete("child") // the other caller removed it before UID-conditional delete
-				want = append(slices.Clone(head), "delete:child", "untag:fork-child")
+				m.delete("child") // what the other caller did; the mock reports NotFound from suspendErr only
+				want = append(slices.Clone(head), "suspend:child", "untag:fork-child")
 			}
 			if !reflect.DeepEqual(m.calls, want) {
 				t.Fatalf("calls=%v want the clone torn down %v", m.calls, want)
@@ -3537,7 +3508,7 @@ func TestCreateRefusesANewActorCapturedBeforeItsResume(t *testing.T) {
 				return
 			}
 			if !errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, substrate.ErrActorBusy) || !reflect.DeepEqual(inc, api.Incarnation{}) {
-				t.Fatalf("create: inc=%+v err=%v, want api.ErrMemoryStateLost and no handed-out incarnation", inc, err)
+				t.Fatalf("create: inc=%+v err=%v, want api.ErrMemoryStateLost, not ErrActorBusy, and no incarnation", inc, err)
 			}
 			if st := m.statusOf("sess-x"); st != substrate.StatusRunning {
 				t.Fatalf("actor is %v, want it left running", st)

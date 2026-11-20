@@ -13,7 +13,6 @@ package ateadapter
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"slices"
 
@@ -138,17 +137,9 @@ func busy(actor substrate.ActorRef, err error) error {
 	return err
 }
 
-// DeleteActor deletes exactly the observed actor UID. A RUNNING actor is accepted by Substrate v1.
-func (ad *Adapter) DeleteActor(ctx context.Context, actor substrate.ActorRef, uid ...string) error {
-	if len(uid) != 1 || uid[0] == "" {
-		return errors.New("substrate: delete actor requires one uid")
-	}
-	_, err := ad.ctl.DeleteActor(ctx, &atepb.DeleteActorRequest{
-		Actor: objectRef(actor), Options: &atepb.DeleteOptions{Uid: uid[0]},
-	})
-	if status.Code(err) == codes.NotFound {
-		return fmt.Errorf("%w: %s/%s: %w", substrate.ErrActorNotFound, actor.Atespace, actor.Name, err)
-	}
+// DeleteActor deletes a suspended actor.
+func (ad *Adapter) DeleteActor(ctx context.Context, actor substrate.ActorRef) error {
+	_, err := ad.ctl.DeleteActor(ctx, &atepb.DeleteActorRequest{Actor: objectRef(actor)})
 	return err
 }
 
@@ -216,17 +207,9 @@ func (ad *Adapter) CreateActorFromTag(ctx context.Context, actor substrate.Actor
 	return actorInfo(a), nil
 }
 
-// DeleteTag removes exactly the observed tag UID and collects the snapshot copy it owns.
-func (ad *Adapter) DeleteTag(ctx context.Context, tag substrate.SnapshotID, uid ...string) error {
-	if len(uid) != 1 || uid[0] == "" {
-		return errors.New("substrate: delete tag requires one uid")
-	}
-	_, err := ad.ctl.DeleteTag(ctx, &atepb.DeleteTagRequest{
-		Tag: tagRef(tag), Options: &atepb.DeleteOptions{Uid: uid[0]},
-	})
-	if status.Code(err) == codes.NotFound {
-		return fmt.Errorf("%w: %s/%s: %w", substrate.ErrTagNotFound, tag.Atespace, tag.Name, err)
-	}
+// DeleteTag removes a tag and collects the snapshot copy it owns.
+func (ad *Adapter) DeleteTag(ctx context.Context, tag substrate.SnapshotID) error {
+	_, err := ad.ctl.DeleteTag(ctx, &atepb.DeleteTagRequest{Tag: tagRef(tag)})
 	return err
 }
 

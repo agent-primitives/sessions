@@ -126,16 +126,14 @@ func TestForkKeepsPrimaryFailureWhenDeadlineLapsesInTeardown(t *testing.T) {
 				liveAtFailure = ctx.Err() == nil
 				return primary
 			}
-			// The child's exact-UID teardown outlasts the caller's deadline.
-			teardown := false
-			ctl.onDelete = func(string) { teardown = true; <-ctx.Done() }
+			// The child's teardown suspends it first, and outlasts the caller's deadline.
+			ctl.onSuspend = func(string) { <-ctx.Done() }
 			desc, err := echoagent.Harness{}.Describe(t.Context())
 			if err != nil {
 				t.Fatal(err)
 			}
 			desc.Capabilities.Resumability = api.ResumabilityStatelessReplay
-			backend := substrate.New(ctl, "space", substrate.ObjectRef{Atespace: "space", Name: "echo"}, desc,
-				substrate.WithCleanupKey("test-control/space"))
+			backend := substrate.New(ctl, "space", substrate.ObjectRef{Atespace: "space", Name: "echo"}, desc)
 			store := openStore(t, ":memory:")
 			if err := store.PutSession(sqlitelog.SessionMeta{UID: "parent", Harness: "echo"}); err != nil {
 				t.Fatal(err)
@@ -144,9 +142,6 @@ func TestForkKeepsPrimaryFailureWhenDeadlineLapsesInTeardown(t *testing.T) {
 			_, err = session.NewService(store, echoRegistry(t, backend)).Fork(ctx, &v1.ForkRequest{Session: "parent", Count: 1})
 			if !tc.lapseInResume && !liveAtFailure {
 				t.Fatal("the child's resume ran after the caller's deadline; the test needs a longer one")
-			}
-			if !tc.lapseInResume && !teardown {
-				t.Fatal("the child teardown did not run")
 			}
 			if ctx.Err() == nil {
 				t.Fatal("the caller's deadline did not lapse during the fork")

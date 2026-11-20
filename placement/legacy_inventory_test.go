@@ -61,7 +61,7 @@ func TestLegacyForkInventoryStaysIncomplete(t *testing.T) {
 					ctl.failCloneOf = "c2"
 				}
 				children := []placement.ForkChild{{UID: "c1", Log: first}, {UID: "c2", Log: inventoryFenceLog{Store: s.Session("c2")}}}
-				err = legacyMemorySubstratePlacer(ctl).Fork(t.Context(), parent, "parent", children, 1)
+				err = memorySubstratePlacer(ctl).Fork(t.Context(), parent, "parent", children, 1)
 				if outcome == "success" && err != nil {
 					t.Fatal(err)
 				}

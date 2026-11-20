@@ -1520,7 +1520,7 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 	// A failed fan-out must not strand compute. The child UIDs are minted per request and returned
 	// only on success, so anything provisioned before the failure would otherwise be unreachable —
 	// unstoppable workers nobody can name.
-	created := make([]api.Incarnation, 0, len(children))
+	created := make([]string, 0, len(children))
 	abort := func(err error) error {
 		// Release the parent first. Nothing in the teardown reads it, and holding the mark through
 		// up to MaxForkChildren × rollbackTimeout of Stops would refuse its turns for that long.
@@ -1540,20 +1540,18 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 			}
 		}
 		if effectErr != nil {
+			// Classify the runtime failure before rollback, not a later journal refusal. The backend
+			// already tore down what it created for this child.
 			primary := allocationStartError(ctx, effectErr)
-			if len(inc.Cleanup.Resources()) != 0 {
-				created = append(created, inc)
-			}
 			if confirmErr != nil {
 				primary = errors.Join(primary, confirmErr)
 			}
 			return abort(primary)
 		}
+		created = append(created, child.UID)
 		if confirmErr != nil {
-			created = append(created, inc)
 			return abort(confirmErr)
 		}
-		created = append(created, inc)
 		_, copyFinished := observability.BeginDebug(ctx, p.logger, "placement", "copy_fork_log",
 			"parent_session_uid", parentUID,
 			"child_session_uid", child.UID,
@@ -1586,16 +1584,16 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 // MaxForkChildren × rollbackTimeout. Shared deletion admission stays held through rollback,
 // excluding Delete but allowing new parent turns; no database handle is held. An overall
 // cap tight enough to matter would abandon the tail, stranding the workers this exists to reclaim.
-func (p *Placer) rollbackFork(ctx context.Context, incarnations []api.Incarnation) {
-	for _, in := range incarnations {
-		p.stopOrphan(ctx, in)
+func (p *Placer) rollbackFork(ctx context.Context, childUIDs []string) {
+	for _, uid := range childUIDs {
+		p.stopOrphan(ctx, uid)
 	}
 }
 
-func (p *Placer) stopOrphan(ctx context.Context, in api.Incarnation) {
+func (p *Placer) stopOrphan(ctx context.Context, uid string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
 	defer cancel()
-	_ = p.backend.Stop(ctx, in)
+	_ = p.backend.Stop(ctx, api.Incarnation{ID: uid})
 }
 
 // rollbackTimeout bounds the best-effort teardown of ONE child of a failed fan-out.

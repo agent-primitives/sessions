@@ -12,9 +12,8 @@ before opening, so the files here never change during a test run.
 | `cleanup-v9.db` | The v0.4.0 tag (`1d5d97c`, Go public `Open`, `BeginAllocation` and `ConfirmAllocation` APIs), with one confirmed legacy handle allocation. Schema version 9. SHA-256 `b260f96ca958ae5bf6d486f91881718346b3a2662c59a410baa92b023ff31700`. | `sqlitelog/cleanup_identity_migration_test.go` |
 
 Regenerate `cleanup-v9.db` by copying `hack/gen-cleanup-v9-fixture.go` into a detached v0.4.0
-worktree and running `go run ./hack/gen-cleanup-v9-fixture.go -mode generate -out cleanup-v9.db`.
-The helper asserts both `PRAGMA user_version=9` and a nonempty allocations table. Its `open` and
-`hold` modes exercise the one-way downgrade refusal and the operational already-open-writer limit.
+worktree and running `go run ./hack/gen-cleanup-v9-fixture.go -out cleanup-v9.db`.
+The helper asserts both `PRAGMA user_version=9` and a nonempty allocations table.
 
 `hack/verify_chain.sh` also audits every `*.db` here with the independent Python verifier, and
 `internal/fuzzcheck.JournalEvents` seeds the fuzz targets that decode an Event from their records.

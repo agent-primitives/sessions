@@ -30,7 +30,6 @@ type actorControl struct {
 	suspends  int
 	onResume  func(actor string)
 	onSuspend func(actor string)
-	onDelete  func(actor string)
 	onGet     func(actor string)
 	// getErr and suspendErr, when set and returning an error, fail GetActor (after onGet ran) and
 	// SuspendActor with it, as a racing delete or another operation holding the actor's lease does.
@@ -84,7 +83,7 @@ func (c *actorControl) CreateActor(_ context.Context, a substrate.ActorRef, _ su
 	}
 	c.status[a.Name] = substrate.StatusSuspended
 	c.newUID(a.Name)
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, UID: c.uids[a.Name]}, nil
+	return substrate.ActorInfo{}, nil
 }
 
 func (c *actorControl) ResumeActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -141,15 +140,9 @@ func (c *actorControl) SuspendActor(_ context.Context, a substrate.ActorRef) (su
 	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: "w", Snapshot: snap, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: uid, CaptureLineage: lineage, NoCapture: noCapture}, nil
 }
 
-func (c *actorControl) DeleteActor(_ context.Context, a substrate.ActorRef, uid ...string) error {
-	if c.onDelete != nil {
-		c.onDelete(a.Name)
-	}
+func (c *actorControl) DeleteActor(_ context.Context, a substrate.ActorRef) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(uid) == 1 && c.uids[a.Name] != uid[0] || len(uid) > 1 {
-		return fmt.Errorf("actor uid changed")
-	}
 	delete(c.status, a.Name)
 	delete(c.uids, a.Name)
 	// The snapshot went with the actor: one created again under the name holds none.
@@ -181,11 +174,11 @@ func (c *actorControl) GetActor(_ context.Context, a substrate.ActorRef) (substr
 	return substrate.ActorInfo{Status: st, Worker: "w", Snapshot: c.snapshots[a.Name], SnapshotFidelity: fidelity, NoSnapshotHistory: noHistory, UID: c.uids[a.Name], CaptureLineage: c.lineage(a.Name), NoCapture: c.captures[a.Name] == 0}, nil
 }
 
-func (c *actorControl) TagActor(_ context.Context, a substrate.ActorRef, tag substrate.SnapshotID) (substrate.TagInfo, error) {
+func (c *actorControl) TagActor(_ context.Context, a substrate.ActorRef, _ substrate.SnapshotID) (substrate.TagInfo, error) {
 	if c.onTag != nil {
 		c.onTag(a.Name)
 	}
-	return substrate.TagInfo{UID: "tag-" + tag.Name}, c.tagErr
+	return substrate.TagInfo{}, c.tagErr
 }
 
 func (c *actorControl) CreateActorFromTag(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {
@@ -199,7 +192,7 @@ func (c *actorControl) CreateActorFromTag(_ context.Context, a substrate.ActorRe
 	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: snap, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: c.uids[a.Name]}, nil
 }
 
-func (c *actorControl) DeleteTag(context.Context, substrate.SnapshotID, ...string) error { return nil }
+func (c *actorControl) DeleteTag(context.Context, substrate.SnapshotID) error { return nil }
 
 // A turn whose Runtime.Create or Runtime.Restore is already in flight when a stateful fork installs
 // its checkpoint mark is past the Placer's checkpoint check, so nothing in this Registry stops it

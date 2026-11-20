@@ -252,18 +252,12 @@ func (e CleanupEvidence) Resources() []CleanupResource {
 	return append([]CleanupResource(nil), e.resources...)
 }
 
-func (e CleanupEvidence) validate() error {
-	_, err := NewCleanupEvidence(e.resources)
-	return err
-}
-
-// ResourceCleanupRuntime opts a backend with dedicated resources into identity-bearing cleanup.
-// CleanupKey identifies the control-plane configuration. CleanupResources returns the complete,
-// UID-empty plan before I/O. ReleaseResource requires immutable UID preconditions and no name fallback.
+// ResourceCleanupRuntime opts a backend with dedicated resources into identity-bearing cleanup
+// records. CleanupKey identifies the control-plane configuration; CleanupResources returns the
+// complete, UID-empty plan before I/O. Releasing recorded resources is not part of this interface yet.
 type ResourceCleanupRuntime interface {
 	CleanupKey() string
 	CleanupResources(CleanupOperation, string) []CleanupResource
-	ReleaseResource(context.Context, CleanupResource) error
 }
 
 // SnapshotKind selects local (warm/pause) vs external (cold/suspend) storage.

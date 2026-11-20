@@ -501,6 +501,13 @@ func (h *ClientHarness) Describe(ctx context.Context) (api.Descriptor, error) {
 // PrepareRun opens the actual Connect stream without sending Start. A Connect failure therefore
 // proves that the remote harness did not receive an execution. The returned stream is one-shot.
 func (h *ClientHarness) PrepareRun(ctx context.Context) (api.PreparedHarnessRun, error) {
+	if replayctx.IsReconstruction(ctx) {
+		return h.prepareReconstruction(ctx)
+	}
+	return h.prepareRun(ctx)
+}
+
+func (h *ClientHarness) prepareRun(ctx context.Context) (api.PreparedHarnessRun, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	stream, err := h.client.Connect(ctx)
 	if err != nil {
@@ -665,13 +672,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 	if start == nil || start.ExecutionID == "" {
 		return errors.New("harnesswire: Start requires execution_id")
 	}
-	var prepared api.PreparedHarnessRun
-	var err error
-	if replayctx.IsReconstruction(ctx) {
-		prepared, err = h.prepareReconstruction(ctx)
-	} else {
-		prepared, err = h.PrepareRun(ctx)
-	}
+	prepared, err := h.PrepareRun(ctx)
 	if err != nil {
 		return err
 	}

@@ -359,6 +359,28 @@ type harnessDecorator struct {
 	api.Harness
 }
 
+type preparingHarnessDecorator struct {
+	harness  api.Harness
+	preparer api.HarnessRunPreparer
+}
+
+func (h preparingHarnessDecorator) Describe(ctx context.Context) (api.Descriptor, error) {
+	return h.harness.Describe(ctx)
+}
+
+func (h preparingHarnessDecorator) PrepareRun(ctx context.Context) (api.PreparedHarnessRun, error) {
+	return h.preparer.PrepareRun(ctx)
+}
+
+func (h preparingHarnessDecorator) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	prepared, err := h.PrepareRun(ctx)
+	if err != nil {
+		return err
+	}
+	defer prepared.Close()
+	return prepared.Run(ctx, start, sink)
+}
+
 func (h harnessDecorator) Describe(ctx context.Context) (api.Descriptor, error) {
 	return h.Harness.Describe(ctx)
 }
@@ -405,6 +427,39 @@ func TestWireReplayBindsClassToConnectPeer(t *testing.T) {
 	}
 	if unmediated.runs != 0 {
 		t.Fatalf("routed Replay ran unmediated Connect peer %d times", unmediated.runs)
+	}
+}
+
+func TestWireReplayBindsClassThroughPreparedRunDecorator(t *testing.T) {
+	s, _ := openFile(t)
+	defer s.Close()
+	log := s.Session("s")
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, event := range []api.Event{
+		{ExecutionID: "turn", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Harness: "routed", HarnessVersion: "1", InputCount: new(int64)}},
+		{ExecutionID: "turn", Kind: api.EventOutput, Message: api.TextMessage("assistant", "reported output")},
+		{ExecutionID: "turn", Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}},
+	} {
+		if _, err := log.Append(int64(i), fence, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unmediated := &unmediatedReplayHarness{}
+	mediated := harnesswire.DescriptorToProto(api.Descriptor{ID: "routed", Version: "1", HarnessClass: api.HarnessClassMediated})
+	inner := harnesswire.NewClientHarness(routedClassClient{describe: mediated, connect: wireHarnessClientFrom(t, unmediated)})
+	remote := preparingHarnessDecorator{harness: inner, preparer: inner}
+	c, err := controller.New(log, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Replay(t.Context(), remote); !errors.Is(err, api.ErrReconstructionUnsupported) {
+		t.Fatalf("prepared Replay = %v; want stream-bound refusal", err)
+	}
+	if unmediated.describes != 1 || unmediated.runs != 0 {
+		t.Fatalf("prepared Replay bypassed inner probe: describes=%d runs=%d", unmediated.describes, unmediated.runs)
 	}
 }
 

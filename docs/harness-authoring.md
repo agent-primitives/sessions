@@ -146,8 +146,10 @@ invoke the harness or send `Start`; its only positive guarantee is that a prepar
 before delegation. The host closes an unused preparation and calls a successful prepared run at most
 once, after `EXECUTION_START` and every `INPUT` are durable. `harnesswire.ClientHarness` implements
 this for `Harness.Connect`. A wrapper around it must forward the optional interface to keep that
-pre-journal boundary. A failed `Send(Start)` or later receive is not proof of non-delivery and stays
-a durable failed execution (`EXE-45`). In particular, successfully opening a client stream does not
+pre-journal boundary, and must pass the supplied context to `PrepareRun`: during reconstruction the
+context makes `ClientHarness.PrepareRun` perform the stream-bound class probe before returning the
+prepared run. A failed `Send(Start)` or later receive is not proof of non-delivery and stays a
+durable failed execution (`EXE-45`). In particular, successfully opening a client stream does not
 prove that a router or harness will accept `Start`; a refusal surfaced by Send or Recv remains
 uncertain and is not filtered from later history.
 

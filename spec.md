@@ -872,7 +872,11 @@ fails closed. The class concerns model calls only; tool `Mediation` (§9.1) is i
 - `EXE-38`: An unmediated harness MUST declare `REQUIRES_MEMORY_SNAPSHOT` (§13.1). Its conversation
   state lives in its compute, and the log, which holds no record of the model calls it makes outside
   the model call operation, cannot rebuild that state. The reference host rejects an explicitly
-  `UNMEDIATED` descriptor with any other tier before compute, journal writes or `Harness.Run`.
+  `UNMEDIATED` descriptor with any other tier before compute or `Harness.Run`, and before any record
+  of an execution it would start. An ordinary `APR-13` call-only repair may append
+  `APPROVAL_REQUEST` without admission; an override on a memory-capable backend performs the
+  override admission before repair. Admission after a decision still refuses the contradictory
+  descriptor before compute or `Harness.Run`.
 - `EXE-39`: An unmediated harness reports what its model produced on a call outside the model
   call operation through the output, reported tool result (`TOOL-2`), and usage operations. On the
   live path the host journals each report as given: no `MODEL_CALL` precedes such an `OUTPUT`, and

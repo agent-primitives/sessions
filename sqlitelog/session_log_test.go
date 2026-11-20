@@ -14,7 +14,8 @@ import (
 // same *Log as Session and ForkSession, so they keep them; CheckWritable is in their
 // eventlog.SessionJournal return type.
 type allocationTracker interface {
-	BeginAllocation(ctx context.Context, backend, operation string) (string, error)
+	BeginAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error)
+	BeginUnpublishedAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error)
 	ConfirmAllocation(ctx context.Context, attempt string, in api.Incarnation) error
 }
 

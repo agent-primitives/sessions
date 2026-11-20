@@ -2,44 +2,85 @@ package sqlitelog
 
 import (
 	"database/sql"
-	"errors"
+	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/agent-primitives/sessions/api"
 )
 
+// makeV9Database exercises every migration before the normalized resource rung. It is a
+// fault-injection helper; release compatibility also uses the checked-in v0.4.0-derived fixture.
 func makeV9Database(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
 	if _, err := db.Exec(schema); err != nil {
+		db.Close()
 		t.Fatal(err)
 	}
 	tx, err := db.Begin()
 	if err != nil {
+		db.Close()
 		t.Fatal(err)
 	}
 	for _, migrate := range migrations[:len(migrations)-1] {
 		if err := migrate(tx); err != nil {
+			tx.Rollback()
+			db.Close()
 			t.Fatal(err)
 		}
 	}
 	if _, err := tx.Exec(`PRAGMA user_version=9`); err != nil {
+		tx.Rollback()
+		db.Close()
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
+		db.Close()
 		t.Fatal(err)
 	}
 	return db
 }
 
-func confirmIdentity(t *testing.T, s *Store, attempt string, resource api.CleanupResource) error {
-	t.Helper()
-	return s.Session("session-1").ConfirmAllocation(t.Context(), attempt, api.Incarnation{CleanupResource: &resource})
+func TestSchemaV9CleanupFixtureMigrates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cleanup-v9.db")
+	blob, err := os.ReadFile("testdata/cleanup-v9.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, blob, 0600); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := raw.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 9 {
+		raw.Close()
+		t.Fatalf("fixture version=%d err=%v", version, err)
+	}
+	var count int
+	if err := raw.QueryRow(`SELECT count(*) FROM allocations`).Scan(&count); err != nil || count != 1 {
+		raw.Close()
+		t.Fatalf("fixture allocations=%d err=%v", count, err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s := deletionStore(t, path)
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != SchemaVersion {
+		t.Fatalf("migrated version=%d err=%v", version, err)
+	}
+	allocations, err := s.Allocations(t.Context(), "v9-session")
+	if err != nil || len(allocations) != 1 || allocations[0].ResourceID != "v9-handle" || !allocations[0].Confirmed {
+		t.Fatalf("migrated allocation=%+v err=%v", allocations, err)
+	}
+	if deletionInfo(t, s, "v9-session").InventoryComplete {
+		t.Fatal("fixture migration certified incomplete inventory")
+	}
 }
 
 func TestCleanupIdentityMigratesFreshAndV9(t *testing.T) {
@@ -49,6 +90,14 @@ func TestCleanupIdentityMigratesFreshAndV9(t *testing.T) {
 		if migrated {
 			oldDB = makeV9Database(t, path)
 			if _, err := oldDB.Exec(`INSERT INTO sessions(session,project) VALUES('legacy','tenant')`); err != nil {
+				oldDB.Close()
+				t.Fatal(err)
+			}
+			if _, err := oldDB.Exec(`INSERT INTO allocations(id,session,backend,operation,resource_id,confirmed) VALUES('old-writer','legacy','route','create','legacy',1)`); err != nil {
+				oldDB.Close()
+				t.Fatal(err)
+			}
+			if err := oldDB.Close(); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -56,83 +105,24 @@ func TestCleanupIdentityMigratesFreshAndV9(t *testing.T) {
 		if SchemaVersion != 10 {
 			t.Fatalf("schema version = %d, want 10", SchemaVersion)
 		}
-		for _, column := range []string{"resource_kind", "resource_namespace", "resource_uid"} {
-			var n int
-			if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('allocations') WHERE name=?`, column).Scan(&n); err != nil || n != 1 {
-				t.Fatalf("column %s count=%d err=%v", column, n, err)
+		for _, table := range []string{"allocation_resources", "allocation_borrowers"} {
+			var count int
+			if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil || count != 1 {
+				t.Fatalf("table %s count=%d err=%v", table, count, err)
 			}
 		}
-		if !migrated {
-			continue
+		var predecessorColumns int
+		if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('allocations') WHERE name IN ('resource_kind','resource_namespace','resource_uid')`).Scan(&predecessorColumns); err != nil || predecessorColumns != 0 {
+			t.Fatalf("predecessor columns=%d err=%v", predecessorColumns, err)
 		}
-		if _, err := oldDB.Exec(`INSERT INTO allocations(id,session,backend,operation,resource_id,confirmed) VALUES('old-writer','legacy','route','create','legacy',1)`); err != nil {
-			t.Fatal(err)
+		if migrated {
+			rows, err := s.Allocations(t.Context(), "legacy")
+			if err != nil || len(rows) != 1 || rows[0].ResourceID != "legacy" || !rows[0].Confirmed {
+				t.Fatalf("legacy row=%+v err=%v", rows, err)
+			}
+			if deletionInfo(t, s, "legacy").InventoryComplete {
+				t.Fatal("v9 row certified inventory")
+			}
 		}
-		got, err := s.Allocations(t.Context(), "legacy")
-		if err != nil || len(got) != 1 || got[0].ResourceUID != "" || got[0].ResourceKind != "" {
-			t.Fatalf("old writer row = %+v, %v", got, err)
-		}
-		if deletionInfo(t, s, "legacy").InventoryComplete {
-			t.Fatal("v9 row certified inventory")
-		}
-	}
-}
-
-func TestCleanupIdentityPersistsAndRejectsReplacement(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "journal.db")
-	s := deletionStore(t, path)
-	target := api.CleanupResource{Kind: api.CleanupResourceActor, Namespace: "space", Name: "session-1"}
-	attempt, err := s.Session("session-1").BeginOwnedAllocation(t.Context(), "route-a", "create", target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := s.Allocations(t.Context(), "session-1")
-	if err != nil || len(got) != 1 || got[0].Confirmed || got[0].ResourceUID != "" {
-		t.Fatalf("target = %+v, %v", got, err)
-	}
-	owned := target
-	owned.UID = "actor-uid-1"
-	if err := confirmIdentity(t, s, attempt, owned); err != nil {
-		t.Fatal(err)
-	}
-	for _, changed := range []api.CleanupResource{
-		{Kind: api.CleanupResourceTag, Namespace: owned.Namespace, Name: owned.Name, UID: owned.UID},
-		{Kind: owned.Kind, Namespace: "other", Name: owned.Name, UID: owned.UID},
-		{Kind: owned.Kind, Namespace: owned.Namespace, Name: "other", UID: owned.UID},
-		{Kind: owned.Kind, Namespace: owned.Namespace, Name: owned.Name, UID: "replacement"},
-	} {
-		if err := confirmIdentity(t, s, attempt, changed); !errors.Is(err, ErrAllocationConflict) {
-			t.Fatalf("changed identity %+v = %v", changed, err)
-		}
-	}
-	if err := confirmIdentity(t, s, attempt, owned); err != nil {
-		t.Fatal(err)
-	}
-	s.Close()
-	s = deletionStore(t, path)
-	got, err = s.Allocations(t.Context(), "session-1")
-	if err != nil || len(got) != 1 || got[0].ResourceUID != owned.UID || !got[0].Confirmed {
-		t.Fatalf("reopened identity = %+v, %v", got, err)
-	}
-}
-
-func TestCleanupIdentityCompactionKeepsReplacementUID(t *testing.T) {
-	s := deletionStore(t, ":memory:")
-	target := api.CleanupResource{Kind: api.CleanupResourceActor, Namespace: "space", Name: "session-1"}
-	for i, uid := range []string{"old-uid", "replacement-uid"} {
-		operation := []string{"create", "restore"}[i]
-		attempt, err := s.Session("session-1").BeginOwnedAllocation(t.Context(), "route", operation, target)
-		if err != nil {
-			t.Fatal(err)
-		}
-		owned := target
-		owned.UID = uid
-		if err := confirmIdentity(t, s, attempt, owned); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got, err := s.Allocations(t.Context(), "session-1")
-	if err != nil || len(got) != 2 {
-		t.Fatalf("replacement compacted: %+v, %v", got, err)
 	}
 }

@@ -21,27 +21,28 @@ var ErrCleanupPending = errors.New("sqlitelog: cleanup pending")
 // never an empty allocation ledger, can certify an untracked session's inventory.
 var ErrInventoryIncomplete = fmt.Errorf("%w: inventory incomplete", ErrCleanupPending)
 
-// ErrAllocationNotFound includes compacted attempts and attempts belonging to a different session;
-// callers must not confirm or release another session's resources.
+// ErrAllocationNotFound includes attempts belonging to a different session.
 var ErrAllocationNotFound = errors.New("sqlitelog: allocation attempt not found")
 
-// ErrAllocationConflict means confirmation lacks a session-scoped handle or would change
-// the handle already recorded for this attempt.
+// ErrAllocationConflict means an observed ownership claim changes the durable plan or UID.
 var ErrAllocationConflict = errors.New("sqlitelog: allocation confirmation conflict")
 
-// Allocation is a write-ahead resource attempt. ResourceID retains the incarnation's
-// session-scoped handle, not its compute-instance identity, address, credentials or routing metadata.
+// Allocation is a write-ahead runtime operation. ResourceID retains the historical legacy handle;
+// owned cleanup records live in AllocationResource rows.
 type Allocation struct {
-	ID, SessionUID, Backend, Operation string
-	ResourceKind                       api.CleanupResourceKind
-	ResourceNamespace, ResourceID      string
-	ResourceUID                        string
-	Confirmed                          bool
+	ID, SessionUID, Backend, Operation, ResourceID string
+	Confirmed                                      bool
+}
+
+// AllocationResource is one per-attempt claim. CanonicalID links an exact duplicate claim without
+// deleting the retry receipt. Borrower is the reference of the resource this claim must outlive.
+type AllocationResource struct {
+	ID, AllocationID, Reference, UID, CanonicalID, Borrower string
+	Ordinal                                                 int
+	Confirmed, Released                                     bool
 }
 
 // migrateCleanupInventory adds the allocation ledger and inventory completeness/evidence columns.
-// Existing inventory is not evidence of complete allocation coverage.
-// The explicit default-value UPDATE provides a deterministic trigger hook for rollback tests.
 func migrateCleanupInventory(tx *sql.Tx) error {
 	_, err := tx.Exec(`
 		ALTER TABLE sessions ADD COLUMN inventory_complete INTEGER NOT NULL DEFAULT 0;
@@ -56,11 +57,30 @@ func migrateCleanupInventory(tx *sql.Tx) error {
 	return err
 }
 
+// migrateCleanupIdentity adds the normalized provider-opaque resource graph. The resource shape is
+// cut with its producer in schema v10; unreleased v10 predecessor columns never ship.
 func migrateCleanupIdentity(tx *sql.Tx) error {
 	_, err := tx.Exec(`
-		ALTER TABLE allocations ADD COLUMN resource_kind TEXT NOT NULL DEFAULT '';
-		ALTER TABLE allocations ADD COLUMN resource_namespace TEXT NOT NULL DEFAULT '';
-		ALTER TABLE allocations ADD COLUMN resource_uid TEXT NOT NULL DEFAULT '';`)
+		CREATE TABLE allocation_resources (
+		  id TEXT PRIMARY KEY,
+		  allocation_id TEXT NOT NULL,
+		  ordinal INTEGER NOT NULL,
+		  reference TEXT NOT NULL,
+		  uid TEXT NOT NULL DEFAULT '',
+		  confirmed INTEGER NOT NULL DEFAULT 0,
+		  released INTEGER NOT NULL DEFAULT 0,
+		  canonical_resource_id TEXT,
+		  UNIQUE(allocation_id, ordinal)
+		);
+		CREATE INDEX allocation_resources_allocation ON allocation_resources(allocation_id);
+		CREATE INDEX allocation_resources_identity ON allocation_resources(reference, uid);
+		CREATE INDEX allocation_resources_canonical ON allocation_resources(canonical_resource_id);
+		CREATE TABLE allocation_borrowers (
+		  resource_id TEXT NOT NULL,
+		  borrower_resource_id TEXT NOT NULL,
+		  PRIMARY KEY(resource_id, borrower_resource_id)
+		);
+		CREATE INDEX allocation_borrowers_borrower ON allocation_borrowers(borrower_resource_id);`)
 	return err
 }
 
@@ -72,20 +92,24 @@ func newLedgerID() (string, error) {
 	return hex.EncodeToString(id[:]), nil
 }
 
-// BeginAllocation preserves the legacy session-handle recorder contract.
-func (l *Log) BeginAllocation(ctx context.Context, backend, operation string) (string, error) {
-	return l.BeginOwnedAllocation(ctx, backend, operation, api.CleanupResource{})
+// BeginAllocation preserves legacy calls and records the complete owned-resource plan before I/O.
+func (l *Log) BeginAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error) {
+	return l.beginAllocation(ctx, backend, operation, true, resources)
 }
 
-// BeginOwnedAllocation durably records an identity-bearing intent before runtime I/O. Implicit logs
-// receive an incomplete metadata row in the same transaction; a tombstone cannot be resurrected.
-func (l *Log) BeginOwnedAllocation(ctx context.Context, backend, operation string, target api.CleanupResource) (string, error) {
+// BeginUnpublishedAllocation records Fork ownership without creating a visible sessions row. The
+// child's existing fork fence remains the publication boundary.
+func (l *Log) BeginUnpublishedAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error) {
+	return l.beginAllocation(ctx, backend, operation, false, resources)
+}
+
+func (l *Log) beginAllocation(ctx context.Context, backend, operation string, publish bool, resources []api.CleanupResource) (string, error) {
 	if l.session == "" || operation == "" {
 		return "", errors.New("sqlitelog: allocation requires session and operation")
 	}
-	if target != (api.CleanupResource{}) {
-		if err := target.ValidateTarget(); err != nil {
-			return "", fmt.Errorf("sqlitelog: allocation target: %w", err)
+	if len(resources) > 0 {
+		if err := api.ValidateCleanupPlan(resources); err != nil {
+			return "", err
 		}
 	}
 	id, err := newLedgerID()
@@ -100,15 +124,36 @@ func (l *Log) BeginOwnedAllocation(ctx context.Context, backend, operation strin
 	if err := checkWritable(tx, l.session); err != nil {
 		return "", err
 	}
-	now := time.Now().UnixNano()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(session,project,created_at,updated_at) VALUES(?,?,?,?)
-		ON CONFLICT(session) DO NOTHING`, l.session, l.store.defaultProject, now, now); err != nil {
-		return "", err
+	if publish {
+		now := time.Now().UnixNano()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(session,project,created_at,updated_at) VALUES(?,?,?,?)
+			ON CONFLICT(session) DO NOTHING`, l.session, l.store.defaultProject, now, now); err != nil {
+			return "", err
+		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO allocations(
-		id,session,backend,operation,resource_kind,resource_namespace,resource_id
-	) VALUES(?,?,?,?,?,?,?)`, id, l.session, backend, operation, target.Kind, target.Namespace, target.Name); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO allocations(id,session,backend,operation) VALUES(?,?,?,?)`, id, l.session, backend, operation); err != nil {
 		return "", fmt.Errorf("sqlitelog: record allocation: %w", err)
+	}
+	ids := make(map[string]string, len(resources))
+	for ordinal, resource := range resources {
+		resourceID, err := newLedgerID()
+		if err != nil {
+			return "", err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO allocation_resources(id,allocation_id,ordinal,reference) VALUES(?,?,?,?)`,
+			resourceID, id, ordinal, resource.Reference); err != nil {
+			return "", fmt.Errorf("sqlitelog: record allocation resource: %w", err)
+		}
+		ids[resource.Reference] = resourceID
+	}
+	for _, resource := range resources {
+		if resource.Borrower == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO allocation_borrowers(resource_id,borrower_resource_id) VALUES(?,?)`,
+			ids[resource.Reference], ids[resource.Borrower]); err != nil {
+			return "", fmt.Errorf("sqlitelog: record allocation borrower: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return "", err
@@ -116,67 +161,354 @@ func (l *Log) BeginOwnedAllocation(ctx context.Context, backend, operation strin
 	return id, nil
 }
 
-// ConfirmAllocation may acknowledge a late response after DELETE, but cannot reassign an attempt
-// or replace its session-scoped handle. It retains this attempt and compacts other confirmed,
-// unreleased attempts for the same (session, backend, handle), regardless of operation. Identical retries
-// succeed while the attempt is retained; compacted IDs return ErrAllocationNotFound.
+// ConfirmAllocation records partial owned evidence even after DELETE. A confirmation never resurrects
+// a session, adopts the current name, or converts unknown evidence into a legacy handle.
 func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Incarnation) error {
-	resourceID := in.ID
-	resourceKind := api.CleanupResourceKind("")
-	resourceNamespace, resourceUID := "", ""
-	if in.CleanupResource != nil {
-		resource := *in.CleanupResource
-		if err := resource.ValidateOwned(); err != nil {
-			return ErrAllocationConflict
-		}
-		resourceKind = resource.Kind
-		resourceNamespace = resource.Namespace
-		resourceID = resource.Name
-		resourceUID = resource.UID
-	}
-	if resourceID == "" {
-		return ErrAllocationConflict
-	}
 	tx, err := l.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	var id, backend, namespace, uid string
-	var kind api.CleanupResourceKind
-	var confirmed, released bool
-	err = tx.QueryRowContext(ctx, `SELECT resource_id,resource_kind,resource_namespace,resource_uid,backend,confirmed,released
-		FROM allocations WHERE id=? AND session=?`, attempt, l.session).Scan(&id, &kind, &namespace, &uid, &backend, &confirmed, &released)
-	if errors.Is(err, sql.ErrNoRows) {
+	var backend string
+	var released bool
+	if err := tx.QueryRowContext(ctx, `SELECT backend,released FROM allocations WHERE id=? AND session=?`, attempt, l.session).
+		Scan(&backend, &released); errors.Is(err, sql.ErrNoRows) {
 		return ErrAllocationNotFound
-	}
-	if err != nil {
+	} else if err != nil {
 		return err
 	}
-	if confirmed {
-		if id != resourceID || kind != resourceKind || namespace != resourceNamespace || uid != resourceUID {
-			return ErrAllocationConflict
+	var planned int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM allocation_resources WHERE allocation_id=?`, attempt).Scan(&planned); err != nil {
+		return err
+	}
+	if planned == 0 {
+		if err := confirmLegacyAllocation(ctx, tx, l.session, attempt, in); err != nil {
+			return err
 		}
-		return nil
+		return tx.Commit()
+	}
+	observed := in.Cleanup.Resources()
+	if len(observed) == 0 {
+		return tx.Commit()
 	}
 	if released {
 		return ErrAllocationConflict
 	}
-	if (resourceKind != "" && (kind != resourceKind || namespace != resourceNamespace || id != resourceID)) ||
-		(resourceKind == "" && (kind != "" || namespace != "" || uid != "")) {
-		return ErrAllocationConflict
+	for _, resource := range observed {
+		var rowID, uid, borrower string
+		var confirmed, resourceReleased bool
+		if err := tx.QueryRowContext(ctx, `SELECT r.id,r.uid,COALESCE(b.reference,''),r.confirmed,r.released
+			FROM allocation_resources r
+			LEFT JOIN allocation_borrowers e ON e.resource_id=r.id
+			LEFT JOIN allocation_resources b ON b.id=e.borrower_resource_id
+			WHERE r.allocation_id=? AND r.reference=?`, attempt, resource.Reference).
+			Scan(&rowID, &uid, &borrower, &confirmed, &resourceReleased); errors.Is(err, sql.ErrNoRows) {
+			return ErrAllocationConflict
+		} else if err != nil {
+			return err
+		}
+		if borrower != resource.Borrower {
+			return ErrAllocationConflict
+		}
+		if resourceReleased || confirmed && uid != resource.UID {
+			return ErrAllocationConflict
+		}
+		if confirmed {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE allocation_resources SET uid=?,confirmed=1 WHERE id=?`, resource.UID, rowID); err != nil {
+			return err
+		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE allocations SET
-		resource_kind=?,resource_namespace=?,resource_id=?,resource_uid=?,confirmed=1
-		WHERE id=? AND session=?`, resourceKind, resourceNamespace, resourceID, resourceUID, attempt, l.session); err != nil {
+	if err := aliasConfirmedClaims(ctx, tx, l.session, backend, attempt); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM allocations
-		WHERE session=? AND backend=? AND resource_kind=? AND resource_namespace=? AND resource_id=? AND resource_uid=?
-		AND confirmed=1 AND released=0 AND id<>?`, l.session, backend, resourceKind, resourceNamespace, resourceID, resourceUID, attempt); err != nil {
+	if err := refreshAllocationConfirmation(ctx, tx, attempt); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func confirmLegacyAllocation(ctx context.Context, tx *sql.Tx, session, attempt string, in api.Incarnation) error {
+	var id, backend string
+	var confirmed bool
+	if err := tx.QueryRowContext(ctx, `SELECT resource_id,backend,confirmed FROM allocations WHERE id=? AND session=?`, attempt, session).
+		Scan(&id, &backend, &confirmed); errors.Is(err, sql.ErrNoRows) {
+		return ErrAllocationNotFound
+	} else if err != nil {
+		return err
+	}
+	if in.ID == "" {
+		return ErrAllocationConflict
+	}
+	if confirmed {
+		if id != in.ID {
+			return ErrAllocationConflict
+		}
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE allocations SET resource_id=?,confirmed=1 WHERE id=? AND session=?`, in.ID, attempt, session); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM allocations
+		WHERE session=? AND backend=? AND resource_id=? AND confirmed=1 AND released=0 AND id<>?`, session, backend, in.ID, attempt)
+	return err
+}
+
+func aliasConfirmedClaims(ctx context.Context, tx *sql.Tx, session, backend, attempt string) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM allocation_resources WHERE allocation_id=? ORDER BY ordinal DESC`, attempt)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := aliasCleanupClaim(ctx, tx, session, backend, id, map[string]bool{}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func aliasCleanupClaim(ctx context.Context, tx *sql.Tx, session, backend, resourceID string, visiting map[string]bool) error {
+	var reference, uid, canonical, borrowerID string
+	var confirmed, released bool
+	var borrower sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT r.reference,r.uid,COALESCE(r.canonical_resource_id,''),r.confirmed,r.released,
+		COALESCE(e.borrower_resource_id,'') FROM allocation_resources r
+		LEFT JOIN allocation_borrowers e ON e.resource_id=r.id WHERE r.id=?`, resourceID).
+		Scan(&reference, &uid, &canonical, &confirmed, &released, &borrower); err != nil {
+		return err
+	}
+	if !confirmed || released {
+		return nil
+	}
+	if canonical != "" {
+		return nil
+	}
+	if borrower.Valid && borrower.String != "" {
+		borrowerID = borrower.String
+		var borrowerConfirmed bool
+		if err := tx.QueryRowContext(ctx, `SELECT confirmed FROM allocation_resources WHERE id=?`, borrowerID).Scan(&borrowerConfirmed); err != nil {
+			return err
+		}
+		if !borrowerConfirmed {
+			return nil // a partial result cannot be canonicalized until its borrower exists
+		}
+		if visiting[resourceID] {
+			return ErrAllocationConflict
+		}
+		visiting[resourceID] = true
+		if err := aliasCleanupClaim(ctx, tx, session, backend, borrowerID, visiting); err != nil {
+			return err
+		}
+		delete(visiting, resourceID)
+	}
+	var candidate string
+	err := tx.QueryRowContext(ctx, `SELECT r.id FROM allocation_resources r JOIN allocations a ON a.id=r.allocation_id
+		WHERE a.session=? AND a.backend=? AND r.reference=? AND r.uid=? AND r.confirmed=1
+		  AND r.released=0 AND r.id<>? ORDER BY r.id LIMIT 1`,
+		session, backend, reference, uid, resourceID).Scan(&candidate)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	root, err := canonicalResourceRoot(ctx, tx, candidate)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE allocation_resources SET canonical_resource_id=? WHERE id=?`, root, resourceID); err != nil {
+		return err
+	}
+	cycle, err := canonicalBorrowCycle(ctx, tx, session)
+	if err != nil {
+		return err
+	}
+	if cycle {
+		return ErrAllocationConflict
+	}
+	return nil
+}
+
+func canonicalResourceRoot(ctx context.Context, tx *sql.Tx, id string) (string, error) {
+	for i := 0; id != "" && i < 1_000; i++ {
+		var canonical sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT canonical_resource_id FROM allocation_resources WHERE id=?`, id).Scan(&canonical); errors.Is(err, sql.ErrNoRows) {
+			return "", ErrAllocationConflict
+		} else if err != nil {
+			return "", err
+		}
+		if !canonical.Valid || canonical.String == "" {
+			return id, nil
+		}
+		id = canonical.String
+	}
+	return "", ErrAllocationConflict
+}
+
+func canonicalBorrowCycle(ctx context.Context, tx *sql.Tx, session string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT e.resource_id,e.borrower_resource_id
+		FROM allocation_borrowers e JOIN allocation_resources r ON r.id=e.resource_id
+		JOIN allocations a ON a.id=r.allocation_id WHERE a.session=?`, session)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	graph := map[string]string{}
+	for rows.Next() {
+		var resource, borrower string
+		if err := rows.Scan(&resource, &borrower); err != nil {
+			return false, err
+		}
+		resourceRoot, err := canonicalResourceRoot(ctx, tx, resource)
+		if err != nil {
+			return false, err
+		}
+		borrowerRoot, err := canonicalResourceRoot(ctx, tx, borrower)
+		if err != nil {
+			return false, err
+		}
+		if previous, exists := graph[resourceRoot]; exists && previous != borrowerRoot {
+			return false, ErrAllocationConflict
+		}
+		graph[resourceRoot] = borrowerRoot
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	state := map[string]uint8{}
+	var visit func(string) bool
+	visit = func(id string) bool {
+		switch state[id] {
+		case 1:
+			return true
+		case 2:
+			return false
+		}
+		state[id] = 1
+		if next := graph[id]; next != "" && visit(next) {
+			return true
+		}
+		state[id] = 2
+		return false
+	}
+	for id := range graph {
+		if visit(id) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func refreshAllocationConfirmation(ctx context.Context, tx *sql.Tx, attempt string) error {
+	_, err := tx.ExecContext(ctx, `UPDATE allocations SET confirmed=
+		CASE WHEN NOT EXISTS (SELECT 1 FROM allocation_resources WHERE allocation_id=? AND confirmed=0) THEN 1 ELSE 0 END
+		WHERE id=?`, attempt, attempt)
+	return err
+}
+
+// AllocationResources returns the durable claims for one session-scoped attempt.
+func (s *Store) AllocationResources(ctx context.Context, uid, attempt string) ([]AllocationResource, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.allocation_id,r.ordinal,r.reference,r.uid,
+		COALESCE(r.canonical_resource_id,''),r.confirmed,r.released,COALESCE(b.reference,'')
+		FROM allocation_resources r JOIN allocations a ON a.id=r.allocation_id
+		LEFT JOIN allocation_borrowers e ON e.resource_id=r.id
+		LEFT JOIN allocation_resources b ON b.id=e.borrower_resource_id
+		WHERE a.session=? AND r.allocation_id=? ORDER BY r.ordinal`, uid, attempt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AllocationResource
+	for rows.Next() {
+		var resource AllocationResource
+		if err := rows.Scan(&resource.ID, &resource.AllocationID, &resource.Ordinal, &resource.Reference,
+			&resource.UID, &resource.CanonicalID, &resource.Confirmed, &resource.Released, &resource.Borrower); err != nil {
+			return nil, err
+		}
+		out = append(out, resource)
+	}
+	return out, rows.Err()
+}
+
+// CleanupResourceBlocked reports whether a resource has an unreleased borrower after canonicalization.
+func (s *Store) CleanupResourceBlocked(ctx context.Context, uid, attempt, reference string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.allocation_id,r.reference,r.confirmed,r.released,
+		COALESCE(r.canonical_resource_id,'') FROM allocation_resources r
+		JOIN allocations a ON a.id=r.allocation_id WHERE a.session=?`, uid)
+	if err != nil {
+		return false, err
+	}
+	resources := map[string]AllocationResource{}
+	for rows.Next() {
+		var resource AllocationResource
+		if err := rows.Scan(&resource.ID, &resource.AllocationID, &resource.Reference, &resource.Confirmed,
+			&resource.Released, &resource.CanonicalID); err != nil {
+			rows.Close()
+			return false, err
+		}
+		resources[resource.ID] = resource
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+	root := func(id string) string {
+		seen := map[string]bool{}
+		for id != "" && !seen[id] {
+			seen[id] = true
+			resource := resources[id]
+			if resource.CanonicalID == "" {
+				return id
+			}
+			id = resource.CanonicalID
+		}
+		return ""
+	}
+	target := ""
+	for id, resource := range resources {
+		if resource.AllocationID == attempt && resource.Reference == reference {
+			target = root(id)
+			break
+		}
+	}
+	if target == "" {
+		return false, nil
+	}
+	edges, err := s.db.QueryContext(ctx, `SELECT e.resource_id,e.borrower_resource_id FROM allocation_borrowers e
+		JOIN allocation_resources r ON r.id=e.resource_id JOIN allocations a ON a.id=r.allocation_id
+		WHERE a.session=?`, uid)
+	if err != nil {
+		return false, err
+	}
+	defer edges.Close()
+	for edges.Next() {
+		var resourceID, borrowerID string
+		if err := edges.Scan(&resourceID, &borrowerID); err != nil {
+			return false, err
+		}
+		if root(resourceID) != target {
+			continue
+		}
+		borrowerRoot := root(borrowerID)
+		for id, borrower := range resources {
+			if root(id) == borrowerRoot && borrower.Confirmed && !borrower.Released {
+				return true, nil
+			}
+		}
+	}
+	return false, edges.Err()
 }
 
 // Allocations returns all unreleased attempts, including unknown outcomes and backend routes.
@@ -185,7 +517,6 @@ func (s *Store) Allocations(ctx context.Context, uid string) ([]Allocation, erro
 }
 
 // AllocationPage bounds cleanup memory while preserving durable attempts and independent progress.
-// after is the last attempt ID from the preceding page, including attempts that failed to release.
 func (s *Store) AllocationPage(ctx context.Context, uid, after string, limit int) ([]Allocation, error) {
 	if limit <= 0 {
 		limit = DefaultPageSize
@@ -196,7 +527,7 @@ func (s *Store) AllocationPage(ctx context.Context, uid, after string, limit int
 	return s.allocations(ctx, uid, after, limit)
 }
 
-const allocationQuery = `SELECT id,session,backend,operation,resource_kind,resource_namespace,resource_id,resource_uid,confirmed FROM allocations
+const allocationQuery = `SELECT id,session,backend,operation,resource_id,confirmed FROM allocations
 	WHERE session=? AND released=0 AND id>? ORDER BY id LIMIT ?`
 
 func (s *Store) allocations(ctx context.Context, uid, after string, limit int) ([]Allocation, error) {
@@ -208,8 +539,7 @@ func (s *Store) allocations(ctx context.Context, uid, after string, limit int) (
 	var out []Allocation
 	for rows.Next() {
 		var a Allocation
-		if err := rows.Scan(&a.ID, &a.SessionUID, &a.Backend, &a.Operation, &a.ResourceKind,
-			&a.ResourceNamespace, &a.ResourceID, &a.ResourceUID, &a.Confirmed); err != nil {
+		if err := rows.Scan(&a.ID, &a.SessionUID, &a.Backend, &a.Operation, &a.ResourceID, &a.Confirmed); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -217,11 +547,14 @@ func (s *Store) allocations(ctx context.Context, uid, after string, limit int) (
 	return out, rows.Err()
 }
 
-// ReleaseAllocation acknowledges a successful safe backend release, even for an unconfirmed
-// attempt when the backend can prove that safe. Released history remains as durable evidence;
-// a late confirmation can retire an earlier unreleased attempt before it is released.
+// ReleaseAllocation acknowledges release of a legacy attempt or all owned claims for this attempt.
 func (s *Store) ReleaseAllocation(ctx context.Context, uid, attempt string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE allocations SET released=1 WHERE id=? AND session=?`, attempt, uid)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE allocations SET released=1 WHERE id=? AND session=?`, attempt, uid)
 	if err != nil {
 		return err
 	}
@@ -232,7 +565,33 @@ func (s *Store) ReleaseAllocation(ctx context.Context, uid, attempt string) erro
 	if n == 0 {
 		return ErrAllocationNotFound
 	}
-	return nil
+	resourceRows, err := tx.QueryContext(ctx, `SELECT id FROM allocation_resources WHERE allocation_id=?`, attempt)
+	if err != nil {
+		return err
+	}
+	var resourceIDs []string
+	for resourceRows.Next() {
+		var id string
+		if err := resourceRows.Scan(&id); err != nil {
+			resourceRows.Close()
+			return err
+		}
+		resourceIDs = append(resourceIDs, id)
+	}
+	if err := resourceRows.Close(); err != nil {
+		return err
+	}
+	for _, id := range resourceIDs {
+		root, err := canonicalResourceRoot(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE allocation_resources SET released=1
+			WHERE id=? OR canonical_resource_id=?`, root, root); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // CertifyInventory trusts explicit operator reconciliation across all applicable namespaces,

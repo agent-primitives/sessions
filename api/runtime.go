@@ -177,22 +177,7 @@ type CleanupResource struct {
 	Reference string
 	UID       string
 	Borrower  string
-
-	// Transitional fields are read only by the v10-predecessor SQLite shape. Task 2 removes them
-	// once the normalized resource graph owns the persisted representation.
-	Kind      CleanupResourceKind `json:"-"`
-	Namespace string              `json:"-"`
-	Name      string              `json:"-"`
 }
-
-// CleanupResourceKind and its constants are transitional compatibility for the previous 1A branch.
-// They are removed when SQLite migrates to provider-opaque references in Task 2.
-type CleanupResourceKind string
-
-const (
-	CleanupResourceActor CleanupResourceKind = "actor"
-	CleanupResourceTag   CleanupResourceKind = "tag"
-)
 
 // ValidateCleanupPlan validates UID-empty targets and complete borrower closure before runtime I/O.
 func ValidateCleanupPlan(resources []CleanupResource) error {
@@ -272,29 +257,6 @@ func (e CleanupEvidence) validate() error {
 	return err
 }
 
-// ValidateTarget and ValidateOwned are temporary bridges for the previous SQLite shape. New code
-// validates complete plans or evidence with ValidateCleanupPlan and NewCleanupEvidence instead.
-func (r CleanupResource) ValidateTarget() error {
-	if r.Reference != "" {
-		return ValidateCleanupPlan([]CleanupResource{r})
-	}
-	if r.Kind != CleanupResourceActor && r.Kind != CleanupResourceTag || r.Namespace == "" || r.Name == "" {
-		return ErrCleanupResource
-	}
-	return nil
-}
-
-func (r CleanupResource) ValidateOwned() error {
-	if r.Reference != "" {
-		_, err := NewCleanupEvidence([]CleanupResource{r})
-		return err
-	}
-	if err := r.ValidateTarget(); err != nil || r.UID == "" {
-		return ErrCleanupResource
-	}
-	return nil
-}
-
 // ResourceCleanupRuntime opts a backend with dedicated resources into identity-bearing cleanup.
 // CleanupKey identifies the control-plane configuration. CleanupResources returns the complete,
 // UID-empty plan before I/O. ReleaseResource requires immutable UID preconditions and no name fallback.
@@ -353,8 +315,6 @@ type Incarnation struct {
 	// ComputeInstance, which identifies memory continuity rather than all dedicated compute. A
 	// backend may return it with an error after a control-plane effect succeeded.
 	Cleanup CleanupEvidence
-	// CleanupResource is a transitional bridge for the previous 1A branch and is removed in Task 2.
-	CleanupResource *CleanupResource
 	// RecordedCheckpoint, on the Incarnation passed to Snapshot, is the checkpoint the session's
 	// journal last recorded for the session (see SessionSpec.RecordedCheckpoint); the zero value
 	// means none. Suspend and a stateful fork set it. A backend whose compute can hold a snapshot

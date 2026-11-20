@@ -52,9 +52,10 @@ const (
 // COMPUTE_CONFIG_INVALID.
 // UNAVAILABLE: CHECKPOINT_PENDING, HARNESS_UNAVAILABLE, COMPUTE_UNAVAILABLE.
 // RESOURCE_EXHAUSTED: COMPUTE_RESOURCE_EXHAUSTED.
-// DeleteSession reports SESSION_BUSY and SESSION_DELETED; mutation deletion-admission probes
-// also report SESSION_BUSY. HarnessRegistry.RegisterHarness and HarnessRegistry.CreateHarness
-// report HARNESS_UNAVAILABLE when placement admission cannot reach the harness.
+// DeleteSession reports SESSION_BUSY and SESSION_DELETED; Exec, Resume, Suspend, Fork, Approve
+// and CloseApproval also report SESSION_BUSY while a DeleteSession holds the session.
+// HarnessRegistry.RegisterHarness and HarnessRegistry.CreateHarness report HARNESS_UNAVAILABLE
+// when placement admission cannot reach the harness.
 // Unknown failures and caller CANCELED/DEADLINE_EXCEEDED have no reason. Other preconditions
 // retain their codes without a reason; this is not an exhaustive taxonomy of failures.
 // Clients must match both domain and reason; see spec.md section 11.9 for precedence and recovery.
@@ -139,11 +140,12 @@ type SessionsClient interface {
 	// tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created for
 	// an in-process harness that declares any other tier; a wire harness that omits its tier or sends
 	// an unknown one is read as STATELESS_REPLAY and gets the gate (spec APR-1, WIRE-3). Approve does
-	// not Describe or resolve a harness. ABORTED: local contention, append-CAS conflict or superseded
-	// fence; retry after reading the session. Identity is unverified provenance, ignored by an
-	// enforcing Go host. Independent read+approve permission checks are opt-in. This method does not
-	// run a host's pre-dispatch tool policy hook (it runs when recovery dispatches the approved call)
-	// and implies no expiry, implicit Resume, or Cancel behavior.
+	// not Describe or resolve a harness. ABORTED: local contention (including a live Resume or a
+	// stateful Fork), append-CAS conflict or superseded fence; retry after reading the session.
+	// Identity is unverified provenance, ignored by an enforcing Go host. Independent read+approve
+	// permission checks are opt-in. This method does not run a host's pre-dispatch tool policy hook
+	// (it runs when recovery dispatches the approved call) and implies no expiry, implicit Resume, or
+	// Cancel behavior.
 	Approve(ctx context.Context, in *ApproveRequest, opts ...grpc.CallOption) (*ApproveResponse, error)
 	// Closes an approval gate the harness cannot re-issue, writing only journal records: no harness,
 	// executor or compute runs. OK returns the gate's decision and receipt; after it Exec admits a
@@ -354,9 +356,10 @@ func (c *sessionsClient) Fork(ctx context.Context, in *ForkRequest, opts ...grpc
 // COMPUTE_CONFIG_INVALID.
 // UNAVAILABLE: CHECKPOINT_PENDING, HARNESS_UNAVAILABLE, COMPUTE_UNAVAILABLE.
 // RESOURCE_EXHAUSTED: COMPUTE_RESOURCE_EXHAUSTED.
-// DeleteSession reports SESSION_BUSY and SESSION_DELETED; mutation deletion-admission probes
-// also report SESSION_BUSY. HarnessRegistry.RegisterHarness and HarnessRegistry.CreateHarness
-// report HARNESS_UNAVAILABLE when placement admission cannot reach the harness.
+// DeleteSession reports SESSION_BUSY and SESSION_DELETED; Exec, Resume, Suspend, Fork, Approve
+// and CloseApproval also report SESSION_BUSY while a DeleteSession holds the session.
+// HarnessRegistry.RegisterHarness and HarnessRegistry.CreateHarness report HARNESS_UNAVAILABLE
+// when placement admission cannot reach the harness.
 // Unknown failures and caller CANCELED/DEADLINE_EXCEEDED have no reason. Other preconditions
 // retain their codes without a reason; this is not an exhaustive taxonomy of failures.
 // Clients must match both domain and reason; see spec.md section 11.9 for precedence and recovery.
@@ -441,11 +444,12 @@ type SessionsServer interface {
 	// tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created for
 	// an in-process harness that declares any other tier; a wire harness that omits its tier or sends
 	// an unknown one is read as STATELESS_REPLAY and gets the gate (spec APR-1, WIRE-3). Approve does
-	// not Describe or resolve a harness. ABORTED: local contention, append-CAS conflict or superseded
-	// fence; retry after reading the session. Identity is unverified provenance, ignored by an
-	// enforcing Go host. Independent read+approve permission checks are opt-in. This method does not
-	// run a host's pre-dispatch tool policy hook (it runs when recovery dispatches the approved call)
-	// and implies no expiry, implicit Resume, or Cancel behavior.
+	// not Describe or resolve a harness. ABORTED: local contention (including a live Resume or a
+	// stateful Fork), append-CAS conflict or superseded fence; retry after reading the session.
+	// Identity is unverified provenance, ignored by an enforcing Go host. Independent read+approve
+	// permission checks are opt-in. This method does not run a host's pre-dispatch tool policy hook
+	// (it runs when recovery dispatches the approved call) and implies no expiry, implicit Resume, or
+	// Cancel behavior.
 	Approve(context.Context, *ApproveRequest) (*ApproveResponse, error)
 	// Closes an approval gate the harness cannot re-issue, writing only journal records: no harness,
 	// executor or compute runs. OK returns the gate's decision and receipt; after it Exec admits a

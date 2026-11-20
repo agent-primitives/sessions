@@ -3,7 +3,9 @@ package e2e
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,7 +58,7 @@ func (f *fixture) requirePolicy(ctx context.Context, t *testing.T, uid string, w
 // TestEgressPolicyAtEveryInstallPoint runs a REQUIRES_MEMORY_SNAPSHOT session through Create,
 // suspend and resume, and a fork, with WithEgressPolicy set: the actor holds the policy after its
 // first turn, keeps the same stored policy (same UID and version) across suspend and resume, where
-// the second install finds it present, and the fork child gets its own.
+// the converge finds it equal and writes nothing, and the fork child gets its own.
 func TestEgressPolicyAtEveryInstallPoint(t *testing.T) {
 	f := newFixture(t, env("SUBSTRATE_ATESPACE", "e2e-egress"))
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
@@ -101,6 +103,60 @@ func TestEgressPolicyAtEveryInstallPoint(t *testing.T) {
 	}
 	if fork := f.requirePolicy(ctx, t, child, e2ePolicy); fork.UID == created.UID {
 		t.Fatalf("child policy UID %s is the parent's: want its own policy", fork.UID)
+	}
+}
+
+// TestEgressPolicyChangedAcrossResume changes the configured policy while a session's actor is
+// suspended: the resume replaces the stored policy under its version, keeping its UID. Configuring
+// none then clears it to an empty rule set at the next resume, which substrate enforces as
+// deny-all.
+func TestEgressPolicyChangedAcrossResume(t *testing.T) {
+	f := newFixture(t, env("SUBSTRATE_ATESPACE", "e2e-egress"))
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	defer cancel()
+
+	var current atomic.Pointer[substrate.EgressPolicy]
+	current.Store(&e2ePolicy)
+	backend := f.egressBackend(t, func(string) *substrate.EgressPolicy { return current.Load() })
+	session := uniqueUID("egress-changed")
+	log := journal(t).Session(session)
+	p := newPlacer(t, backend, echoagent.Model)
+	defer stopQuietly(t, backend, session)
+
+	driveTurns(ctx, t, p, log, session, 1)
+	created := f.requirePolicy(ctx, t, session, e2ePolicy)
+
+	changed := substrate.EgressPolicy{Rules: []substrate.EgressRule{
+		{Protocol: substrate.EgressHTTPS, Hostnames: []string{"api.example.com"}, Ports: []int32{8443}},
+	}}
+	suspendResume := func(want int) {
+		t.Helper()
+		if _, err := p.Suspend(ctx, log, session); err != nil {
+			t.Fatalf("suspend: %v", err)
+		}
+		if err := p.Resume(ctx, log, session); err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+		driveTurns(ctx, t, p, log, session, 1)
+		if got := lastOutput(t, log); got != fmt.Sprint(want) {
+			t.Fatalf("count after resume = %s, want %d", got, want)
+		}
+	}
+	current.Store(&changed)
+	suspendResume(2)
+	updated := f.requirePolicy(ctx, t, session, changed)
+	if updated.UID != created.UID || updated.Version <= created.Version {
+		t.Fatalf("policy after a changed resume is %s v%d, want %s at a version after %d", updated.UID, updated.Version, created.UID, created.Version)
+	}
+
+	current.Store(nil)
+	suspendResume(3)
+	cleared, err := ateadapter.New(f.conn).GetActorEgressPolicy(ctx, substrate.ActorRef{Atespace: f.atespace, Name: session})
+	if err != nil {
+		t.Fatalf("egress policy after configuring none: %v (want an empty rule set, not none)", err)
+	}
+	if len(cleared.Policy.Rules) != 0 || cleared.UID != created.UID {
+		t.Fatalf("policy after configuring none = %+v (%s), want no rules under %s", cleared.Policy, cleared.UID, created.UID)
 	}
 }
 

@@ -56,15 +56,13 @@ CreateActor · ResumeActor · SuspendActor · DeleteActor · GetActor
 
 `SnapshotCloner` is an optional second interface, also defined in the core, for the clone-from-snapshot
 half of fork (`CreateTag`, `CreateActor{source_tag}`, `DeleteTag`). Keeping it separate means a control
-client without substrate's Tag APIs still satisfies the base interface. CreateTag and
-CreateActorFromTag report exact UIDs; DeleteTag requires the UID. The daemon supplies a credential-free
-cleanup key derived from its ate-api endpoint identity, server identity and actor atespace. A
-programmatically embedded backend without that key keeps the legacy untracked path and does not
-produce owned cleanup rows.
+client without substrate's Tag APIs still satisfies the base interface. `CreateActor` and
+`TagActor` return the UID the server assigned, so placement can record which resources a call
+created ([allocation ownership](allocation-ownership.md#resource-plans)). The daemon sets a cleanup
+key from its ate-api server identity and atespace; a backend built without one records no plan.
 
 - `runtime/substrate` (in the core module) implements `api.Runtime` over that interface — no substrate
-  import. `CreateActor` and `TagActor` return the server-assigned UID. Actor/tag deletes require that
-  exact UID, and the backend encodes atespace/name in private opaque cleanup references.
+  import.
 - `integrations/substrate` is a **separate Go module** with its own `go.mod` that adapts the real
   generated ate-api client to `ControlClient`. The core never imports it.
 - A CI gate asserts `go list -deps ./...` on the core contains **zero** `agent-substrate` packages.
@@ -102,18 +100,6 @@ ate-api-server](#substrate-v1-namespace-access-to-ate-api-server). Its principal
 `editor` role in `-substrate-atespace`, or Substrate denies every Control call with
 `PERMISSION_DENIED`: see [authorization and atespace
 provisioning](#substrate-v1-authorization-and-atespace-provisioning).
-
-## Cleanup ownership and teardown
-
-Placement records a Substrate actor target before Create or Restore and records both the fork tag and
-child actor before Fork runtime I/O. The tag declares the child actor as its borrower. A stateful fork
-that loses the `CreateActorFromTag` reply keeps the exact tag: an unknown-UID child may still borrow
-it. Known actor/tag identities may be returned with a later placement error and are persisted.
-
-`Stop` accepts only exact owned identities. It deletes a RUNNING or suspended actor directly with
-`DeleteOptions.uid`; it does not suspend first. A UID mismatch leaves the replacement untouched. The
-actor is deleted before its incoming fork tag, and a NOT_FOUND result makes a retry idempotent. This
-producer work does not add a background cleanup worker or change `DeleteSession` completion.
 
 The tier is declared, not discovered: placement gates on it before an actor exists, and nothing
 checks it against the image's own `Describe`. Declaring a `REQUIRES_MEMORY_SNAPSHOT` harness as

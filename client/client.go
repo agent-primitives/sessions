@@ -169,8 +169,8 @@ type ExecOptions struct {
 	// OnRecord is called for each committed record as it arrives, for callers that want to react
 	// during the turn rather than after it.
 	OnRecord func(*v1.LogRecord)
-	// OnDelta is called for each streaming chunk. The server does not emit deltas yet, so this is
-	// wired for when it does rather than exercised today.
+	// OnDelta is called for each streaming chunk of a model call in progress. Chunks are not
+	// committed; a model call that completes records its complete response as an OUTPUT record.
 	OnDelta func(*v1.Delta)
 }
 

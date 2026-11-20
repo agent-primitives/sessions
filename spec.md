@@ -88,9 +88,24 @@ an RPC, encoding or output failure is not converted into a success. Approval rec
 still reports that the decision committed. JSON serialization does not change canonical bytes,
 the hash chain or the journal format.
 
-Without `--json`, `create` retains its bare UID output. `exec` streaming and harness JSON content
-are unchanged. Approval JSON changes from lowerCamelCase to snake_case field names. Non-JSON
-diagnostics, including the deletion PENDING warning, go to stderr even in JSON mode.
+`exec --json` emits JSON Lines, one protobuf `ExecUpdate` per line in the order the stream delivers
+them: `session` frames and committed `record`s, each record the same `LogRecord` `replay --json`
+prints. The first line is the session frame `Exec` sends before the turn runs. A turn that pauses
+for approval exits successfully and ends with a `session` frame: a snapshot of the session when the
+stream closes, which carries `pending_approval` unless a concurrent decision has already resolved
+it. Only a recorded `END` shows that a turn completed. Streamed `delta` chunks are not committed and
+are omitted; readers ignore update kinds they do not expect. A stream error leaves the lines already
+written and exits unsuccessfully, without retrying the turn. A failed stdout write, including a pipe
+whose reader has exited, ends the command unsuccessfully after the stream is read to its end, so the
+turn is not cut short. Without `--json`, `exec` keeps the default Unix behavior and exits on SIGPIPE
+when its pipe closes. That ends its stream, which cancels a turn still running, embedded or remote;
+since the turn may already have ended, the outcome is unknown until the journal is read, and the
+turn is not retried.
+
+Without `--json`, `create` retains its bare UID output, and the human output of `exec`, `replay` and
+`fork` is not a stable contract; scripts use `--json`. Harness JSON content is unchanged. Approval
+JSON changes from lowerCamelCase to snake_case field names. Non-JSON diagnostics, including the
+deletion PENDING warning, go to stderr even in JSON mode.
 Session commands default their endpoint from
 `AGENTSESSIONS_SERVER`; explicit `--server` wins, including an empty value to select embedded mode.
 An environment-selected target is announced on stderr before making requests; failure to write

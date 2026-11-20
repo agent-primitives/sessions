@@ -1,12 +1,19 @@
 package main
 
 import (
+	"maps"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+
+	v1 "github.com/agent-primitives/sessions/api/genpb"
 )
 
 // TestSessionLifecycleRealBinaries is the smoke test for the quickstart path: agentsessionsd on the
@@ -55,32 +62,108 @@ func TestSessionLifecycleRealBinaries(t *testing.T) {
 		}
 	}
 
+	// exec, fork and replay are read through --json: their human views can change. Lines that are not
+	// JSON are diagnostics on stderr, which ctl merges into its output.
+	jsonLines := func(out string, decode func([]byte) error) {
+		t.Helper()
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "{") {
+				if err := decode([]byte(line)); err != nil {
+					t.Fatalf("decode %s: %v", line, err)
+				}
+			}
+		}
+	}
+	execRecords := func(args ...string) []*v1.LogRecord {
+		t.Helper()
+		var recs []*v1.LogRecord
+		jsonLines(ctl(append([]string{"exec", "--json"}, args...)...), func(b []byte) error {
+			var u v1.ExecUpdate
+			if err := protojson.Unmarshal(b, &u); err != nil {
+				return err
+			}
+			if r := u.GetRecord(); r != nil {
+				recs = append(recs, r)
+			}
+			return nil
+		})
+		return recs
+	}
+	replayRecords := func(sess string) []*v1.LogRecord {
+		t.Helper()
+		var recs []*v1.LogRecord
+		jsonLines(ctl("replay", "--json", "--session", sess), func(b []byte) error {
+			var r v1.LogRecord
+			if err := protojson.Unmarshal(b, &r); err != nil {
+				return err
+			}
+			recs = append(recs, &r)
+			return nil
+		})
+		return recs
+	}
+	// outputs is the text of each OUTPUT record, by seq.
+	outputs := func(recs []*v1.LogRecord) map[int64]string {
+		texts := map[int64]string{}
+		for _, r := range recs {
+			if r.GetEvent().GetKind() == v1.EventKind_EVENT_OUTPUT {
+				var text strings.Builder
+				for _, p := range r.GetEvent().GetMessage().GetParts() {
+					text.WriteString(p.GetText().GetText())
+				}
+				texts[r.GetSeq()] = text.String()
+			}
+		}
+		return texts
+	}
+	expectOutput := func(recs []*v1.LogRecord, seq int64, text string) {
+		t.Helper()
+		if got, ok := outputs(recs)[seq]; !ok || got != text {
+			t.Fatalf("OUTPUT at seq %d = %q (present %v), want %q; records:\n%v", seq, got, ok, text, recs)
+		}
+	}
+
 	uid := strings.TrimSpace(ctl("create", "--name", "smoke-parent"))
 	if !regexp.MustCompile(`^sess-[0-9a-f]+$`).MatchString(uid) {
 		t.Fatalf("create printed %q, want a session UID", uid)
 	}
 	expectGet(uid, "smoke-parent", "0", "NONE", "PENDING", "ACTIVE", "unset")
 
-	out := ctl("exec", "--session", uid, "--input", "hello")
-	expect(out, `^seq=4 +EVENT_OUTPUT  assistant: echo:hello$`)
-	expect(out, `^seq=5 +EVENT_END$`)
+	recs := execRecords("--session", uid, "--input", "hello")
+	expectOutput(recs, 4, "echo:hello")
+	if last := recs[len(recs)-1]; last.GetSeq() != 5 || last.GetEvent().GetEnd().GetState() != "COMPLETED" {
+		t.Fatalf("turn ended with %v, want END COMPLETED at seq 5", last)
+	}
 
 	expect(ctl("suspend", "--session", uid), `^session `+uid+` suspend execution=COMPLETED compute=COLD last_seq=6$`)
 	expectGet(uid, "smoke-parent", "6", "COLD", "COMPLETED", "ACTIVE", "unset")
 	expect(ctl("resume", "--session", uid), `^session `+uid+` resume execution=COMPLETED compute=LIVE last_seq=7$`)
 
-	out = ctl("exec", "--session", uid, "--input", "again")
-	expect(out, `^seq=11 +EVENT_OUTPUT  assistant: echo:again$`)
+	expectOutput(execRecords("--session", uid, "--input", "again"), 11, "echo:again")
 
-	child := expect(ctl("fork", "--session", uid, "--at", "5", "--names", "smoke-child"),
-		`^child (sess-[0-9a-f]+) parent=`+uid+` fork_seq=5 name=smoke-child$`)[1]
+	var forked v1.ForkResponse
+	jsonLines(ctl("fork", "--json", "--session", uid, "--at", "5", "--names", "smoke-child"), func(b []byte) error {
+		return protojson.Unmarshal(b, &forked)
+	})
+	if len(forked.GetChildren()) != 1 || forked.GetChildren()[0].GetParentUid() != uid || forked.GetChildren()[0].GetForkSeq() != 5 ||
+		forked.GetChildren()[0].GetMetadata().GetName() != "smoke-child" || !regexp.MustCompile(`^sess-[0-9a-f]+$`).MatchString(forked.GetChildren()[0].GetMetadata().GetUid()) {
+		t.Fatalf("fork = %v, want one child smoke-child of %s at seq 5", &forked, uid)
+	}
+	child := forked.GetChildren()[0].GetMetadata().GetUid()
 	// The child shares the parent's history up to seq 5, so its turn sees "hello", not "again".
-	out = ctl("exec", "--session", child, "--input", "from child")
-	expect(out, `^seq=\d+ +EVENT_OUTPUT  assistant: echo:from child$`)
-	replay := ctl("replay", "--session", child)
-	if got := regexp.MustCompile(`(?m)^seq=\d+ +EVENT_OUTPUT  assistant: (.*)$`).FindAllStringSubmatch(replay, -1); len(got) != 2 ||
-		got[0][1] != "echo:hello" || got[1][1] != "echo:from child" {
-		t.Fatalf("child replay outputs = %v, want echo:hello then echo:from child:\n%s", got, replay)
+	recs = execRecords("--session", child, "--input", "from child")
+	if got := outputs(recs); len(got) != 1 || !slices.Contains(slices.Collect(maps.Values(got)), "echo:from child") {
+		t.Fatalf("child turn outputs = %v, want echo:from child", got)
+	}
+	replay := replayRecords(child)
+	var got []string
+	for _, r := range replay {
+		if text, ok := outputs([]*v1.LogRecord{r})[r.GetSeq()]; ok {
+			got = append(got, text)
+		}
+	}
+	if len(got) != 2 || got[0] != "echo:hello" || got[1] != "echo:from child" {
+		t.Fatalf("child replay outputs = %q, want echo:hello then echo:from child", got)
 	}
 
 	list := ctl("list")
@@ -99,11 +182,16 @@ func TestSessionLifecycleRealBinaries(t *testing.T) {
 	expect(ctl("delete", "--session", child), `^session `+child+tombstone)
 	expectGet(child, "smoke-child", `\d+`, `\w+`, "COMPLETED", "PENDING", regexp.QuoteMeta(requested))
 	before := replay
-	replay = ctl("replay", "--session", child)
-	if !strings.HasPrefix(replay, before) {
-		t.Fatalf("child replay lost records on delete:\nbefore\n%s\nafter\n%s", before, replay)
+	replay = replayRecords(child)
+	if len(replay) != len(before)+1 {
+		t.Fatalf("child replay has %d records after delete, want the %d before plus one", len(replay), len(before))
 	}
-	expect(strings.TrimPrefix(replay, before), `\Aseq=\d+ +EVENT_LIFECYCLE\n\z`)
+	if !slices.EqualFunc(before, replay[:len(before)], func(a, b *v1.LogRecord) bool { return proto.Equal(a, b) }) {
+		t.Fatalf("child replay changed on delete:\nbefore\n%v\nafter\n%v", before, replay)
+	}
+	if last := replay[len(replay)-1]; last.GetEvent().GetLifecycle().GetKind() != v1.Lifecycle_LIFECYCLE_DELETE {
+		t.Fatalf("child replay ends with %v, want the DELETE lifecycle record", last)
+	}
 	if strings.Contains(ctl("list"), child) {
 		t.Fatalf("list shows deleted session %s", child)
 	}
@@ -116,11 +204,11 @@ func TestSessionLifecycleRealBinaries(t *testing.T) {
 	startServer(t, bin, addr, "-journal", journalPath)
 	expectGet(uid, "smoke-parent", "12", `\w+`, "COMPLETED", "ACTIVE", "unset")
 	expectGet(child, "smoke-child", `\d+`, `\w+`, "COMPLETED", "PENDING", regexp.QuoteMeta(requested))
-	if again := ctl("replay", "--session", child); again != replay {
-		t.Fatalf("child replay changed across a restart:\nbefore\n%s\nafter\n%s", replay, again)
+	if again := replayRecords(child); !slices.EqualFunc(again, replay, func(a, b *v1.LogRecord) bool { return proto.Equal(a, b) }) {
+		t.Fatalf("child replay changed across a restart:\nbefore\n%v\nafter\n%v", replay, again)
 	}
 	if strings.Contains(ctl("list"), child) {
 		t.Fatalf("list shows deleted session %s after a restart", child)
 	}
-	expect(ctl("exec", "--session", uid, "--input", "after restart"), `^seq=16 +EVENT_OUTPUT  assistant: echo:after restart$`)
+	expectOutput(execRecords("--session", uid, "--input", "after restart"), 16, "echo:after restart")
 }

@@ -59,17 +59,34 @@ print("generation %s %s %s" % (s["generation"], s["fidelity"], s["durableSnapsho
 actor_state() { "${ATE[@]}" get actor "$1" -a "${ATESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"]["state"])'; }
 actor_uid() { "${ATE[@]}" get actor "$1" -a "${ATESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"].get("uid", ""))'; }
 agentctl() { "${WORK}/bin/agentctl" "$1" --server "${SERVER}" "${@:2}"; }
+# The checks below read agentctl's --json output, not its human views, which can change.
+# texts KIND ROLE: from agentctl JSON Lines on stdin (replay's LogRecords or exec's ExecUpdates),
+# the text of each KIND record whose message has ROLE, one per line. Newlines print as \n and other
+# non-graphic characters (controls, format characters, and the line and paragraph separators U+2028
+# and U+2029) as \xNN or \uNNNN, as agentctl's human output prints them, so a reply quoted in a
+# failure message cannot act on the terminal or start a new log line.
+texts() {
+	jq -r --arg kind "$1" --arg role "$2" '(.record // .) | .event // empty
+		| select(.kind == $kind and .message.role == $role)
+		| [.message.parts[]?.text.text // empty] | join("") | gsub("\n"; "\\n")' |
+		python3 -c 'import sys, unicodedata
+for line in sys.stdin:
+    print("".join(c if unicodedata.category(c)[0] != "C" and unicodedata.category(c) not in ("Zl", "Zp")
+                  else ("\\x%02x" if ord(c) < 128 else "\\u%04x") % ord(c)
+                  for c in line.rstrip("\n")))'
+}
 inputs() { # session -> the user inputs its journal holds, in order, joined by '|'
-	agentctl replay --session "$1" | sed -n 's/^seq=[0-9]* *EVENT_INPUT  user: //p' | paste -sd '|' -
+	agentctl replay --session "$1" --json | texts EVENT_INPUT user | paste -sd '|' -
 }
 records() { # session kind -> how many records of that kind its journal holds
-	agentctl replay --session "$1" | awk -v k="$2" '$2 == k { n++ } END { print n + 0 }'
+	agentctl replay --session "$1" --json | jq -s --arg kind "$2" 'map(select(.event.kind == $kind)) | length'
 }
 say() { # session input -> prints the turn, sets REPLY to the assistant text
-	local out
-	out="$(agentctl exec --session "$1" --input "$2")"
-	echo "${out}"
-	REPLY="$(sed -n 's/^seq=[0-9]* *EVENT_OUTPUT  assistant: //p' <<<"${out}" | tail -1)"
+	local out from
+	out="$(agentctl exec --session "$1" --input "$2" --json)"
+	from="$(jq -rs 'map(select(.record))[0].record.seq // empty' <<<"${out}")"
+	agentctl replay --session "$1" --from "${from}"
+	REPLY="$(texts EVENT_OUTPUT assistant <<<"${out}" | tail -1)"
 }
 
 (cd "${ROOT}" && go build -o "${WORK}/bin/agentctl" ./cmd/agentctl)
@@ -159,13 +176,14 @@ else
 fi
 
 step "7. Fork at the end of turn 1 and diverge"
-FORK_SEQ="$(agentctl replay --session "${SID}" | awk '/EVENT_END/ { sub("seq=", "", $1); print $1; exit }')"
-CHILD="$(agentctl fork --session "${SID}" --at "${FORK_SEQ}" --names after-turn-1 | awk '{ print $2 }')"
+# jq reads all of replay's output (-s): stopping at the first match could end replay with SIGPIPE.
+FORK_SEQ="$(agentctl replay --session "${SID}" --json | jq -rs 'map(select(.event.kind == "EVENT_END"))[0].seq // empty')"
+CHILD="$(agentctl fork --session "${SID}" --at "${FORK_SEQ}" --names after-turn-1 --json | jq -r '.children[0].metadata.uid')"
 echo "child ${CHILD} forked at seq ${FORK_SEQ}"
 say "${CHILD}" "actually, the printer is on fire"
 [[ -n "${REAL}" || "${REPLY}" == *"1) my laptop will not boot; 2) actually, the printer is on fire | next"* ]] || fail "child did not diverge from turn 1: ${REPLY}"
 "${ATE[@]}" get actor "${CHILD}" -a "${ATESPACE}"
-PARENT_LAST="$(agentctl replay --session "${SID}" | sed -n 's/^seq=[0-9]* *EVENT_OUTPUT  assistant: //p' | tail -1)"
+PARENT_LAST="$(agentctl replay --session "${SID}" --json | texts EVENT_OUTPUT assistant | tail -1)"
 [[ -n "${REAL}" || "${PARENT_LAST}" == *"4) also, my password expired"* ]] || fail "parent changed"
 [[ "$(inputs "${CHILD}")" == "my laptop will not boot|actually, the printer is on fire" ]] ||
 	fail "child journal inputs are not turn 1 plus its own: $(inputs "${CHILD}")"

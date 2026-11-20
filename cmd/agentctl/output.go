@@ -16,7 +16,7 @@ import (
 
 func sessionFlags(fs *flag.FlagSet) *config {
 	cfg := commonFlags(fs)
-	fs.BoolVar(&cfg.json, "json", false, "print protobuf JSON (replay: one LogRecord per line)")
+	fs.BoolVar(&cfg.json, "json", false, "print protobuf JSON (exec: one ExecUpdate per line; replay: one LogRecord per line)")
 	return cfg
 }
 
@@ -32,11 +32,20 @@ func writeOutput(text string) error {
 }
 
 func writeJSON(message proto.Message) error {
-	data, err := (protojson.MarshalOptions{UseProtoNames: true}).Marshal(message)
+	text, err := protoJSON(message)
 	if err != nil {
 		return fmt.Errorf("encode protobuf JSON response (successful operations remain committed): %w", err)
 	}
-	return writeOutput(escapeFormatRunes(string(data)) + "\n")
+	return writeOutput(text + "\n")
+}
+
+// protoJSON is message as the CLI's protobuf JSON, on one line without its newline.
+func protoJSON(message proto.Message) (string, error) {
+	data, err := (protojson.MarshalOptions{UseProtoNames: true}).Marshal(message)
+	if err != nil {
+		return "", err
+	}
+	return escapeFormatRunes(string(data)), nil
 }
 
 func sessionDetails(s *v1.Session) string {

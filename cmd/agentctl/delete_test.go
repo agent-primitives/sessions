@@ -170,12 +170,12 @@ func TestEmbeddedDeleteAuditAndDescendants(t *testing.T) {
 	}
 	parent := mustRun("create", "--name", "parent")
 	mustRun("exec", "--session", parent, "--input", "before")
-	fork := mustRun("fork", "--session", parent)
-	fields := strings.Fields(fork)
-	if len(fields) < 2 || fields[0] != "child" {
-		t.Fatalf("fork output: %s", fork)
+	fork := mustRun("fork", "--session", parent, "--json")
+	var forked v1.ForkResponse
+	if err := protojson.Unmarshal([]byte(fork), &forked); err != nil || len(forked.GetChildren()) != 1 {
+		t.Fatalf("fork output: %s %v", fork, err)
 	}
-	child := fields[1]
+	child := forked.GetChildren()[0].GetMetadata().GetUid()
 	deleted := mustRun("delete", "--session", parent)
 	get := mustRun("get", "--session", parent)
 	if detailValue(get, "Deletion") != "PENDING" || detailValue(get, "Deletion requested") == "" || strings.Contains(get, "deletion_completed") {
@@ -184,7 +184,7 @@ func TestEmbeddedDeleteAuditAndDescendants(t *testing.T) {
 	if retry := mustRun("delete", "--session", parent); retry != deleted {
 		t.Fatalf("retry changed output/times:\n%s\n%s", deleted, retry)
 	}
-	if replay := mustRun("replay", "--session", parent); !strings.Contains(replay, "EVENT_OUTPUT") || !strings.Contains(replay, "EVENT_LIFECYCLE") {
+	if replay := mustRun("replay", "--session", parent, "--json"); !strings.Contains(replay, `"EVENT_OUTPUT"`) || !strings.Contains(replay, `"LIFECYCLE_DELETE"`) {
 		t.Fatalf("audit unavailable: %s", replay)
 	}
 	list := mustRun("list")

@@ -36,7 +36,7 @@ Run these before pushing; they are the same gates the `ci` workflow enforces.
 | Proto lint | `buf lint` |
 | Go blocks in docs (`docs` workflow, every pull request) | `go run ./hack/doccheck` |
 | Changelog fragment (`changelog` workflow, every pull request, rerun when a label changes) | `go run ./hack/changelog check -base "$(git merge-base upstream/main HEAD)" -head HEAD`, with `origin/main` in a clone without an `upstream` remote (see [Changelog](#changelog)) |
-| Release build (`release-check`, on changes to Go, `Dockerfile`, `LICENSE`, `README.md`, `.goreleaser.yaml`, `.ko.yaml`, the `release` and `release-check` workflows, `hack/release-tags.sh`, `hack/release-tags-test.sh`) | `hack/release-tags-test.sh`, `goreleaser check`, then `tags="$(hack/release-tags.sh)" && env ${tags} goreleaser release --snapshot --clean --skip=sbom` (bash; needs `ko`; publishes nothing) and a check that `dist/artifacts.json` lists the `agentsessionsd` and `harnessnode` ko images; `docker build` of `Dockerfile` after `CGO_ENABLED=0 GOOS=linux go build -o agentnode ./cmd/agentnode` |
+| Release build (`release-check`, on changes to `.go` files, the root and `integrations/claudecode` `go.mod` and `go.sum`, `Dockerfile`, `LICENSE`, `README.md`, `.goreleaser.yaml`, `.ko.yaml`, the `release` and `release-check` workflows, `hack/release-tags.sh`, `hack/release-tags-test.sh`) | `hack/release-tags-test.sh`, `goreleaser check`, then `tags="$(hack/release-tags.sh)" && env ${tags} goreleaser release --snapshot --clean --skip=sbom` (bash; needs `ko`; publishes nothing) and a check that `dist/artifacts.json` lists the `agentsessionsd`, `claudecode-harnessnode` and `harnessnode` ko images; `docker build` of `Dockerfile` after `CGO_ENABLED=0 GOOS=linux go build -o agentnode ./cmd/agentnode` |
 | Fuzzing (30s per target; nightly longer) | `./hack/fuzz.sh <dir> 30s` for each `<dir>` in `./hack/fuzz.sh --packages`; `hack/fuzz-test.sh` checks the one failure `fuzz.sh` lets pass, the Go 1.26 fuzzing coordinator's own deadline ([golang/go#75804](https://github.com/golang/go/issues/75804)) |
 
 Two gates catch stale generated files, and both fail the build rather than regenerating for you:
@@ -104,16 +104,20 @@ git push origin v0.1.0
 
 The `release` workflow first checks that the tagged commit has no changelog fragments left
 (`go run ./hack/changelog verify-assembled`); if it has, nothing is published: delete the tag, merge
-the release pull request and tag its commit. It re-runs the full suite against the tagged commit
-before publishing anything, then builds `agentctl` and `agentsessionsd` for linux and darwin on
-amd64 and arm64, attaches an SBOM per archive, publishes the `agentsessionsd` and `harnessnode`
-images to `ghcr.io/agent-primitives/sessions`, and signs a build-provenance attestation. Release
-notes are generated from the commits since the previous release tag, which is what conventional
-commit messages buy.
+the release pull request and tag its commit. It re-runs the full suite, and that of the
+`integrations/claudecode` module, against the tagged commit before publishing anything, then builds
+`agentctl` and `agentsessionsd` for linux and darwin on amd64 and arm64, attaches an SBOM per
+archive, publishes the `agentsessionsd`, `harnessnode` and `claudecode-harnessnode` images to
+`ghcr.io/agent-primitives/sessions`, and signs a build-provenance attestation. Release notes are
+generated from the commits since the previous release tag, which is what conventional commit
+messages buy.
 
 Only `v<digit>...` tags without a `/` are root-module releases. A nested module such as
 `integrations/substrate` is tagged `integrations/substrate/vX.Y.Z`, which does not trigger the
-`release` workflow.
+`release` workflow. The `claudecode-harnessnode` image is no exception: the root release builds it
+from the tagged commit's `integrations/claudecode`, whose `replace` points it at the root module of
+that same commit, and tags it with the root tag. An `integrations/claudecode/vX.Y.Z` tag publishes
+no image.
 goreleaser on its own would still take the nearest tag of either module as the version and as the
 start of the changelog, so both workflows set `GORELEASER_CURRENT_TAG` and `GORELEASER_PREVIOUS_TAG`
 from `hack/release-tags.sh`. Run goreleaser locally the same way, so that a failure of the script

@@ -11,7 +11,9 @@
 # `git.ignore_tag_prefixes` and `monorepo.tag_prefix` are Pro-only. Its documented override is these
 # two variables, which it takes as given.
 #
-# A root release tag is `v` followed by a digit, with no `/`.
+# A root release tag is `v` followed by a digit, with no `/`. A module tag publishes nothing: the
+# root release builds the claudecode-harnessnode image from integrations/claudecode in the root
+# tag's tree and gives it the root tag.
 #
 # Usage: hack/release-tags.sh [current-tag]
 #

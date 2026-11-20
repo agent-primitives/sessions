@@ -75,7 +75,7 @@ func TestCleanupRestoreRequiresRecordedUIDMatch(t *testing.T) {
 	}
 }
 
-func TestCleanupMissingKeyKeepsLegacyUnownedIncarnation(t *testing.T) {
+func TestCleanupMissingKeyKeepsLegacyStopWithoutDurablePlan(t *testing.T) {
 	m := &mockControl{info: running("worker-a")}
 	b := newBackend(m)
 	if plan := b.CleanupResources(api.CleanupCreate, "sess-x"); len(plan) != 0 {
@@ -85,8 +85,14 @@ func TestCleanupMissingKeyKeepsLegacyUnownedIncarnation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := inc.Cleanup.Resources(); len(got) != 0 {
-		t.Fatalf("keyless cleanup=%+v", got)
+	if got := inc.Cleanup.Resources(); len(got) != 1 || got[0].UID == "" {
+		t.Fatalf("keyless incarnation lacks exact ephemeral identity: %+v", got)
+	}
+	if err := b.Stop(context.Background(), inc); err != nil {
+		t.Fatalf("keyless Stop: %v", err)
+	}
+	if want := []string{"get:sess-x", "create:sess-x", "resume:sess-x", "delete:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("calls=%v want=%v", m.calls, want)
 	}
 }
 

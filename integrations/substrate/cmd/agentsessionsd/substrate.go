@@ -272,7 +272,7 @@ func substrateCleanupKey(address, serverName, atespace string) string {
 			identity = address
 		}
 	}
-	sum := sha256.Sum256([]byte("substrate-cleanup-v1\x00" + address + "\x00" + identity + "\x00" + atespace))
+	sum := sha256.Sum256([]byte("substrate-cleanup-v1\x00" + identity + "\x00" + atespace))
 	return hex.EncodeToString(sum[:])
 }
 

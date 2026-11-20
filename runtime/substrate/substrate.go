@@ -374,10 +374,10 @@ func (b *Backend) cleanupResource(kind, atespace, name, uid string) (api.Cleanup
 }
 
 func (b *Backend) partialIncarnation(in api.Incarnation) api.Incarnation {
-	if len(in.Cleanup.Resources()) == 0 {
+	if b.cleanupKey == "" || len(in.Cleanup.Resources()) == 0 {
 		return api.Incarnation{}
 	}
-	return in
+	return api.Incarnation{ID: in.ID, Cleanup: in.Cleanup}
 }
 
 func (b *Backend) ownedEvidence(resources ...api.CleanupResource) (api.CleanupEvidence, error) {
@@ -609,7 +609,9 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	if incarnationErr != nil {
 		return b.partialIncarnation(inc), incarnationErr
 	}
-	placed.Cleanup = inc.Cleanup
+	if len(inc.Cleanup.Resources()) != 0 {
+		placed.Cleanup = inc.Cleanup
+	}
 	inc = placed
 	// The new actor was SUSPENDED and addressable until this resume (see the doc comment above).
 	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
@@ -1192,7 +1194,9 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 	if incarnationErr != nil {
 		return b.partialIncarnation(inc), incarnationErr
 	}
-	placed.Cleanup = inc.Cleanup
+	if len(inc.Cleanup.Resources()) != 0 {
+		placed.Cleanup = inc.Cleanup
+	}
 	inc = placed
 	if b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
 		if err := b.requireRecordedCheckpoint(ctx, name, info, ref, resumedNotHandedOut); err != nil {
@@ -1660,7 +1664,9 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 		b.memoryLostWarned.Delete(child)
 		return inc, err
 	}
-	placed.Cleanup = inc.Cleanup
+	if len(inc.Cleanup.Resources()) != 0 {
+		placed.Cleanup = inc.Cleanup
+	}
 	return placed, nil
 }
 
@@ -2026,7 +2032,7 @@ func (b *Backend) incarnation(ctx context.Context, uid string, info ActorInfo, o
 			return api.Incarnation{}, b.memoryNotRestored(ctx, uid, info, outcome)
 		}
 	}
-	return api.Incarnation{
+	inc := api.Incarnation{
 		ID:           uid,
 		Worker:       info.Worker,
 		Address:      b.router,
@@ -2035,7 +2041,18 @@ func (b *Backend) incarnation(ctx context.Context, uid string, info ActorInfo, o
 		// The router reaches the actor by name, so this records which actor the name resolved to
 		// when the backend looked, not which one the router reaches later.
 		ComputeInstance: instance,
-	}, nil
+	}
+	if b.cleanupKey == "" && info.UID != "" {
+		resource, err := b.cleanupResource("actor", b.atespace, uid, info.UID)
+		if err != nil {
+			return api.Incarnation{}, err
+		}
+		inc.Cleanup, err = api.NewCleanupEvidence([]api.CleanupResource{resource})
+		if err != nil {
+			return api.Incarnation{}, err
+		}
+	}
+	return inc, nil
 }
 
 // memoryNotRestored is the api.ErrMemoryStateLost refusal for a REQUIRES_MEMORY_SNAPSHOT

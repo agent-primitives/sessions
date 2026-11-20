@@ -342,6 +342,7 @@ func TestCreateBootsActor(t *testing.T) {
 		Address:      substrate.DefaultRouterAddress,
 		CallMetadata: map[string]string{"ate-target-actor": "space/sess-x"},
 		Runtime:      "substrate",
+		Cleanup:      in.Cleanup,
 	}
 	if !reflect.DeepEqual(in, want) {
 		t.Fatalf("incarnation=%+v want %+v", in, want)
@@ -3536,7 +3537,7 @@ func TestCreateRefusesANewActorCapturedBeforeItsResume(t *testing.T) {
 				return
 			}
 			if !errors.Is(err, api.ErrMemoryStateLost) || errors.Is(err, substrate.ErrActorBusy) || !reflect.DeepEqual(inc, api.Incarnation{}) {
-				t.Fatalf("create: inc=%+v err=%v, want api.ErrMemoryStateLost, not ErrActorBusy, and no incarnation", inc, err)
+				t.Fatalf("create: inc=%+v err=%v, want api.ErrMemoryStateLost and no handed-out incarnation", inc, err)
 			}
 			if st := m.statusOf("sess-x"); st != substrate.StatusRunning {
 				t.Fatalf("actor is %v, want it left running", st)

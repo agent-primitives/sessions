@@ -50,8 +50,8 @@ import (
 
 func TestSubstrateCleanupKeyBindsControlPlaneAndAtespace(t *testing.T) {
 	a := substrateCleanupKey("api.cluster:443", "", "space")
-	if a == "" || a != substrateCleanupKey("api.cluster:443", "api.cluster", "space") {
-		t.Fatalf("equivalent key=%q", a)
+	if a == "" || a != substrateCleanupKey("api.cluster:7443", "api.cluster", "space") {
+		t.Fatalf("stable server identity changed across address/port: %q", a)
 	}
 	for _, different := range []string{
 		substrateCleanupKey("other.cluster:443", "", "space"),

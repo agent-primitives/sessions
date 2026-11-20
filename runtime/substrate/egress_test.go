@@ -303,16 +303,17 @@ func TestCreateInstallsEgressPolicyBeforeResume(t *testing.T) {
 }
 
 // With no option the backend issues exactly the calls it did before egress policies existed. A
-// function that returns no policy adds only the read before it resumes an existing SUSPENDED
-// actor, which finds nothing to clear.
+// function that returns no policy adds the create of an empty policy on the actor Create makes, and
+// the read before it resumes an existing SUSPENDED actor, which finds nothing to clear.
 func TestNoEgressPolicyCalls(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		opts    []substrate.Option
-		restore []string
+		name            string
+		opts            []substrate.Option
+		create, restore []string
 	}{
-		{name: "no option", restore: []string{"get:sess-x", "resume:sess-x"}},
-		{name: "nil policy", opts: []substrate.Option{(&policyFunc{}).option()}, restore: []string{"get:sess-x", "egress-get:sess-x", "resume:sess-x"}},
+		{name: "no option", create: []string{"resume:sess-x"}, restore: []string{"get:sess-x", "resume:sess-x"}},
+		{name: "nil policy", opts: []substrate.Option{(&policyFunc{}).option()},
+			create: []string{"egress:sess-x", "resume:sess-x"}, restore: []string{"get:sess-x", "egress-get:sess-x", "resume:sess-x"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newEgressControl()
@@ -326,7 +327,30 @@ func TestNoEgressPolicyCalls(t *testing.T) {
 			if err := restoreSess(b); err != nil {
 				t.Fatal(err)
 			}
-			wantCalls(t, c.calls, append([]string{"get:sess-x", "create:sess-x", "resume:sess-x", "suspend:sess-x"}, tc.restore...))
+			wantCalls(t, c.calls, slices.Concat([]string{"get:sess-x", "create:sess-x"}, tc.create, []string{"suspend:sess-x"}, tc.restore))
+		})
+	}
+}
+
+// Removing the option does not revoke: without it, a resume of an existing SUSPENDED actor, by
+// Restore or by Create attaching to it, makes no egress call, so the policy the actor has stored
+// stays in force, unchanged and at its version.
+func TestNoEgressPolicyOptionKeepsStoredPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(*substrate.Backend) error
+	}{
+		{name: "restore", call: restoreSess},
+		{name: "create attaching", call: createSess},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newSuspendedEgressControl()
+			c.setPolicy("sess-x", testPolicy)
+			if err := tc.call(newEgressBackend(c)); err != nil {
+				t.Fatal(err)
+			}
+			wantCalls(t, c.calls, []string{"get:sess-x", "resume:sess-x"})
+			wantPolicy(t, c.policy(t, "sess-x"), testPolicy, 1)
 		})
 	}
 }
@@ -335,7 +359,8 @@ func TestNoEgressPolicyCalls(t *testing.T) {
 // existing SUSPENDED actor without asking the function: the actor can hold a policy (an
 // out-of-band edit, or one an earlier configuration stored) that only a read finds and only an
 // update clears, so resuming it would run compute on that policy. A new actor has none, so
-// creating it with no policy wanted needs no egress call, and an actor found RUNNING is attached
+// creating it with no policy wanted needs no egress call (with the client, the backend would store
+// an empty one; without it there is nothing to write with), and an actor found RUNNING is attached
 // without one, as with the client.
 func TestNilEgressPolicyWithoutClientRefusesExistingActor(t *testing.T) {
 	unsupported := func(t *testing.T, what string, err error) {
@@ -435,6 +460,39 @@ func TestFailedEgressInstallLeavesTheActorSuspended(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantCalls(t, c.calls, []string{"get:sess-x", "egress-get:sess-x", "egress:sess-x", "resume:sess-x"})
+}
+
+// A fresh actor's empty policy is a write like any other: when it fails, Create fails and leaves
+// the actor SUSPENDED, and a retry reads that it still has none, which a resume leaves as it is,
+// and resumes it without creating one; a fork's clone is torn down.
+func TestFailedFreshNilEgressPolicy(t *testing.T) {
+	denied := errors.New("rpc error: code = PermissionDenied")
+	t.Run("create", func(t *testing.T) {
+		c := newEgressControl()
+		c.createErr = denied
+		b := newEgressBackend(c, (&policyFunc{}).option())
+		if err := createSess(b); !errors.Is(err, denied) || errors.Is(err, api.ErrComputeConfigInvalid) {
+			t.Fatalf("err=%v want the install error, unclassified", err)
+		}
+		wantCalls(t, c.calls, []string{"get:sess-x", "create:sess-x", "egress:sess-x"})
+		if st := c.statusOf("sess-x"); st != substrate.StatusSuspended {
+			t.Fatalf("actor status=%v after a failed install, want SUSPENDED", st)
+		}
+		c.createErr, c.calls = nil, nil
+		if err := createSess(b); err != nil {
+			t.Fatal(err)
+		}
+		wantCalls(t, c.calls, []string{"get:sess-x", "egress-get:sess-x", "resume:sess-x"})
+	})
+	t.Run("fork clone", func(t *testing.T) {
+		c := newEgressCloner()
+		c.createErr = denied
+		if err := forkMemory(newMemoryBackend(c, (&policyFunc{}).option()), context.Background()); !errors.Is(err, denied) {
+			t.Fatalf("err=%v want the install error", err)
+		}
+		wantCalls(t, c.calls, []string{"get:parent", "tag:parent->fork-child", "get:parent", "clone:child:from=fork-child", "egress:child",
+			"get:child", "suspend:child", "delete:child", "untag:fork-child"})
+	})
 }
 
 // Every resume the backend issues on a SUSPENDED actor is preceded by the converge: attaching to
@@ -839,6 +897,7 @@ func TestEgressInstallLogsNoPolicyContents(t *testing.T) {
 		name    string
 		stored  *substrate.EgressPolicy
 		f       *policyFunc
+		call    func(*substrate.Backend) error // restoreSess when nil
 		outcome string
 		rules   int
 	}{
@@ -847,6 +906,8 @@ func TestEgressInstallLogsNoPolicyContents(t *testing.T) {
 		{name: "updated", stored: &otherPolicy, f: staticPolicy(), outcome: "updated", rules: 1},
 		{name: "cleared", stored: &testPolicy, f: &policyFunc{}, outcome: "cleared", rules: 0},
 		{name: "absent", f: &policyFunc{}, outcome: "absent", rules: 0},
+		{name: "fenced by a Sync", stored: &testPolicy, f: staticPolicy(), call: syncSess, outcome: "fenced", rules: 1},
+		{name: "empty created by a Sync", f: &policyFunc{}, call: syncSess, outcome: "created", rules: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
@@ -854,7 +915,11 @@ func TestEgressInstallLogsNoPolicyContents(t *testing.T) {
 			if tc.stored != nil {
 				c.setPolicy("sess-x", *tc.stored)
 			}
-			if err := restoreSess(newEgressBackend(c, tc.f.option(), substrate.WithLogger(debugLogger(&out)))); err != nil {
+			call := tc.call
+			if call == nil {
+				call = restoreSess
+			}
+			if err := call(newEgressBackend(c, tc.f.option(), substrate.WithLogger(debugLogger(&out)))); err != nil {
 				t.Fatal(err)
 			}
 			logs := out.String()
@@ -1207,11 +1272,384 @@ func TestEgressReadWithoutAPreconditionIsRefused(t *testing.T) {
 	}
 	wantCalls(t, c.calls, []string{"get:sess-x", "egress-get:sess-x"})
 
-	// An equal policy needs no write, so no precondition either.
+	// An equal policy needs no write on a resume, so no precondition either; a Sync writes it
+	// again, so it needs one.
 	c = newSuspendedEgressControl()
 	c.setPolicy("sess-x", testPolicy)
 	c.noPrecondition = true
-	if err := restoreSess(newEgressBackend(c, staticPolicy().option())); err != nil {
+	b := newEgressBackend(c, staticPolicy().option())
+	if err := restoreSess(b); err != nil {
 		t.Fatal(err)
 	}
+	c.calls = nil
+	err = syncSess(b)
+	if err == nil || errors.Is(err, api.ErrComputeConfigInvalid) || !strings.Contains(err.Error(), "UID and version") {
+		t.Fatalf("Sync err=%v want an unclassified error naming the missing UID and version", err)
+	}
+	wantCalls(t, c.calls, []string{"egress-get:sess-x"})
+}
+
+func syncSess(b *substrate.Backend) error {
+	return b.SyncEgressPolicy(context.Background(), "sess-x")
+}
+
+// SyncEgressPolicy converges a running actor's policy as a resume would, without resuming or
+// suspending it or reading its state, except that it always writes: an equal policy is written
+// again under the version read, and no policy wanted where none is stored creates an empty one.
+func TestSyncEgressPolicyOnARunningActor(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stored  *substrate.EgressPolicy
+		f       *policyFunc
+		calls   []string
+		want    substrate.EgressPolicy
+		version int64
+	}{
+		{name: "changed", stored: &otherPolicy, f: staticPolicy(), calls: []string{"egress-get:sess-x", "egress-update:sess-x"}, want: testPolicy, version: 2},
+		{name: "equal", stored: &testPolicy, f: staticPolicy(), calls: []string{"egress-get:sess-x", "egress-update:sess-x"}, want: testPolicy, version: 2},
+		{name: "none stored", f: staticPolicy(), calls: []string{"egress-get:sess-x", "egress:sess-x"}, want: testPolicy, version: 1},
+		{name: "nil clears", stored: &testPolicy, f: &policyFunc{}, calls: []string{"egress-get:sess-x", "egress-update:sess-x"}, version: 2},
+		{name: "nil with none stored", f: &policyFunc{}, calls: []string{"egress-get:sess-x", "egress:sess-x"}, version: 1},
+		{name: "nil with empty stored", stored: &substrate.EgressPolicy{}, f: &policyFunc{}, calls: []string{"egress-get:sess-x", "egress-update:sess-x"}, version: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newEgressControl()
+			c.exists("sess-x", substrate.StatusRunning)
+			if tc.stored != nil {
+				c.setPolicy("sess-x", *tc.stored)
+			}
+			if err := syncSess(newEgressBackend(c, tc.f.option())); err != nil {
+				t.Fatal(err)
+			}
+			wantCalls(t, c.calls, tc.calls)
+			wantPolicy(t, c.policy(t, "sess-x"), tc.want, tc.version)
+			if st := c.statusOf("sess-x"); st != substrate.StatusRunning {
+				t.Fatalf("actor status=%v, want RUNNING", st)
+			}
+		})
+	}
+	t.Run("a suspended actor is not resumed", func(t *testing.T) {
+		c := newSuspendedEgressControl()
+		c.setPolicy("sess-x", otherPolicy)
+		if err := syncSess(newEgressBackend(c, staticPolicy().option())); err != nil {
+			t.Fatal(err)
+		}
+		wantCalls(t, c.calls, []string{"egress-get:sess-x", "egress-update:sess-x"})
+		if st := c.statusOf("sess-x"); st != substrate.StatusSuspended {
+			t.Fatalf("actor status=%v, want SUSPENDED", st)
+		}
+	})
+}
+
+// A Sync for a session without an actor has nothing to apply a policy to: one the function wants
+// is ErrActorNotFound, and no policy is no error, also when the actor is deleted between the
+// Sync's read and its write.
+func TestSyncEgressPolicyWithoutAnActor(t *testing.T) {
+	c := newEgressControl()
+	err := syncSess(newEgressBackend(c, staticPolicy().option()))
+	if !errors.Is(err, substrate.ErrActorNotFound) || errors.Is(err, api.ErrComputeConfigInvalid) {
+		t.Fatalf("err=%v want ErrActorNotFound", err)
+	}
+	wantCalls(t, c.calls, []string{"egress-get:sess-x", "egress:sess-x"})
+
+	c = newEgressControl()
+	if err := syncSess(newEgressBackend(c, (&policyFunc{}).option())); err != nil {
+		t.Fatal(err)
+	}
+	wantCalls(t, c.calls, []string{"egress-get:sess-x", "egress:sess-x"})
+
+	for _, tc := range []struct {
+		name   string
+		stored *substrate.EgressPolicy
+		f      *policyFunc
+		write  string
+		found  bool
+	}{
+		{name: "none wanted, empty stored", stored: &substrate.EgressPolicy{}, f: &policyFunc{}, write: "egress-update:sess-x"},
+		{name: "none wanted, rules stored", stored: &testPolicy, f: &policyFunc{}, write: "egress-update:sess-x"},
+		{name: "none wanted, none stored", f: &policyFunc{}, write: "egress:sess-x"},
+		{name: "a policy wanted", stored: &testPolicy, f: returning(otherPolicy), write: "egress-update:sess-x", found: true},
+	} {
+		t.Run("deleted before the write: "+tc.name, func(t *testing.T) {
+			c := newEgressControl()
+			c.exists("sess-x", substrate.StatusRunning)
+			if tc.stored != nil {
+				c.setPolicy("sess-x", *tc.stored)
+			}
+			c.beforeCreate = func(name string) { c.delete(name) }
+			c.beforeUpdate = c.beforeCreate
+			err := syncSess(newEgressBackend(c, tc.f.option()))
+			if got := errors.Is(err, substrate.ErrActorNotFound); got != tc.found || (!tc.found && err != nil) {
+				t.Fatalf("err=%v, want ErrActorNotFound only when a policy is wanted", err)
+			}
+			wantCalls(t, c.calls, []string{"egress-get:sess-x", tc.write})
+		})
+	}
+}
+
+// A Sync that cannot run makes no call; its errors are classified as a resume's.
+func TestSyncEgressPolicyErrors(t *testing.T) {
+	t.Run("without WithEgressPolicy", func(t *testing.T) {
+		c := newEgressControl()
+		c.exists("sess-x", substrate.StatusRunning)
+		if err := syncSess(newEgressBackend(c)); err == nil || errors.Is(err, api.ErrComputeConfigInvalid) {
+			t.Fatalf("err=%v want an unclassified error", err)
+		}
+		wantCalls(t, c.calls, nil)
+	})
+	t.Run("without a session", func(t *testing.T) {
+		c := newEgressControl()
+		f := staticPolicy()
+		if err := newEgressBackend(c, f.option()).SyncEgressPolicy(context.Background(), ""); err == nil {
+			t.Fatal("Sync of an empty session uid succeeded")
+		}
+		wantCalls(t, c.calls, nil)
+		if len(f.seen) != 0 {
+			t.Fatalf("policy function asked for %v", f.seen)
+		}
+	})
+	t.Run("without EgressPolicyClient", func(t *testing.T) {
+		m := &mockControl{info: running("worker-a")}
+		m.exists("sess-x", substrate.StatusRunning)
+		if err := syncSess(newBackend(m, staticPolicy().option())); !errors.Is(err, substrate.ErrEgressPolicyUnsupported) || !errors.Is(err, api.ErrComputeConfigInvalid) {
+			t.Fatalf("err=%v want ErrEgressPolicyUnsupported", err)
+		}
+		// Even with no policy wanted: the actor can hold one that only a read finds and only an
+		// update clears. The function is not asked.
+		none := &policyFunc{}
+		if err := syncSess(newBackend(m, none.option())); !errors.Is(err, substrate.ErrEgressPolicyUnsupported) || !errors.Is(err, api.ErrComputeConfigInvalid) {
+			t.Fatalf("nil policy: err=%v want ErrEgressPolicyUnsupported", err)
+		}
+		if len(none.seen) != 0 {
+			t.Fatalf("policy function asked for %v", none.seen)
+		}
+		wantCalls(t, m.calls, nil)
+	})
+	t.Run("refused", func(t *testing.T) {
+		c := newEgressControl()
+		c.exists("sess-x", substrate.StatusRunning)
+		c.setPolicy("sess-x", otherPolicy)
+		c.updateErr = fmt.Errorf("%w: rpc error: code = InvalidArgument desc = %s", substrate.ErrEgressPolicyInvalid, substrateText)
+		err := syncSess(newEgressBackend(c, staticPolicy().option()))
+		if !errors.Is(err, api.ErrComputeConfigInvalid) || strings.Contains(err.Error(), substrateText) {
+			t.Fatalf("err=%v want api.ErrComputeConfigInvalid without the client's text", err)
+		}
+	})
+	t.Run("conflicts exhausted", func(t *testing.T) {
+		c := newEgressControl()
+		c.exists("sess-x", substrate.StatusRunning)
+		c.setPolicy("sess-x", otherPolicy)
+		c.beforeUpdate = func(name string) { c.bump(name, otherPolicy) }
+		if err := syncSess(newEgressBackend(c, staticPolicy().option())); !errors.Is(err, substrate.ErrActorBusy) {
+			t.Fatalf("err=%v want ErrActorBusy", err)
+		}
+	})
+}
+
+// A Sync after a change to the function's answer is not undone by a resume converging at the same
+// time on the same actor: whichever reads second asks the function after the change, and a write
+// based on an older read conflicts and starts over.
+func TestSyncEgressPolicyRacesAResume(t *testing.T) {
+	newer := substrate.EgressPolicy{Rules: []substrate.EgressRule{{Protocol: substrate.EgressHTTPS, Hostnames: []string{"newer.example.com"}}}}
+	t.Run("Sync before the resume reads", func(t *testing.T) {
+		c := newSuspendedEgressControl()
+		c.setPolicy("sess-x", testPolicy)
+		f := staticPolicy()
+		b := newEgressBackend(c, f.option())
+		c.beforeGet = func(string) {
+			c.beforeGet = nil
+			f.policy = &newer
+			if err := syncSess(b); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := restoreSess(b); err != nil {
+			t.Fatal(err)
+		}
+		wantCalls(t, c.calls, []string{"get:sess-x", "egress-get:sess-x", "egress-get:sess-x", "egress-update:sess-x", "resume:sess-x"})
+		wantPolicy(t, c.policy(t, "sess-x"), newer, 2)
+	})
+	t.Run("Sync between the resume's read and its write", func(t *testing.T) {
+		c := newSuspendedEgressControl()
+		c.setPolicy("sess-x", otherPolicy)
+		f := staticPolicy()
+		b := newEgressBackend(c, f.option())
+		c.beforeUpdate = func(string) {
+			c.beforeUpdate = nil
+			f.policy = &newer
+			if err := syncSess(b); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := restoreSess(b); err != nil {
+			t.Fatal(err)
+		}
+		wantCalls(t, c.calls, []string{"get:sess-x", "egress-get:sess-x", "egress-update:sess-x",
+			"egress-get:sess-x", "egress-update:sess-x", // the Sync
+			"egress-get:sess-x", "resume:sess-x"})
+		wantPolicy(t, c.policy(t, "sess-x"), newer, 2)
+	})
+	t.Run("Sync between CreateActor and the fresh policy", func(t *testing.T) {
+		c := newEgressControl()
+		f := staticPolicy()
+		b := newEgressBackend(c, f.option())
+		c.beforeCreate = func(string) {
+			c.beforeCreate = nil
+			f.policy = &newer
+			if err := syncSess(b); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := createSess(b); err != nil {
+			t.Fatal(err)
+		}
+		wantCalls(t, c.calls, []string{"get:sess-x", "create:sess-x", "egress:sess-x",
+			"egress-get:sess-x", "egress:sess-x", // the Sync
+			"egress-get:sess-x", "resume:sess-x"})
+		wantPolicy(t, c.policy(t, "sess-x"), newer, 1)
+	})
+}
+
+// staleConfig is a WithEgressPolicy function whose configured policy changes from old to new during
+// its nth call. That call runs during after the change (a Sync, or a Create, racing the caller) and
+// still returns old: an answer evaluated before the change and written late. Later calls, the ones
+// during makes included, return new.
+type staleConfig struct {
+	old, new *substrate.EgressPolicy
+	n, calls int
+	during   func()
+}
+
+func (f *staleConfig) option() substrate.Option {
+	return substrate.WithEgressPolicy(func(context.Context, *api.SessionSpec) (*substrate.EgressPolicy, error) {
+		f.calls++
+		if f.calls < f.n {
+			return f.old, nil
+		}
+		if f.calls > f.n {
+			return f.new, nil
+		}
+		f.during()
+		return f.old, nil
+	})
+}
+
+// A fresh actor whose function returns no policy gets an empty one, created without a read like any
+// other: a policy another writer created on it after CreateActor (a stale Sync, or another host)
+// is then a conflict, and the next attempt reads and clears it, instead of resuming the actor on
+// it. A fork's clone is refused and torn down instead (TestForkCloneRefusesAPolicyCreatedFirst).
+func TestFreshNilEgressPolicyClearsAnotherWritersPolicy(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		c := newEgressControl()
+		f := &policyFunc{}
+		f.onCall = func(f *policyFunc) {
+			if len(f.seen) == 2 { // after CreateActor
+				c.setPolicy("sess-x", testPolicy)
+			}
+		}
+		if err := createSess(newEgressBackend(c, f.option())); err != nil {
+			t.Fatal(err)
+		}
+		wantPolicy(t, c.policy(t, "sess-x"), substrate.EgressPolicy{}, 2)
+		wantCalls(t, c.calls, []string{"get:sess-x", "create:sess-x", "egress:sess-x", "egress-get:sess-x", "egress-update:sess-x", "resume:sess-x"})
+	})
+	t.Run("fork clone", func(t *testing.T) {
+		c := newEgressCloner()
+		f := &policyFunc{}
+		f.onCall = func(f *policyFunc) {
+			if len(f.seen) == 2 { // after the clone
+				c.setPolicy("child", testPolicy)
+			}
+		}
+		if err := forkMemory(newMemoryBackend(c, f.option()), context.Background()); !errors.Is(err, substrate.ErrActorBusy) {
+			t.Fatalf("err=%v want ErrActorBusy", err)
+		}
+		wantCalls(t, c.calls, []string{"get:parent", "tag:parent->fork-child", "get:parent", "clone:child:from=fork-child",
+			"egress:child", "get:child", "suspend:child", "delete:child", "untag:fork-child"})
+	})
+}
+
+// A Sync that read before the actor existed, and asked the function before the configuration
+// changed to no policy, does not leave its stale policy on the actor a Create made in between: the
+// fresh actor's empty policy makes the Sync's create conflict, and its next attempt reads and asks
+// the function again.
+func TestStaleSyncCreateAfterAFreshNilActor(t *testing.T) {
+	c := newEgressControl()
+	f := staticPolicy()
+	b := newEgressBackend(c, f.option())
+	c.beforeCreate = func(string) {
+		c.beforeCreate = nil
+		f.policy = nil
+		if err := createSess(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := syncSess(b); err != nil {
+		t.Fatal(err)
+	}
+	wantPolicy(t, c.policy(t, "sess-x"), substrate.EgressPolicy{}, 2)
+	wantCalls(t, c.calls, []string{"egress-get:sess-x", "egress:sess-x",
+		"get:sess-x", "create:sess-x", "egress:sess-x", "resume:sess-x", // the Create
+		"egress-get:sess-x", "egress-update:sess-x"})
+}
+
+// Every Sync writes, even when the stored policy already matches, so the version it writes fences
+// a converge that read before it: a stale answer that converge got from the function, before the
+// change Sync applied, conflicts and is asked again, instead of undoing the Sync.
+func TestSyncFencesAStaleConverge(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		stored        *substrate.EgressPolicy
+		stale, config *substrate.EgressPolicy
+		calls         []string
+		want          substrate.EgressPolicy
+		version       int64
+	}{
+		{name: "none stored, none configured", stale: &testPolicy,
+			calls: []string{"egress-get:sess-x", "egress-get:sess-x", "egress:sess-x", "egress:sess-x", "egress-get:sess-x"},
+			want:  substrate.EgressPolicy{}, version: 1},
+		{name: "equal policy", stored: &testPolicy, stale: &otherPolicy, config: &testPolicy,
+			calls: []string{"egress-get:sess-x", "egress-get:sess-x", "egress-update:sess-x", "egress-update:sess-x", "egress-get:sess-x"},
+			want:  testPolicy, version: 2},
+		{name: "empty stored, none configured", stored: &substrate.EgressPolicy{}, stale: &otherPolicy,
+			calls: []string{"egress-get:sess-x", "egress-get:sess-x", "egress-update:sess-x", "egress-update:sess-x", "egress-get:sess-x"},
+			want:  substrate.EgressPolicy{}, version: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newSuspendedEgressControl()
+			if tc.stored != nil {
+				c.setPolicy("sess-x", *tc.stored)
+			}
+			var b *substrate.Backend
+			f := &staleConfig{old: tc.stale, new: tc.config, n: 1, during: func() {
+				if err := syncSess(b); err != nil {
+					t.Fatal(err)
+				}
+			}}
+			b = newEgressBackend(c, f.option())
+			if err := restoreSess(b); err != nil {
+				t.Fatal(err)
+			}
+			wantPolicy(t, c.policy(t, "sess-x"), tc.want, tc.version)
+			wantCalls(t, c.calls, append(append([]string{"get:sess-x"}, tc.calls...), "resume:sess-x"))
+		})
+	}
+	t.Run("fresh create with a stale policy", func(t *testing.T) {
+		c := newEgressControl()
+		var b *substrate.Backend
+		// Call 1 is the check before CreateActor, call 2 the fresh converge's.
+		f := &staleConfig{old: &testPolicy, n: 2, during: func() {
+			if err := syncSess(b); err != nil {
+				t.Fatal(err)
+			}
+		}}
+		b = newEgressBackend(c, f.option())
+		if err := createSess(b); err != nil {
+			t.Fatal(err)
+		}
+		wantPolicy(t, c.policy(t, "sess-x"), substrate.EgressPolicy{}, 1)
+		wantCalls(t, c.calls, []string{"get:sess-x", "create:sess-x",
+			"egress-get:sess-x", "egress:sess-x", // the Sync
+			"egress:sess-x", "egress-get:sess-x", "resume:sess-x"})
+	})
 }

@@ -250,12 +250,17 @@ The egress policy is runtime configuration: which hosts and ports the harness's 
 and which credential the egress injects on a matching request. The journal does not record it. On
 substrate, `substrate.WithEgressPolicy` or the daemon's `-substrate-egress-policy-file` sets the
 Substrate `EgressPolicy` of each session's actor before every backend resume of a suspended actor,
-so compute the backend resumes never runs a turn without the policy, or with one the configuration
-no longer holds. An actor already running when the backend reaches it, or woken by the Substrate
-router, keeps its stored policy until it is suspended and the backend resumes it. The policy
-holds credential references (`ate-secret://...`) or an actor JWT audience, never a credential
-value. The backend's install log records the rule count, the outcome and an `error_kind`, not the
-rules. A policy Substrate refuses as invalid reaches callers as fixed text (`FAILED_PRECONDITION`,
+so while the option is set, the backend resumes an actor only once its stored policy matches the
+configuration. Substrate enforces a stored policy through its policy caches (about 10 seconds for
+requests and new connections, 5 seconds for DNS on v1.0.0), so requests a resumed actor makes soon
+after a change can still be judged by the policy cached before its suspend. Without the option, or
+with the flag empty, the backend makes no egress call, and an existing actor resumes with whatever
+policy it has stored. An actor already running when the backend reaches it, or woken by the
+Substrate router, keeps its stored policy until it is suspended and the backend resumes it, or until
+`substrate.Backend.SyncEgressPolicy` applies the change. The policy holds credential references
+(`ate-secret://...`) or an actor JWT audience, never a credential value. The backend's install log
+records the rule count, the outcome and an `error_kind`, not the rules. A policy Substrate
+refuses as invalid reaches callers as fixed text (`FAILED_PRECONDITION`,
 `COMPUTE_CONFIG_INVALID`), without Substrate's message, which can name a rejected hostname or
 credential reference. A policy call Substrate refuses because another operation holds the actor
 (`ABORTED`, `COMPUTE_BUSY`) leaves Substrate's message out as well. Other install failures keep the
@@ -263,28 +268,39 @@ backend error's text, which reaches callers when authorization is off. A daemon 
 policy file that does not parse can quote the offending JSON token; it goes only to the operator.
 
 - **Fail closed.** A configured policy that the control client cannot install, or that Substrate
-  refuses, fails the call and leaves the actor suspended. A control client that cannot read and
-  update policies fails every resume of an existing actor, even when no policy is configured,
-  since only a read finds a stored policy and only an update clears it. An actor without a policy
-  is deny-all.
+  refuses, fails the call and leaves the actor suspended. With the option set, a control client
+  that cannot read and update policies fails every resume of an existing actor and every Sync, even
+  when the function returns no policy, since only a read finds a stored policy and only an update
+  clears it. An actor without a policy is deny-all.
 - **Changes reach existing actors at their next backend resume.** The backend reads the stored
   policy and replaces it when it differs from the configured one, under the stored version, so a
-  tightened policy reaches each existing session the next time the backend resumes it. An actor the
-  Substrate router wakes for a routed request is resumed without the backend, so it keeps its stored
-  policy, and the backend then finds it running. A policy that no longer configures any rule is
-  cleared to an empty rule set (deny-all), never deleted.
+  tightened policy is stored before the backend next resumes each existing session, and its traffic
+  follows within Substrate's policy caches. An actor the Substrate router wakes for a routed request
+  is resumed without the backend, so it keeps its stored policy, and the backend then finds it
+  running. A policy that no longer configures any rule is cleared to an empty rule set (deny-all),
+  never deleted.
 - **The configuration is authoritative, if the backend is the only policy writer.** A policy
   edited in Substrate by anyone else is overwritten at the actor's next backend resume while the
   option is set. A stored policy the control client cannot read is refused, not overwritten. The
-  backend's preconditions order its own converges, not other writers: a policy another identity
-  stores between a converge and `ResumeActor`, or on a running actor, is enforced until the actor's
-  next converge. Keep the backend's identity the only writer of egress policies in its atespace.
-  Substrate v1 policy calls name the actor, not its UID, so a fork whose clone is replaced, before
-  its policy is created, by an actor with no policy creates the child's policy on that actor and
-  resumes it; the fork then fails `ABORTED` and leaves it running. A clone that already has a
-  policy is refused without a write.
-- **Running compute is not changed.** An actor already running when the backend reaches it keeps
-  whatever policy it has, or stays deny-all without one, until it is suspended and resumed.
+  backend's preconditions order its own converges and Syncs, not other writers: a policy another
+  identity stores between a converge and `ResumeActor`, or on a running actor, is enforced until
+  the actor's next converge. Keep the backend's identity the only writer of egress policies in its
+  atespace. Substrate v1 policy calls name the actor, not its UID, so a fork whose clone is
+  replaced, before its policy is created, by an actor with no policy creates the child's policy on
+  that actor and resumes it; the fork then fails `ABORTED` and leaves it running. A clone that
+  already has a policy is refused without a write.
+- **Running compute changes only on a Sync.** An actor already running when the backend reaches it
+  keeps whatever policy it has, or stays deny-all without one, until it is suspended and resumed.
+  `substrate.Backend.SyncEgressPolicy` applies a changed policy to a running actor. Change the
+  configuration, then call it: a Sync always writes, so a converge that read the stored policy
+  before it cannot undo it. Its effect on traffic is bounded by the same policy caches, and an open
+  TLS passthrough connection is not cut. The daemon does not call it.
+- **Removing the option does not revoke.** Without the option, or with the daemon's flag empty,
+  each stored policy stays in force on its actor. To revoke, keep the option with a function that
+  returns no policy, or restart the daemon with a file holding `{}` (no rules): each stored policy
+  is then cleared to an empty rule set (deny-all) at the actor's next backend resume. Until then a
+  running actor, and one the Substrate router wakes, keeps its rules, as above; a host clears a
+  running actor with a Sync, which the daemon does not call.
 
 See [Actor egress policy](substrate-conformance.md#actor-egress-policy) for the install points
 and the comparison.

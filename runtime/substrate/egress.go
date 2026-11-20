@@ -146,13 +146,14 @@ var ErrEgressPolicyNotFound = errors.New("substrate: actor egress policy not fou
 var ErrEgressPolicyInvalid = errors.New("substrate: actor egress policy is invalid")
 
 // ErrEgressPolicyUnsupported is returned when WithEgressPolicy is set but the backend's
-// ControlClient does not implement EgressPolicyClient, and the backend would have to read or
-// write a policy: before it resumes an existing SUSPENDED actor, whatever the function returns (a
-// nil result must clear a stored policy, which takes a read and an update), and before Create or
-// Fork creates an actor when the function returns a policy. A
-// function that returns nil for a new actor needs no call, since a new actor has no policy. No
-// actor is resumed: starting compute on a policy the backend cannot converge is refused. The
-// backend's error also wraps api.ErrComputeConfigInvalid.
+// ControlClient does not implement EgressPolicyClient, and the backend would have to read or write
+// a policy: before it resumes an existing SUSPENDED actor and on every SyncEgressPolicy, whatever
+// the function returns (a nil result must clear a stored policy, which takes a read and an update),
+// and before Create or Fork creates an actor when the function returns a policy. Without the
+// client, a function that returns nil for a new actor is not refused: a new actor has no policy,
+// which is deny-all, and there is nothing to write with. No actor is resumed: starting compute on a
+// policy the backend cannot converge is refused. The backend's error also wraps
+// api.ErrComputeConfigInvalid.
 var ErrEgressPolicyUnsupported = errors.New("substrate: egress policy configured but the control client does not implement EgressPolicyClient")
 
 // errEgressPolicyFunc marks an error returned by the WithEgressPolicy function.
@@ -162,39 +163,45 @@ var errEgressPolicyFunc = errors.New("substrate: egress policy function")
 var errEgressPolicyInstall = errors.New("substrate: install egress policy")
 
 // WithEgressPolicy converges each actor's egress policy on the one policy returns before the
-// backend resumes a SUSPENDED actor (one it created or found suspended), so compute
-// the backend resumes never runs without it, and never runs with a policy the function no longer
-// returns. An actor already RUNNING when the backend reaches it, or one the substrate router wakes,
-// keeps its stored policy until it is suspended and the backend resumes it. policy returns the
-// policy for one session; nil, with no error, is deny-all: an actor without a policy is left without
-// one, and one that has a policy is cleared to an empty rule set, which substrate also enforces as
-// deny-all.
+// backend resumes a SUSPENDED actor (one it created or found suspended), so the backend resumes
+// an actor only once its stored policy is the one the function returns, or deny-all for nil.
+// Substrate enforces a stored policy through its caches (see Backend.SyncEgressPolicy), so requests
+// a resumed actor makes soon after a change can still be judged by the policy cached before its
+// suspend. An actor already RUNNING when the backend reaches it, or one the substrate router wakes,
+// keeps its stored policy until it is suspended and the backend resumes it, or until
+// Backend.SyncEgressPolicy applies the change. policy returns the policy for one session; nil, with
+// no error, is deny-all, stored as an empty rule set: an actor the backend creates gets an empty
+// policy, an existing actor without a policy is left without one, and one that has rules is cleared
+// to an empty rule set. Substrate v1.0.0 enforces an empty rule set as it does no policy (its
+// egress gateway denies both, cmd/atenet/internal/router/egress/egress.go, and its DNS answers no
+// name for either, internal/atunnel/dns/evaluator.go), and deletes the policy with the actor.
 //
 // policy receives a spec whose SessionUID is set (the child's on Fork). No other field is set
 // today, on any path; later releases may set more, so key per-session policies on SessionUID and do
 // not rely on other fields being zero. It must return the current policy each time it is called,
-// read after any change made before the call: the backend calls it after reading the actor's
-// stored policy, so that a write it bases on the result cannot undo a newer one, and a function
-// that caches converges only as fresh as its cache. It may run several times in one backend call:
-// once before Create creates an actor and before Fork tags the parent (so an error, or a policy
-// with a ControlClient without EgressPolicyClient, refuses before any actor exists; that result is
-// never written), and once for each attempt to converge, up to three. An error from any call
-// fails the backend call without resuming the actor, and is not retried. Return rules in a stable
-// order: rule order is compared, so a reordered policy is written again.
+// read after any change made before the call: the backend calls it after reading the actor's stored
+// policy, so that a write it bases on the result cannot undo a newer one, and a function that
+// caches converges only as fresh as its cache. It may run several times in one backend call: once
+// before Create creates an actor and before Fork tags the parent (so an error, or a policy with a
+// ControlClient without EgressPolicyClient, refuses before any actor exists; that result is never
+// written), and once for each attempt to converge, up to three, whatever it returns. An error from
+// any call fails the backend call without resuming the actor, and is not retried. Return rules in a
+// stable order: rule order is compared, so a reordered policy is written again.
 //
 // Converging reads the stored policy (GetActorEgressPolicy) and compares it with the configured
 // one by meaning: a rule that leaves its ports unset equals one with substrate's default port
-// stored, and hostnames and ports compare as sets. An equal policy is left as it is, so an
-// unchanged policy costs one read and no write. A different one is replaced with
-// UpdateActorEgressPolicy, preconditioned on the UID and version just read, and a missing one is
-// created. An actor the backend has just created (Create, or a fork's create from tag) has no
-// policy, so it is created without a read. A precondition that no longer holds (another writer
-// changed the policy, or created one first) starts the read, the call to policy and the write
-// over, up to three attempts in all, then fails with ErrActorBusy, which is retryable. A fork's
-// clone is the exception: one that already has a policy when the backend creates one is refused
-// with ErrActorBusy and torn down, and nothing is written, since the actor under the child's name
-// may no longer be the clone and a policy call cannot tell (it names the actor, not its UID). The
-// backend never deletes a policy.
+// stored, and hostnames and ports compare as sets. On a resume an equal policy is left as it is, so
+// an unchanged policy costs one read and no write (SyncEgressPolicy writes it again, which costs a
+// write, not a call). A different one is replaced with UpdateActorEgressPolicy, preconditioned on
+// the UID and version just read, and a missing one is created. An actor the backend has just
+// created (Create, or a fork's create from tag) has no policy, so it gets the configured policy,
+// or an empty one for nil, without a read. A precondition that no longer holds (another writer
+// changed the policy, or created one first) starts the read, the call to policy and the write over,
+// up to three attempts in all, then fails with ErrActorBusy, which is retryable. A fork's clone is
+// the exception: one that already has a policy when the backend creates one is refused with
+// ErrActorBusy and torn down, and nothing is written, since the actor under the child's name may no
+// longer be the clone and a policy call cannot tell (it names the actor, not its UID). The backend
+// never deletes a policy.
 //
 // The converge runs between the backend's CreateActor (or a fork's create from tag) and its
 // ResumeActor, and before every later ResumeActor the backend issues on a SUSPENDED actor: Create
@@ -204,12 +211,12 @@ var errEgressPolicyInstall = errors.New("substrate: install egress policy")
 // backend makes no egress call, and policies already stored are kept.
 //
 // The configured policy is authoritative only if the backend's identity is the only writer of
-// policies in its atespace. Preconditions order the backend's own converges, not another writer: a
-// policy another writer stores between the converge and ResumeActor, or on a running actor, takes
-// effect until the actor's next converge. Substrate v1 policy calls carry no actor UID
-// precondition either: if a fork's clone is replaced, before its policy is created, by an actor
-// with no policy, the child's policy is created on that actor and Fork's resume wakes it, and Fork
-// then fails with ErrActorBusy and leaves it running.
+// policies in its atespace. Preconditions order the backend's own converges and SyncEgressPolicy
+// calls, not another writer: a policy another writer stores between the converge and ResumeActor,
+// or on a running actor, takes effect until the actor's next converge. Substrate v1 policy calls
+// carry no actor UID precondition either: if a fork's clone is replaced, before its policy is
+// created, by an actor with no policy, the child's policy is created on that actor and Fork's
+// resume wakes it, and Fork then fails with ErrActorBusy and leaves it running.
 //
 // Refusals that repeat until the configuration changes wrap api.ErrComputeConfigInvalid
 // (FAILED_PRECONDITION at the Sessions API): a ControlClient without EgressPolicyClient
@@ -219,10 +226,64 @@ var errEgressPolicyInstall = errors.New("substrate: install egress policy")
 // policy itself, and any other egress call failure, is not classified.
 //
 // The backend issues no egress call for an actor it finds RUNNING (Create attaching to it, or
-// Restore of it): a turn does not pay for a policy read. A running actor keeps the policy it has
+// Restore of it): a turn does not pay for a policy read. Call Backend.SyncEgressPolicy after a
+// change to apply it to running compute; without that, a running actor keeps the policy it has
 // until it is suspended and the backend resumes it.
 func WithEgressPolicy(policy func(ctx context.Context, s *api.SessionSpec) (*EgressPolicy, error)) Option {
 	return func(b *Backend) { b.egressPolicy = policy }
+}
+
+// Errors of SyncEgressPolicy called without what it needs.
+var (
+	errEgressPolicyNotConfigured = errors.New("substrate: SyncEgressPolicy needs WithEgressPolicy")
+	errSyncRequiresSessionUID    = errors.New("substrate: SyncEgressPolicy requires a session uid")
+)
+
+// SyncEgressPolicy converges the egress policy of sessionUID's actor on the one the
+// WithEgressPolicy function returns now, as the backend does before it resumes a SUSPENDED actor,
+// whatever state the actor is in: it reads the stored policy, asks the function, and writes the
+// result under the version it read. Unlike a resume it writes even when nothing differs: an equal
+// policy is written again, and with none stored and none returned it creates an empty one. It
+// neither resumes nor suspends the actor. Call it after changing what the function returns, to
+// apply the change to a running actor without waiting for its next resume; a call that started
+// before the change is not expected to reflect it. Call it on the backend that places the session:
+// with a placement registry whose backends configure different functions, each converges the actor
+// on its own.
+//
+// The protocol is: change the function, then call SyncEgressPolicy. A call that returns nil cannot
+// be undone by a converge (a resume, Create, Fork or another Sync) that read the stored policy, or
+// asked the function, before this call wrote: every write is preconditioned, an update on the
+// version its read found and a create on there being no policy, and every Sync writes, so such a
+// converge conflicts, reads again and asks again, after the change. A resume that writes nothing
+// fences nothing, so a change applied only by resumes carries no such guarantee. On an actor that
+// does not exist yet the call writes nothing; the backend's create of that actor asks the function
+// afterwards and stores its policy, or an empty one, and that create is what a stale writer
+// conflicts with. This relies on Substrate moving the version on every update, an unchanged policy
+// included, as Substrate v1.0.0 does (cmd/ateapi/internal/store/atepg/egress_policy.go).
+//
+// It returns an error, and makes no call, without WithEgressPolicy. An actor that does not exist is
+// ErrActorNotFound when the function returns a policy (the next Create installs it), and is no
+// error when it returns none, also when the actor is deleted during the call. Errors are classified
+// as on a resume: ErrActorBusy after three conflicting writers, a policy the client refuses or a
+// stored policy it cannot read as api.ErrComputeConfigInvalid, and ErrEgressPolicyUnsupported for a
+// ControlClient without EgressPolicyClient, whatever the function returns and without calling it.
+//
+// On Substrate v1.0.0, "applies" is bounded by Substrate's caches: the egress gateway acts on a
+// fetched policy for up to 10 seconds by default (its --egress-policy-cache-ttl,
+// cmd/atenet/internal/router/egress/policycache.go) for each new HTTP request, intercepted HTTPS
+// request and new connection, and the actor's DNS answers follow within 5 seconds, keeping the
+// last policy while a fetch fails (internal/atunnel/egresspolicy.go). A TLS passthrough connection
+// is allowed once, on its SNI, so one already open stays open until it closes.
+func (b *Backend) SyncEgressPolicy(ctx context.Context, sessionUID string) error {
+	if b.egressPolicy == nil {
+		return errEgressPolicyNotConfigured
+	}
+	if sessionUID == "" {
+		return errSyncRequiresSessionUID
+	}
+	e := b.egressFor(sessionUID)
+	e.fence = true
+	return e.converge(ctx, b.ref(sessionUID), false)
 }
 
 // egressConvergeAttempts bounds the read, evaluate and write attempts of one converge. Each
@@ -233,6 +294,10 @@ const egressConvergeAttempts = 3
 type egressConverge struct {
 	b          *Backend
 	sessionUID string
+	// fence makes every attempt write, even when the stored policy already matches
+	// (SyncEgressPolicy): the write moves the version, so a converge that read before it conflicts
+	// and asks again.
+	fence bool
 	// clone marks the converge of a stateful fork's clone (Fork). Its fresh create finding a policy
 	// is refused, not converged: the host has not recorded the child yet, so the policy is not one
 	// of this backend's, and the actor under the name may no longer be the clone (policy calls name
@@ -284,16 +349,17 @@ const (
 	egressUnchanged = "unchanged" // the stored policy already equals the configured one
 	egressUpdated   = "updated"   // the stored policy replaced with the configured one
 	egressCleared   = "cleared"   // the stored policy replaced with an empty (deny-all) rule set
+	egressFenced    = "fenced"    // an equal stored policy written again to move its version (Sync)
 )
 
 // converge makes actor's stored policy the session's configured one. fresh says the actor was just
-// created by this backend call, so it has no policy and the first attempt creates without a read.
-// The error wraps the client's, so ErrActorNotFound and ErrActorBusy still classify it; a busy
-// refusal (api.ErrComputeBusy) keeps the client's error in its chain but not in its text
-// (busyRefusal); a policy the client refuses or cannot read (ErrEgressPolicyInvalid) is
-// egressPolicyRefusedError. Without the option it does nothing. Without EgressPolicyClient it
-// refuses an existing actor whatever the function returns, and a fresh one only when the function
-// returns a policy.
+// created by this backend call, so it has no policy and the first attempt creates the configured
+// one, or an empty one for none, without a read. The error wraps the client's, so ErrActorNotFound
+// and ErrActorBusy still classify it; a busy refusal (api.ErrComputeBusy) keeps the client's error
+// in its chain but not in its text (busyRefusal); a policy the client refuses or cannot read
+// (ErrEgressPolicyInvalid) is egressPolicyRefusedError. Without the option it does nothing. Without
+// EgressPolicyClient it refuses an existing actor whatever the function returns, and a fresh one
+// only when the function returns a policy.
 func (e *egressConverge) converge(ctx context.Context, actor ActorRef, fresh bool) error {
 	if e.b.egressPolicy == nil {
 		return nil
@@ -379,24 +445,28 @@ func (e *egressConverge) attempts(ctx context.Context, client EgressPolicyClient
 }
 
 // createFresh is the first attempt on an actor this call just created. The function is asked only
-// now, after the actor exists, so what it returns reflects any change made before the actor did; a
-// policy created in between (ErrEgressPolicyExists) is a conflict, and the next attempt reads it.
-// On a fork's clone the conflict is refused instead (clone).
+// now, after the actor exists, so what it returns reflects any change made before the actor did.
+// No policy is created as an empty one, which substrate enforces as none: a policy another writer
+// created on the actor, before this create or after it, then conflicts (ErrEgressPolicyExists),
+// and that writer's next attempt, or this one's, reads it. On a fork's clone the conflict is
+// refused instead (clone).
 func (e *egressConverge) createFresh(ctx context.Context, client EgressPolicyClient, actor ActorRef, res *egressResult) (conflict, err error) {
 	policy, err := e.desired(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if policy == nil {
-		res.rules, res.outcome = 0, egressAbsent
-		return nil, nil
+	want := EgressPolicy{}
+	if policy != nil {
+		want = *policy
 	}
-	res.rules = len(policy.Rules)
-	return e.create(ctx, client, actor, *policy, res)
+	res.rules = len(want.Rules)
+	return e.create(ctx, client, actor, want, res)
 }
 
 // convergeExisting is one attempt on an actor that may already have a policy: read it, ask the
-// function, and write only what differs, preconditioned on what was read.
+// function, and write only what differs, preconditioned on what was read. With fence it also writes
+// what does not differ: an empty policy when none is stored and none is wanted, and the stored one
+// again when it is equal.
 func (e *egressConverge) convergeExisting(ctx context.Context, client EgressPolicyClient, actor ActorRef, res *egressResult) (conflict, err error) {
 	stored, err := client.GetActorEgressPolicy(ctx, actor)
 	found := err == nil
@@ -419,20 +489,22 @@ func (e *egressConverge) convergeExisting(ctx context.Context, client EgressPoli
 		res.rules = len(policy.Rules)
 	}
 	want, outcome := EgressPolicy{}, egressCleared
+	if policy != nil {
+		want, outcome = *policy, egressUpdated
+	}
 	switch {
-	case !found && policy == nil:
+	case !found && policy == nil && !e.fence:
 		res.outcome = egressAbsent
 		return nil, nil
 	case !found:
-		return e.create(ctx, client, actor, *policy, res)
-	case policy == nil && len(stored.Policy.Rules) == 0:
-		res.outcome = egressUnchanged
-		return nil, nil
-	case policy != nil && egressPolicyEqual(*policy, stored.Policy):
-		res.outcome = egressUnchanged
-		return nil, nil
-	case policy != nil:
-		want, outcome = *policy, egressUpdated
+		conflict, err := e.create(ctx, client, actor, want, res)
+		return e.syncGone(policy, conflict, err, res)
+	case egressPolicyEqual(want, stored.Policy):
+		if !e.fence {
+			res.outcome = egressUnchanged
+			return nil, nil
+		}
+		outcome = egressFenced
 	}
 	if stored.UID == "" || stored.Version == 0 {
 		// Substrate refuses an update without both, as INVALID_ARGUMENT, which the client would
@@ -449,7 +521,18 @@ func (e *egressConverge) convergeExisting(ctx context.Context, client EgressPoli
 		// Another writer changed or deleted the policy since the read.
 		return err, nil
 	}
-	return nil, egressWriteError(actor, err)
+	return e.syncGone(policy, nil, egressWriteError(actor, err), res)
+}
+
+// syncGone makes a Sync that wants no policy succeed when the actor turns out to be missing (the
+// write's ErrActorNotFound): there is no actor to fence, and the backend's create of a new one
+// stores a policy, or an empty one, itself. Any other result is returned as it is.
+func (e *egressConverge) syncGone(policy *EgressPolicy, conflict, err error, res *egressResult) (error, error) {
+	if e.fence && policy == nil && errors.Is(err, ErrActorNotFound) {
+		res.outcome = egressAbsent
+		return nil, nil
+	}
+	return conflict, err
 }
 
 // create creates policy on an actor that had none when this attempt looked.

@@ -404,9 +404,11 @@ func TestCreateSessionModelPolicyPreservesCause(t *testing.T) {
 
 type policyDescriptorHarness struct {
 	echoagent.Harness
-	models      []string
-	describeErr error
-	describes   atomic.Int32
+	models       []string
+	harnessClass api.HarnessClass
+	resumability api.Resumability
+	describeErr  error
+	describes    atomic.Int32
 }
 
 func (h *policyDescriptorHarness) Describe(ctx context.Context) (api.Descriptor, error) {
@@ -416,6 +418,10 @@ func (h *policyDescriptorHarness) Describe(ctx context.Context) (api.Descriptor,
 	}
 	d, err := h.Harness.Describe(ctx)
 	d.Models = h.models
+	d.HarnessClass = h.harnessClass
+	if h.resumability != "" {
+		d.Capabilities.Resumability = h.resumability
+	}
 	return d, err
 }
 
@@ -449,26 +455,39 @@ func TestStoredHarnessModelPolicyFailureLeavesOnlyRouteUnavailable(t *testing.T)
 func TestRegisterHarnessModelPolicyChecksBeforeStore(t *testing.T) {
 	const private = "unix /private/harness.sock?token=private-payload"
 	for _, tc := range []struct {
-		name        string
-		models      []string
-		describeErr error
-		want        codes.Code
+		name         string
+		models       []string
+		harnessClass api.HarnessClass
+		resumability api.Resumability
+		describeErr  error
+		createOnly   bool
+		want         codes.Code
 	}{
-		{"allowed", []string{"allowed"}, nil, codes.OK},
-		{"forbidden", []string{"forbidden"}, nil, codes.FailedPrecondition},
-		{"describe_failed", nil, errors.New(private), codes.Unavailable},
+		{name: "allowed", models: []string{"allowed"}, want: codes.OK},
+		{name: "forbidden", models: []string{"forbidden"}, want: codes.FailedPrecondition},
+		{name: "describe failed", describeErr: errors.New(private), want: codes.Unavailable},
+		{name: "invalid class register", models: []string{"allowed"}, harnessClass: api.HarnessClassUnmediated, resumability: api.ResumabilityStatelessReplay, want: codes.FailedPrecondition},
+		{name: "invalid class create", models: []string{"allowed"}, harnessClass: api.HarnessClassUnmediated, resumability: api.ResumabilityStatelessReplay, createOnly: true, want: codes.FailedPrecondition},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			harness := &policyDescriptorHarness{models: tc.models, describeErr: tc.describeErr}
+			harness := &policyDescriptorHarness{models: tc.models, harnessClass: tc.harnessClass, resumability: tc.resumability, describeErr: tc.describeErr}
 			factory := func(_ string, spec *v1.HarnessSpec) (*placement.Placer, func(), error) {
 				b := local.New(harness)
 				return placement.New(b, echoagent.Model, placement.WithDescriptorID(spec.GetDescriptorId()),
 					placement.WithModelPolicy(api.ModelPolicy{Default: "allowed", Allowed: []string{"allowed"}})), func() { _ = b.Close() }, nil
 			}
 			h := startRegistryHostWith(t, filepath.Join(t.TempDir(), "journal.db"), factory)
-			_, err := h.reg.RegisterHarness(t.Context(), &v1.RegisterHarnessRequest{Name: "policy", Spec: remoteSpec("127.0.0.1:9000")})
+			var err error
+			if tc.createOnly {
+				_, err = h.reg.CreateHarness(t.Context(), &v1.CreateHarnessRequest{Name: "policy", Spec: remoteSpec("127.0.0.1:9000")})
+			} else {
+				_, err = h.reg.RegisterHarness(t.Context(), &v1.RegisterHarnessRequest{Name: "policy", Spec: remoteSpec("127.0.0.1:9000")})
+			}
 			if status.Code(err) != tc.want {
 				t.Fatalf("registration status = %v; want %s", err, tc.want)
+			}
+			if tc.harnessClass == api.HarnessClassUnmediated && !errors.Is(err, api.ErrInvalidHarnessClass) {
+				t.Fatalf("registration lost ErrInvalidHarnessClass: %v", err)
 			}
 			if err != nil && strings.Contains(err.Error(), private) {
 				t.Fatalf("registration leaked peer error: %v", err)

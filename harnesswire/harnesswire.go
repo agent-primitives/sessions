@@ -66,7 +66,9 @@ func (s *Server) Connect(stream v1.Harness_ConnectServer) error {
 	if err != nil {
 		return err
 	}
+	reconstruction := false
 	if first.GetFrame() == nil && first.GetSession() == "" && first.GetExecutionId() == "" {
+		reconstruction = true
 		desc, err := s.harness.Describe(stream.Context())
 		if err != nil {
 			return err
@@ -111,6 +113,11 @@ func (s *Server) Connect(stream v1.Harness_ConnectServer) error {
 		attribute.Int64("agentsessions.resume_from_seq", runStart.ResumeFromSeq),
 	))
 	defer span.End()
+	if reconstruction {
+		// Preserve reconstruction intent through a server that delegates to another harnesswire
+		// client, so every downstream Connect stream performs its own class handshake.
+		ctx = replayctx.WithReconstruction(ctx)
+	}
 	runErr := s.harness.Run(ctx, runStart, sink)
 	// Interrupt an in-flight await before taking the effect lock. Never wait for
 	// Recv: gRPC cancels the stream context after this handler returns.

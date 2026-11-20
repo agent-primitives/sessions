@@ -2174,6 +2174,7 @@ involved, and `TestApprovalRawProtocol` uses neither controller nor journal.
 | `TestWireDescribeRoundTrip` | Descriptor survives the gRPC round trip | `WIRE-1` |
 | `TestWireReplayRefusesUnmediatedHarnessBeforeConnect` | An unmediated descriptor is refused before opening `Connect` or invoking `Run` | `EXE-41`, `WIRE-3a` |
 | `TestWireReplayBindsClassToConnectPeer` | A mediated `Describe` cannot authorize an unmediated peer selected for `Connect`, including through a harness decorator | `EXE-41`, `WIRE-3a` |
+| `TestWireReplayPropagatesClassCheckThroughDelegatingServer` | A server delegating to another wire harness preserves reconstruction intent, so the inner stream also checks its class before `Start` | `EXE-41`, `WIRE-3a` |
 | `TestWirePropagatesExecutionID` | Remote `Start` execution id equals the journal's | `WIRE-4` |
 | `TestWireFailedHarnessSurfacesError` | Remote failure journaled as `ERROR`, not `END` | `EXE-5`, `WIRE-12` |
 | `TestWireSinkErrorEndsInvocation` | A harness that handles a provider error completes in process but fails over the wire | `EXE-33` |

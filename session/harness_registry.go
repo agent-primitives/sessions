@@ -455,7 +455,7 @@ func (h *HarnessRegistry) register(ctx context.Context, method, name string, spe
 			}
 			code := codes.Internal // nil Placer or a dropped descriptor-ID check is a host bug.
 			switch {
-			case errors.Is(err, api.ErrModelNotAllowed), errors.Is(err, api.ErrInvalidModelPolicy):
+			case errors.Is(err, api.ErrModelNotAllowed), errors.Is(err, api.ErrInvalidModelPolicy), errors.Is(err, api.ErrInvalidHarnessClass):
 				code = codes.FailedPrecondition
 			case errors.Is(err, placement.ErrHarnessUnavailable):
 				code = codes.Unavailable

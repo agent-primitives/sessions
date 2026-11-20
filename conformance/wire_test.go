@@ -345,6 +345,43 @@ func TestWireReplayBindsClassToConnectPeer(t *testing.T) {
 	}
 }
 
+func TestWireReplayPropagatesClassCheckThroughDelegatingServer(t *testing.T) {
+	s, _ := openFile(t)
+	defer s.Close()
+	log := s.Session("s")
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, event := range []api.Event{
+		{ExecutionID: "turn", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Harness: "routed", HarnessVersion: "1", InputCount: new(int64)}},
+		{ExecutionID: "turn", Kind: api.EventOutput, Message: api.TextMessage("assistant", "reported output")},
+		{ExecutionID: "turn", Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}},
+	} {
+		if _, err := log.Append(int64(i), fence, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	unmediated := &unmediatedReplayHarness{}
+	mediated := harnesswire.DescriptorToProto(api.Descriptor{ID: "routed", Version: "1", HarnessClass: api.HarnessClassMediated})
+	inner := harnesswire.NewClientHarness(routedClassClient{describe: mediated, connect: wireHarnessClientFrom(t, unmediated)})
+	outer := wireHarnessFrom(t, inner)
+	c, err := controller.New(log, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Replay(t.Context(), outer); err == nil {
+		t.Fatal("two-hop Replay succeeded; want inner stream-bound refusal")
+	}
+	if unmediated.runs != 0 {
+		t.Fatalf("two-hop Replay ran unmediated inner peer %d times", unmediated.runs)
+	}
+	if unmediated.describes != 1 {
+		t.Fatalf("two-hop Replay inner Describe calls = %d, want exact-stream class check", unmediated.describes)
+	}
+}
+
 // TestWireControllerMediatedTool proves a CONTROLLER_MEDIATED tool is host-mediated across the
 // process boundary: the out-of-process harness emits the tool call over Harness.Connect, the HOST
 // executes it (its executor, not the harness) and records intent+result, and on replay the recorded

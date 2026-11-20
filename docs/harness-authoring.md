@@ -451,7 +451,11 @@ the proto default, so such a wire harness gets the stateless gate; a Go harness 
 unresolved call returns a typed `*api.ApprovalParkedError`: stop Run and propagate it, with no END or
 later model/tool/sink operation. The Go bridge validates the host's session/execution/call/request
 control tuple, sends exactly one correlated `EVENT_PARKED` acknowledgement, and closes without END;
-raw peers must implement that exchange. The host requires actual ACK/EOF and connection closure
+raw peers must implement that exchange. Raw peers that support reconstruction must also recognize
+`ControllerFrame.reconstruction_probe` with empty `session` and `execution_id`, answer before Start
+with one transport-only `EVENT_RECONSTRUCTION_INFO` carrying their class, then wait for Start. If
+they cannot determine the class, they return a non-OK status without running the harness. The host
+requires actual ACK/EOF and connection closure
 before an external snapshot and durable `SUSPEND` make the live pause successful. Transport/snapshot/
 append failures leave the request recoverable and retain the actual error, not a fake successful park.
 

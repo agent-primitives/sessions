@@ -1588,26 +1588,33 @@ Exec's terminal status details survive after the first session frame, including 
   `HARNESS_CLASS_UNSPECIFIED` as mediated for compatibility. Reconstruction replay MUST refuse
   `UNMEDIATED` and an unknown `HarnessClass` number before the first `Harness.Run`; it does not
   refuse `Exec` or recovery, and raw journal replay is unaffected. On `Harness.Connect`, the host
-  sends an empty `ControllerFrame` before `Start`; the server MUST answer with transport-only
-  `EVENT_RECONSTRUCTION_INFO` carrying the class of the exact harness serving that stream and MUST
-  NOT invoke `Harness.Run` before it receives `Start`; `Describe` remains the required
-  side-effect-free metadata operation. The host sends `Start` only for `MEDIATED` or compatibility
-  `UNSPECIFIED`. A missing, malformed, unmediated or unknown response fails closed. The reference
-  host bounds the stream metadata exchange to 10 seconds, without extending an earlier caller
-  deadline.
+  sends `ControllerFrame.reconstruction_probe` before `Start`; the server recognizes the probe by
+  that explicit `oneof` member with an empty `session` and `execution_id`, and MUST answer with
+  transport-only `EVENT_RECONSTRUCTION_INFO` carrying the class of the exact harness serving that
+  stream and MUST NOT invoke `Harness.Run` before it receives `Start`; `Describe` remains the
+  required side-effect-free metadata operation. The explicit member distinguishes the probe from a
+  malformed empty frame and gives non-Go servers a stable discriminator. The host sends `Start`
+  only for `MEDIATED` or compatibility `UNSPECIFIED`. A server that cannot determine its class MUST
+  return a non-OK status and MUST NOT accept `Start`. A missing, malformed, unmediated or unknown
+  response fails closed. The reference host bounds the stream metadata exchange to 10 seconds,
+  without extending an earlier caller deadline.
 - TODO(spike): Should an unknown `Resumability` number be refused instead of read as
   `STATELESS_REPLAY`? A harness declaring a tier added later is placed as the weakest one.
 
 ### 12.2 Connect
 
 `Connect` drives one execution. The host sends `ControllerFrame`s; the harness sends `Event`s.
-There is no protocol-version handshake; compatibility rests on `Describe` and
-`HarnessDescriptor.version`.
+There is no general protocol-version handshake; compatibility rests on `Describe` and
+`HarnessDescriptor.version`. Reconstruction alone has the class probe in `WIRE-3a`.
 
 ```mermaid
 sequenceDiagram
   participant H as Host
   participant N as Harness
+  opt reconstruction
+    H->>N: ControllerFrame{reconstruction_probe}
+    N->>H: Event RECONSTRUCTION_INFO {harness_class}
+  end
   H->>N: ControllerFrame{session, execution_id, start}
   N->>H: Event MODEL_CALL {id, messages, tools}
   Note over H: journal MODEL_CALL, call provider, journal OUTPUT

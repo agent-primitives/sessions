@@ -66,11 +66,16 @@ func (s *Server) Connect(stream v1.Harness_ConnectServer) error {
 	if err != nil {
 		return err
 	}
-	reconstruction := false
-	if first.GetFrame() == nil && first.GetSession() == "" && first.GetExecutionId() == "" {
-		reconstruction = true
+	reconstruction := first.GetReconstructionProbe() != nil
+	if reconstruction {
+		if first.GetSession() != "" || first.GetExecutionId() != "" {
+			return status.Error(grpccodes.InvalidArgument, "harnesswire: reconstruction probe must have an empty envelope")
+		}
 		desc, err := s.harness.Describe(stream.Context())
 		if err != nil {
+			if _, ok := status.FromError(err); !ok {
+				return status.Error(grpccodes.Unavailable, "harnesswire: describe harness for reconstruction failed")
+			}
 			return err
 		}
 		if err := stream.Send(&v1.Event{
@@ -528,15 +533,13 @@ func (h *ClientHarness) prepareReconstruction(ctx context.Context) (api.Prepared
 		cancel()
 		return nil, reconstructionHandshakeError(callerCtx, timedOut.Load(), err)
 	}
-	if sendErr := stream.Send(&v1.ControllerFrame{}); sendErr != nil {
+	if sendErr := stream.Send(&v1.ControllerFrame{Frame: &v1.ControllerFrame_ReconstructionProbe{ReconstructionProbe: &v1.ReconstructionProbe{}}}); sendErr != nil {
 		err := sendErr
 		if sendErr == io.EOF {
 			// gRPC may surface a transport/server failure as EOF from Send; Recv owns the
 			// authoritative final status. A bare EOF here is still a transient handshake failure,
 			// not evidence that the peer lacks reconstruction support.
-			if _, recvErr := stream.Recv(); recvErr != nil {
-				err = recvErr
-			}
+			err = drainReconstructionStatus(stream)
 		}
 		stopTimer()
 		cancel()
@@ -562,6 +565,14 @@ func (h *ClientHarness) prepareReconstruction(ctx context.Context) (api.Prepared
 		return nil, fmt.Errorf("%w: Connect peer declares %q", api.ErrReconstructionUnsupported, class)
 	}
 	return &preparedClientRun{stream: stream, ctx: ctx, cancel: cancel}, nil
+}
+
+func drainReconstructionStatus(stream v1.Harness_ConnectClient) error {
+	for {
+		if _, err := stream.Recv(); err != nil {
+			return err
+		}
+	}
 }
 
 func reconstructionHandshakeError(callerCtx context.Context, timedOut bool, err error) error {

@@ -54,6 +54,23 @@ type blockingReconstructionStream struct {
 	ctx context.Context
 }
 
+type bufferedBlockingReconstructionStream struct {
+	grpc.ClientStream
+	ctx      context.Context
+	metadata bool
+}
+
+func (*bufferedBlockingReconstructionStream) Send(*v1.ControllerFrame) error { return io.EOF }
+func (s *bufferedBlockingReconstructionStream) Recv() (*v1.Event, error) {
+	if !s.metadata {
+		s.metadata = true
+		return reconstructionInfo(v1.HarnessClass_HARNESS_CLASS_MEDIATED), nil
+	}
+	<-s.ctx.Done()
+	return nil, s.ctx.Err()
+}
+func (*bufferedBlockingReconstructionStream) CloseSend() error { return nil }
+
 func (*blockingReconstructionStream) Send(*v1.ControllerFrame) error { return nil }
 func (s *blockingReconstructionStream) Recv() (*v1.Event, error) {
 	<-s.ctx.Done()
@@ -181,8 +198,8 @@ func TestPrepareReconstructionClassHandshake(t *testing.T) {
 			if !errors.Is(err, tc.err) || (prepared != nil) != tc.ok {
 				t.Fatalf("PrepareReconstruction = (%v, %v), want prepared=%v err=%v", prepared, err, tc.ok, tc.err)
 			}
-			if len(stream.sent) != 1 || stream.sent[0].GetFrame() != nil || stream.sent[0].GetSession() != "" || stream.sent[0].GetExecutionId() != "" {
-				t.Fatalf("probe = %+v, want one empty ControllerFrame", stream.sent)
+			if len(stream.sent) != 1 || stream.sent[0].GetReconstructionProbe() == nil || stream.sent[0].GetSession() != "" || stream.sent[0].GetExecutionId() != "" {
+				t.Fatalf("probe = %+v, want one explicit reconstruction probe", stream.sent)
 			}
 			if prepared != nil {
 				prepared.Close()
@@ -218,6 +235,29 @@ func TestPrepareReconstructionPreservesFailureClassification(t *testing.T) {
 		}
 	})
 
+	t.Run("send EOF drains buffered metadata", func(t *testing.T) {
+		cause := status.Error(codes.Unavailable, "peer down")
+		stream := &prepareClientStream{sendErr: io.EOF, events: []*v1.Event{reconstructionInfo(v1.HarnessClass_HARNESS_CLASS_MEDIATED)}, recvErr: cause}
+		_, err := NewClientHarness(&prepareClient{stream: stream}).prepareReconstruction(t.Context())
+		if !errors.Is(err, api.ErrReconstructionHandshake) || status.Code(err) != codes.Unavailable || errors.Is(err, api.ErrReconstructionUnsupported) {
+			t.Fatalf("buffered send EOF handshake = %v", err)
+		}
+	})
+
+	t.Run("send EOF buffered drain is bounded", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		stream := &bufferedBlockingReconstructionStream{ctx: ctx}
+		client := blockingConnectClient{stream: stream, setContext: func(got context.Context) { stream.ctx = got }}
+		h := NewClientHarness(client)
+		h.reconstructionTimeout = 10 * time.Millisecond
+		start := time.Now()
+		_, err := h.prepareReconstruction(ctx)
+		cancel()
+		if !errors.Is(err, api.ErrReconstructionHandshake) || !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > time.Second {
+			t.Fatalf("bounded buffered drain = %v after %v", err, time.Since(start))
+		}
+	})
+
 	t.Run("bounded", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		stream := &blockingReconstructionStream{ctx: ctx}
@@ -235,7 +275,7 @@ func TestPrepareReconstructionPreservesFailureClassification(t *testing.T) {
 
 type blockingConnectClient struct {
 	v1.HarnessClient
-	stream     *blockingReconstructionStream
+	stream     grpc.BidiStreamingClient[v1.ControllerFrame, v1.Event]
 	setContext func(context.Context)
 }
 

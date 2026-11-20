@@ -667,8 +667,6 @@ func controllerError(ctx context.Context, err error) error {
 		return describeError(ctx, err, errors.Is(err, context.DeadlineExceeded))
 	case errors.Is(err, controller.ErrHarnessPrepareFailed):
 		return prepareHarnessError(ctx, err)
-	case errors.Is(err, api.ErrReconstructionHandshake):
-		return fmt.Errorf("%w: reconstruction handshake: %w", ErrHarnessUnavailable, err)
 	default:
 		return err
 	}

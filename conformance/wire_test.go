@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/agent-primitives/sessions/api"
@@ -242,6 +244,25 @@ type unmediatedReplayHarness struct {
 	runs      int
 }
 
+type probeDescribeFailureHarness struct {
+	describes int
+	runs      int
+	err       error
+}
+
+func (h *probeDescribeFailureHarness) Describe(context.Context) (api.Descriptor, error) {
+	h.describes++
+	if h.describes > 1 {
+		return api.Descriptor{}, h.err
+	}
+	return api.Descriptor{ID: "probe-failure", Version: "1", HarnessClass: api.HarnessClassMediated}, nil
+}
+
+func (h *probeDescribeFailureHarness) Run(context.Context, *api.Start, api.EventSink) error {
+	h.runs++
+	return nil
+}
+
 func (h *unmediatedReplayHarness) Describe(context.Context) (api.Descriptor, error) {
 	h.describes++
 	return api.Descriptor{ID: "unmediated", Version: "1", HarnessClass: api.HarnessClassUnmediated,
@@ -284,6 +305,48 @@ func TestWireReplayRefusesUnmediatedHarnessBeforeConnect(t *testing.T) {
 	}
 	if h.describes != 1 {
 		t.Fatalf("wire Replay Describe calls = %d, want preflight refusal before Connect", h.describes)
+	}
+}
+
+func TestWireReplayProbeDescribeFailureIsTransient(t *testing.T) {
+	const private = "backend temporarily down: token=private"
+	for _, tc := range []struct {
+		name, want, notWant string
+		cause               error
+		code                codes.Code
+	}{
+		{name: "plain error is redacted", cause: errors.New(private), code: codes.Unavailable, want: "describe harness for reconstruction failed", notWant: private},
+		{name: "explicit status is preserved", cause: status.Error(codes.ResourceExhausted, "worker pool drained"), code: codes.ResourceExhausted, want: "worker pool drained"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := openFile(t)
+			defer s.Close()
+			log := s.Session("s")
+			fence, err := log.NewFence()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, event := range []api.Event{
+				{ExecutionID: "turn", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Harness: "probe-failure", HarnessVersion: "1", InputCount: new(int64)}},
+				{ExecutionID: "turn", Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}},
+			} {
+				if _, err := log.Append(int64(i), fence, event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h := &probeDescribeFailureHarness{err: tc.cause}
+			c, err := controller.New(log, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = c.Replay(t.Context(), wireHarnessFrom(t, h))
+			if !errors.Is(err, api.ErrReconstructionHandshake) || errors.Is(err, api.ErrReconstructionUnsupported) || status.Code(err) != tc.code || !strings.Contains(err.Error(), tc.want) || tc.notWant != "" && strings.Contains(err.Error(), tc.notWant) {
+				t.Fatalf("Replay probe Describe failure = %v; want code=%s text=%q without %q", err, tc.code, tc.want, tc.notWant)
+			}
+			if h.describes != 2 || h.runs != 0 {
+				t.Fatalf("probe Describe failure had effects: describes=%d runs=%d", h.describes, h.runs)
+			}
+		})
 	}
 }
 
@@ -371,8 +434,8 @@ func TestWireReplayPropagatesClassCheckThroughDelegatingServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Replay(t.Context(), outer); err == nil {
-		t.Fatal("two-hop Replay succeeded; want inner stream-bound refusal")
+	if _, err := c.Replay(t.Context(), outer); err == nil || !strings.Contains(err.Error(), api.ErrReconstructionUnsupported.Error()) || !strings.Contains(err.Error(), "UNMEDIATED") {
+		t.Fatalf("two-hop Replay = %v; want the inner unmediated-class refusal", err)
 	}
 	if unmediated.runs != 0 {
 		t.Fatalf("two-hop Replay ran unmediated inner peer %d times", unmediated.runs)

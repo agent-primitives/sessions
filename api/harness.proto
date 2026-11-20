@@ -92,6 +92,10 @@ message Cancel {
   string reason = 1; // USER | TIMEOUT | INTERNAL
 }
 
+// ReconstructionProbe asks the exact Harness.Connect peer to advertise its class before Start.
+// It has no fields; presence in ControllerFrame.frame distinguishes it from a malformed empty frame.
+message ReconstructionProbe {}
+
 // ControllerFrame is sent by the host to the harness during an execution. Tool/approval control
 // frames MUST match the Start envelope's session and execution_id and the outstanding tool call
 // id. The session is the effect namespace; a reused tool id in another session is unrelated.
@@ -132,6 +136,7 @@ message ControllerFrame {
     ToolResult tool = 6;         // result for a CONTROLLER_MEDIATED or decided REQUIRES_APPROVAL call
     ModelResult model = 7;       // served completion for a mediated/replayed model call
     ApprovalRef park = 8;        // host-owned unresolved request; requires correlated EVENT_PARKED
+    ReconstructionProbe reconstruction_probe = 9; // transport-only, before Start
   }
 }
 
@@ -148,13 +153,13 @@ service Harness {
   rpc Describe(DescribeRequest) returns (HarnessDescriptor);
 
   // Connect drives ONE execution. The host normally sends Start first (and optional control
-  // frames). For reconstruction replay it first sends an empty ControllerFrame; a supporting
+  // frames). For reconstruction replay it first sends ControllerFrame.reconstruction_probe; a
+  // supporting
   // server answers with an EVENT_RECONSTRUCTION_INFO carrying the class of the exact harness that
   // will receive Start. The host sends Start only for MEDIATED or compatibility UNSPECIFIED. Older
   // servers close that probe without invoking the harness, so reconstruction fails closed rather
-  // than sending Start.
-  // Normally
-  // the harness streams Events terminated by exactly one EVENT_END. An unresolved approval
+  // than sending Start. Normally the harness streams Events terminated by exactly one EVENT_END.
+  // An unresolved approval
   // instead follows park -> correlated EVENT_PARKED -> stream closure, with no EVENT_END.
   // Durable requests/decisions belong to the host; this protocol applies to STATELESS_REPLAY and
   // REQUIRES_MEMORY_SNAPSHOT harnesses.

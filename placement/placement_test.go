@@ -264,6 +264,16 @@ type contradictoryClassHarness struct {
 	runs *atomic.Int32
 }
 
+type createCountingBackend struct {
+	placement.Backend
+	creates *atomic.Int32
+}
+
+func (b createCountingBackend) Create(ctx context.Context, spec *api.SessionSpec) (api.Incarnation, error) {
+	b.creates.Add(1)
+	return b.Backend.Create(ctx, spec)
+}
+
 func (h contradictoryClassHarness) Describe(context.Context) (api.Descriptor, error) {
 	return api.Descriptor{ID: "invalid", HarnessClass: api.HarnessClassUnmediated,
 		Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, nil
@@ -281,13 +291,15 @@ func TestPlacerRejectsContradictoryUnmediatedDescriptorBeforeCompute(t *testing.
 	}
 	defer store.Close()
 	log := store.Session("s")
-	var runs atomic.Int32
-	p := newLocalPlacer(t, contradictoryClassHarness{runs: &runs})
+	var runs, creates atomic.Int32
+	backend := local.New(contradictoryClassHarness{runs: &runs})
+	t.Cleanup(func() { _ = backend.Close() })
+	p := placement.New(createCountingBackend{Backend: backend, creates: &creates}, echoagent.Model)
 	if _, err := p.Exec(t.Context(), log, "s", nil, 0); !errors.Is(err, api.ErrInvalidHarnessClass) {
 		t.Fatalf("Exec = %v; want ErrInvalidHarnessClass", err)
 	}
-	if head, err := log.Head(); err != nil || head != 0 || runs.Load() != 0 {
-		t.Fatalf("refused descriptor had effects: head=%d runs=%d err=%v", head, runs.Load(), err)
+	if head, err := log.Head(); err != nil || head != 0 || runs.Load() != 0 || creates.Load() != 0 {
+		t.Fatalf("refused descriptor had effects: head=%d creates=%d runs=%d err=%v", head, creates.Load(), runs.Load(), err)
 	}
 	if err := p.Resume(t.Context(), log, "s"); !errors.Is(err, api.ErrInvalidHarnessClass) {
 		t.Fatalf("Resume = %v; want ErrInvalidHarnessClass", err)

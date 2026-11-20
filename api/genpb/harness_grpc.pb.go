@@ -44,13 +44,13 @@ type HarnessClient interface {
 	// Describe returns the static contract; used to match the harness to a runtime.
 	Describe(ctx context.Context, in *DescribeRequest, opts ...grpc.CallOption) (*HarnessDescriptor, error)
 	// Connect drives ONE execution. The host normally sends Start first (and optional control
-	// frames). For reconstruction replay it first sends an empty ControllerFrame; a supporting
+	// frames). For reconstruction replay it first sends ControllerFrame.reconstruction_probe; a
+	// supporting
 	// server answers with an EVENT_RECONSTRUCTION_INFO carrying the class of the exact harness that
 	// will receive Start. The host sends Start only for MEDIATED or compatibility UNSPECIFIED. Older
 	// servers close that probe without invoking the harness, so reconstruction fails closed rather
-	// than sending Start.
-	// Normally
-	// the harness streams Events terminated by exactly one EVENT_END. An unresolved approval
+	// than sending Start. Normally the harness streams Events terminated by exactly one EVENT_END.
+	// An unresolved approval
 	// instead follows park -> correlated EVENT_PARKED -> stream closure, with no EVENT_END.
 	// Durable requests/decisions belong to the host; this protocol applies to STATELESS_REPLAY and
 	// REQUIRES_MEMORY_SNAPSHOT harnesses.
@@ -98,13 +98,13 @@ type HarnessServer interface {
 	// Describe returns the static contract; used to match the harness to a runtime.
 	Describe(context.Context, *DescribeRequest) (*HarnessDescriptor, error)
 	// Connect drives ONE execution. The host normally sends Start first (and optional control
-	// frames). For reconstruction replay it first sends an empty ControllerFrame; a supporting
+	// frames). For reconstruction replay it first sends ControllerFrame.reconstruction_probe; a
+	// supporting
 	// server answers with an EVENT_RECONSTRUCTION_INFO carrying the class of the exact harness that
 	// will receive Start. The host sends Start only for MEDIATED or compatibility UNSPECIFIED. Older
 	// servers close that probe without invoking the harness, so reconstruction fails closed rather
-	// than sending Start.
-	// Normally
-	// the harness streams Events terminated by exactly one EVENT_END. An unresolved approval
+	// than sending Start. Normally the harness streams Events terminated by exactly one EVENT_END.
+	// An unresolved approval
 	// instead follows park -> correlated EVENT_PARKED -> stream closure, with no EVENT_END.
 	// Durable requests/decisions belong to the host; this protocol applies to STATELESS_REPLAY and
 	// REQUIRES_MEMORY_SNAPSHOT harnesses.

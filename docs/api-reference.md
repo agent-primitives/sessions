@@ -795,6 +795,7 @@ catching the error cannot authorize a later model/tool effect or mark recovery c
 | tool | [ToolResult](#agentsessions-v1-ToolResult) |  | result for a CONTROLLER_MEDIATED or decided REQUIRES_APPROVAL call |
 | model | [ModelResult](#agentsessions-v1-ModelResult) |  | served completion for a mediated/replayed model call |
 | park | [ApprovalRef](#agentsessions-v1-ApprovalRef) |  | host-owned unresolved request; requires correlated EVENT_PARKED |
+| reconstruction_probe | [ReconstructionProbe](#agentsessions-v1-ReconstructionProbe) |  | transport-only, before Start |
 
 
 
@@ -860,6 +861,17 @@ The Message carries text, opaque reasoning, and tool_call parts, recorded verbat
 | message | [Message](#agentsessions-v1-Message) |  |  |
 | usage | [Usage](#agentsessions-v1-Usage) |  |  |
 | model_call_id | [string](#string) |  | correlates to the emitted ModelCall.id |
+
+
+
+
+
+
+<a name="agentsessions-v1-ReconstructionProbe"></a>
+
+### ReconstructionProbe
+ReconstructionProbe asks the exact Harness.Connect peer to advertise its class before Start.
+It has no fields; presence in ControllerFrame.frame distinguishes it from a malformed empty frame.
 
 
 
@@ -934,7 +946,7 @@ this against a runtime&#39;s RuntimeCapabilities.
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
 | Describe | [DescribeRequest](#agentsessions-v1-DescribeRequest) | [HarnessDescriptor](#agentsessions-v1-HarnessDescriptor) | Describe returns the static contract; used to match the harness to a runtime. |
-| Connect | [ControllerFrame](#agentsessions-v1-ControllerFrame) stream | [Event](#agentsessions-v1-Event) stream | Connect drives ONE execution. The host normally sends Start first (and optional control frames). For reconstruction replay it first sends an empty ControllerFrame; a supporting server answers with an EVENT_RECONSTRUCTION_INFO carrying the class of the exact harness that will receive Start. The host sends Start only for MEDIATED or compatibility UNSPECIFIED. Older servers close that probe without invoking the harness, so reconstruction fails closed rather than sending Start. Normally the harness streams Events terminated by exactly one EVENT_END. An unresolved approval instead follows park -&gt; correlated EVENT_PARKED -&gt; stream closure, with no EVENT_END. Durable requests/decisions belong to the host; this protocol applies to STATELESS_REPLAY and REQUIRES_MEMORY_SNAPSHOT harnesses. After ACK and actual stream closure, the host closes the invocation connection, performs an external snapshot and commits SUSPEND before reporting a successful live pause. Handoff failures retain the durable request and their actual error; they are not park success. |
+| Connect | [ControllerFrame](#agentsessions-v1-ControllerFrame) stream | [Event](#agentsessions-v1-Event) stream | Connect drives ONE execution. The host normally sends Start first (and optional control frames). For reconstruction replay it first sends ControllerFrame.reconstruction_probe; a supporting server answers with an EVENT_RECONSTRUCTION_INFO carrying the class of the exact harness that will receive Start. The host sends Start only for MEDIATED or compatibility UNSPECIFIED. Older servers close that probe without invoking the harness, so reconstruction fails closed rather than sending Start. Normally the harness streams Events terminated by exactly one EVENT_END. An unresolved approval instead follows park -&gt; correlated EVENT_PARKED -&gt; stream closure, with no EVENT_END. Durable requests/decisions belong to the host; this protocol applies to STATELESS_REPLAY and REQUIRES_MEMORY_SNAPSHOT harnesses. After ACK and actual stream closure, the host closes the invocation connection, performs an external snapshot and commits SUSPEND before reporting a successful live pause. Handoff failures retain the durable request and their actual error; they are not park success. |
 
  
 

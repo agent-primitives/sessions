@@ -1524,16 +1524,21 @@ does not erase data or reclaim compute.
 | `Cancel` | `UNIMPLEMENTED` |
 | Any other failure | `INTERNAL` |
 
-Known lifecycle failures on Exec, Resume, Suspend and Fork carry one `google.rpc.ErrorInfo`
-with domain `agentsessions`, the reason below and no metadata. DeleteSession reports only
-SESSION_BUSY and SESSION_DELETED from this table. Clients match domain and reason together;
-details are additive, and an older server or an unclassified error may supply none.
+Recognized lifecycle and compute-start failures carry one `google.rpc.ErrorInfo` with domain
+`agentsessions`, the reason below and no metadata. Reasons follow the classified condition, not
+the method: they apply to Exec, Resume, Suspend, Fork, Approve and CloseApproval wherever the
+corresponding condition is classified. DeleteSession reports SESSION_BUSY and SESSION_DELETED;
+Exec, Resume, Suspend, Fork, Approve and CloseApproval also report SESSION_BUSY while a
+DeleteSession holds the session. HarnessRegistry.RegisterHarness and
+HarnessRegistry.CreateHarness report HARNESS_UNAVAILABLE when placement admission cannot reach
+the harness. Clients match domain and reason together; details are additive, and an older server
+or an unclassified error may supply none.
 
 | Code | Condition → reason (first matching condition within the code wins) |
 |---|---|
 | `ABORTED` | Append-CAS conflict → `STALE_CURSOR`; local session contention → `SESSION_BUSY`; fork snapshot superseded → `SNAPSHOT_SUPERSEDED`; compute contention → `COMPUTE_BUSY`; checkpoint in progress → `CHECKPOINT_IN_PROGRESS`; superseded writer fence → `FENCED` |
 | `FAILED_PRECONDITION` | Deleted session → `SESSION_DELETED`; lost memory-tier state → `MEMORY_STATE_LOST`; refused checkpoint → `CHECKPOINT_INVALID`; known invalid compute configuration → `COMPUTE_CONFIG_INVALID` |
-| `UNAVAILABLE` | Checkpoint uploading → `CHECKPOINT_PENDING`; unreachable harness → `HARNESS_UNAVAILABLE` (Exec/Resume/Fork); compute unavailable → `COMPUTE_UNAVAILABLE` |
+| `UNAVAILABLE` | Checkpoint uploading → `CHECKPOINT_PENDING`; unreachable harness → `HARNESS_UNAVAILABLE`; compute unavailable → `COMPUTE_UNAVAILABLE` |
 | `RESOURCE_EXHAUSTED` | No eligible compute capacity → `COMPUTE_RESOURCE_EXHAUSTED` |
 
 A stale cursor requires reading the head before retrying. Session/compute contention can be

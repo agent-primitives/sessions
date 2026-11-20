@@ -14,10 +14,51 @@ import (
 	"github.com/agent-primitives/sessions/placement"
 )
 
-func TestApprovalCheckpointRefusalIsAborted(t *testing.T) {
-	err := approvalError(fmt.Errorf("checkpoint: %w", placement.ErrCheckpointing))
-	if status.Code(err) != codes.Aborted {
-		t.Fatalf("Approve checkpoint refusal=%v, want ABORTED", err)
+func TestApprovalErrorReasons(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cause  error
+		code   codes.Code
+		reason string
+	}{
+		{"busy", placement.ErrSessionBusy, codes.Aborted, "SESSION_BUSY"},
+		{"checkpoint", placement.ErrCheckpointing, codes.Aborted, "CHECKPOINT_IN_PROGRESS"},
+		{"conflict", eventlog.ErrConflict, codes.Aborted, "STALE_CURSOR"},
+		{"fence", eventlog.ErrFenced, codes.Aborted, "FENCED"},
+		{"checkpoint before fence", errors.Join(placement.ErrCheckpointing, eventlog.ErrFenced), codes.Aborted, "CHECKPOINT_IN_PROGRESS"},
+		{"conflict before busy", errors.Join(eventlog.ErrConflict, placement.ErrSessionBusy), codes.Aborted, "STALE_CURSOR"},
+		{"deleted", eventlog.ErrDeleted, codes.FailedPrecondition, "SESSION_DELETED"},
+	} {
+		for name, mapper := range map[string]func(error) error{"Approve": approvalError, "CloseApproval": closeApprovalError} {
+			t.Run(name+"/"+tc.name, func(t *testing.T) {
+				cause := fmt.Errorf("approval: %w", tc.cause)
+				got := mapper(cause)
+				assertErrorInfo(t, got, tc.code, tc.reason)
+				if !errors.Is(got, cause) || status.Convert(got).Message() != cause.Error() {
+					t.Fatalf("lost cause or changed message: %v", got)
+				}
+			})
+		}
+	}
+}
+
+func TestApprovalReasonlessErrors(t *testing.T) {
+	for _, tc := range []struct {
+		cause error
+		code  codes.Code
+	}{
+		{controller.ErrInvalidApprovalDecision, codes.FailedPrecondition},
+		{controller.ErrInvalidExecutionLog, codes.FailedPrecondition},
+		{controller.ErrReplayDiverged, codes.FailedPrecondition},
+		{controller.ErrApprovalUnavailable, codes.FailedPrecondition},
+		{errors.New("storage"), codes.Internal},
+		{status.Error(codes.Aborted, "foreign status"), codes.Internal},
+	} {
+		for name, mapper := range map[string]func(error) error{"Approve": approvalError, "CloseApproval": closeApprovalError} {
+			t.Run(name+"/"+tc.cause.Error(), func(t *testing.T) {
+				assertErrorInfo(t, mapper(fmt.Errorf("approval: %w", tc.cause)), tc.code, "")
+			})
+		}
 	}
 }
 

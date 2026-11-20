@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -690,16 +691,31 @@ func TestApprovalBusyVersusBackendAborted(t *testing.T) {
 	c := serveRegistry(t, store, r)
 	uid := mustCreate(t, c)
 	b.snapshotErr = status.Error(codes.Aborted, "backend conflict")
+	assertBusy := func(t *testing.T, err error) {
+		t.Helper()
+		st := status.Convert(err)
+		if st.Code() != codes.Aborted || len(st.Details()) != 1 {
+			t.Fatalf("local busy=%v, details=%v; want ABORTED with one reason", err, st.Details())
+		}
+		info, ok := st.Details()[0].(*errdetails.ErrorInfo)
+		if !ok || info.Domain != "agentsessions" || info.Reason != "SESSION_BUSY" || len(info.Metadata) != 0 {
+			t.Fatalf("local busy detail=%v, want agentsessions/SESSION_BUSY without metadata", st.Details()[0])
+		}
+	}
 	b.beforeSnapshot = func() {
 		info, err := store.SessionInfo(uid)
 		if err != nil {
 			t.Fatal(err)
 		}
 		ref := info.PendingApproval
-		_, err = c.Approve(t.Context(), &v1.ApproveRequest{Session: uid, ExecutionId: ref.ExecutionID, ToolCallId: ref.ToolCallID, RequestSeq: ref.RequestSeq, Approved: proto.Bool(false)})
-		if status.Code(err) != codes.Aborted {
-			t.Errorf("local busy=%v", err)
-		}
+		t.Run("Approve", func(t *testing.T) {
+			_, err := c.Approve(t.Context(), &v1.ApproveRequest{Session: uid, ExecutionId: ref.ExecutionID, ToolCallId: ref.ToolCallID, RequestSeq: ref.RequestSeq, Approved: proto.Bool(false)})
+			assertBusy(t, err)
+		})
+		t.Run("CloseApproval", func(t *testing.T) {
+			_, err := c.CloseApproval(t.Context(), &v1.CloseApprovalRequest{Session: uid, ExecutionId: ref.ExecutionID, ToolCallId: ref.ToolCallID, RequestSeq: ref.RequestSeq})
+			assertBusy(t, err)
+		})
 	}
 	frames, err := collectPublicExec(c, &v1.ExecRequest{Session: uid})
 	if status.Code(err) != codes.Internal || frames[len(frames)-1].GetSession() != nil {

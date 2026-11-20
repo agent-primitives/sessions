@@ -338,15 +338,19 @@ message Delta {
   bool done = 4;        // last delta for this part
 }
 
-// Exec, Resume, Suspend and Fork attach google.rpc.ErrorInfo for recognized lifecycle and
-// compute-start failures. The domain is "agentsessions", with no metadata:
+// Recognized lifecycle and compute-start failures attach google.rpc.ErrorInfo with domain
+// "agentsessions" and no metadata. Reasons follow the classified condition, not the method:
+// they apply to Exec, Resume, Suspend, Fork, Approve and CloseApproval wherever that condition
+// is classified.
 // ABORTED: STALE_CURSOR, SESSION_BUSY, COMPUTE_BUSY, CHECKPOINT_IN_PROGRESS, FENCED,
 // SNAPSHOT_SUPERSEDED (Fork only).
 // FAILED_PRECONDITION: SESSION_DELETED, MEMORY_STATE_LOST, CHECKPOINT_INVALID,
 // COMPUTE_CONFIG_INVALID.
-// UNAVAILABLE: CHECKPOINT_PENDING, HARNESS_UNAVAILABLE (Exec/Resume/Fork), COMPUTE_UNAVAILABLE.
+// UNAVAILABLE: CHECKPOINT_PENDING, HARNESS_UNAVAILABLE, COMPUTE_UNAVAILABLE.
 // RESOURCE_EXHAUSTED: COMPUTE_RESOURCE_EXHAUSTED.
-// DeleteSession also reports SESSION_BUSY and SESSION_DELETED for the matching conditions.
+// DeleteSession reports SESSION_BUSY and SESSION_DELETED; mutation deletion-admission probes
+// also report SESSION_BUSY. HarnessRegistry.RegisterHarness and HarnessRegistry.CreateHarness
+// report HARNESS_UNAVAILABLE when placement admission cannot reach the harness.
 // Unknown failures and caller CANCELED/DEADLINE_EXCEEDED have no reason. Other preconditions
 // retain their codes without a reason; this is not an exhaustive taxonomy of failures.
 // Clients must match both domain and reason; see spec.md section 11.9 for precedence and recovery.

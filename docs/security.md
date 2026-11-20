@@ -248,25 +248,39 @@ spec §17.
 
 The egress policy is runtime configuration: which hosts and ports the harness's compute may reach,
 and which credential the egress injects on a matching request. The journal does not record it. On
-substrate, `substrate.WithEgressPolicy` or the daemon's `-substrate-egress-policy-file` installs a
-Substrate `EgressPolicy` on each session's actor before the backend resumes it, so no turn runs on
-compute without the policy. The policy holds credential references (`ate-secret://...`) or an actor
-JWT audience, never a credential value. The backend's install log records the rule count and an
-`error_kind`, not the rules. A policy Substrate refuses as invalid reaches callers as fixed text
-(`FAILED_PRECONDITION`, `COMPUTE_CONFIG_INVALID`), without Substrate's message, which can name a
-rejected hostname or credential reference. Other install failures keep the backend error's text,
-which reaches callers when authorization is off. A daemon startup error for a policy file that
-does not parse can quote the offending JSON token; it goes only to the operator.
+substrate, `substrate.WithEgressPolicy` or the daemon's `-substrate-egress-policy-file` sets the
+Substrate `EgressPolicy` of each session's actor before every backend resume of a suspended actor,
+so compute the backend resumes never runs a turn without the policy, or with one the configuration
+no longer holds. An actor already running when the backend reaches it, or woken by the Substrate
+router, keeps its stored policy until it is suspended and the backend resumes it. The policy
+holds credential references (`ate-secret://...`) or an actor JWT audience, never a credential
+value. The backend's install log records the rule count, the outcome and an `error_kind`, not the
+rules. A policy Substrate refuses as invalid reaches callers as fixed text (`FAILED_PRECONDITION`,
+`COMPUTE_CONFIG_INVALID`), without Substrate's message, which can name a rejected hostname or
+credential reference. A policy call Substrate refuses because another operation holds the actor
+(`ABORTED`, `COMPUTE_BUSY`) leaves Substrate's message out as well. Other install failures keep the
+backend error's text, which reaches callers when authorization is off. A daemon startup error for a
+policy file that does not parse can quote the offending JSON token; it goes only to the operator.
 
 - **Fail closed.** A configured policy that the control client cannot install, or that Substrate
-  refuses, fails the call and leaves the actor suspended. An actor without a policy is deny-all.
-- **Existing actors keep their policy.** A policy changed in the option or the file reaches only
-  actors created afterwards. Tightening it does not reach existing sessions until their actors are
-  recreated or their policy is updated in Substrate.
+  refuses, fails the call and leaves the actor suspended. A control client that cannot read and
+  update policies fails every resume of an existing actor, even when no policy is configured,
+  since only a read finds a stored policy and only an update clears it. An actor without a policy
+  is deny-all.
+- **Changes reach existing actors at their next backend resume.** The backend reads the stored
+  policy and replaces it when it differs from the configured one, under the stored version, so a
+  tightened policy reaches each existing session the next time the backend resumes it. An actor the
+  Substrate router wakes for a routed request is resumed without the backend, so it keeps its stored
+  policy, and the backend then finds it running. A policy that no longer configures any rule is
+  cleared to an empty rule set (deny-all), never deleted.
+- **The configuration is authoritative.** A policy edited in Substrate by anyone else is
+  overwritten at the actor's next backend resume while the option is set. A stored policy the
+  control client cannot read is refused, not overwritten.
 - **Running compute is not changed.** An actor already running when the backend reaches it keeps
-  whatever policy it has, or stays deny-all without one.
+  whatever policy it has, or stays deny-all without one, until it is suspended and resumed.
 
-See [Actor egress policy](substrate-conformance.md#actor-egress-policy) for the install points.
+See [Actor egress policy](substrate-conformance.md#actor-egress-policy) for the install points
+and the comparison.
 
 ## Deletion is not erasure or containment
 

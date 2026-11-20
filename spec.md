@@ -2290,20 +2290,21 @@ The reference implementation protects the integrity of the record, not access to
 - The runtime's egress policy, which hosts and ports the compute may reach and which credential
   the egress injects, is runtime configuration, not session state: it is not journaled and plays
   no part in replay. A runtime that applies one installs it before the compute first runs, so no
-  turn runs without it. The reference substrate backend does this with `WithEgressPolicy`
+  turn runs without it. The reference substrate backend does this with `WithEgressPolicy`, and
+  replaces a stored policy that differs from the configured one before each later resume
   ([docs/security.md](docs/security.md#runtime-egress-policy)).
 - The invariant keeps the value out of the harness, not its use. An unmediated harness can send
   any request the egress allows with the injected credential, and the host neither bounds nor
   records that spend (`EXE-41`). Its prompts and outputs pass through the egress, which must see
   the request to inject the credential, so the egress is trusted with session content as well as
   the credential.
-- On Substrate v1.0.0 the reach of an installed policy follows from its source. The policy is
-  stored per actor name and deleted only with the actor, so a suspend and resume keeps it. The
-  egress gateway reads it per request by actor name through a cache of at most 10 seconds
-  (`cmd/atenet/internal/router/egress/policycache.go`) and denies an actor without one. A cached
-  "no policy" can therefore only deny, and only within 10 seconds of a lookup of the same actor
-  name made before the install; an actor deleted and recreated under its name can see the old
-  actor's policy for as long.
+- On Substrate v1.0.0 the reach of an installed policy follows from its source. The policy is stored
+  per actor name and deleted only with the actor, so a suspend and resume keeps it unless the
+  backend replaces it. The egress gateway reads it per request by actor name through a cache of at
+  most 10 seconds (`cmd/atenet/internal/router/egress/policycache.go`) and denies an actor without
+  one. A cached "no policy" can therefore only deny, and only within 10 seconds of a lookup of the
+  same actor name made before the install; an actor deleted and recreated under its name can see the
+  old actor's policy for as long.
 - TODO(spike): Verify end to end, against a live gateway, that an installed policy is enforced
   (an allowed host reachable, others denied), that the egress can inject a provider credential
   over a placeholder for an unmediated harness (request header, retries, TLS trust in the actor),

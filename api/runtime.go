@@ -157,7 +157,36 @@ type CleanupRuntime interface {
 	ReleaseSession(ctx context.Context, sessionUID string) error
 }
 
-// CleanupResourceKind identifies a backend-owned resource Sessions may release.
+// CleanupOperation names a runtime effect whose owned resources placement records before I/O.
+type CleanupOperation string
+
+const (
+	CleanupCreate  CleanupOperation = "create"
+	CleanupRestore CleanupOperation = "restore"
+	CleanupFork    CleanupOperation = "fork"
+)
+
+// ErrCleanupResource classifies invalid resource plans or ownership evidence. Messages intentionally
+// omit references and provider payloads, since RPC errors can carry this text outside authorization.
+var ErrCleanupResource = errors.New("cleanup resource: invalid")
+
+// CleanupResource is provider-opaque ownership evidence. Reference names one planned resource;
+// UID becomes required only after the backend proves it owns that exact resource. Borrower names at
+// most one other resource in the complete plan that must be released before this resource.
+type CleanupResource struct {
+	Reference string
+	UID       string
+	Borrower  string
+
+	// Transitional fields are read only by the v10-predecessor SQLite shape. Task 2 removes them
+	// once the normalized resource graph owns the persisted representation.
+	Kind      CleanupResourceKind `json:"-"`
+	Namespace string              `json:"-"`
+	Name      string              `json:"-"`
+}
+
+// CleanupResourceKind and its constants are transitional compatibility for the previous 1A branch.
+// They are removed when SQLite migrates to provider-opaque references in Task 2.
 type CleanupResourceKind string
 
 const (
@@ -165,48 +194,113 @@ const (
 	CleanupResourceTag   CleanupResourceKind = "tag"
 )
 
-// CleanupResource is opaque ownership evidence for one backend-owned resource. It is not
-// routing, authorization or diagnostic data. Namespace and Name identify the pre-I/O target;
-// UID becomes required before the resource may be treated as owned or released.
-type CleanupResource struct {
-	Kind      CleanupResourceKind
-	Namespace string
-	Name      string
-	UID       string
-}
-
-// ValidateTarget checks a resource target recorded before its backend call. UID may be empty.
-func (r CleanupResource) ValidateTarget() error {
-	if r.Kind != CleanupResourceActor && r.Kind != CleanupResourceTag {
-		return errors.New("cleanup resource: unknown kind")
+// ValidateCleanupPlan validates UID-empty targets and complete borrower closure before runtime I/O.
+func ValidateCleanupPlan(resources []CleanupResource) error {
+	refs := make(map[string]CleanupResource, len(resources))
+	for _, resource := range resources {
+		if resource.Reference == "" || resource.UID != "" {
+			return ErrCleanupResource
+		}
+		if _, exists := refs[resource.Reference]; exists {
+			return ErrCleanupResource
+		}
+		if resource.Borrower == resource.Reference {
+			return ErrCleanupResource
+		}
+		refs[resource.Reference] = resource
 	}
-	if r.Namespace == "" {
-		return errors.New("cleanup resource: missing namespace")
+	for _, resource := range resources {
+		if resource.Borrower != "" {
+			if _, exists := refs[resource.Borrower]; !exists {
+				return ErrCleanupResource
+			}
+		}
 	}
-	if r.Name == "" {
-		return errors.New("cleanup resource: missing name")
+	state := make(map[string]uint8, len(resources))
+	var visit func(string) bool
+	visit = func(ref string) bool {
+		switch state[ref] {
+		case 1:
+			return true
+		case 2:
+			return false
+		}
+		state[ref] = 1
+		if next := refs[ref].Borrower; next != "" && visit(next) {
+			return true
+		}
+		state[ref] = 2
+		return false
+	}
+	for ref := range refs {
+		if visit(ref) {
+			return ErrCleanupResource
+		}
 	}
 	return nil
 }
 
-// ValidateOwned checks evidence a caller may release without adopting a replacement by name.
+// CleanupEvidence is immutable ownership evidence returned alongside an incarnation or error. Its
+// unexported storage means ordinary Incarnation copies cannot mutate the evidence in place.
+type CleanupEvidence struct {
+	resources []CleanupResource
+}
+
+// NewCleanupEvidence validates partial ownership evidence. A borrower may name a resource omitted
+// from partial evidence because the complete plan is durable before the runtime call.
+func NewCleanupEvidence(resources []CleanupResource) (CleanupEvidence, error) {
+	seen := make(map[string]struct{}, len(resources))
+	for _, resource := range resources {
+		if resource.Reference == "" || resource.UID == "" || resource.Borrower == resource.Reference {
+			return CleanupEvidence{}, ErrCleanupResource
+		}
+		if _, exists := seen[resource.Reference]; exists {
+			return CleanupEvidence{}, ErrCleanupResource
+		}
+		seen[resource.Reference] = struct{}{}
+	}
+	return CleanupEvidence{resources: append([]CleanupResource(nil), resources...)}, nil
+}
+
+// Resources returns a defensive copy of the observed ownership evidence.
+func (e CleanupEvidence) Resources() []CleanupResource {
+	return append([]CleanupResource(nil), e.resources...)
+}
+
+func (e CleanupEvidence) validate() error {
+	_, err := NewCleanupEvidence(e.resources)
+	return err
+}
+
+// ValidateTarget and ValidateOwned are temporary bridges for the previous SQLite shape. New code
+// validates complete plans or evidence with ValidateCleanupPlan and NewCleanupEvidence instead.
+func (r CleanupResource) ValidateTarget() error {
+	if r.Reference != "" {
+		return ValidateCleanupPlan([]CleanupResource{r})
+	}
+	if r.Kind != CleanupResourceActor && r.Kind != CleanupResourceTag || r.Namespace == "" || r.Name == "" {
+		return ErrCleanupResource
+	}
+	return nil
+}
+
 func (r CleanupResource) ValidateOwned() error {
-	if err := r.ValidateTarget(); err != nil {
+	if r.Reference != "" {
+		_, err := NewCleanupEvidence([]CleanupResource{r})
 		return err
 	}
-	if r.UID == "" {
-		return errors.New("cleanup resource: missing uid")
+	if err := r.ValidateTarget(); err != nil || r.UID == "" {
+		return ErrCleanupResource
 	}
 	return nil
 }
 
-// ResourceCleanupRuntime opts a runtime with dedicated resources into identity-bearing cleanup.
-// CleanupKey identifies the control-plane configuration. CleanupResource returns the UID-empty
-// target recorded before I/O. ReleaseResource must use the immutable UID precondition and must
-// never fall back to a name-only delete.
+// ResourceCleanupRuntime opts a backend with dedicated resources into identity-bearing cleanup.
+// CleanupKey identifies the control-plane configuration. CleanupResources returns the complete,
+// UID-empty plan before I/O. ReleaseResource requires immutable UID preconditions and no name fallback.
 type ResourceCleanupRuntime interface {
 	CleanupKey() string
-	CleanupResource(sessionUID string) CleanupResource
+	CleanupResources(CleanupOperation, string) []CleanupResource
 	ReleaseResource(context.Context, CleanupResource) error
 }
 
@@ -255,10 +349,11 @@ type Incarnation struct {
 	// fork pass that recorded instance to Snapshot, which refuses another one.
 	// Empty records nothing and skips the check.
 	ComputeInstance string
-	// CleanupResource is immutable backend ownership evidence for this incarnation. It is separate
-	// from routing fields and ComputeInstance, which identifies memory continuity rather than all
-	// dedicated compute. A runtime may return it with an error when a control-plane effect succeeded
-	// before a later placement step failed.
+	// Cleanup is provider-opaque ownership evidence. It is separate from routing fields and
+	// ComputeInstance, which identifies memory continuity rather than all dedicated compute. A
+	// backend may return it with an error after a control-plane effect succeeded.
+	Cleanup CleanupEvidence
+	// CleanupResource is a transitional bridge for the previous 1A branch and is removed in Task 2.
 	CleanupResource *CleanupResource
 	// RecordedCheckpoint, on the Incarnation passed to Snapshot, is the checkpoint the session's
 	// journal last recorded for the session (see SessionSpec.RecordedCheckpoint); the zero value

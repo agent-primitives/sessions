@@ -1528,7 +1528,8 @@ Recognized lifecycle and compute-start failures carry one `google.rpc.ErrorInfo`
 `agentsessions`, the reason below and no metadata. Reasons follow the classified condition, not
 the method: they apply to Exec, Resume, Suspend, Fork, Approve and CloseApproval wherever the
 corresponding condition is classified. DeleteSession reports SESSION_BUSY and SESSION_DELETED;
-mutation deletion-admission probes also report SESSION_BUSY. HarnessRegistry.RegisterHarness and
+Exec, Resume, Suspend, Fork, Approve and CloseApproval also report SESSION_BUSY while a
+DeleteSession holds the session. HarnessRegistry.RegisterHarness and
 HarnessRegistry.CreateHarness report HARNESS_UNAVAILABLE when placement admission cannot reach
 the harness. Clients match domain and reason together; details are additive, and an older server
 or an unclassified error may supply none.

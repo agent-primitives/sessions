@@ -64,7 +64,8 @@ const (
 type HarnessRegistryClient interface {
 	// Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec,
 	// or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve
-	// a new placement. An identical repeat of a registration isolated during startup returns
+	// a new placement. UNAVAILABLE (HARNESS_UNAVAILABLE) when placement admission cannot reach the
+	// harness. An identical repeat of a registration isolated during startup returns
 	// UNCHANGED or REACTIVATED with unservable_reason set; it does not claim this host serves it.
 	// An identical compatible repeat of a row added since startup can load it locally without restart.
 	// Repeating a RETIRED registration reactivates it for every host sharing the journal; restart the
@@ -80,7 +81,8 @@ type HarnessRegistryClient interface {
 	// under a registered name. A valid request is ALREADY_EXISTS when the name has a registration
 	// row of any spec, ACTIVE or RETIRED (whether or not this host has loaded or can serve it), or
 	// is taken by or reserved for a STATIC harness; nothing is stored, reactivated or loaded. A free
-	// name is FAILED_PRECONDITION, like RegisterHarness, when the host cannot serve its placement. A
+	// name is FAILED_PRECONDITION, like RegisterHarness, when the host cannot serve its placement, and
+	// UNAVAILABLE (HARNESS_UNAVAILABLE) when placement admission cannot reach the harness. A
 	// server that predates this RPC returns UNIMPLEMENTED and changes nothing.
 	// A call that fails with DEADLINE_EXCEEDED, CANCELLED or a transport error may or may not have
 	// stored the registration, and a retry that finds it returns ALREADY_EXISTS whoever stored it.
@@ -178,7 +180,8 @@ func (c *harnessRegistryClient) RetireHarness(ctx context.Context, in *RetireHar
 type HarnessRegistryServer interface {
 	// Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec,
 	// or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve
-	// a new placement. An identical repeat of a registration isolated during startup returns
+	// a new placement. UNAVAILABLE (HARNESS_UNAVAILABLE) when placement admission cannot reach the
+	// harness. An identical repeat of a registration isolated during startup returns
 	// UNCHANGED or REACTIVATED with unservable_reason set; it does not claim this host serves it.
 	// An identical compatible repeat of a row added since startup can load it locally without restart.
 	// Repeating a RETIRED registration reactivates it for every host sharing the journal; restart the
@@ -194,7 +197,8 @@ type HarnessRegistryServer interface {
 	// under a registered name. A valid request is ALREADY_EXISTS when the name has a registration
 	// row of any spec, ACTIVE or RETIRED (whether or not this host has loaded or can serve it), or
 	// is taken by or reserved for a STATIC harness; nothing is stored, reactivated or loaded. A free
-	// name is FAILED_PRECONDITION, like RegisterHarness, when the host cannot serve its placement. A
+	// name is FAILED_PRECONDITION, like RegisterHarness, when the host cannot serve its placement, and
+	// UNAVAILABLE (HARNESS_UNAVAILABLE) when placement admission cannot reach the harness. A
 	// server that predates this RPC returns UNIMPLEMENTED and changes nothing.
 	// A call that fails with DEADLINE_EXCEEDED, CANCELLED or a transport error may or may not have
 	// stored the registration, and a retry that finds it returns ALREADY_EXISTS whoever stored it.

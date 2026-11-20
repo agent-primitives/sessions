@@ -20,8 +20,8 @@ import (
 // Resume does. Resume and suspend fail with err.
 type conflictControl struct{ err error }
 
-func (conflictControl) CreateActor(context.Context, substrate.ActorRef, substrate.ObjectRef) error {
-	return nil
+func (conflictControl) CreateActor(context.Context, substrate.ActorRef, substrate.ObjectRef) (substrate.ActorInfo, error) {
+	return substrate.ActorInfo{}, nil
 }
 
 func (c conflictControl) ResumeActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {

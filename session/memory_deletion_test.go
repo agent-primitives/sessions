@@ -40,7 +40,7 @@ func (c *countingControl) reset() []string {
 	return calls
 }
 
-func (c *countingControl) CreateActor(ctx context.Context, a substrate.ActorRef, t substrate.ObjectRef) error {
+func (c *countingControl) CreateActor(ctx context.Context, a substrate.ActorRef, t substrate.ObjectRef) (substrate.ActorInfo, error) {
 	c.record("CreateActor", a.Name)
 	return c.actorControl.CreateActor(ctx, a, t)
 }
@@ -65,7 +65,7 @@ func (c *countingControl) GetActor(ctx context.Context, a substrate.ActorRef) (s
 	return c.actorControl.GetActor(ctx, a)
 }
 
-func (c *countingControl) TagActor(ctx context.Context, a substrate.ActorRef, tag substrate.SnapshotID) error {
+func (c *countingControl) TagActor(ctx context.Context, a substrate.ActorRef, tag substrate.SnapshotID) (substrate.TagInfo, error) {
 	c.record("TagActor", a.Name)
 	return c.actorControl.TagActor(ctx, a, tag)
 }

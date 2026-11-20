@@ -22,10 +22,10 @@ func TestComputeFailuresOverAdapter(t *testing.T) {
 	template := substrate.ObjectRef{Atespace: "space", Name: "template"}
 	tag := substrate.SnapshotID{Atespace: "space", Name: "fork-child"}
 	operations := map[string]func(*Adapter) error{
-		"create": func(ad *Adapter) error { return ad.CreateActor(ctx, actor, template) },
+		"create": func(ad *Adapter) error { _, err := ad.CreateActor(ctx, actor, template); return err },
 		"resume": func(ad *Adapter) error { _, err := ad.ResumeActor(ctx, actor); return err },
 		"get":    func(ad *Adapter) error { _, err := ad.GetActor(ctx, actor); return err },
-		"tag":    func(ad *Adapter) error { return ad.TagActor(ctx, actor, tag) },
+		"tag":    func(ad *Adapter) error { _, err := ad.TagActor(ctx, actor, tag); return err },
 		"clone":  func(ad *Adapter) error { _, err := ad.CreateActorFromTag(ctx, actor, template, tag); return err },
 	}
 	for name, call := range operations {
@@ -88,20 +88,20 @@ func TestComputeClassificationPreservesLifecycleSentinels(t *testing.T) {
 		resumeErr: status.Error(codes.NotFound, "missing volume or actor"),
 		tagErr:    status.Error(codes.AlreadyExists, "exists"),
 	})
-	if err := ad.CreateActor(ctx, actor, substrate.ObjectRef{}); !errors.Is(err, substrate.ErrActorExists) {
+	if _, err := ad.CreateActor(ctx, actor, substrate.ObjectRef{}); !errors.Is(err, substrate.ErrActorExists) {
 		t.Fatal(err)
 	}
 	if _, err := ad.ResumeActor(ctx, actor); !errors.Is(err, substrate.ErrActorNotFound) {
 		t.Fatal(err)
 	}
-	if err := ad.TagActor(ctx, actor, substrate.SnapshotID{}); !errors.Is(err, substrate.ErrTagExists) {
+	if _, err := ad.TagActor(ctx, actor, substrate.SnapshotID{}); !errors.Is(err, substrate.ErrTagExists) {
 		t.Fatal(err)
 	}
 	ad = FromClient(&fakeControl{resumeErr: status.Error(codes.Aborted, "busy"), tagErr: status.Error(codes.Aborted, "busy")})
 	if _, err := ad.ResumeActor(ctx, actor); !errors.Is(err, substrate.ErrActorBusy) {
 		t.Fatal(err)
 	}
-	if err := ad.TagActor(ctx, actor, substrate.SnapshotID{}); !errors.Is(err, substrate.ErrActorBusy) {
+	if _, err := ad.TagActor(ctx, actor, substrate.SnapshotID{}); !errors.Is(err, substrate.ErrActorBusy) {
 		t.Fatal(err)
 	}
 }

@@ -12,40 +12,71 @@ import (
 )
 
 // allocationRecorder is optional so standalone event logs retain their existing behavior.
-// Durable logs record an unresolved attempt before compute IO, even if its response is lost.
+// Durable logs record an unresolved operation and, for owned backends, its complete resource plan
+// before compute I/O.
 type allocationRecorder interface {
-	BeginAllocation(ctx context.Context, backend, operation string) (string, error)
+	BeginAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error)
 	ConfirmAllocation(ctx context.Context, attempt string, in api.Incarnation) error
 }
 
-func (p *Placer) allocate(ctx context.Context, log eventlog.Store, operation string, effect func() (api.Incarnation, error)) (api.Incarnation, error) {
+type forkAllocationRecorder interface {
+	BeginUnpublishedAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error)
+	ConfirmAllocation(ctx context.Context, attempt string, in api.Incarnation) error
+}
+
+func cleanupOperation(operation string) api.CleanupOperation {
+	switch operation {
+	case "create":
+		return api.CleanupCreate
+	case "restore":
+		return api.CleanupRestore
+	case "fork":
+		return api.CleanupFork
+	default:
+		return api.CleanupOperation(operation)
+	}
+}
+
+func (p *Placer) allocate(ctx context.Context, log eventlog.Store, sessionUID, operation string, effect func() (api.Incarnation, error)) (api.Incarnation, error) {
 	recorder, tracked := log.(allocationRecorder)
 	if !tracked {
 		in, err := effect()
 		return in, allocationStartError(ctx, err)
 	}
 	key := ""
-	if cleanup, ok := p.backend.(api.CleanupRuntime); ok {
+	var resources []api.CleanupResource
+	owned := false
+	if cleanup, ok := p.backend.(api.ResourceCleanupRuntime); ok && cleanup.CleanupKey() != "" {
+		key = cleanup.CleanupKey()
+		resources = append([]api.CleanupResource(nil), cleanup.CleanupResources(cleanupOperation(operation), sessionUID)...)
+		if err := api.ValidateCleanupPlan(resources); err != nil {
+			return api.Incarnation{}, allocationStartError(ctx, fmt.Errorf("placement: %s allocation plan: %w", operation, err))
+		}
+		owned = true
+	} else if cleanup, ok := p.backend.(api.CleanupRuntime); ok {
 		key = cleanup.CleanupKey()
 	}
-	// Unsupported backends still run, but their attempts remain unreleasable rather than
-	// falling back to a potentially destructive name-only Stop.
-	attempt, err := recorder.BeginAllocation(ctx, key, operation)
+	attempt, err := recorder.BeginAllocation(ctx, key, operation, resources...)
 	if err != nil {
 		return api.Incarnation{}, allocationStartError(ctx, fmt.Errorf("placement: begin %s allocation: %w", operation, err))
 	}
-	in, err := effect()
-	if err != nil {
-		return in, allocationStartError(ctx, err)
+	in, effectErr := effect()
+	// Legacy handle cleanup keeps its existing success-only confirmation. Identity-bearing cleanup
+	// must also confirm a UID returned with an error, because the control-plane effect may have landed.
+	if effectErr != nil && !owned {
+		return in, allocationStartError(ctx, effectErr)
 	}
-	// The runtime has returned a known handle. Persist it even if the caller stopped
-	// waiting, but bound the write independently so cancellation cannot strand this call.
 	confirmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	if err := recorder.ConfirmAllocation(confirmCtx, attempt, in); err != nil {
-		return in, fmt.Errorf("placement: confirm %s allocation: %w", operation, err)
+	confirmErr := recorder.ConfirmAllocation(confirmCtx, attempt, in)
+	if confirmErr != nil {
+		wrapped := fmt.Errorf("placement: confirm %s allocation: %w", operation, confirmErr)
+		if effectErr != nil {
+			return in, errors.Join(allocationStartError(ctx, effectErr), wrapped)
+		}
+		return in, wrapped
 	}
-	return in, nil
+	return in, allocationStartError(ctx, effectErr)
 }
 
 // CallerContextError records the caller's outcome at failure, independently of any

@@ -25,12 +25,13 @@ var ErrInventoryIncomplete = fmt.Errorf("%w: inventory incomplete", ErrCleanupPe
 // callers must not confirm or release another session's resources.
 var ErrAllocationNotFound = errors.New("sqlitelog: allocation attempt not found")
 
-// ErrAllocationConflict means confirmation lacks a session-scoped handle or would change
-// the handle already recorded for this attempt.
+// ErrAllocationConflict means confirmation lacks a session-scoped handle, would change the handle
+// or a resource UID already recorded for this attempt, or names a resource its plan does not.
 var ErrAllocationConflict = errors.New("sqlitelog: allocation confirmation conflict")
 
 // Allocation is a write-ahead resource attempt. ResourceID retains the incarnation's
 // session-scoped handle, not its compute-instance identity, address, credentials or routing metadata.
+// An attempt with a resource plan leaves it empty; its UIDs live in allocation_resources.
 type Allocation struct {
 	ID, SessionUID, Backend, Operation, ResourceID string
 	Confirmed                                      bool
@@ -53,6 +54,34 @@ func migrateCleanupInventory(tx *sql.Tx) error {
 	return err
 }
 
+// migrateCleanupIdentity adds the provider-opaque resource plan of each attempt: one row per
+// resource, its UID once a backend proves it created it, and which resource borrows it. The
+// canonical_resource_id column ships empty; a later cleanup change uses it to link duplicate claims.
+func migrateCleanupIdentity(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+		CREATE TABLE allocation_resources (
+		  id TEXT PRIMARY KEY,
+		  allocation_id TEXT NOT NULL,
+		  ordinal INTEGER NOT NULL,
+		  reference TEXT NOT NULL,
+		  uid TEXT NOT NULL DEFAULT '',
+		  confirmed INTEGER NOT NULL DEFAULT 0,
+		  released INTEGER NOT NULL DEFAULT 0,
+		  canonical_resource_id TEXT,
+		  UNIQUE(allocation_id, ordinal)
+		);
+		CREATE INDEX allocation_resources_allocation ON allocation_resources(allocation_id);
+		CREATE INDEX allocation_resources_identity ON allocation_resources(reference, uid);
+		CREATE INDEX allocation_resources_canonical ON allocation_resources(canonical_resource_id);
+		CREATE TABLE allocation_borrowers (
+		  resource_id TEXT NOT NULL,
+		  borrower_resource_id TEXT NOT NULL,
+		  PRIMARY KEY(resource_id, borrower_resource_id)
+		);
+		CREATE INDEX allocation_borrowers_borrower ON allocation_borrowers(borrower_resource_id);`)
+	return err
+}
+
 func newLedgerID() (string, error) {
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
@@ -61,11 +90,25 @@ func newLedgerID() (string, error) {
 	return hex.EncodeToString(id[:]), nil
 }
 
-// BeginAllocation durably records an intent before runtime IO. Implicit logs receive an incomplete
-// metadata row in the same transaction; a tombstone can never be resurrected by an attempt.
-func (l *Log) BeginAllocation(ctx context.Context, backend, operation string) (string, error) {
+// BeginAllocation durably records an intent, and any resource plan, before runtime IO. Implicit
+// logs receive an incomplete metadata row in the same transaction; a tombstone can never be
+// resurrected by an attempt.
+func (l *Log) BeginAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error) {
+	return l.beginAllocation(ctx, backend, operation, true, resources)
+}
+
+// BeginUnpublishedAllocation records a fork child's plan without creating its sessions row, so
+// the child stays unlisted until its fork fence publishes it.
+func (l *Log) BeginUnpublishedAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error) {
+	return l.beginAllocation(ctx, backend, operation, false, resources)
+}
+
+func (l *Log) beginAllocation(ctx context.Context, backend, operation string, publish bool, resources []api.CleanupResource) (string, error) {
 	if l.session == "" || operation == "" {
 		return "", errors.New("sqlitelog: allocation requires session and operation")
+	}
+	if err := api.ValidateCleanupPlan(resources); err != nil {
+		return "", err
 	}
 	id, err := newLedgerID()
 	if err != nil {
@@ -79,13 +122,36 @@ func (l *Log) BeginAllocation(ctx context.Context, backend, operation string) (s
 	if err := checkWritable(tx, l.session); err != nil {
 		return "", err
 	}
-	now := time.Now().UnixNano()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(session,project,created_at,updated_at) VALUES(?,?,?,?)
-		ON CONFLICT(session) DO NOTHING`, l.session, l.store.defaultProject, now, now); err != nil {
-		return "", err
+	if publish {
+		now := time.Now().UnixNano()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(session,project,created_at,updated_at) VALUES(?,?,?,?)
+			ON CONFLICT(session) DO NOTHING`, l.session, l.store.defaultProject, now, now); err != nil {
+			return "", err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO allocations(id,session,backend,operation) VALUES(?,?,?,?)`, id, l.session, backend, operation); err != nil {
 		return "", fmt.Errorf("sqlitelog: record allocation: %w", err)
+	}
+	rows := make(map[string]string, len(resources))
+	for ordinal, resource := range resources {
+		rowID, err := newLedgerID()
+		if err != nil {
+			return "", err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO allocation_resources(id,allocation_id,ordinal,reference) VALUES(?,?,?,?)`,
+			rowID, id, ordinal, resource.Reference); err != nil {
+			return "", fmt.Errorf("sqlitelog: record allocation resource: %w", err)
+		}
+		rows[resource.Reference] = rowID
+	}
+	for _, resource := range resources {
+		if resource.Borrower == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO allocation_borrowers(resource_id,borrower_resource_id) VALUES(?,?)`,
+			rows[resource.Reference], rows[resource.Borrower]); err != nil {
+			return "", fmt.Errorf("sqlitelog: record allocation borrower: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return "", err
@@ -97,10 +163,10 @@ func (l *Log) BeginAllocation(ctx context.Context, backend, operation string) (s
 // or replace its session-scoped handle. It retains this attempt and compacts other confirmed,
 // unreleased attempts for the same (session, backend, handle), regardless of operation. Identical retries
 // succeed while the attempt is retained; compacted IDs return ErrAllocationNotFound.
+//
+// An attempt with a resource plan instead records the UIDs in in.Cleanup, which may be partial and
+// may come with a runtime error. Unproven resources stay unconfirmed; nothing is compacted.
 func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Incarnation) error {
-	if in.ID == "" {
-		return ErrAllocationConflict
-	}
 	tx, err := l.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -114,6 +180,19 @@ func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Inca
 	}
 	if err != nil {
 		return err
+	}
+	var planned bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM allocation_resources WHERE allocation_id=?)`, attempt).Scan(&planned); err != nil {
+		return err
+	}
+	if planned {
+		if err := confirmResources(ctx, tx, attempt, released, in.Cleanup.Resources()); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if in.ID == "" {
+		return ErrAllocationConflict
 	}
 	if confirmed {
 		if id != in.ID {
@@ -132,6 +211,37 @@ func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Inca
 		return err
 	}
 	return tx.Commit()
+}
+
+// confirmResources records observed UIDs against the attempt's plan. A resource outside the plan, a
+// different borrower or a changed UID is a conflict; repeating the same evidence is a no-op.
+func confirmResources(ctx context.Context, tx *sql.Tx, attempt string, released bool, observed []api.CleanupResource) error {
+	if len(observed) == 0 {
+		return nil
+	}
+	if released {
+		return ErrAllocationConflict
+	}
+	for _, resource := range observed {
+		var rowID, uid, borrower string
+		err := tx.QueryRowContext(ctx, `SELECT r.id,r.uid,COALESCE(b.reference,'')
+			FROM allocation_resources r
+			LEFT JOIN allocation_borrowers e ON e.resource_id=r.id
+			LEFT JOIN allocation_resources b ON b.id=e.borrower_resource_id
+			WHERE r.allocation_id=? AND r.reference=?`, attempt, resource.Reference).Scan(&rowID, &uid, &borrower)
+		if errors.Is(err, sql.ErrNoRows) || err == nil && (borrower != resource.Borrower || uid != "" && uid != resource.UID) {
+			return ErrAllocationConflict
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE allocation_resources SET uid=?,confirmed=1 WHERE id=?`, resource.UID, rowID); err != nil {
+			return err
+		}
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE allocations SET confirmed=NOT EXISTS
+		(SELECT 1 FROM allocation_resources WHERE allocation_id=? AND confirmed=0) WHERE id=?`, attempt, attempt)
+	return err
 }
 
 // Allocations returns all unreleased attempts, including unknown outcomes and backend routes.

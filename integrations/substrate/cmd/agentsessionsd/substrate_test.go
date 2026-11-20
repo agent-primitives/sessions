@@ -586,12 +586,12 @@ func (f *fakeControl) log() []string {
 	return slices.Clone(f.calls)
 }
 
-func (f *fakeControl) CreateActor(_ context.Context, a substrate.ActorRef, tmpl substrate.ObjectRef) error {
+func (f *fakeControl) CreateActor(_ context.Context, a substrate.ActorRef, tmpl substrate.ObjectRef) (substrate.ActorInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "create:"+a.Atespace+"/"+a.Name+":tmpl="+tmpl.Atespace+"/"+tmpl.Name)
 	f.actors[a.Name] = substrate.StatusSuspended
-	return nil
+	return substrate.ActorInfo{}, nil
 }
 
 func (f *fakeControl) ResumeActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -854,4 +854,25 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// The cleanup key names one control plane and atespace. It survives a port change, so recorded
+// attempts keep their key, and is empty without an atespace.
+func TestSubstrateCleanupKeyBindsControlPlaneAndAtespace(t *testing.T) {
+	a := substrateCleanupKey("api.cluster:443", "", "space")
+	if a == "" || a != substrateCleanupKey("api.cluster:7443", "api.cluster", "space") {
+		t.Fatalf("key changed across port or server name: %q", a)
+	}
+	for _, other := range []string{
+		substrateCleanupKey("other.cluster:443", "", "space"),
+		substrateCleanupKey("api.cluster:443", "other.cluster", "space"),
+		substrateCleanupKey("api.cluster:443", "", "other-space"),
+	} {
+		if other == "" || other == a {
+			t.Fatalf("cleanup key collision: %q", other)
+		}
+	}
+	if got := substrateCleanupKey("api.cluster:443", "", ""); got != "" {
+		t.Fatalf("key without atespace=%q, want empty", got)
+	}
 }

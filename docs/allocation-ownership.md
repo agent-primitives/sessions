@@ -33,6 +33,17 @@ safe release route. The ledger runs no cleanup and does not change Fork's rollba
 from the ledger, a failed `Exec` or `Resume` releases the compute it allocated through
 `ReleaseSession` when the journal records nothing that owns it (spec `RT-7`).
 
+## Resource plans
+
+A runtime with dedicated per-session resources can implement `api.ResourceCleanupRuntime` (spec
+`RT-4j`). Substrate does when the daemon gives it a cleanup key. Placement then records the
+operation's complete resource plan before I/O: provider-opaque references, and which resource
+borrows which (a memory-tier fork child borrows its tag's snapshot). The runtime returns the UIDs it
+proved it created in `Incarnation.Cleanup`, also with an error, and placement confirms them on the
+same bounded context. A reference outside the plan, a changed UID or a changed borrower is a
+conflict. A lost response leaves the resource unconfirmed. A Fork child's plan is recorded without
+publishing the child. These rows are not released yet; teardown is unchanged.
+
 ## Compatibility
 
 Version 7 adds the allocation ledger and inventory completeness/evidence columns. Fork-publication
@@ -45,3 +56,6 @@ Create/Restore alone cannot cover a subsequent legacy Fork. Neither an empty led
 fork nor a later tracked restore establishes completeness. A host embedding `sqlitelog` may call
 `Store.CertifyInventory` only after reconciling every namespace, runtime override and failed-fork
 allocation; its evidence is persisted. Resource confirmation/release never auto-certifies inventory.
+
+Version 10 adds the resource plan tables. Its rollout steps are in
+[spec §18](../spec.md#18-versioning-and-compatibility).

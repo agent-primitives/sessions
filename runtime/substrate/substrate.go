@@ -25,6 +25,7 @@ package substrate
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -174,7 +175,7 @@ type ControlClient interface {
 	// CreateActor creates a SUSPENDED actor, borrowing the template's current golden tag as its
 	// first snapshot when one exists. A name that is already taken must be reported as (or wrap)
 	// ErrActorExists.
-	CreateActor(ctx context.Context, actor ActorRef, template ObjectRef) error
+	CreateActor(ctx context.Context, actor ActorRef, template ObjectRef) (ActorInfo, error)
 	// ResumeActor schedules the actor onto a worker from its own snapshot, or cold-boots the
 	// template spec if it has none. It does not look up the template's golden tag at resume time.
 	// There is no per-call boot flag. It returns the actor as the resume left it, with every field
@@ -226,6 +227,11 @@ type SnapshotID struct {
 	Name     string
 }
 
+// TagInfo is the immutable identity of a snapshot tag created by this control-plane call.
+type TagInfo struct {
+	UID string
+}
+
 // SnapshotCloner is the OPTIONAL clone-from-snapshot extension of ControlClient, backed by
 // substrate's Tag APIs. Keeping it separate from ControlClient means a control client that does not
 // implement tags still satisfies the base interface: stateless sessions keep forking (they never need
@@ -240,7 +246,7 @@ type SnapshotCloner interface {
 	// it. The tag lives in the source actor's atespace. Substrate reserves the tag's name before it
 	// copies, so a call that fails may still leave a pending tag behind; a name that was already
 	// taken fails with ErrTagExists.
-	TagActor(ctx context.Context, source ActorRef, tag SnapshotID) error
+	TagActor(ctx context.Context, source ActorRef, tag SnapshotID) (TagInfo, error)
 	// CreateActorFromTag creates actor seeded from the snapshot behind tag and reports the actor it
 	// created, UID included. Substrate requires the actor's template to be the one the snapshot was
 	// taken under. Fork compares the reported UID with the one ResumeActor reports, so a clone
@@ -260,6 +266,7 @@ type Backend struct {
 	router      string         // host:port of the atenet-router ingress the harness is reached through
 	logger      *slog.Logger
 	volumesOnly bool
+	cleanupKey  string
 	// egressPolicy, set by WithEgressPolicy, is the policy installed on an actor before its compute
 	// starts; nil installs none.
 	egressPolicy func(ctx context.Context, s *api.SessionSpec) (*EgressPolicy, error)
@@ -268,6 +275,7 @@ type Backend struct {
 }
 
 var _ api.Runtime = (*Backend)(nil)
+var _ api.ResourceCleanupRuntime = (*Backend)(nil)
 
 var (
 	errCreateRequiresSessionSpec = errors.New("substrate: create requires a session spec")
@@ -284,11 +292,79 @@ func WithLogger(logger *slog.Logger) Option { return func(b *Backend) { b.logger
 // DefaultRouterAddress, is the in-cluster Service a stock substrate install creates.
 func WithRouter(address string) Option { return func(b *Backend) { b.router = address } }
 
+// WithCleanupKey binds this backend to an explicit, credential-free control-plane identity. A
+// backend without one remains usable but emits no owned cleanup plan or evidence.
+func WithCleanupKey(key string) Option { return func(b *Backend) { b.cleanupKey = key } }
+
 // WithVolumesOnly requires Snapshot to observe a completed VOLUMES snapshot with a durable URI
 // and disables memory-snapshot admission. It validates results, not template configuration: set
 // the template's preferred fidelity to VOLUMES, configure durable directories and disable goldens.
 // Combining it with a memory-required descriptor is unplaceable and Snapshot refuses directly too.
 func WithVolumesOnly() Option { return func(b *Backend) { b.volumesOnly = true } }
+
+// cleanupReference names one Substrate resource opaquely for the ledger. Each part is encoded, so
+// a name cannot forge a separator.
+func cleanupReference(kind, atespace, name string) string {
+	return "substrate:v1:" + kind + ":" +
+		base64.RawURLEncoding.EncodeToString([]byte(atespace)) + ":" +
+		base64.RawURLEncoding.EncodeToString([]byte(name))
+}
+
+// CleanupKey returns the configured control-plane identity; it never falls back to a harness alias.
+func (b *Backend) CleanupKey() string { return b.cleanupKey }
+
+// CleanupResources returns the complete UID-empty plan for one operation. A stateful fork takes a
+// tag the child actor borrows, so the actor is its borrower.
+func (b *Backend) CleanupResources(operation api.CleanupOperation, sessionUID string) []api.CleanupResource {
+	if b.cleanupKey == "" || sessionUID == "" {
+		return nil
+	}
+	actor := api.CleanupResource{Reference: cleanupReference("actor", b.atespace, sessionUID)}
+	switch operation {
+	case api.CleanupCreate, api.CleanupRestore:
+		return []api.CleanupResource{actor}
+	case api.CleanupFork:
+		if b.descriptor.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
+			return []api.CleanupResource{actor}
+		}
+		tag := api.CleanupResource{Reference: cleanupReference("tag", b.atespace, forkTag(sessionUID)), Borrower: actor.Reference}
+		return []api.CleanupResource{tag, actor}
+	default:
+		return nil
+	}
+}
+
+// actorEvidence and forkEvidence report the identities a call proved it created. Without a cleanup
+// key, or without a UID, they report nothing: an unknown outcome stays unconfirmed in the ledger.
+func (b *Backend) actorEvidence(name, uid string) api.CleanupEvidence {
+	if b.cleanupKey == "" || uid == "" {
+		return api.CleanupEvidence{}
+	}
+	evidence, _ := api.NewCleanupEvidence([]api.CleanupResource{{Reference: cleanupReference("actor", b.atespace, name), UID: uid}})
+	return evidence
+}
+
+func (b *Backend) forkEvidence(child, tagUID, actorUID string) api.CleanupEvidence {
+	if b.cleanupKey == "" || tagUID == "" {
+		return api.CleanupEvidence{}
+	}
+	actor := cleanupReference("actor", b.atespace, child)
+	resources := []api.CleanupResource{{Reference: cleanupReference("tag", b.atespace, forkTag(child)), UID: tagUID, Borrower: actor}}
+	if actorUID != "" {
+		resources = append(resources, api.CleanupResource{Reference: actor, UID: actorUID})
+	}
+	evidence, _ := api.NewCleanupEvidence(resources)
+	return evidence
+}
+
+// partial is what a failed call still returns: the session handle and the identities it created,
+// so placement can confirm them. It carries no routing fields.
+func partial(id string, evidence api.CleanupEvidence) api.Incarnation {
+	if len(evidence.Resources()) == 0 {
+		return api.Incarnation{}
+	}
+	return api.Incarnation{ID: id, Cleanup: evidence}
+}
 
 // New builds the backend targeting one atespace and harness ActorTemplate. descriptor is the
 // harness's declared contract, used by the placement gate (see Describe).
@@ -423,7 +499,8 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 		"actor", ref.Name,
 		"atespace", ref.Atespace,
 	)
-	if err := b.ctl.CreateActor(callCtx, ref, b.template); err != nil {
+	created, err := b.ctl.CreateActor(callCtx, ref, b.template)
+	if err != nil {
 		if errors.Is(err, ErrActorExists) {
 			// Another host created the actor after this call looked. Use it as that host does; the
 			// host's compute-instance check still refuses it if it replaced a lost actor.
@@ -439,11 +516,13 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 		return api.Incarnation{}, fmt.Errorf("substrate: create actor: %w", err)
 	}
 	createFinished(nil)
+	// From here every return reports the actor this call created, so placement records its UID.
+	owned := b.actorEvidence(ref.Name, created.UID)
 
 	// The actor is SUSPENDED until the resume, so its compute never runs without its policy. A
 	// failed install leaves it SUSPENDED; a retry finds it and installs again before resuming it.
 	if err := egress.install(ctx, ref); err != nil {
-		return api.Incarnation{}, err
+		return partial(ref.Name, owned), err
 	}
 
 	callCtx, resumeFinished := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "resume_actor",
@@ -453,16 +532,17 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	info, err := b.ctl.ResumeActor(callCtx, ref)
 	if err != nil {
 		resumeFinished(err, "error_kind", "resume_actor_failed")
-		return api.Incarnation{}, fmt.Errorf("substrate: resume actor: %w", err)
+		return partial(ref.Name, owned), fmt.Errorf("substrate: resume actor: %w", err)
 	}
 	resumeFinished(nil, "actor_status", info.Status)
 	if inc, err = b.incarnation(ctx, sessionUID, info, actorLeftRunning); err != nil {
-		return api.Incarnation{}, err
+		return partial(ref.Name, owned), err
 	}
+	inc.Cleanup = owned
 	// The new actor was SUSPENDED and addressable until this resume (see the doc comment above).
 	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
 	if err := b.requireAttachCheckpoint(ctx, ref.Name, info, memory, s.RecordedCheckpoint, resumedNotHandedOut); err != nil {
-		return api.Incarnation{}, err
+		return partial(ref.Name, owned), err
 	}
 	return inc, nil
 }
@@ -1013,11 +1093,12 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 	if err != nil {
 		return api.Incarnation{}, err
 	}
+	owned := b.restoredEvidence(ctx, name, recorded)
 	// A SUSPENDED actor gets the session's egress policy before it is resumed (normally it has one
 	// already and keeps it). A RUNNING one is left as it is: the resume below is a no-op for it.
 	if !running {
 		if err := b.restoreEgress(ctx, ref, recorded); err != nil {
-			return api.Incarnation{}, err
+			return partial(name, owned), err
 		}
 	}
 	callCtx, resumeFinished := observability.BeginDebug(ctx, b.logger, "runtime.substrate", "resume_actor",
@@ -1028,21 +1109,38 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 	if err != nil {
 		resumeFinished(err, "error_kind", "resume_actor_failed")
 		if lost := b.memoryActorGone(ctx, ref, recorded, err); lost != nil {
-			return api.Incarnation{}, lost
+			return partial(name, owned), lost
 		}
-		return api.Incarnation{}, fmt.Errorf("substrate: resume (restore) actor: %w", err)
+		return partial(name, owned), fmt.Errorf("substrate: resume (restore) actor: %w", err)
 	}
 	resumeFinished(nil, "actor_status", info.Status)
 	inc, err = b.incarnation(ctx, name, info, actorLeftRunning)
 	if err != nil {
-		return api.Incarnation{}, err
+		return partial(name, owned), err
 	}
+	inc.Cleanup = owned
 	if b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
 		if err := b.requireRecordedCheckpoint(ctx, name, info, ref, resumedNotHandedOut); err != nil {
-			return api.Incarnation{}, fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
+			return partial(name, owned), fmt.Errorf("%w: %w", ErrSnapshotNotRestorable, err)
 		}
 	}
 	return inc, nil
+}
+
+// restoredEvidence claims the restored actor only when its current UID is the one the journal
+// recorded. Anything else (no key, no record, a replacement, a failed read) claims nothing.
+func (b *Backend) restoredEvidence(ctx context.Context, name string, recorded func() (string, error)) api.CleanupEvidence {
+	if b.cleanupKey == "" || recorded == nil {
+		return api.CleanupEvidence{}
+	}
+	uid, err := recorded()
+	if err != nil || uid == "" {
+		return api.CleanupEvidence{}
+	}
+	if info, err := b.ctl.GetActor(ctx, b.ref(name)); err != nil || info.UID != uid {
+		return api.CleanupEvidence{}
+	}
+	return b.actorEvidence(name, uid)
 }
 
 // restoreEgress installs the session's egress policy on the actor Restore is about to resume. An
@@ -1357,7 +1455,9 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 				childRef := b.ref(child)
 				err = busyRefusal(fmt.Sprintf("substrate: create fork child %s/%s", childRef.Atespace, childRef.Name), err)
 			}
-			return api.Incarnation{}, err
+			// Create's partial result names the actor it created, so placement records it even
+			// though the teardown above may fail.
+			return inc, err
 		}
 		return inc, nil
 	}
@@ -1385,7 +1485,14 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 	if err := b.requireSnapshot(ctx, parent, ref.ExternalURI); err != nil {
 		return api.Incarnation{}, err
 	}
-	if err := cloner.TagActor(ctx, parent, tag); err != nil {
+	tagged, err := cloner.TagActor(ctx, parent, tag)
+	if errors.Is(err, ErrTagExists) {
+		tagged = TagInfo{} // another caller's tag: never claim it
+	}
+	// Every later return reports the tag and child this call created, so placement records their UIDs
+	// even when the best-effort teardown below fails.
+	owned := b.forkEvidence(child, tagged.UID, "")
+	if err != nil {
 		// Substrate reserves the tag before it copies the snapshot, so a failed or timed-out create
 		// can leave a pending tag holding a partial copy, and the atespace cannot be deleted while it
 		// remains. Release it, unless the name was already taken: that tag is not this attempt's.
@@ -1397,28 +1504,29 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 			// as on either side of the tag. The tag's error stays in the chain but not in the text
 			// (hiddenCause), since it can carry substrate's own message.
 			if gone := b.requireSnapshot(ctx, parent, ref.ExternalURI); errors.Is(gone, api.ErrMemoryStateLost) || errors.Is(gone, ErrSnapshotSuperseded) {
-				return api.Incarnation{}, &hiddenCause{err: fmt.Errorf("%w; the tag of parent %q failed", gone, parent.Name), cause: err}
+				return partial(child, owned), &hiddenCause{err: fmt.Errorf("%w; the tag of parent %q failed", gone, parent.Name), cause: err}
 			}
 		}
-		return api.Incarnation{}, forkCallError(fmt.Sprintf("substrate: tag parent %q", parent.Name), err)
+		return partial(child, owned), forkCallError(fmt.Sprintf("substrate: tag parent %q", parent.Name), err)
 	}
 	if err := b.requireSnapshot(ctx, parent, ref.ExternalURI); err != nil {
 		b.releaseForkTag(ctx, cloner, child)
-		return api.Incarnation{}, err
+		return partial(child, owned), err
 	}
 	created, err := cloner.CreateActorFromTag(ctx, b.ref(child), b.template, tag)
 	if err != nil {
 		// No actor exists yet, but the tag does. Release it: the tag name is derived from a child UID
 		// the caller is about to discard, so this is the last moment it can be named.
 		b.releaseForkTag(ctx, cloner, child)
-		return api.Incarnation{}, forkCallError(fmt.Sprintf("substrate: create actor from tag %q", tag.Name), err)
+		return partial(child, owned), forkCallError(fmt.Sprintf("substrate: create actor from tag %q", tag.Name), err)
 	}
+	owned = b.forkEvidence(child, tagged.UID, created.UID)
 	if created.UID == "" {
 		// The host records the clone's UID on the child's FORK marker and refuses any other actor
 		// under the child's name, so a clone it cannot identify is never handed out. The create
 		// just succeeded, so the actor under the name is this call's.
 		_ = b.destroyChild(ctx, child)
-		return api.Incarnation{}, fmt.Errorf("substrate: create actor from tag %q reported no actor UID; a %s clone must report one",
+		return partial(child, owned), fmt.Errorf("substrate: create actor from tag %q reported no actor UID; a %s clone must report one",
 			tag.Name, api.ResumabilityRequiresMemorySnapshot)
 	}
 	// The child holds the tag's snapshot, so resuming it restores the cloned RAM. The clone is
@@ -1431,17 +1539,17 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 			// install's text names the call, but its busy cause carries the client's.
 			err = forkCallError(fmt.Sprintf("%v on actor %s/%s", errEgressPolicyInstall, childRef.Atespace, childRef.Name), err)
 		}
-		return api.Incarnation{}, b.discardClone(ctx, cloner, childRef, created.UID, err)
+		return partial(child, owned), b.discardClone(ctx, cloner, childRef, created.UID, err)
 	}
 	info, err := b.ctl.ResumeActor(ctx, childRef)
 	if err != nil {
-		return api.Incarnation{}, b.discardClone(ctx, cloner, childRef, created.UID, forkCallError(fmt.Sprintf("substrate: resume cloned actor %s/%s", childRef.Atespace, childRef.Name), err))
+		return partial(child, owned), b.discardClone(ctx, cloner, childRef, created.UID, forkCallError(fmt.Sprintf("substrate: resume cloned actor %s/%s", childRef.Atespace, childRef.Name), err))
 	}
 	if info.UID != created.UID {
 		// ResumeActor has no UID precondition, so it may have resumed the replacement. That actor
 		// is not this fork's: leave it running and release only the tag, which no clone holds now.
 		b.releaseForkTag(ctx, cloner, child)
-		return api.Incarnation{}, fmt.Errorf("%w: fork child %s/%s was replaced between its create and resume (clone %q, now %q); its cloned RAM is gone, no child was created, and the replacement may have been woken by this fork's resume and is left running, not suspended or deleted",
+		return partial(child, owned), fmt.Errorf("%w: fork child %s/%s was replaced between its create and resume (clone %q, now %q); its cloned RAM is gone, no child was created, and the replacement may have been woken by this fork's resume and is left running, not suspended or deleted",
 			ErrActorBusy, childRef.Atespace, childRef.Name, created.UID, info.UID)
 	}
 	// The clone was created and resumed but is not reported RUNNING, came back without the parent's
@@ -1452,7 +1560,7 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 		outcome := b.tearDownForkClone(ctx, cloner, childRef, info.UID)
 		err = b.refuseForkClone(ctx, childRef, created, info, outcome)
 		b.memoryLostWarned.Delete(child)
-		return api.Incarnation{}, err
+		return partial(child, owned), err
 	}
 	inc, err = b.incarnation(ctx, child, info, forkCloneTornDown)
 	if err != nil {
@@ -1460,8 +1568,9 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 		// is all incarnation checks. Tear it down all the same, so a check added there cannot leak it.
 		_ = b.destroyChild(ctx, child)
 		b.memoryLostWarned.Delete(child)
-		return api.Incarnation{}, err
+		return partial(child, owned), err
 	}
+	inc.Cleanup = owned
 	return inc, nil
 }
 

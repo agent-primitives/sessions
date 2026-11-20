@@ -56,7 +56,10 @@ CreateActor · ResumeActor · SuspendActor · DeleteActor · GetActor
 
 `SnapshotCloner` is an optional second interface, also defined in the core, for the clone-from-snapshot
 half of fork (`CreateTag`, `CreateActor{source_tag}`, `DeleteTag`). Keeping it separate means a control
-client without substrate's Tag APIs still satisfies the base interface.
+client without substrate's Tag APIs still satisfies the base interface. `CreateActor` and
+`TagActor` return the UID the server assigned, so placement can record which resources a call
+created ([allocation ownership](allocation-ownership.md#resource-plans)). The daemon sets a cleanup
+key from its ate-api server identity and atespace; a backend built without one records no plan.
 
 - `runtime/substrate` (in the core module) implements `api.Runtime` over that interface — no substrate
   import.

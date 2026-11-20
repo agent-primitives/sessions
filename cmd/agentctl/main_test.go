@@ -127,10 +127,23 @@ func TestResponseBrokenPipe(t *testing.T) {
 		!strings.Contains(stderr.String(), "the turn was not interrupted and its records are committed") {
 		t.Fatalf("exec --json on a closed pipe: state=%v stderr=%q err=%v", cmd.ProcessState, stderr.String(), err)
 	}
-	var last v1.LogRecord
-	lines := strings.Split(strings.TrimSpace(string(run("replay", "--session", parent, "--json"))), "\n")
-	if err := protojson.Unmarshal([]byte(lines[len(lines)-1]), &last); err != nil || last.GetEvent().GetEnd().GetState() != "COMPLETED" {
-		t.Fatalf("the turn behind a closed pipe did not complete: last record %v (%v)", &last, err)
+	// The END must be the closed-pipe turn's own: an earlier turn's END would not prove anything.
+	var execution, state string
+	for _, line := range strings.Split(strings.TrimSpace(string(run("replay", "--session", parent, "--json"))), "\n") {
+		var r v1.LogRecord
+		if err := protojson.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatalf("decode %s: %v", line, err)
+		}
+		ev := r.GetEvent()
+		if ev.GetKind() == v1.EventKind_EVENT_INPUT && wire.MessageFromProto(ev.GetMessage()).Text() == "closed pipe" {
+			execution = ev.GetExecutionId()
+		}
+		if execution != "" && ev.GetExecutionId() == execution && ev.GetKind() == v1.EventKind_EVENT_END {
+			state = ev.GetEnd().GetState()
+		}
+	}
+	if execution == "" || state != "COMPLETED" {
+		t.Fatalf("the turn behind a closed pipe did not complete: execution %q, END state %q", execution, state)
 	}
 }
 

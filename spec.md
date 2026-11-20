@@ -98,7 +98,9 @@ are omitted; readers ignore update kinds they do not expect. A stream error leav
 written and exits unsuccessfully, without retrying the turn. A failed stdout write, including a pipe
 whose reader has exited, ends the command unsuccessfully after the stream is read to its end, so the
 turn is not cut short. Without `--json`, `exec` keeps the default Unix behavior and exits on SIGPIPE
-when its pipe closes, which cancels the turn, embedded or remote.
+when its pipe closes. That ends its stream, which cancels a turn still running, embedded or remote;
+since the turn may already have ended, the outcome is unknown until the journal is read, and the
+turn is not retried.
 
 Without `--json`, `create` retains its bare UID output, and the human output of `exec`, `replay` and
 `fork` is not a stable contract; scripts use `--json`. Harness JSON content is unchanged. Approval

@@ -200,7 +200,7 @@ memory-capable backend the same commands restore RAM instead. The CLI is identic
 
 Use a fresh session so the sequence numbers are easy to follow. Take its UID from `create`, not by
 piping `exec` into `head -1`: without `--json`, `exec` exits on `SIGPIPE` when a reader stops early,
-which cancels the turn mid-way.
+which cancels the turn if it is still running.
 
 ```bash
 SID2=$(agentctl create --journal /tmp/sr.db)
@@ -432,8 +432,9 @@ and `exec --json` report broken stdout pipes as output errors on stderr rather t
 SIGPIPE. For unary commands the error notes that successful mutations remain committed. `exec
 --json`, and `exec` for any other stdout write error, stops writing, reads the turn to its end so it
 is not cut short, then exits with an error noting that the turn's records are committed. Without
-`--json`, `exec` still exits via SIGPIPE when its pipe closes, which cancels the turn, embedded or
-remote.
+`--json`, `exec` still exits via SIGPIPE when its pipe closes, which cancels the turn if it is still
+running, embedded or remote. The turn may already have ended, so its outcome is unknown: check the
+journal with `agentctl replay` before running it again.
 
 **Migration:** `get` no longer emits a single key/value line; `list` now has aligned columns and
 headings, even when empty. Lifecycle and approval summaries use short state values and include

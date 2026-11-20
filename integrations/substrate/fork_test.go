@@ -182,7 +182,9 @@ func (l *lifecycleControl) CreateTag(_ context.Context, in *atepb.CreateTagReque
 		return nil, status.Errorf(codes.FailedPrecondition, "Actor %s holds no snapshot", tg.GetSourceActor().GetName())
 	}
 	l.tags[tg.GetMetadata().GetName()] = uri
-	return tg, nil
+	stored := proto.Clone(tg).(*atepb.Tag)
+	stored.Metadata.Uid = "tag-uid-" + tg.GetMetadata().GetName()
+	return stored, nil
 }
 
 func (l *lifecycleControl) DeleteTag(_ context.Context, in *atepb.DeleteTagRequest, _ ...grpc.CallOption) (*atepb.Tag, error) {
@@ -709,7 +711,7 @@ func TestForkOfACloneThatHoldsItsOwnCaptureIsRefusedOverTheAdapter(t *testing.T)
 				t.Fatalf("refusal %q must name the clone %q, say %q and not %q, say it is torn down, and name no snapshot URI",
 					err, cloneUID, tc.says, tc.not)
 			}
-			want := []string{"tag:parent->fork-child", "create:child", "resume:child", "suspend:child", "delete:child", "untag:fork-child"}
+			want := []string{"tag:parent->fork-child", "create:child", "resume:child", "delete:child", "untag:fork-child"}
 			if !reflect.DeepEqual(ctl.calls, want) {
 				t.Fatalf("calls=%v\nwant %v", ctl.calls, want)
 			}

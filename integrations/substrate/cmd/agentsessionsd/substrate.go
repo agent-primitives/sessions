@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"maps"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -257,6 +260,22 @@ func ateapiDeadline(timeout time.Duration) grpc.UnaryClientInterceptor {
 // the router client's dialer for its incarnations. The returned close function releases the
 // connection. grpc.NewClient does not connect, so nothing is sent before the first session is
 // placed; the router probe runs in the background and only logs.
+func substrateCleanupKey(address, serverName, atespace string) string {
+	if atespace == "" || address == "" {
+		return ""
+	}
+	identity := serverName
+	if identity == "" {
+		if host, _, err := net.SplitHostPort(address); err == nil {
+			identity = host
+		} else {
+			identity = address
+		}
+	}
+	sum := sha256.Sum256([]byte("substrate-cleanup-v1\x00" + address + "\x00" + identity + "\x00" + atespace))
+	return hex.EncodeToString(sum[:])
+}
+
 func (f *substrateFlags) Backends(logger *slog.Logger) (map[string]placement.Backend, placement.Dialer, func(), error) {
 	if f.routerCreds == nil {
 		return nil, nil, nil, errors.New("substrate router client not loaded: Harnesses must succeed first")
@@ -292,7 +311,11 @@ func (f *substrateFlags) Backends(logger *slog.Logger) (map[string]placement.Bac
 		return nil, nil, nil, fmt.Errorf("dial ate-api %s: %w", *f.ateapi, err)
 	}
 	ctl := f.newControl(conn)
-	opts := []substrate.Option{substrate.WithLogger(logger), substrate.WithRouter(*f.router)}
+	opts := []substrate.Option{
+		substrate.WithLogger(logger),
+		substrate.WithRouter(*f.router),
+		substrate.WithCleanupKey(substrateCleanupKey(*f.ateapi, *f.serverName, *f.atespace)),
+	}
 	if f.egressPolicy != nil {
 		// The backend refuses each session the same way, but a control client that cannot install
 		// the policy is a build mistake, so refuse it before any session.

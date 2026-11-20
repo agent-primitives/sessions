@@ -717,7 +717,7 @@ func TestResumeOntoAReplacementActorIsRefused(t *testing.T) {
 	if err := ctl.DeleteActor(ctx, ref); err != nil {
 		t.Fatal(err)
 	}
-	if err := ctl.CreateActor(ctx, ref, substrate.ObjectRef{Atespace: "space", Name: "mem"}); err != nil {
+	if _, err := ctl.CreateActor(ctx, ref, substrate.ObjectRef{Atespace: "space", Name: "mem"}); err != nil {
 		t.Fatal(err)
 	}
 	head, err := store.Session(sess).Head()
@@ -771,7 +771,7 @@ func TestSuspendAndForkOfALostOrReplacedActorAreRefused(t *testing.T) {
 				}
 				wantMsg := "no longer exists"
 				if actor == "replaced" {
-					if err := ctl.CreateActor(ctx, ref, substrate.ObjectRef{Atespace: "space", Name: "mem"}); err != nil {
+					if _, err := ctl.CreateActor(ctx, ref, substrate.ObjectRef{Atespace: "space", Name: "mem"}); err != nil {
 						t.Fatal(err)
 					}
 					wantMsg = "replaced"
@@ -999,7 +999,7 @@ func TestResumeWhoseActorIsReplacedAfterTheFailedResumeIsRefused(t *testing.T) {
 	}
 	ctl.onGet = func(actor string) {
 		if actor == sess && deleted.Load() && replaced.CompareAndSwap(false, true) {
-			_ = ctl.CreateActor(ctx, substrate.ActorRef{Atespace: "space", Name: actor}, substrate.ObjectRef{})
+			_, _ = ctl.CreateActor(ctx, substrate.ActorRef{Atespace: "space", Name: actor}, substrate.ObjectRef{})
 		}
 	}
 
@@ -1056,7 +1056,7 @@ func TestResumeOfTheRecordedActorHoldingANewerSnapshot(t *testing.T) {
 			ctl.mu.Unlock()
 			if tc.replace {
 				_ = ctl.DeleteActor(ctx, actor)
-				_ = ctl.CreateActor(ctx, actor, substrate.ObjectRef{})
+				_, _ = ctl.CreateActor(ctx, actor, substrate.ObjectRef{})
 			}
 			// Woken and suspended again outside this journal: the actor now holds a newer snapshot.
 			ctl.mu.Lock()
@@ -1148,7 +1148,7 @@ func TestResumeWithoutASnapshotIsLostOnlyWhenTheRecordedActorIsGone(t *testing.T
 				}
 				if tc.replace {
 					_ = ctl.DeleteActor(ctx, substrate.ActorRef{Atespace: "space", Name: actor})
-					_ = ctl.CreateActor(ctx, substrate.ActorRef{Atespace: "space", Name: actor}, substrate.ObjectRef{})
+					_, _ = ctl.CreateActor(ctx, substrate.ActorRef{Atespace: "space", Name: actor}, substrate.ObjectRef{})
 				}
 				return fmt.Errorf("%w: template volume not found", substrate.ErrActorNotFound)
 			}

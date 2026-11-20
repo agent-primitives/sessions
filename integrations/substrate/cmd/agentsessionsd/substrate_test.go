@@ -48,6 +48,25 @@ import (
 	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
+func TestSubstrateCleanupKeyBindsControlPlaneAndAtespace(t *testing.T) {
+	a := substrateCleanupKey("api.cluster:443", "", "space")
+	if a == "" || a != substrateCleanupKey("api.cluster:443", "api.cluster", "space") {
+		t.Fatalf("equivalent key=%q", a)
+	}
+	for _, different := range []string{
+		substrateCleanupKey("other.cluster:443", "", "space"),
+		substrateCleanupKey("api.cluster:443", "other.cluster", "space"),
+		substrateCleanupKey("api.cluster:443", "", "other-space"),
+	} {
+		if different == "" || different == a {
+			t.Fatalf("cleanup key collision: %q", different)
+		}
+	}
+	if got := substrateCleanupKey("api.cluster:443", "", ""); got != "" {
+		t.Fatalf("missing atespace key=%q", got)
+	}
+}
+
 func TestSubstrateHarnessFlagParsing(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -586,12 +605,12 @@ func (f *fakeControl) log() []string {
 	return slices.Clone(f.calls)
 }
 
-func (f *fakeControl) CreateActor(_ context.Context, a substrate.ActorRef, tmpl substrate.ObjectRef) error {
+func (f *fakeControl) CreateActor(_ context.Context, a substrate.ActorRef, tmpl substrate.ObjectRef) (substrate.ActorInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "create:"+a.Atespace+"/"+a.Name+":tmpl="+tmpl.Atespace+"/"+tmpl.Name)
 	f.actors[a.Name] = substrate.StatusSuspended
-	return nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, UID: "uid-" + a.Name}, nil
 }
 
 func (f *fakeControl) ResumeActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -617,7 +636,7 @@ func (f *fakeControl) SuspendActor(_ context.Context, a substrate.ActorRef) (sub
 	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: f.snapshots[a.Name], UID: "uid-" + a.Name}, nil
 }
 
-func (f *fakeControl) DeleteActor(_ context.Context, a substrate.ActorRef) error {
+func (f *fakeControl) DeleteActor(_ context.Context, a substrate.ActorRef, _ ...string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "delete:"+a.Atespace+"/"+a.Name)

@@ -13,6 +13,7 @@ package ateadapter
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -57,17 +58,20 @@ func tagRef(t substrate.SnapshotID) *atepb.ObjectRef {
 // CreateActor creates an actor from an ActorTemplate (atespace + name). With no source tag, substrate
 // seeds it from the template's golden snapshot when one is built. A name already taken is reported as
 // substrate.ErrActorExists, so the backend can attach to the actor another host just created.
-func (ad *Adapter) CreateActor(ctx context.Context, actor substrate.ActorRef, template substrate.ObjectRef) error {
-	_, err := ad.ctl.CreateActor(ctx, &atepb.CreateActorRequest{
+func (ad *Adapter) CreateActor(ctx context.Context, actor substrate.ActorRef, template substrate.ObjectRef) (substrate.ActorInfo, error) {
+	created, err := ad.ctl.CreateActor(ctx, &atepb.CreateActorRequest{
 		Actor: &atepb.Actor{
 			Metadata:      &atepb.ResourceMetadata{Atespace: actor.Atespace, Name: actor.Name},
 			ActorTemplate: templateRef(template),
 		},
 	})
 	if status.Code(err) == codes.AlreadyExists {
-		return fmt.Errorf("%w: %s/%s: %w", substrate.ErrActorExists, actor.Atespace, actor.Name, err)
+		return substrate.ActorInfo{}, fmt.Errorf("%w: %s/%s: %w", substrate.ErrActorExists, actor.Atespace, actor.Name, err)
 	}
-	return computeError(err)
+	if err != nil {
+		return substrate.ActorInfo{}, computeError(err)
+	}
+	return actorInfo(created), nil
 }
 
 // ResumeActor schedules the actor onto a worker. Substrate restores the actor's own external
@@ -134,9 +138,17 @@ func busy(actor substrate.ActorRef, err error) error {
 	return err
 }
 
-// DeleteActor deletes a suspended actor.
-func (ad *Adapter) DeleteActor(ctx context.Context, actor substrate.ActorRef) error {
-	_, err := ad.ctl.DeleteActor(ctx, &atepb.DeleteActorRequest{Actor: objectRef(actor)})
+// DeleteActor deletes exactly the observed actor UID. A RUNNING actor is accepted by Substrate v1.
+func (ad *Adapter) DeleteActor(ctx context.Context, actor substrate.ActorRef, uid ...string) error {
+	if len(uid) != 1 || uid[0] == "" {
+		return errors.New("substrate: delete actor requires one uid")
+	}
+	_, err := ad.ctl.DeleteActor(ctx, &atepb.DeleteActorRequest{
+		Actor: objectRef(actor), Options: &atepb.DeleteOptions{Uid: uid[0]},
+	})
+	if status.Code(err) == codes.NotFound {
+		return fmt.Errorf("%w: %s/%s: %w", substrate.ErrActorNotFound, actor.Atespace, actor.Name, err)
+	}
 	return err
 }
 
@@ -167,8 +179,8 @@ func (ad *Adapter) GetActor(ctx context.Context, actor substrate.ActorRef) (subs
 // cmd/ateapi/internal/controlapi/workflow_tag.go), reported as substrate.ErrActorBusy. A missing
 // source actor is FAILED_PRECONDITION (RPCService.CreateTag in
 // cmd/ateapi/internal/controlapi/tag.go), which the backend classifies by reading the actor.
-func (ad *Adapter) TagActor(ctx context.Context, source substrate.ActorRef, tag substrate.SnapshotID) error {
-	_, err := ad.ctl.CreateTag(ctx, &atepb.CreateTagRequest{
+func (ad *Adapter) TagActor(ctx context.Context, source substrate.ActorRef, tag substrate.SnapshotID) (substrate.TagInfo, error) {
+	created, err := ad.ctl.CreateTag(ctx, &atepb.CreateTagRequest{
 		Tag: &atepb.Tag{
 			Metadata:    &atepb.ResourceMetadata{Atespace: tag.Atespace, Name: tag.Name},
 			Scope:       atepb.TagScope_TAG_SCOPE_ATESPACE,
@@ -176,9 +188,12 @@ func (ad *Adapter) TagActor(ctx context.Context, source substrate.ActorRef, tag 
 		},
 	})
 	if status.Code(err) == codes.AlreadyExists {
-		return fmt.Errorf("%w: %s/%s: %w", substrate.ErrTagExists, tag.Atespace, tag.Name, err)
+		return substrate.TagInfo{}, fmt.Errorf("%w: %s/%s: %w", substrate.ErrTagExists, tag.Atespace, tag.Name, err)
 	}
-	return computeError(busy(source, err))
+	if err != nil {
+		return substrate.TagInfo{}, computeError(busy(source, err))
+	}
+	return substrate.TagInfo{UID: created.GetMetadata().GetUid()}, nil
 }
 
 // CreateActorFromTag creates an actor seeded from the snapshot behind tag. Substrate requires the
@@ -201,9 +216,17 @@ func (ad *Adapter) CreateActorFromTag(ctx context.Context, actor substrate.Actor
 	return actorInfo(a), nil
 }
 
-// DeleteTag removes a tag and collects the snapshot copy it owns.
-func (ad *Adapter) DeleteTag(ctx context.Context, tag substrate.SnapshotID) error {
-	_, err := ad.ctl.DeleteTag(ctx, &atepb.DeleteTagRequest{Tag: tagRef(tag)})
+// DeleteTag removes exactly the observed tag UID and collects the snapshot copy it owns.
+func (ad *Adapter) DeleteTag(ctx context.Context, tag substrate.SnapshotID, uid ...string) error {
+	if len(uid) != 1 || uid[0] == "" {
+		return errors.New("substrate: delete tag requires one uid")
+	}
+	_, err := ad.ctl.DeleteTag(ctx, &atepb.DeleteTagRequest{
+		Tag: tagRef(tag), Options: &atepb.DeleteOptions{Uid: uid[0]},
+	})
+	if status.Code(err) == codes.NotFound {
+		return fmt.Errorf("%w: %s/%s: %w", substrate.ErrTagNotFound, tag.Atespace, tag.Name, err)
+	}
 	return err
 }
 

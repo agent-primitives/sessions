@@ -160,6 +160,49 @@ func TestEgressPolicyChangedAcrossResume(t *testing.T) {
 	}
 }
 
+// TestEgressPolicySyncRunningActor changes the configured policy while a session's actor runs and
+// calls SyncEgressPolicy: the stored policy is replaced under its version, keeping its UID, and the
+// actor stays RUNNING and keeps its state.
+func TestEgressPolicySyncRunningActor(t *testing.T) {
+	f := newFixture(t, env("SUBSTRATE_ATESPACE", "e2e-egress"))
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	defer cancel()
+
+	var current atomic.Pointer[substrate.EgressPolicy]
+	current.Store(&e2ePolicy)
+	backend := f.egressBackend(t, func(string) *substrate.EgressPolicy { return current.Load() })
+	session := uniqueUID("egress-sync")
+	log := journal(t).Session(session)
+	p := newPlacer(t, backend, echoagent.Model)
+	defer stopQuietly(t, backend, session)
+
+	driveTurns(ctx, t, p, log, session, 1)
+	created := f.requirePolicy(ctx, t, session, e2ePolicy)
+
+	changed := substrate.EgressPolicy{Rules: []substrate.EgressRule{
+		{Protocol: substrate.EgressHTTPS, Hostnames: []string{"api.example.com"}, Ports: []int32{8443}},
+	}}
+	current.Store(&changed)
+	if err := backend.SyncEgressPolicy(ctx, session); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	synced := f.requirePolicy(ctx, t, session, changed)
+	if synced.UID != created.UID || synced.Version <= created.Version {
+		t.Fatalf("policy after sync is %s v%d, want %s at a version after %d", synced.UID, synced.Version, created.UID, created.Version)
+	}
+	info, err := ateadapter.New(f.conn).GetActor(ctx, substrate.ActorRef{Atespace: f.atespace, Name: session})
+	if err != nil {
+		t.Fatalf("get actor: %v", err)
+	}
+	if info.Status != substrate.StatusRunning {
+		t.Fatalf("actor status after sync = %v, want RUNNING", info.Status)
+	}
+	driveTurns(ctx, t, p, log, session, 1)
+	if got, want := lastOutput(t, log), "2"; got != want {
+		t.Fatalf("count after sync = %s, want %s", got, want)
+	}
+}
+
 // TestEgressPolicyNotConfigured: without WithEgressPolicy the backend creates no policy, so the
 // actor has none.
 func TestEgressPolicyNotConfigured(t *testing.T) {

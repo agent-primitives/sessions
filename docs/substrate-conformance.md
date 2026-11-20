@@ -86,7 +86,7 @@ The substrate build of `agentsessionsd` adds these flags:
 | `-atenet-router` | Router address harnesses are reached through, over mTLS (default `atenet-router.ate-system.svc:443`). See [the transport](#the-transport-harnesswire-through-atenet-router). |
 | `-atenet-router-cert-file`, `-atenet-router-ca-file` | Required. The host's SPIFFE certificate bundle (private key and chain, from a `podCertificate` volume for signer `podidentity.podcert.ate.dev/identity`) and the router's trust bundle (a `clusterTrustBundle` volume for signer `servicedns.podcert.ate.dev/identity`). Both are re-read on every router connection. The daemon refuses to start if either is missing, the certificate has expired or is not yet valid, or it does not carry exactly one SPIFFE ID. |
 | `-atenet-router-server-name` | DNS name the router's certificate must carry (default `atenet-router.ate-system.svc`). It does not follow `-atenet-router`: the servicedns signer issues only `<service>.<namespace>.svc` names. |
-| `-substrate-egress-policy-file` | A Substrate `ateapi.v1` `EgressPolicy` in protojson, rules only (`metadata` is refused, as are unknown fields), applied to every session actor before each resume of a suspended actor. Read once at startup; a file that is missing or does not parse refuses the start. A changed file reaches an existing actor at its first resume after the restart. See [Actor egress policy](#actor-egress-policy). |
+| `-substrate-egress-policy-file` | A Substrate `ateapi.v1` `EgressPolicy` in protojson, rules only (`metadata` is refused, as are unknown fields), applied to every session actor before each resume of a suspended actor. Read once at startup; a file that is missing or does not parse refuses the start. A changed file reaches an existing actor at its first resume after the restart; the daemon does not call `SyncEgressPolicy`, so an actor running across the restart keeps the old policy until it is suspended and resumed. Empty makes no egress call and keeps stored policies; a file holding `{}` clears each to an empty rule set (deny-all) at its next resume. See [Actor egress policy](#actor-egress-policy). |
 
 The other flags only configure `-substrate-harness` entries; given without one, the daemon refuses
 to start rather than ignore them.
@@ -303,19 +303,23 @@ stored policy on the configured one:
   stateless fork child is a Create.
 
 Each converge reads the stored policy (`GetActorEgressPolicy`), then asks the `WithEgressPolicy`
-function, then writes only what differs:
+function, then writes what differs (a Sync also writes what does not):
 
-| Stored | Configured | Call |
-|---|---|---|
-| none | none (`nil`) | none |
-| none | a policy | `CreateActorEgressPolicy` |
-| equal to the configured one | a policy | none |
-| different | a policy | `UpdateActorEgressPolicy` |
-| has rules | none (`nil`) | `UpdateActorEgressPolicy` to an empty rule set (deny-all) |
-| no rules | none (`nil`) | none |
+| Stored | Configured | Call on a resume | Call on a Sync |
+|---|---|---|---|
+| none | none (`nil`) | none | `CreateActorEgressPolicy` with an empty rule set |
+| none | a policy | `CreateActorEgressPolicy` | the same |
+| equal to the configured one | a policy | none | `UpdateActorEgressPolicy` with the same policy |
+| different | a policy | `UpdateActorEgressPolicy` | the same |
+| has rules | none (`nil`) | `UpdateActorEgressPolicy` to an empty rule set (deny-all) | the same |
+| no rules | none (`nil`) | none | `UpdateActorEgressPolicy` to an empty rule set |
 
-An actor the backend has just created (Create, or a fork's clone) has no policy, so it is created
-without the read. The backend never calls `DeleteActorEgressPolicy`.
+An actor the backend has just created (Create, or a fork's clone) has no policy, so it gets the
+configured policy without the read, or an empty rule set when the function returns `nil`.
+Substrate v1.0.0 enforces an empty rule set as it does no policy: its egress gateway denies every
+request for both, and its DNS answers no name for either. The empty policy is visible in Substrate
+(its CLI and the gateway's 403 log line), and is deleted with the actor. The backend never calls
+`DeleteActorEgressPolicy`.
 
 The rules:
 
@@ -336,11 +340,12 @@ The rules:
   policies are kept.
 - **Fail closed.** With the option set, a `ControlClient` that does not implement
   `substrate.EgressPolicyClient` is refused (`ErrEgressPolicyUnsupported`): before any actor is
-  created when the function returns a policy, and before every resume of an existing actor
-  whatever it returns, since only a read finds a stored policy and only an update clears it. A new
-  actor with no policy wanted needs no call. The daemon refuses the combination at startup. A
-  failed read or write fails the call and leaves the actor `SUSPENDED`. A fork's clone is deleted
-  and its tag released, as for a failed resume.
+  created when the function returns a policy, and before every resume of an existing actor and every
+  Sync whatever it returns, since only a read finds a stored policy and only an update clears it.
+  Without the client, a new actor with no policy wanted is not refused: it has no policy, which is
+  deny-all. The daemon refuses the combination at startup. A failed read or write fails the call and
+  leaves the actor `SUSPENDED`. A fork's clone is deleted and its tag released, as for a failed
+  resume.
 - **Configuration errors are `FAILED_PRECONDITION`.** The refusals that repeat until the
   configuration changes wrap `api.ErrComputeConfigInvalid`, so Exec, Resume and Fork report
   `FAILED_PRECONDITION` with reason `COMPUTE_CONFIG_INVALID`: the missing `EgressPolicyClient`; a
@@ -351,15 +356,53 @@ The rules:
   `error_kind=egress_policy_invalid`. The daemon checks only the file's shape at startup, so a
   rule Substrate refuses surfaces on the first call. Other egress call failures, and an error from
   the `WithEgressPolicy` function, keep their codes (`INTERNAL` when unclassified).
-- **Running compute is left alone.** The backend makes no egress call for an actor it finds
-  `RUNNING`. Such an actor keeps the policy it has, or stays deny-all without one, until it is
-  suspended and the backend resumes it.
+- **Running compute is changed only by a Sync.** A resume makes no egress call for an actor it
+  finds `RUNNING`. Such an actor keeps the policy it has, or stays deny-all without one, until it
+  is suspended and the backend resumes it, or until `SyncEgressPolicy` converges it. An actor the
+  Substrate router wakes for a routed request is resumed without the backend, so it keeps its
+  stored policy, and the backend's next call finds it `RUNNING`.
 - **Not journaled.** The policy is runtime configuration. A session's journal does not record it,
   and replay does not depend on it.
 
 The converge is logged at debug level as `install_egress_policy` with the configured rule count,
-`policy_outcome` (`created`, `updated`, `cleared`, `unchanged` or `absent`) and the attempts, never
-the rules.
+`policy_outcome` (`created`, `updated`, `cleared`, `unchanged`, `fenced` or `absent`) and the
+attempts, never the rules. `fenced` is a Sync that wrote an equal policy again.
+
+### Syncing a running actor
+
+`(*substrate.Backend).SyncEgressPolicy(ctx, sessionUID)` runs the same converge on the session's
+actor in whatever state it is, without resuming or suspending it or reading its state. To apply a
+changed policy to running compute, change what the `WithEgressPolicy` function returns, then call
+Sync for each affected session on the backend that places it.
+
+Unlike a resume, a Sync always writes (see the table above): an equal policy is written again,
+and with none stored and none configured it creates an empty rule set. Every write is
+preconditioned, an update on the version its read found and a create on there being no policy,
+so a Sync that returns nil cannot be undone by a converge (a resume, Create, Fork or another
+Sync) that read the stored policy, or asked the function, before the Sync wrote: that converge
+conflicts, reads again and asks again, after the change. A resume that writes nothing fences
+nothing, so a change applied only by resumes has no such guarantee. This relies on Substrate
+moving the version on every update, an unchanged policy included, as v1.0.0 does
+(`cmd/ateapi/internal/store/atepg/egress_policy.go`).
+
+- Without `WithEgressPolicy` it returns an error and makes no call. Without `EgressPolicyClient`
+  it returns `ErrEgressPolicyUnsupported` and makes no call, whatever the function returns.
+- An actor that does not exist is `ErrActorNotFound` when the function returns a policy (the next
+  Create installs it), and no error when it returns none, also when the actor is deleted during
+  the call. Such a Sync writes nothing; the backend's create of the actor asks the function
+  afterwards and stores its policy, or an empty one, and that create is what a stale writer
+  conflicts with.
+- Errors are classified as on a resume: `ErrActorBusy` after three conflicts,
+  `api.ErrComputeConfigInvalid` for a refused or unreadable policy.
+- The daemon has no Sync trigger: its policy file is read once at startup.
+
+On Substrate v1.0.0 a stored policy takes effect within Substrate's caches, not at once:
+
+| Traffic | Bound | Substrate source |
+|---|---|---|
+| HTTP requests, intercepted HTTPS requests, new connections through the egress gateway | the gateway's policy cache, 10 seconds by default (`--egress-policy-cache-ttl`, 0 disables it) | `cmd/atenet/internal/router/egress/policycache.go` (`DefaultPolicyCacheTTL`) |
+| The actor's DNS answers | 5 seconds; a failed fetch keeps the last policy | `internal/atunnel/egresspolicy.go` (`egressPolicyTTL`) |
+| A TLS passthrough connection already open | allowed once on its SNI, so it stays open until it closes | `cmd/atenet/internal/router/egress/egress.go` (passthrough chain) |
 
 ## SPI → substrate mapping
 
@@ -1387,15 +1430,16 @@ policy back with `GetActorEgressPolicy` after the first turn, after suspend and 
 stored policy at the same version, so an unchanged policy is not written again), and on a fork
 child (its own policy). `TestEgressPolicyChangedAcrossResume` changes the configured policy while
 the actor is suspended and reads the new one back after the resume, then configures none and reads
-back an empty rule set.
-`TestEgressPolicyNotConfigured` checks that an actor created without the option has none.
-`TestEgressPolicyInstallFailure` uses a hostname Substrate refuses: Create fails twice with the actor
-still `SUSPENDED`, and a fork whose child policy is refused leaves no child actor and the parent's
-policy unchanged.
+back an empty rule set. `TestEgressPolicySyncRunningActor` changes the configured policy while the
+actor runs, calls `SyncEgressPolicy`, and reads the new policy back with the actor still
+`RUNNING`. `TestEgressPolicyNotConfigured` checks that an actor created without the option has
+none. `TestEgressPolicyInstallFailure` uses a hostname Substrate refuses: Create fails twice with
+the actor still `SUSPENDED`, and a fork whose child policy is refused leaves no child actor and the
+parent's policy unchanged.
 
-These check that the policy is stored at each install point and replaced when it changes. The counter makes no egress call, so
-they do not check enforcement: that the first request and a request after resume are filtered, or
-that a credential is injected.
+These check that the policy is stored at each install point and replaced when it changes. The
+counter makes no egress call, so they do not check enforcement: that the first request and a
+request after resume are filtered, or that a credential is injected.
 
 ## CI
 

@@ -12,7 +12,8 @@
 // Stop→SuspendActor+DeleteActor; Status→GetActor; Fork→replay-fork for a stateless harness, or
 // CreateTag{source_actor}+CreateActor{source_tag}+ResumeActor to clone the parent's RAM for a
 // REQUIRES_MEMORY_SNAPSHOT harness. With WithEgressPolicy, the actor's egress policy is converged on
-// the configured one (EgressPolicyClient) before every ResumeActor of a SUSPENDED actor.
+// the configured one (EgressPolicyClient) before every ResumeActor of a SUSPENDED actor, and by
+// SyncEgressPolicy on a running one.
 //
 // Transport: the harness is reached through substrate's atenet-router, the only supported ingress
 // to an actor. Every incarnation addresses the router and carries the ate-target-actor metadata that
@@ -1012,7 +1013,7 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 	}
 	// A SUSPENDED actor's egress policy is converged on the session's before it is resumed, so a
 	// changed policy reaches it here. A RUNNING one is left as it is: the resume below is a no-op
-	// for it.
+	// for it (SyncEgressPolicy converges a running actor).
 	if !running {
 		if err := b.restoreEgress(ctx, ref, recorded); err != nil {
 			return api.Incarnation{}, err

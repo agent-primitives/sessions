@@ -17,5 +17,5 @@ category: Compatibility
   may run more than once per call (a check before an actor is created, then once per attempt to
   converge), after the read, and must return the current policy each time. A `ControlClient` that
   does not implement `EgressPolicyClient` is now refused (`ErrEgressPolicyUnsupported`) on every
-  resume of an existing actor, even when the function returns no policy; before, a function that
-  returned none needed no egress calls.
+  resume of an existing actor and every `SyncEgressPolicy`, even when the function returns no
+  policy; before, a function that returned none needed no egress calls.

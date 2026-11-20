@@ -1723,10 +1723,12 @@ The reference host takes it as `placement.Backend` in
   session's recorded checkpoint (`RT-4i`); `Image`, `Harness`, and `Identity` are empty. `Fork`
   receives the child's uid as `ForkOpts.ChildSessionUID`, and a later `Restore` of the child arrives
   as `{local: child uid}` until the child writes its own `SUSPEND` (`RT-4c`).
-- `RT-4b`: `Snapshot` and `Stop` receive an `Incarnation` carrying `ID` (the session uid). `Suspend`
-  and the memory-tier fork source step also pass the latest recorded `ComputeInstance` to `Snapshot`
+- `RT-4b`: `Snapshot` and `Stop` receive an `Incarnation` carrying `ID` (the session uid). `Stop`
+  also carries `Cleanup`, when the caller has exact ownership evidence; a dedicated-resource runtime
+  MUST refuse `Stop` that lacks the immutable UID it needs rather than delete by name. `Suspend` and
+  the memory-tier fork source step also pass the latest recorded `ComputeInstance` to `Snapshot`
   (`RT-4h`), empty when none is recorded, and the recorded checkpoint in `RecordedCheckpoint`
-  (`RT-4i`), zero when none is; nothing else is set. The runtime MUST resolve everything
+  (`RT-4i`), zero when none is. The runtime MUST resolve everything
   it needs from those. The host does not check that the uid has an incarnation: `Suspend` (`OPS-17`)
   and the memory-tier fork source step (`OPS-25`) call `Snapshot` for a uid the backend may hold
   nothing for, for example a `Suspend` before any `Exec`. Whether one exists is the backend's state,
@@ -1809,6 +1811,18 @@ The reference host takes it as `placement.Backend` in
   cannot, such as one whose lease another caller holds, is logged at `WARN` naming the clone and its
   tag for an operator to delete), and the host writes no child journal. This reads only fields the
   journal already has; a backend that does not need it ignores it.
+- `RT-4j`: A runtime MAY implement `api.ResourceCleanupRuntime` for dedicated per-session
+  resources. `CleanupKey` identifies the exact control-plane configuration, not a harness alias.
+  `CleanupResources(operation, session_uid)` returns the complete UID-empty target plan before I/O;
+  `Incarnation.Cleanup` may carry an exact observed UID subset with a later error. Core references
+  are opaque. The host rejects changed plan references or borrower graphs, confirms an UID only for
+  its planned target, and never adopts ownership by looking up the current name. Unknown outcomes
+  stay unconfirmed. Fork uses an unpublished recorder so ownership can exist before the child's
+  first fence without making an unprovisioned child visible.
+- `RT-4k`: A dedicated-resource runtime's `Stop` uses server-side immutable UID preconditions. A
+  RUNNING actor needs no suspend prelude. A missing resource is idempotent success; a replacement UID
+  mismatch leaves the replacement untouched. A resource returned with an ambiguous child-create
+  error remains releasable only after its borrower is resolved.
 - `RT-4f`: `Describe` returns the harness descriptor the host admits on. It MUST NOT provision
   compute: the host calls it before `Create`, `Restore`, and the fork source step (`RT-1`), in the
   memory-tier override check (`OPS-7`), and when the registry reports a harness's observed
@@ -1919,23 +1933,32 @@ The reference host takes it as `placement.Backend` in
 
 ### 13.4 Reference backends (informative)
 
-The SQLite placement path durably records allocation intent before Create/Restore and confirms
-only the returned session-scoped handle, not an immutable compute-instance identity. A replaced
-compute instance can reuse the same handle. Confirmation gets a bounded context independent of
-client cancellation once the runtime returns. A successful confirmation atomically replaces prior
-confirmed, unreleased attempts for the same (session, backend key, handle), retaining the attempt
-being confirmed, not the one with the greatest random ID. Unresolved attempts and released history
-are preserved, so repeated unknown outcomes can still grow the ledger. Confirming or releasing a
-compacted attempt returns `sqlitelog.ErrAllocationNotFound`; cleanup must reread the live inventory
-if a late confirmation retires a paged attempt. Addresses and call credentials are not inventory.
-Optional `api.CleanupRuntime` keys identify exact non-destructive release configurations, not
-harness aliases or a generic Stop fallback. Fork keeps its legacy allocation/rollback path at this
-stage. Version 7 adds the allocation ledger and inventory completeness/evidence columns, without
-fork-publication or reaper state. It enables no reclamation. Every newly created inventory remains
-incomplete, as does every migrated row; tracking a later restore does not certify a previous
-untracked fork. A host embedding `sqlitelog` can establish coverage by calling
-`Store.CertifyInventory` only after explicit reconciliation. Stop all old writers before migration
-and never downgrade the migrated journal to v0.3.0 or older.
+The SQLite placement path records an operation-level allocation before Create or Restore I/O. A
+legacy/shared backend confirms only its returned session handle. An `api.ResourceCleanupRuntime`
+with a nonempty cleanup key records a complete plan of provider-opaque references and borrower edges
+before I/O. A returned `Incarnation.Cleanup` subset may be confirmed even when the runtime also
+returns an error; an unknown result stays unconfirmed. Confirmation uses an independent bounded
+context. Addresses, routing metadata, credentials and raw provider responses are not inventory.
+
+Schema version 10 stores per-attempt `allocation_resources` claims and
+`allocation_borrowers` edges. Exact duplicate references and UIDs are linked through
+`canonical_resource_id`; the original attempt remains available so late confirmation is
+idempotent. Different UIDs stay separate, complete plans are acyclic, and the canonical graph is
+rechecked after aliasing. Fork uses an unpublished allocation record, so a failed fan-out cannot
+publish a child merely by recording its cleanup targets. Atomic child publication, the cleanup
+reaper and cleanup-complete state remain deferred.
+
+Optional `api.CleanupRuntime` still keys non-destructive shared-compute release. Substrate's
+`ResourceCleanupRuntime` is a separate identity-bearing contract: its private references encode
+atespace and actor/tag names, its adapter returns server UIDs, and deletion uses those UIDs. The
+neutral root contains no Substrate vocabulary. An ambiguous `CreateActorFromTag` result retains the
+exact tag because an unknown-UID child may borrow it. A replacement observed by name is never adopted
+as ownership.
+
+The v10 producer does not enable reclamation or mark an inventory complete. Every new or migrated
+inventory remains incomplete until explicit `Store.CertifyInventory` evidence reconciles every
+route, runtime override and failed fork. Stop all old writers, including embedded processes, and
+back up the database and WAL before migration; v10 is one-way and has no downgrade.
 
 - `runtime/local`: serves the harness in the host process over a unix socket shared by all
   sessions. `Describe` asks that in-process harness. All capabilities false.
@@ -2388,6 +2411,12 @@ The reference implementation protects the integrity of the record, not access to
     embedded `agentctl`, and back up the database and WAL before the first version 8 open: Open
     stamps the journal even when the process only reads metadata, and there is no downgrade to
     version 7.
+  - Version 10 adds the normalized allocation resource graph and its configured producer. It adds
+    no public proto fields and changes no event bytes. Stop all older hosts and embedded clients,
+    then back up the database and WAL before upgrade. Old binaries refuse v10 on a fresh open, but
+    an already-open v9 writer is not fenced by the schema stamp. Existing legacy allocation rows
+    remain unconfirmed inventory evidence. There is no downgrade migration; restore the backup to
+    roll back.
   - Version 9 extends `approval_executions` with an execution outcome and rebuilds the shared
     execution/approval projection from the journal. Events, canonical bytes, hashes and fences
     do not change. An undecodable session reports RUNNING without an approval reference; SQL

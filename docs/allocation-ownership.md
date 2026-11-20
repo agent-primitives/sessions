@@ -1,47 +1,82 @@
 # Durable allocation ownership
 
-Placement records Create/Restore intent in SQLite before runtime I/O, then acknowledges the
-returned session-scoped handle. An unresolved attempt survives failure and restart, including a
-runtime refusal before allocation: the recorder cannot prove whether an error left resources behind.
-Only the returned handle is retained, not addresses, tokens or worker metadata. Runtimes must return
-a nonempty `Incarnation.ID` from Create/Restore regardless of the log implementation. SQLite-tracked
-placement enforces this requirement: an empty ID fails confirmation with
-`sqlitelog.ErrAllocationConflict` before dialing and leaves the attempt unresolved. The handle is
-not the compute-instance identity used to detect replacement. Standalone logs without the optional
-recorder retain their existing behavior.
+Placement records runtime allocation intent in SQLite before I/O. A runtime with an identity-bearing
+cleanup contract supplies a complete, immutable plan: one target for every dedicated resource that
+operation may create. Create and Restore use the normal session recorder. Fork uses an unpublished
+allocation recorder so the resource plan is durable without inserting a visible `sessions` row before
+the child's existing first-fence publication boundary.
 
-Once the runtime returns a handle, confirmation uses a separate five-second timeout, independent
-of client cancellation. A failed confirmation leaves the durable attempt unresolved. Successful
-confirmation atomically retires prior confirmed, unreleased attempts with the same session, backend
-key and handle, keeping the attempt being confirmed. Repeated Execs and Resumes that return the
-same handle therefore retain one live row, not one per turn. A replaced compute instance can reuse
-that handle; it does not identify an immutable resource. Unknown outcomes, distinct handles or
-sessions, distinct nonempty backend keys and released history are preserved; repeated failures can
-still grow the ledger. Backends without `api.CleanupRuntime` record an empty key: different key-less
-configurations returning the same handle for the same session compact into one row. These rows have
-no safe release route. This is an incomplete intent ledger, not an authoritative cleanup inventory
-or a per-call audit log.
+## Legacy handles and owned resources
 
-Repeating confirmation of a retained attempt with the same handle is harmless, including after
-release. Confirming or releasing a compacted attempt returns `sqlitelog.ErrAllocationNotFound`. If a
-late confirmation retires a row already paged for cleanup, reread the live inventory and retry its
-idempotent release; the surviving row remains unreleased.
+A backend without `api.ResourceCleanupRuntime`, or one with an empty cleanup key, keeps the legacy
+session-handle path. Placement records the operation before I/O and confirms the returned
+`Incarnation.ID` on success. The ID is not immutable compute identity and cannot authorize name-only
+deletion. Existing local and remote `api.CleanupRuntime` behavior is unchanged.
 
-`api.CleanupRuntime` is an optional, non-destructive release contract. Local and remote backends
-opt in using configuration keys; unsupported backends record an empty key instead of guessing a
-safe release route. The ledger runs no cleanup and does not change Fork's rollback semantics. Apart
-from the ledger, a failed `Exec` or `Resume` releases the compute it allocated through
-`ReleaseSession` when the journal records nothing that owns it (spec `RT-7`).
+An identity-bearing backend implements `api.ResourceCleanupRuntime`. Its cleanup key identifies the
+actual control-plane configuration, never a harness alias. `CleanupResources` returns UID-empty,
+provider-opaque references before I/O. Core `api` knows neither actor/tag vocabulary nor namespace
+layout. A Substrate backend encodes those details privately. If a configured owned backend cannot
+record an unpublished Fork allocation, placement refuses before runtime I/O rather than silently
+falling back to an untracked resource effect.
+
+`Incarnation.Cleanup` carries immutable ownership evidence. `CleanupEvidence.Resources` returns a
+defensive copy. A producer may return evidence with an error after a control-plane effect; placement
+confirms that evidence on the separate bounded confirmation context and preserves both the runtime
+and persistence error. An empty or lost response leaves targets unconfirmed. No code looks up the
+current object by name and adopts its UID.
+
+## SQLite v10 resource graph
+
+Schema v10 keeps `allocations` for operation-level intent and adds one `allocation_resources` claim
+per planned target. Each claim records its opaque reference, observed immutable UID, confirmation and
+release state. `allocation_borrowers` names release dependencies. For a memory-tier Substrate fork,
+the child actor borrows the tag's snapshot copy, so the tag remains blocked until the actor is
+released.
+
+A complete plan rejects missing references, duplicate references, self-borrowing and cycles before
+I/O. Partial evidence may omit the borrower resource, which permits a confirmed tag to survive a
+lost child-create reply while the actor target remains unresolved. SQLite checks every observed
+reference and borrower against the complete durable plan. A result with an error is therefore useful,
+but never permission to add a new target after the fact.
+
+Exact duplicate claims keep their per-attempt rows. Compaction sets `canonical_resource_id` instead
+of deleting the old retry receipt, so an identical late confirmation remains a harmless no-op.
+Different UIDs remain separate. Queries and future release code resolve borrower endpoints through
+the canonical claim. Alias creation rechecks the canonical graph for cycles before commit.
+
+## Substrate producer and UID preconditions
+
+Substrate's adapter now returns actor and tag UIDs from create calls. The backend keeps provider
+reference parsing and UID-conditional deletion in `runtime/substrate`; the core API contains no
+`actor`/`tag` enum and no Substrate `Namespace` field.
+
+Create records an actor identity after the adapter proves this call created it, including when a
+later egress-policy, resume or checkpoint-validation step fails. Restore returns ownership only when
+a recorded actor UID matches the object it resumes. Merely observing a replacement is not ownership.
+Fork records the tag and child actor separately. If `CreateActorFromTag` has an ambiguous result and
+no child UID, the backend retains the exact tag: an unknown-UID child may still borrow it. It may
+release a tag immediately only after a conclusive no-child result or exact known-child deletion.
+
+All changed Substrate teardown calls require one nonempty immutable UID. `DeleteActor` runs directly
+for RUNNING or suspended actors; no suspend step creates another snapshot. A NOT_FOUND result makes
+an exact UID retry idempotent. Actor deletion precedes release of its incoming fork tag. A UID
+mismatch leaves the replacement untouched and the owning claim unresolved.
+
+This PR records ownership. It does not run the cleanup reaper, change `DeleteSession` completion, or
+publish reserved fork batches. The following PR still owns atomic fork-child publication and must
+document that reserved children stay hidden from List/Get until the fan-out commits.
 
 ## Compatibility
 
-Version 7 adds the allocation ledger and inventory completeness/evidence columns. Fork-publication
-and reaper state are not included. Stop **all** old daemon and embedded writers before migration.
-Back up first: there is no downgrade to v0.3.0 or older after migration, and an already-open old
-writer cannot be fenced by a schema stamp.
+Version 10 adds the normalized resource graph and its producer in the same change. The migration is
+one-way. Before upgrading, stop every daemon and embedded writer that shares the database, then back
+up the database and WAL. Open the database with the v10 build only; an older binary refuses v10 on a
+fresh open, but it cannot detect the migration if it already held the database open. There is no
+version 10 downgrade path; restore the backup to roll back.
 
-All inventories, including fresh metadata rows and implicit logs, remain incomplete. Tracking
-Create/Restore alone cannot cover a subsequent legacy Fork. Neither an empty ledger, a successful
-fork nor a later tracked restore establishes completeness. A host embedding `sqlitelog` may call
-`Store.CertifyInventory` only after reconciling every namespace, runtime override and failed-fork
-allocation; its evidence is persisted. Resource confirmation/release never auto-certifies inventory.
+A v0.4.0-produced v9 fixture pins the legacy `allocations` row and `PRAGMA user_version=9`. Fresh and
+migrated v10 schemas match. Every migrated or fresh inventory remains incomplete. Neither an empty
+ledger, a successful fork, nor a later tracked Restore proves that historical inventory was covered.
+`Store.CertifyInventory` still requires explicit reconciliation of every route, override and failed
+fork. Resource confirmation and release never auto-certify inventory.

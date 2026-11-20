@@ -2,5 +2,6 @@
 category: Added
 ---
 
-- Runtime allocation attempts now record immutable backend resource identity in SQLite. The
-  ledger is evidence for later cleanup work; DeleteSession does not consume it yet.
+- Sessions now records durable, UID-backed cleanup ownership for Create, Restore, and Fork
+  resources. Substrate actor and tag identities use UID-conditional teardown primitives; the
+  cleanup reaper and DeleteSession completion behavior are not part of this change.

@@ -40,10 +40,12 @@ var egressFilePolicy = substrate.EgressPolicy{Rules: []substrate.EgressRule{
 	{Protocol: substrate.EgressTLSPassthrough, Hostnames: []string{"*.example.org"}, Ports: []int32{443}},
 }}
 
-// egressFakeControl is fakeControl with the EgressPolicyClient extension the ate-api adapter has.
+// egressFakeControl is fakeControl with the EgressPolicyClient extension the ate-api adapter has:
+// one policy per actor, and an update preconditioned on the stored UID and version.
 type egressFakeControl struct {
 	*fakeControl
 	policies map[string]substrate.EgressPolicy
+	versions map[string]int64
 }
 
 func (f *egressFakeControl) CreateActorEgressPolicy(_ context.Context, a substrate.ActorRef, p substrate.EgressPolicy) error {
@@ -54,15 +56,41 @@ func (f *egressFakeControl) CreateActorEgressPolicy(_ context.Context, a substra
 		return substrate.ErrEgressPolicyExists
 	}
 	f.policies[a.Name] = p
+	f.version(a.Name, 1)
 	return nil
 }
 
-func (f *egressFakeControl) GetActorEgressPolicy(context.Context, substrate.ActorRef) (substrate.EgressPolicyInfo, error) {
-	return substrate.EgressPolicyInfo{}, errors.New("not used")
+func (f *egressFakeControl) version(name string, v int64) {
+	if f.versions == nil {
+		f.versions = map[string]int64{}
+	}
+	f.versions[name] = v
 }
 
-func (f *egressFakeControl) UpdateActorEgressPolicy(context.Context, substrate.ActorRef, substrate.EgressPolicy, substrate.EgressPolicyInfo) (substrate.EgressPolicyInfo, error) {
-	return substrate.EgressPolicyInfo{}, errors.New("not used")
+func (f *egressFakeControl) GetActorEgressPolicy(_ context.Context, a substrate.ActorRef) (substrate.EgressPolicyInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "egress-get:"+a.Atespace+"/"+a.Name)
+	p, ok := f.policies[a.Name]
+	if !ok {
+		return substrate.EgressPolicyInfo{}, substrate.ErrEgressPolicyNotFound
+	}
+	return substrate.EgressPolicyInfo{Policy: p, UID: "policy-" + a.Name, Version: f.versions[a.Name]}, nil
+}
+
+func (f *egressFakeControl) UpdateActorEgressPolicy(_ context.Context, a substrate.ActorRef, p substrate.EgressPolicy, precond substrate.EgressPolicyInfo) (substrate.EgressPolicyInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "egress-update:"+a.Atespace+"/"+a.Name)
+	if _, ok := f.policies[a.Name]; !ok {
+		return substrate.EgressPolicyInfo{}, substrate.ErrEgressPolicyNotFound
+	}
+	if precond.UID != "policy-"+a.Name || precond.Version != f.versions[a.Name] {
+		return substrate.EgressPolicyInfo{}, substrate.ErrActorBusy
+	}
+	f.policies[a.Name] = p
+	f.version(a.Name, precond.Version+1)
+	return substrate.EgressPolicyInfo{Policy: p, UID: precond.UID, Version: precond.Version + 1}, nil
 }
 
 func (f *egressFakeControl) DeleteActorEgressPolicy(context.Context, substrate.ActorRef) error {
@@ -152,6 +180,90 @@ func TestSubstrateEgressPolicyFileIsInstalled(t *testing.T) {
 		if strings.Contains(out, leak) {
 			t.Fatalf("log records policy contents %q: %s", leak, out)
 		}
+	}
+}
+
+// startEgressDaemon builds the writer backend of a daemon started on ctl, with file as its
+// -substrate-egress-policy-file, or without the flag when file is empty.
+func startEgressDaemon(t *testing.T, ctl *egressFakeControl, file string) *substrate.Backend {
+	t.Helper()
+	args := []string{"-substrate-harness", "writer=agentsuite/writer", "-substrate-atespace", "sessions", "-ateapi-insecure-skip-verify"}
+	if file != "" {
+		args = append(args, "-substrate-egress-policy-file", writeFile(t, "policy.json", []byte(file)))
+	}
+	f := parseFlags(t, func(grpc.ClientConnInterface) substrate.ControlClient { return ctl }, args...)
+	backends, _, closeConn, err := f.Backends(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(closeConn)
+	return backends["writer"].(*substrate.Backend)
+}
+
+// suspendAndRestore suspends sess-a's actor and resumes it through b, leaving only the restore's
+// calls in ctl's log.
+func suspendAndRestore(t *testing.T, ctl *egressFakeControl, b *substrate.Backend) {
+	t.Helper()
+	ref, err := b.Snapshot(t.Context(), api.Incarnation{ID: "sess-a"}, api.SnapshotExternal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctl.mu.Lock()
+	ctl.calls = nil
+	ctl.mu.Unlock()
+	if _, err := b.Restore(t.Context(), ref); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A changed -substrate-egress-policy-file reaches an existing session's actor at the first resume
+// after the restart that reads it: the stored policy is read and replaced. An unchanged file costs
+// the read only.
+func TestSubstrateEgressPolicyFileChangeReachesExistingActors(t *testing.T) {
+	ctl := &egressFakeControl{fakeControl: &fakeControl{actors: map[string]substrate.ActorStatus{}}, policies: map[string]substrate.EgressPolicy{}}
+	b := startEgressDaemon(t, ctl, egressFile)
+	if _, err := b.Create(t.Context(), &api.SessionSpec{SessionUID: "sess-a"}); err != nil {
+		t.Fatal(err)
+	}
+	suspendAndRestore(t, ctl, b)
+	if want := []string{"egress-get:sessions/sess-a", "resume:sessions/sess-a"}; !slices.Equal(ctl.log(), want) {
+		t.Fatalf("control calls for an unchanged file = %v, want %v", ctl.log(), want)
+	}
+
+	changed := `{"rules": [{"https": {"hostnames": ["api.example.com"]}}]}`
+	suspendAndRestore(t, ctl, startEgressDaemon(t, ctl, changed))
+	if want := []string{"egress-get:sessions/sess-a", "egress-update:sessions/sess-a", "resume:sessions/sess-a"}; !slices.Equal(ctl.log(), want) {
+		t.Fatalf("control calls for a changed file = %v, want %v", ctl.log(), want)
+	}
+	want := substrate.EgressPolicy{Rules: []substrate.EgressRule{{Protocol: substrate.EgressHTTPS, Hostnames: []string{"api.example.com"}}}}
+	if got := ctl.policies["sess-a"]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("policy after the restart = %+v, want %+v", got, want)
+	}
+}
+
+// Removing -substrate-egress-policy-file does not revoke: after a restart without it, a resume makes
+// no egress call and the actor keeps its stored rules. A restart with a file holding {} (no rules)
+// clears them to an empty rule set at the next resume, with an update preconditioned on the read.
+func TestSubstrateEgressPolicyFileRevocation(t *testing.T) {
+	ctl := &egressFakeControl{fakeControl: &fakeControl{actors: map[string]substrate.ActorStatus{}}, policies: map[string]substrate.EgressPolicy{}}
+	if _, err := startEgressDaemon(t, ctl, egressFile).Create(t.Context(), &api.SessionSpec{SessionUID: "sess-a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	suspendAndRestore(t, ctl, startEgressDaemon(t, ctl, ""))
+	if want := []string{"resume:sessions/sess-a"}; !slices.Equal(ctl.log(), want) {
+		t.Fatalf("control calls without the flag = %v, want %v", ctl.log(), want)
+	}
+	if got := ctl.policies["sess-a"]; !reflect.DeepEqual(got, egressFilePolicy) {
+		t.Fatalf("policy after a restart without the flag = %+v, want the stored %+v", got, egressFilePolicy)
+	}
+
+	suspendAndRestore(t, ctl, startEgressDaemon(t, ctl, "{}"))
+	if want := []string{"egress-get:sessions/sess-a", "egress-update:sessions/sess-a", "resume:sessions/sess-a"}; !slices.Equal(ctl.log(), want) {
+		t.Fatalf("control calls with {} = %v, want %v", ctl.log(), want)
+	}
+	if got, ok := ctl.policies["sess-a"]; !ok || got.Rules == nil || len(got.Rules) != 0 {
+		t.Fatalf("policy after a restart with {} = %+v (stored %v), want an empty rule set", got, ok)
 	}
 }
 

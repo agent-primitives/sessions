@@ -734,6 +734,45 @@ func TestEgressInstallOnAMissingActor(t *testing.T) {
 	})
 }
 
+// A step of resuming a SUSPENDED actor that reports it missing, when the actor was replaced
+// meanwhile, is retryable ErrActorBusy, published as ABORTED. The error keeps the step's in its
+// chain but not its text, which can carry substrate's own message.
+func TestReplacedActorRefusalKeepsTheClientsTextOut(t *testing.T) {
+	notFound := fmt.Errorf("%w: sess-x: rpc error: code = FailedPrecondition desc = %s", substrate.ErrActorNotFound, substrateText)
+	for _, tc := range []struct {
+		name, during string
+		opts         []substrate.Option
+		fail         func(c egressControl)
+		calls        []string
+	}{
+		{name: "egress converge", during: "its egress policy was being converged", opts: []substrate.Option{staticPolicy().option()},
+			fail:  func(c egressControl) { c.readErr = notFound },
+			calls: []string{"get:sess-x", "egress-get:sess-x", "get:sess-x"}},
+		{name: "resume", during: "it was being resumed",
+			fail:  func(c egressControl) { c.resumeErr = notFound },
+			calls: []string{"get:sess-x", "resume:sess-x", "get:sess-x"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newEgressControl()
+			c.exists("sess-x", substrate.StatusSuspended)
+			c.afterGet = func(name string) {
+				c.delete(name)
+				c.exists(name, substrate.StatusSuspended)
+				c.afterGet = nil
+			}
+			tc.fail(c)
+			err := createSess(newEgressBackend(c, tc.opts...))
+			if !errors.Is(err, substrate.ErrActorBusy) || !errors.Is(err, notFound) {
+				t.Fatalf("err=%v want ErrActorBusy retaining %v", err, notFound)
+			}
+			if strings.Contains(err.Error(), substrateText) || !strings.Contains(err.Error(), "actor space/sess-x was replaced while "+tc.during) {
+				t.Fatalf("err=%q carries the client's text, or does not say the actor was replaced while %s", err, tc.during)
+			}
+			wantCalls(t, c.calls, tc.calls)
+		})
+	}
+}
+
 func forkMemory(b *substrate.Backend, ctx context.Context) error {
 	_, err := b.Fork(ctx, api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
 		api.ForkOpts{ChildSessionUID: "child"})

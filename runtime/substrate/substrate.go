@@ -593,7 +593,9 @@ func (b *Backend) requireAttachCheckpoint(ctx context.Context, name string, info
 // Gone now, it is reported as not found, so Create treats it as any missing actor: a memory-tier
 // session with started turns is refused with ErrMemoryStateLost, anything else gets a new actor.
 // Replaced (another UID), the step is ErrActorBusy, which is retryable: the next attempt attaches to
-// the replacement, which the host refuses if it recorded another UID. Otherwise cause stands.
+// the replacement, which the host refuses if it recorded another UID. The session service publishes
+// that refusal's text as ABORTED, so cause, which can carry substrate's own message, stays in its
+// chain but not in its text (hiddenCause). Otherwise cause stands.
 func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo, during string, cause error) (api.Incarnation, bool, error) {
 	if errors.Is(cause, ErrActorNotFound) {
 		now, err := b.ctl.GetActor(ctx, ref)
@@ -601,8 +603,10 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 		case errors.Is(err, ErrActorNotFound):
 			return api.Incarnation{}, false, nil
 		case err == nil && now.UID != seen.UID:
-			return api.Incarnation{}, true, fmt.Errorf("%w: actor %s/%s was replaced while %s: %w",
-				ErrActorBusy, ref.Atespace, ref.Name, during, cause)
+			return api.Incarnation{}, true, &hiddenCause{
+				err:   fmt.Errorf("%w: actor %s/%s was replaced while %s", ErrActorBusy, ref.Atespace, ref.Name, during),
+				cause: cause,
+			}
 		}
 	}
 	return api.Incarnation{}, true, cause
@@ -1260,10 +1264,11 @@ var ErrMemoryStateLost = fmt.Errorf("substrate: refusing to cold-create an actor
 
 // hiddenCause is err with cause added to its chain but not to its text. The session service
 // publishes the typed refusals (api.ErrMemoryStateLost, api.ErrSnapshotSuperseded,
-// api.ErrComputeBusy) of Fork, Suspend, an Exec or Resume that parks for approval, and the egress
-// converge, and any failure of a stateful Fork's parent read (requireSnapshot), as their Error()
-// text, and a ControlClient's error can carry substrate's own message, which is not part of that
-// contract. Go callers still reach cause through errors.Is and errors.As.
+// api.ErrComputeBusy) of Fork, Suspend, an Exec or Resume that parks for approval, the egress
+// converge, and a resume whose actor was replaced meanwhile (resumeFailed), and any failure of a
+// stateful Fork's parent read (requireSnapshot), as their Error() text, and a ControlClient's error
+// can carry substrate's own message, which is not part of that contract. Go callers still reach
+// cause through errors.Is and errors.As.
 type hiddenCause struct {
 	err   error
 	cause error

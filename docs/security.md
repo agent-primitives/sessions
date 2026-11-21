@@ -262,10 +262,12 @@ Substrate router, keeps its stored policy until it is suspended and the backend 
 records the rule count, the outcome and an `error_kind`, not the rules. A policy Substrate
 refuses as invalid reaches callers as fixed text (`FAILED_PRECONDITION`,
 `COMPUTE_CONFIG_INVALID`), without Substrate's message, which can name a rejected hostname or
-credential reference. A policy call Substrate refuses because another operation holds the actor
-(`ABORTED`, `COMPUTE_BUSY`) leaves Substrate's message out as well. Other install failures keep the
-backend error's text, which reaches callers when authorization is off. A daemon startup error for a
-policy file that does not parse can quote the offending JSON token; it goes only to the operator.
+credential reference. A policy call Substrate refuses because another operation holds the actor,
+and an `Exec` refused because the actor was replaced while its policy was converged or it was
+resumed, are `ABORTED` with `COMPUTE_BUSY` and leave Substrate's message out as well. Other install
+failures keep the backend error's text, which reaches callers when authorization is off. A daemon
+startup error for a policy file that does not parse can quote the offending JSON token; it goes only
+to the operator.
 
 - **Fail closed.** A configured policy that the control client cannot install, or that Substrate
   refuses, fails the call and leaves the actor suspended. With the option set, a control client

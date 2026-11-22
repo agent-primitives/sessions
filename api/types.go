@@ -17,19 +17,20 @@ import "time"
 type EventKind string
 
 const (
-	EventInput           EventKind = "INPUT"
-	EventModelCall       EventKind = "MODEL_CALL"
-	EventOutput          EventKind = "OUTPUT"
-	EventToolCall        EventKind = "TOOL_CALL"
-	EventToolResult      EventKind = "TOOL_RESULT"
-	EventApprovalRequest EventKind = "APPROVAL_REQUEST"
-	EventApprovalResult  EventKind = "APPROVAL_RESULT"
-	EventUsage           EventKind = "USAGE"
-	EventLifecycle       EventKind = "LIFECYCLE"
-	EventEnd             EventKind = "END"
-	EventError           EventKind = "ERROR"
-	EventExecutionStart  EventKind = "EXECUTION_START"
-	EventParked          EventKind = "PARKED" // transport-only approval park acknowledgement; never journaled
+	EventInput              EventKind = "INPUT"
+	EventModelCall          EventKind = "MODEL_CALL"
+	EventOutput             EventKind = "OUTPUT"
+	EventToolCall           EventKind = "TOOL_CALL"
+	EventToolResult         EventKind = "TOOL_RESULT"
+	EventApprovalRequest    EventKind = "APPROVAL_REQUEST"
+	EventApprovalResult     EventKind = "APPROVAL_RESULT"
+	EventUsage              EventKind = "USAGE"
+	EventLifecycle          EventKind = "LIFECYCLE"
+	EventEnd                EventKind = "END"
+	EventError              EventKind = "ERROR"
+	EventExecutionStart     EventKind = "EXECUTION_START"
+	EventParked             EventKind = "PARKED"              // transport-only approval park acknowledgement; never journaled
+	EventReconstructionInfo EventKind = "RECONSTRUCTION_INFO" // transport-only stream-bound class metadata; never journaled
 )
 
 // Message is a role-tagged sequence of content parts (A2A Message = role + Part[]).

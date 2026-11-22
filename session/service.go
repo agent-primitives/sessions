@@ -1077,7 +1077,7 @@ func forkError(parent string, err error) error {
 		return statusError(codes.Aborted, err, err.Error())
 	case errors.Is(err, api.ErrInvalidCheckpoint):
 		return checkpointRefusal("fork", parent, err)
-	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch),
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, api.ErrInvalidHarnessClass),
 		errors.Is(err, api.ErrMemoryStateLost):
 		return statusError(codes.FailedPrecondition, err, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
@@ -1258,7 +1258,7 @@ func resumeError(uid string, err error) error {
 		return statusError(codes.FailedPrecondition, err, fmt.Sprintf("resume: %v", err))
 	case errors.Is(err, api.ErrInvalidCheckpoint):
 		return checkpointRefusal("resume", uid, err)
-	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrStatefulOverride), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch),
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrStatefulOverride), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch), errors.Is(err, api.ErrInvalidHarnessClass),
 		errors.Is(err, api.ErrMemoryStateLost):
 		return statusError(codes.FailedPrecondition, err, fmt.Sprintf("resume: %v", err))
 	case errors.Is(err, placement.ErrUnknownHarness):
@@ -1315,7 +1315,7 @@ func execError(uid string, err error) error {
 		return statusError(codes.Aborted, err, err.Error())
 	case errors.Is(err, api.ErrInvalidCheckpoint):
 		return checkpointRefusal("exec", uid, err)
-	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrToolPolicyRefused), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport), errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrStatefulOverride), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch),
+	case errors.Is(err, controller.ErrApprovalBlocked), errors.Is(err, controller.ErrApprovalUnavailable), errors.Is(err, controller.ErrMissingToolExecutor), errors.Is(err, controller.ErrToolPolicyRefused), errors.Is(err, controller.ErrInvalidApprovalCall), errors.Is(err, controller.ErrApprovalReceiptReport), errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrStatefulOverride), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch), errors.Is(err, api.ErrInvalidHarnessClass),
 		errors.Is(err, api.ErrMemoryStateLost):
 		return statusError(codes.FailedPrecondition, err, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):

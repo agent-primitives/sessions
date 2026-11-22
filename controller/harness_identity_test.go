@@ -240,7 +240,7 @@ func TestRecoveryHarnessIdentity(t *testing.T) {
 					t.Fatal(err)
 				}
 				har := identityHarness{describe: func(context.Context) (api.Descriptor, error) {
-					if tc.marker == nil || tc.marker.Harness == "" && tc.marker.HarnessVersion == "" {
+					if !completed && (tc.marker == nil || tc.marker.Harness == "" && tc.marker.HarnessVersion == "") {
 						t.Fatal("legacy identity introduced a Describe dependency")
 					}
 					return tc.desc, nil
@@ -496,6 +496,87 @@ func TestReplayDescribesHarnessOnceBeforeAllRuns(t *testing.T) {
 	}}
 	if outputs, err := c.Replay(t.Context(), har); err != nil || !reflect.DeepEqual(outputs, []string{"reply", "reply"}) || runs != 2 || descriptions != 1 {
 		t.Fatalf("Replay = %v, %v; runs=%d descriptions=%d", outputs, err, runs, descriptions)
+	}
+}
+
+func TestReplayEnforcesHarnessClassBeforeRun(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		class api.HarnessClass
+		want  error
+	}{
+		{name: "legacy omitted class"},
+		{name: "mediated", class: api.HarnessClassMediated},
+		{name: "unmediated", class: api.HarnessClassUnmediated, want: controller.ErrReconstructionUnsupported},
+		{name: "unknown", class: api.HarnessClass("FUTURE_CLASS"), want: controller.ErrReconstructionUnsupported},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := identityLog(t,
+				api.Event{ExecutionID: "turn", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Harness: "h", HarnessVersion: "v1", InputCount: inputCount(0)}},
+				api.Event{ExecutionID: "turn", Kind: api.EventOutput, Message: api.TextMessage("assistant", "reply")},
+				api.Event{ExecutionID: "turn", Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}},
+			)
+			before, err := log.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := controller.New(log, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			descriptions, runs, providerCalls, toolCalls := 0, 0, 0, 0
+			har := identityHarness{describe: func(context.Context) (api.Descriptor, error) {
+				descriptions++
+				desc := api.Descriptor{ID: "h", Version: "v1", HarnessClass: tc.class}
+				if tc.class == api.HarnessClassUnmediated {
+					desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
+				}
+				return desc, nil
+			}, run: func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+				runs++
+				// These stand in for effects an unmediated harness performs without the sink.
+				providerCalls++
+				toolCalls++
+				return sink.Output(ctx, "reply")
+			}}
+			outputs, err := c.Replay(t.Context(), har)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Replay error = %v; want %v", err, tc.want)
+			}
+			if descriptions != 1 {
+				t.Fatalf("Describe calls = %d, want 1", descriptions)
+			}
+			if tc.want != nil {
+				if outputs != nil || runs != 0 || providerCalls != 0 || toolCalls != 0 {
+					t.Fatalf("refused replay had effects: outputs=%v runs/provider/tools=%d/%d/%d", outputs, runs, providerCalls, toolCalls)
+				}
+			} else if !reflect.DeepEqual(outputs, []string{"reply"}) || runs != 1 {
+				t.Fatalf("permitted Replay = %v with %d runs", outputs, runs)
+			}
+			after, readErr := log.Read(1)
+			if readErr != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("Replay changed journal: %v", readErr)
+			}
+		})
+	}
+}
+
+func TestReplayHarnessMismatchPrecedesInvalidClass(t *testing.T) {
+	log := identityLog(t,
+		api.Event{ExecutionID: "turn", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Harness: "expected", HarnessVersion: "v1", InputCount: inputCount(0)}},
+		api.Event{ExecutionID: "turn", Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}},
+	)
+	c, err := controller.New(log, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	har := identityHarness{desc: api.Descriptor{ID: "wrong", Version: "v1", HarnessClass: api.HarnessClassUnmediated,
+		Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, run: func(context.Context, *api.Start, api.EventSink) error {
+		t.Fatal("mismatched harness ran")
+		return nil
+	}}
+	if _, err := c.Replay(t.Context(), har); !errors.Is(err, controller.ErrHarnessMismatch) || errors.Is(err, api.ErrInvalidHarnessClass) {
+		t.Fatalf("Replay = %v; want harness mismatch precedence", err)
 	}
 }
 

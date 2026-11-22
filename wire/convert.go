@@ -673,6 +673,8 @@ func kindToProto(k api.EventKind) v1.EventKind {
 		return v1.EventKind_EVENT_EXECUTION_START
 	case api.EventParked:
 		return v1.EventKind_EVENT_PARKED
+	case api.EventReconstructionInfo:
+		return v1.EventKind_EVENT_RECONSTRUCTION_INFO
 	default:
 		return v1.EventKind_EVENT_KIND_UNSPECIFIED
 	}
@@ -706,6 +708,8 @@ func kindFromProto(k v1.EventKind) api.EventKind {
 		return api.EventExecutionStart
 	case v1.EventKind_EVENT_PARKED:
 		return api.EventParked
+	case v1.EventKind_EVENT_RECONSTRUCTION_INFO:
+		return api.EventReconstructionInfo
 	default:
 		return ""
 	}

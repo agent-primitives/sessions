@@ -26,7 +26,7 @@ func TestDescribe(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := api.Descriptor{
-		ID: "tool", Version: "1", Models: []string{"m"},
+		ID: "tool", Version: "1", Models: []string{"m"}, HarnessClass: api.HarnessClassMediated,
 		Tools:        []api.ToolSpec{{Name: "publish", Description: "Publish text.", Mediation: api.MediationRequiresApproval}},
 		Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay, ForkSafe: true},
 	}

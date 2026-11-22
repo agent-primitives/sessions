@@ -97,6 +97,9 @@ func (l *Log) NewFence() int64 {
 func (l *Log) Append(expectedLastSeq, fence int64, ev api.Event) (Record, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if ev.Kind == api.EventReconstructionInfo {
+		return Record{}, fmt.Errorf("eventlog: %s is transport-only", ev.Kind)
+	}
 
 	if expectedLastSeq != l.headLocked() {
 		return Record{}, ErrConflict

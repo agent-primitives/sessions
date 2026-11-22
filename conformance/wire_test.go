@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/agent-primitives/sessions/api"
@@ -28,6 +30,10 @@ func wireHarness(t *testing.T) api.Harness { return wireHarnessFrom(t, echoagent
 // wireHarnessFrom serves h over a bufconn Harness server and returns an api.Harness that drives it
 // out of process, so a test can swap in a deliberately-failing harness.
 func wireHarnessFrom(t *testing.T, h api.Harness) api.Harness {
+	return harnesswire.NewClientHarness(wireHarnessClientFrom(t, h))
+}
+
+func wireHarnessClientFrom(t *testing.T, h api.Harness) v1.HarnessClient {
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
@@ -44,7 +50,7 @@ func wireHarnessFrom(t *testing.T, h api.Harness) api.Harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn))
+	return v1.NewHarnessClient(conn)
 }
 
 type descriptorHarness struct {
@@ -230,6 +236,267 @@ func TestWireNondeterministicReplay(t *testing.T) {
 	}
 	if err := log.Verify(); err != nil {
 		t.Fatalf("verify: %v", err)
+	}
+}
+
+type unmediatedReplayHarness struct {
+	describes int
+	runs      int
+}
+
+type probeDescribeFailureHarness struct {
+	describes int
+	runs      int
+	err       error
+}
+
+func (h *probeDescribeFailureHarness) Describe(context.Context) (api.Descriptor, error) {
+	h.describes++
+	if h.describes > 1 {
+		return api.Descriptor{}, h.err
+	}
+	return api.Descriptor{ID: "probe-failure", Version: "1", HarnessClass: api.HarnessClassMediated}, nil
+}
+
+func (h *probeDescribeFailureHarness) Run(context.Context, *api.Start, api.EventSink) error {
+	h.runs++
+	return nil
+}
+
+func (h *unmediatedReplayHarness) Describe(context.Context) (api.Descriptor, error) {
+	h.describes++
+	return api.Descriptor{ID: "unmediated", Version: "1", HarnessClass: api.HarnessClassUnmediated,
+		Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}}, nil
+}
+
+func (h *unmediatedReplayHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	h.runs++
+	return sink.Output(ctx, "reported output")
+}
+
+func TestWireReplayRefusesUnmediatedHarnessBeforeConnect(t *testing.T) {
+	s, _ := openFile(t)
+	defer s.Close()
+	log := s.Session("s")
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, event := range []api.Event{
+		{ExecutionID: "turn", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Harness: "unmediated", HarnessVersion: "1", InputCount: new(int64)}},
+		{ExecutionID: "turn", Kind: api.EventOutput, Message: api.TextMessage("assistant", "reported output")},
+		{ExecutionID: "turn", Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}},
+	} {
+		if _, err := log.Append(int64(i), fence, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := &unmediatedReplayHarness{}
+	remote := wireHarnessFrom(t, h)
+	c, err := controller.New(log, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Replay(t.Context(), remote); !errors.Is(err, controller.ErrReconstructionUnsupported) {
+		t.Fatalf("wire Replay = %v; want ErrReconstructionUnsupported", err)
+	}
+	if h.runs != 0 {
+		t.Fatalf("wire Replay opened Connect and ran the unmediated harness %d times", h.runs)
+	}
+	if h.describes != 1 {
+		t.Fatalf("wire Replay Describe calls = %d, want preflight refusal before Connect", h.describes)
+	}
+}
+
+func TestWireReplayProbeDescribeFailureIsTransient(t *testing.T) {
+	const private = "backend temporarily down: token=private"
+	for _, tc := range []struct {
+		name, want, notWant string
+		cause               error
+		code                codes.Code
+	}{
+		{name: "plain error is redacted", cause: errors.New(private), code: codes.Unavailable, want: "describe harness for reconstruction failed", notWant: private},
+		{name: "explicit status is preserved", cause: status.Error(codes.ResourceExhausted, "worker pool drained"), code: codes.ResourceExhausted, want: "worker pool drained"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := openFile(t)
+			defer s.Close()
+			log := s.Session("s")
+			fence, err := log.NewFence()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, event := range []api.Event{
+				{ExecutionID: "turn", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Harness: "probe-failure", HarnessVersion: "1", InputCount: new(int64)}},
+				{ExecutionID: "turn", Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}},
+			} {
+				if _, err := log.Append(int64(i), fence, event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h := &probeDescribeFailureHarness{err: tc.cause}
+			c, err := controller.New(log, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = c.Replay(t.Context(), wireHarnessFrom(t, h))
+			if !errors.Is(err, api.ErrReconstructionHandshake) || errors.Is(err, api.ErrReconstructionUnsupported) || status.Code(err) != tc.code || !strings.Contains(err.Error(), tc.want) || tc.notWant != "" && strings.Contains(err.Error(), tc.notWant) {
+				t.Fatalf("Replay probe Describe failure = %v; want code=%s text=%q without %q", err, tc.code, tc.want, tc.notWant)
+			}
+			if h.describes != 2 || h.runs != 0 {
+				t.Fatalf("probe Describe failure had effects: describes=%d runs=%d", h.describes, h.runs)
+			}
+		})
+	}
+}
+
+type routedClassClient struct {
+	describe *v1.HarnessDescriptor
+	connect  v1.HarnessClient
+}
+
+type harnessDecorator struct {
+	api.Harness
+}
+
+type preparingHarnessDecorator struct {
+	harness  api.Harness
+	preparer api.HarnessRunPreparer
+}
+
+func (h preparingHarnessDecorator) Describe(ctx context.Context) (api.Descriptor, error) {
+	return h.harness.Describe(ctx)
+}
+
+func (h preparingHarnessDecorator) PrepareRun(ctx context.Context) (api.PreparedHarnessRun, error) {
+	return h.preparer.PrepareRun(ctx)
+}
+
+func (h preparingHarnessDecorator) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	prepared, err := h.PrepareRun(ctx)
+	if err != nil {
+		return err
+	}
+	defer prepared.Close()
+	return prepared.Run(ctx, start, sink)
+}
+
+func (h harnessDecorator) Describe(ctx context.Context) (api.Descriptor, error) {
+	return h.Harness.Describe(ctx)
+}
+
+func (h harnessDecorator) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	return h.Harness.Run(ctx, start, sink)
+}
+
+func (c routedClassClient) Describe(context.Context, *v1.DescribeRequest, ...grpc.CallOption) (*v1.HarnessDescriptor, error) {
+	return c.describe, nil
+}
+
+func (c routedClassClient) Connect(ctx context.Context, opts ...grpc.CallOption) (v1.Harness_ConnectClient, error) {
+	return c.connect.Connect(ctx, opts...)
+}
+
+func TestWireReplayBindsClassToConnectPeer(t *testing.T) {
+	s, _ := openFile(t)
+	defer s.Close()
+	log := s.Session("s")
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, event := range []api.Event{
+		{ExecutionID: "turn", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Harness: "routed", HarnessVersion: "1", InputCount: new(int64)}},
+		{ExecutionID: "turn", Kind: api.EventOutput, Message: api.TextMessage("assistant", "reported output")},
+		{ExecutionID: "turn", Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}},
+	} {
+		if _, err := log.Append(int64(i), fence, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	unmediated := &unmediatedReplayHarness{}
+	mediated := harnesswire.DescriptorToProto(api.Descriptor{ID: "routed", Version: "1", HarnessClass: api.HarnessClassMediated})
+	remote := harnessDecorator{Harness: harnesswire.NewClientHarness(routedClassClient{describe: mediated, connect: wireHarnessClientFrom(t, unmediated)})}
+	c, err := controller.New(log, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Replay(t.Context(), remote); !errors.Is(err, controller.ErrReconstructionUnsupported) {
+		t.Fatalf("routed Replay = %v; want stream-bound refusal", err)
+	}
+	if unmediated.runs != 0 {
+		t.Fatalf("routed Replay ran unmediated Connect peer %d times", unmediated.runs)
+	}
+}
+
+func TestWireReplayBindsClassThroughPreparedRunDecorator(t *testing.T) {
+	s, _ := openFile(t)
+	defer s.Close()
+	log := s.Session("s")
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, event := range []api.Event{
+		{ExecutionID: "turn", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Harness: "routed", HarnessVersion: "1", InputCount: new(int64)}},
+		{ExecutionID: "turn", Kind: api.EventOutput, Message: api.TextMessage("assistant", "reported output")},
+		{ExecutionID: "turn", Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}},
+	} {
+		if _, err := log.Append(int64(i), fence, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unmediated := &unmediatedReplayHarness{}
+	mediated := harnesswire.DescriptorToProto(api.Descriptor{ID: "routed", Version: "1", HarnessClass: api.HarnessClassMediated})
+	inner := harnesswire.NewClientHarness(routedClassClient{describe: mediated, connect: wireHarnessClientFrom(t, unmediated)})
+	remote := preparingHarnessDecorator{harness: inner, preparer: inner}
+	c, err := controller.New(log, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Replay(t.Context(), remote); !errors.Is(err, api.ErrReconstructionUnsupported) {
+		t.Fatalf("prepared Replay = %v; want stream-bound refusal", err)
+	}
+	if unmediated.describes != 1 || unmediated.runs != 0 {
+		t.Fatalf("prepared Replay bypassed inner probe: describes=%d runs=%d", unmediated.describes, unmediated.runs)
+	}
+}
+
+func TestWireReplayPropagatesClassCheckThroughDelegatingServer(t *testing.T) {
+	s, _ := openFile(t)
+	defer s.Close()
+	log := s.Session("s")
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, event := range []api.Event{
+		{ExecutionID: "turn", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Harness: "routed", HarnessVersion: "1", InputCount: new(int64)}},
+		{ExecutionID: "turn", Kind: api.EventOutput, Message: api.TextMessage("assistant", "reported output")},
+		{ExecutionID: "turn", Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}},
+	} {
+		if _, err := log.Append(int64(i), fence, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	unmediated := &unmediatedReplayHarness{}
+	mediated := harnesswire.DescriptorToProto(api.Descriptor{ID: "routed", Version: "1", HarnessClass: api.HarnessClassMediated})
+	inner := harnesswire.NewClientHarness(routedClassClient{describe: mediated, connect: wireHarnessClientFrom(t, unmediated)})
+	outer := wireHarnessFrom(t, inner)
+	c, err := controller.New(log, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Replay(t.Context(), outer); err == nil || !strings.Contains(err.Error(), api.ErrReconstructionUnsupported.Error()) || !strings.Contains(err.Error(), "UNMEDIATED") {
+		t.Fatalf("two-hop Replay = %v; want the inner unmediated-class refusal", err)
+	}
+	if unmediated.runs != 0 {
+		t.Fatalf("two-hop Replay ran unmediated inner peer %d times", unmediated.runs)
+	}
+	if unmediated.describes != 1 {
+		t.Fatalf("two-hop Replay inner Describe calls = %d, want exact-stream class check", unmediated.describes)
 	}
 }
 

@@ -175,13 +175,16 @@ from binding the socket first. The host
 does refuse a harness that declares `REQUIRES_MEMORY_SNAPSHOT`, but that is a correctness check on
 what the harness declares, not authentication.
 
-That check also has a known limit. The host checks a harness's capabilities with a `Describe` call
-before it opens the turn's `Connect` stream, and the answer is not bound to that stream. If a
+That check also has a known limit. The host checks a harness's identity, version and capabilities
+with a `Describe` call before it opens the turn's `Connect` stream, and the answer is not bound to
+that stream. If a
 different harness takes over the same address between the two calls, for instance because the
 harness restarted, gRPC reconnected to another replica, or a proxy routed the two calls to different
 backends, the turn runs on that harness and the host does not detect it. Registering a harness by
 address assumes the operator controls what serves that address, and that every harness that can
-answer there declares the same resumability.
+answer there declares the same identity, version and capabilities. Reconstruction replay separately
+checks the harness class on the exact `Connect` stream before sending `Start`; heterogeneous class
+routing therefore fails before `Run`.
 
 **Registering a harness is an admin action.** A caller that can register a harness chooses what the
 host dials, which means where it sends every session's history and whose model credential pays for
@@ -218,8 +221,11 @@ classes; what differs is who upholds it and what the journal records.
   it makes itself leave its compute through the runtime's egress. The harness holds only a
   placeholder key, which the egress replaces with the real credential on the way out. The egress,
   not the host, keeps the key out, and the host cannot check that it does. An unmediated harness
-  must declare `REQUIRES_MEMORY_SNAPSHOT`, so it runs only on memory-snapshot compute. A call it
-  still makes through `EventSink.Model` is handled as for a mediated harness.
+  declares `HarnessClassUnmediated` and `REQUIRES_MEMORY_SNAPSHOT`, so reconstruction replay refuses
+  it and placement runs it only on memory-snapshot compute. These are trusted declarations, not
+  proof of where calls originate; the host does reject the contradictory explicit declaration
+  `UNMEDIATED + STATELESS_REPLAY`. A call it still makes through `EventSink.Model` is handled as for
+  a mediated harness.
 
 What an unmediated harness gives up for the calls it makes itself, and an operator accepts by
 running one:
@@ -232,9 +238,10 @@ running one:
   usage the harness reports. A verified chain proves the record was not altered after writing, not
   that a report matches what the provider returned.
 - **No replay.** Reconstructing an unmediated execution would call the provider again, so the
-  replay guarantee [above](#what-is-protected) does not apply. A turn interrupted by losing the
-  harness's memory fails, and the user re-prompts; once the compute is gone, that means a new
-  session (spec `EXE-43`).
+  replay guarantee [above](#what-is-protected) does not apply. The reference controller refuses an
+  explicitly unmediated harness before reconstruction runs it; raw journal replay remains safe. A
+  turn interrupted by losing the harness's memory fails, and the user re-prompts; once the compute
+  is gone, that means a new session (spec `EXE-43`).
 - **The egress sees session content.** It must read the request to inject the credential, so it is
   trusted with prompts and outputs as well as the key.
 

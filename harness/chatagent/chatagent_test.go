@@ -240,9 +240,10 @@ func TestDescribe(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := api.Descriptor{
-		ID:      "chat",
-		Version: "1",
-		Models:  []string{"test-model"},
+		ID:           "chat",
+		Version:      "1",
+		Models:       []string{"test-model"},
+		HarnessClass: api.HarnessClassMediated,
 		Capabilities: api.Capabilities{
 			Resumability: api.ResumabilityStatelessReplay,
 			ForkSafe:     true,

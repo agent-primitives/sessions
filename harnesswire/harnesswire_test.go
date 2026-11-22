@@ -1,12 +1,57 @@
 package harnesswire
 
 import (
+	"context"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 )
+
+type frameConnectServer struct {
+	v1.Harness_ConnectServer
+	frames []*v1.ControllerFrame
+	sent   []*v1.Event
+}
+
+func (s *frameConnectServer) Context() context.Context { return context.Background() }
+func (s *frameConnectServer) Recv() (*v1.ControllerFrame, error) {
+	if len(s.frames) == 0 {
+		return nil, io.EOF
+	}
+	frame := s.frames[0]
+	s.frames = s.frames[1:]
+	return frame, nil
+}
+func (s *frameConnectServer) Send(event *v1.Event) error {
+	s.sent = append(s.sent, event)
+	return nil
+}
+
+type countRunHarness struct {
+	runs int
+}
+
+func (*countRunHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{HarnessClass: api.HarnessClassMediated}, nil
+}
+func (h *countRunHarness) Run(context.Context, *api.Start, api.EventSink) error {
+	h.runs++
+	return nil
+}
+
+func TestEmptyFrameIsNotAReconstructionProbe(t *testing.T) {
+	harness := &countRunHarness{}
+	stream := &frameConnectServer{frames: []*v1.ControllerFrame{{}}}
+	if err := NewServer(harness).Connect(stream); err == nil || !strings.Contains(err.Error(), "first ControllerFrame must be Start") {
+		t.Fatalf("empty first frame = %v; want malformed Start refusal", err)
+	}
+	if harness.runs != 0 || len(stream.sent) != 0 {
+		t.Fatalf("empty frame had effects: runs=%d sent=%v", harness.runs, stream.sent)
+	}
+}
 
 // fakeConnectServer is a minimal Harness_ConnectServer that records Sends; Model/ToolCall only send
 // and read the results channel, so the other stream methods are never called.

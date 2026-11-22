@@ -226,11 +226,16 @@ func TestApprovalComputeAndAtomicity(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := approvalInfo(t, store, "s")
-	if _, err := log.Append(3, fence, api.Event{Kind: api.EventParked, Parked: &api.ApprovalRef{ExecutionID: "e", ToolCallID: "call", RequestSeq: 3}}); err == nil || !strings.Contains(err.Error(), "transport-only") {
-		t.Fatalf("PARKED refusal: %v", err)
+	for _, event := range []api.Event{
+		{Kind: api.EventParked, Parked: &api.ApprovalRef{ExecutionID: "e", ToolCallID: "call", RequestSeq: 3}},
+		{Kind: api.EventReconstructionInfo},
+	} {
+		if _, err := log.Append(3, fence, event); err == nil || !strings.Contains(err.Error(), "transport-only") {
+			t.Fatalf("%s refusal: %v", event.Kind, err)
+		}
 	}
 	if after := approvalInfo(t, store, "s"); !reflect.DeepEqual(after, before) {
-		t.Fatalf("PARKED changed metadata or cursor: %+v", after)
+		t.Fatalf("transport-only append changed metadata or cursor: %+v", after)
 	}
 	if before.LastSeq != 3 || before.PendingApproval != (api.ApprovalRef{ExecutionID: "e", ToolCallID: "call", RequestSeq: 3}) || before.Project != "custom" || before.Name != "renamed" {
 		t.Fatalf("metadata clobbered projection: %+v", before)

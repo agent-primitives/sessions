@@ -1,6 +1,22 @@
 package api
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+)
+
+// ErrReconstructionUnsupported is returned before Harness.Run when the supplied harness does not
+// support reconstruction replay. Reading the raw journal is unaffected.
+var ErrReconstructionUnsupported = errors.New("harness does not support reconstruction replay")
+
+// ErrReconstructionHandshake identifies a transient failure while binding reconstruction safety
+// metadata to the exact remote Harness.Connect stream.
+var ErrReconstructionHandshake = errors.New("reconstruction handshake failed")
+
+// ErrInvalidHarnessClass is returned when a descriptor's class contradicts capabilities required
+// to run it safely.
+var ErrInvalidHarnessClass = errors.New("invalid harness class declaration")
 
 // Harness is the Bring-Your-Own-Harness SPI. A Microsoft Agent Framework (MAF) agent,
 // a GitHub Copilot agent, or a custom agent implements it via a thin adapter. The host
@@ -10,11 +26,13 @@ import "context"
 // The wire contract is api/harness.proto (Harness.Connect / Harness.Describe); an SDK
 // adapts between them and hides sequence numbers and the tool-mediation round-trip.
 type Harness interface {
-	// Describe returns the static contract, used to match the harness to a Runtime.
+	// Describe returns the static contract, used to match the harness to a Runtime. It must be
+	// side-effect-free: hosts may call it during admission and reconstruction safety checks.
 	Describe(ctx context.Context) (Descriptor, error)
 
 	// Run drives exactly one execution (turn). It reads the Start, emits events via
-	// sink, and returns nil on COMPLETED or an error on FAILED. Cancellation via ctx.
+	// sink, and returns nil on COMPLETED or an error on FAILED. Cancellation via ctx. A wrapper
+	// must pass ctx, or a context derived from it, to a delegated Run.
 	Run(ctx context.Context, s *Start, sink EventSink) error
 }
 
@@ -45,6 +63,31 @@ type Descriptor struct {
 	Models       []string // supported/required IDs; a subset of explicit host policy, never its default
 	Tools        []ToolSpec
 	Capabilities Capabilities
+	HarnessClass HarnessClass // where model calls originate; empty is legacy-mediated compatibility
+}
+
+// HarnessClass declares where a harness's model calls originate. The host trusts this declaration:
+// it cannot observe a model call that does not reach EventSink.Model. The empty value is accepted as
+// mediated for compatibility with harnesses built before the class was advertised.
+type HarnessClass string
+
+const (
+	// HarnessClassMediated makes every model call through EventSink.Model, so completed executions
+	// can be reconstructed from their recorded effects.
+	HarnessClassMediated HarnessClass = "MEDIATED"
+	// HarnessClassUnmediated makes one or more model calls from its own compute. Reconstruction
+	// replay is unsafe because it could repeat billed calls or tools, so the host refuses it.
+	HarnessClassUnmediated HarnessClass = "UNMEDIATED"
+)
+
+// ValidateDescriptor rejects class/capability combinations the host can prove unsafe. An omitted
+// class retains legacy compatibility and unknown classes remain available for forward-compatible
+// live placement; reconstruction separately fails closed on unknown values.
+func ValidateDescriptor(desc Descriptor) error {
+	if desc.HarnessClass == HarnessClassUnmediated && desc.Capabilities.Resumability != ResumabilityRequiresMemorySnapshot {
+		return fmt.Errorf("%w: UNMEDIATED requires %s", ErrInvalidHarnessClass, ResumabilityRequiresMemorySnapshot)
+	}
+	return nil
 }
 
 // ToolSpec declares a tool the harness can call and its default mediation.

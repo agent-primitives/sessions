@@ -22,6 +22,7 @@ import (
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/eventlog"
+	"github.com/agent-primitives/sessions/internal/replayctx"
 	"github.com/agent-primitives/sessions/observability"
 )
 
@@ -32,6 +33,10 @@ var ErrReplayInvokedModel = errors.New("controller: replay invoked the model (I1
 // tool request identity or result correlation differs, required tool evidence is missing, or the
 // harness leaves recorded effects unconsumed.
 var ErrReplayDiverged = errors.New("controller: replay diverged from the journal")
+
+// ErrReconstructionUnsupported aliases the API sentinel returned before Harness.Run when the
+// supplied harness cannot safely reconstruct recorded executions.
+var ErrReconstructionUnsupported = api.ErrReconstructionUnsupported
 
 // ErrInvalidExecutionLog is returned when modern execution-scoped events lack execution identity,
 // a legacy-to-modern boundary is ambiguous, or a start marker cannot establish a complete
@@ -332,6 +337,9 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 	if err != nil {
 		return err
 	}
+	if err := api.ValidateDescriptor(desc); err != nil {
+		return err
+	}
 
 	model := ""
 	if c.modelPolicy != nil {
@@ -442,6 +450,8 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 // abandons the legacy tail after its last END for replay only; modern history retains it. Replay asserts
 // the model is never invoked (I1) and each recorded model-input hash matches (I0). It is read-only.
 // A journal whose hash chain fails verification returns ErrJournalTampered before the harness runs.
+// An explicitly unmediated harness, or one with an unknown class, returns
+// ErrReconstructionUnsupported before the first Run.
 func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []string, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var recordCount, effectCount int
@@ -482,7 +492,7 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 			selected = append(selected, execution)
 		}
 	}
-	if _, err := c.checkHarness(ctx, har, selected); err != nil {
+	if _, err := c.checkHarness(ctx, har, selected, true); err != nil {
 		return nil, err
 	}
 
@@ -521,25 +531,33 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 			Config:        execution.config,
 			ResumeFromSeq: execution.resumeFromSeq,
 		}
-		runErr := har.Run(ctx, start, sink)
-		_ = sink.guard.close()
-		if sink.failure != nil {
-			return nil, sink.failure
-		}
-		if runErr != nil {
-			return nil, runErr
-		}
-		if c.liveModelCalls != before {
-			return nil, ErrReplayInvokedModel
-		}
-		// Over-consumption errors inside the sink; this catches a shorter replay path.
-		if sink.i != len(sink.stream) {
-			return nil, fmt.Errorf("%w: execution %q consumed %d of %d recorded effects",
-				ErrReplayDiverged, execution.id, sink.i, len(sink.stream))
+		run := har.Run
+		runErr := run(replayctx.WithReconstruction(ctx), start, sink)
+		if err := c.finishReplayRun(sink, runErr, before, execution); err != nil {
+			return nil, err
 		}
 		outputs = append(outputs, sink.outputs...)
 	}
 	return outputs, nil
+}
+
+func (c *Controller) finishReplayRun(sink *replaySink, runErr error, modelCallsBefore int, execution recordedExecution) error {
+	_ = sink.guard.close()
+	if sink.failure != nil {
+		return sink.failure
+	}
+	if runErr != nil {
+		return runErr
+	}
+	if c.liveModelCalls != modelCallsBefore {
+		return ErrReplayInvokedModel
+	}
+	// Over-consumption errors inside the sink; this catches a shorter replay path.
+	if sink.i != len(sink.stream) {
+		return fmt.Errorf("%w: execution %q consumed %d of %d recorded effects",
+			ErrReplayDiverged, execution.id, sink.i, len(sink.stream))
+	}
+	return nil
 }
 
 // Outputs returns the recorded assistant outputs in order, after the same chain verification as
@@ -706,6 +724,10 @@ func controllerErrorKind(err error) string {
 		return "replay_invoked_model"
 	case errors.Is(err, ErrReplayDiverged):
 		return "replay_diverged"
+	case errors.Is(err, ErrReconstructionUnsupported):
+		return "reconstruction_unsupported"
+	case errors.Is(err, api.ErrInvalidHarnessClass):
+		return "invalid_harness_class"
 	case errors.Is(err, ErrInvalidExecutionLog):
 		return "invalid_execution_log"
 	case errors.Is(err, ErrHarnessMismatch):

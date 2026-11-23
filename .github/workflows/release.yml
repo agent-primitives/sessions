@@ -67,6 +67,15 @@ jobs:
           go vet ./...
           go test -race ./...
 
+      # ko's image SBOM describes the root module by the version integrations/claudecode/go.mod
+      # requires, not by its ../.. replacement, so the release pull request sets that requirement to
+      # the release tag. This fails the release, before anything is published, when it did not.
+      - name: install ko
+        run: go install github.com/google/ko@latest
+
+      - name: claudecode-harnessnode SBOM names the release tag
+        run: hack/claudecode-sbom-check.sh "${GITHUB_REF_NAME}"
+
       - name: core links no backend vendor
         run: |
           test "$(go list -deps ./... | grep -cE 'agent-substrate|go\.ate\.dev')" = "0"

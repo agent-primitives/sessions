@@ -48,7 +48,7 @@ type recordingLog struct {
 
 func (l *recordingLog) BeginPlannedAllocation(ctx context.Context, backend, operation string, plan ...api.CleanupResource) (string, error) {
 	l.plan = plan
-	return l.allocationLog.BeginAllocation(ctx, backend, operation)
+	return l.BeginAllocation(ctx, backend, operation)
 }
 
 // The plan is recorded under the backend's key before I/O, and a UID the runtime returns with an

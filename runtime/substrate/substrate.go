@@ -11,8 +11,9 @@
 // Mapping: Create→CreateActor+ResumeActor; Snapshot(EXTERNAL)→SuspendActor; Restore→ResumeActor;
 // Stop→SuspendActor+DeleteActor; Status→GetActor; Fork→replay-fork for a stateless harness, or
 // CreateTag{source_actor}+CreateActor{source_tag}+ResumeActor to clone the parent's RAM for a
-// REQUIRES_MEMORY_SNAPSHOT harness. With WithEgressPolicy, CreateActorEgressPolicy precedes every
-// ResumeActor of a SUSPENDED actor (EgressPolicyClient).
+// REQUIRES_MEMORY_SNAPSHOT harness. With WithEgressPolicy, the actor's egress policy is converged on
+// the configured one (EgressPolicyClient) before every ResumeActor of a SUSPENDED actor, and by
+// SyncEgressPolicy on a running one.
 //
 // Transport: the harness is reached through substrate's atenet-router, the only supported ingress
 // to an actor. Every incarnation addresses the router and carries the ate-target-actor metadata that
@@ -260,8 +261,8 @@ type Backend struct {
 	router      string         // host:port of the atenet-router ingress the harness is reached through
 	logger      *slog.Logger
 	volumesOnly bool
-	// egressPolicy, set by WithEgressPolicy, is the policy installed on an actor before its compute
-	// starts; nil installs none.
+	// egressPolicy, set by WithEgressPolicy, is the policy an actor's stored one is converged on
+	// before its compute starts; nil makes no egress call.
 	egressPolicy func(ctx context.Context, s *api.SessionSpec) (*EgressPolicy, error)
 	// memoryLostWarned maps an actor name to the UID memoryNotRestored last warned about.
 	memoryLostWarned sync.Map
@@ -415,7 +416,7 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	}
 
 	// Refuse a policy that cannot be installed before any actor exists, so the failure leaves nothing.
-	if err := egress.resolve(ctx); err != nil {
+	if err := egress.check(ctx); err != nil {
 		return api.Incarnation{}, err
 	}
 
@@ -441,8 +442,8 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	createFinished(nil)
 
 	// The actor is SUSPENDED until the resume, so its compute never runs without its policy. A
-	// failed install leaves it SUSPENDED; a retry finds it and installs again before resuming it.
-	if err := egress.install(ctx, ref); err != nil {
+	// failed converge leaves it SUSPENDED; a retry finds it and converges again before resuming it.
+	if err := egress.converge(ctx, ref, true); err != nil {
 		return api.Incarnation{}, err
 	}
 
@@ -483,10 +484,10 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 // then. A mismatch is api.ErrMemoryStateLost, and the actor is left running and not handed out
 // (see resumedNotHandedOut). A SUSPEND another host recorded in that window is read and accepted.
 //
-// A SUSPENDED actor gets the session's egress policy (WithEgressPolicy) before it is resumed; a
-// failed install is classified as a failed resume is (see resumeFailed) and nothing is resumed. A
-// RUNNING actor is attached to without any egress call.
-func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api.SnapshotRef, error), egress *egressInstall) (inc api.Incarnation, found bool, err error) {
+// A SUSPENDED actor's egress policy is converged on the session's (WithEgressPolicy) before it is
+// resumed; a failed converge is classified as a failed resume is (see resumeFailed) and nothing is
+// resumed. A RUNNING actor is attached to without any egress call.
+func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api.SnapshotRef, error), egress *egressConverge) (inc api.Incarnation, found bool, err error) {
 	info, err := b.ctl.GetActor(ctx, ref)
 	memory := b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
 	resumed := false
@@ -518,12 +519,9 @@ func (b *Backend) attach(ctx context.Context, ref ActorRef, recorded func() (api
 				return api.Incarnation{}, true, err
 			}
 		}
-		if err := egress.resolve(ctx); err != nil {
-			return api.Incarnation{}, true, err
-		}
 		seen := info
-		if err := egress.install(ctx, ref); err != nil {
-			return b.resumeFailed(ctx, ref, seen, "its egress policy was being installed", err)
+		if err := egress.converge(ctx, ref, false); err != nil {
+			return b.resumeFailed(ctx, ref, seen, "its egress policy was being converged", err)
 		}
 		if info, err = b.ctl.ResumeActor(ctx, ref); err != nil {
 			return b.resumeFailed(ctx, ref, seen, "it was being resumed", fmt.Errorf("substrate: resume suspended actor: %w", err))
@@ -595,7 +593,9 @@ func (b *Backend) requireAttachCheckpoint(ctx context.Context, name string, info
 // Gone now, it is reported as not found, so Create treats it as any missing actor: a memory-tier
 // session with started turns is refused with ErrMemoryStateLost, anything else gets a new actor.
 // Replaced (another UID), the step is ErrActorBusy, which is retryable: the next attempt attaches to
-// the replacement, which the host refuses if it recorded another UID. Otherwise cause stands.
+// the replacement, which the host refuses if it recorded another UID. The session service publishes
+// that refusal's text as ABORTED, so cause, which can carry substrate's own message, stays in its
+// chain but not in its text (hiddenCause). Otherwise cause stands.
 func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo, during string, cause error) (api.Incarnation, bool, error) {
 	if errors.Is(cause, ErrActorNotFound) {
 		now, err := b.ctl.GetActor(ctx, ref)
@@ -603,8 +603,10 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 		case errors.Is(err, ErrActorNotFound):
 			return api.Incarnation{}, false, nil
 		case err == nil && now.UID != seen.UID:
-			return api.Incarnation{}, true, fmt.Errorf("%w: actor %s/%s was replaced while %s: %w",
-				ErrActorBusy, ref.Atespace, ref.Name, during, cause)
+			return api.Incarnation{}, true, &hiddenCause{
+				err:   fmt.Errorf("%w: actor %s/%s was replaced while %s", ErrActorBusy, ref.Atespace, ref.Name, during),
+				cause: cause,
+			}
 		}
 	}
 	return api.Incarnation{}, true, cause
@@ -1013,8 +1015,9 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 	if err != nil {
 		return api.Incarnation{}, err
 	}
-	// A SUSPENDED actor gets the session's egress policy before it is resumed (normally it has one
-	// already and keeps it). A RUNNING one is left as it is: the resume below is a no-op for it.
+	// A SUSPENDED actor's egress policy is converged on the session's before it is resumed, so a
+	// changed policy reaches it here. A RUNNING one is left as it is: the resume below is a no-op
+	// for it (SyncEgressPolicy converges a running actor).
 	if !running {
 		if err := b.restoreEgress(ctx, ref, recorded); err != nil {
 			return api.Incarnation{}, err
@@ -1045,11 +1048,11 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 	return inc, nil
 }
 
-// restoreEgress installs the session's egress policy on the actor Restore is about to resume. An
-// install that reports the actor missing is classified as a failed resume is (memoryActorGone), so a
+// restoreEgress converges the egress policy of the actor Restore is about to resume. A converge
+// that reports the actor missing is classified as a failed resume is (memoryActorGone), so a
 // memory-tier session whose actor is gone is ErrMemoryStateLost.
 func (b *Backend) restoreEgress(ctx context.Context, ref api.SnapshotRef, recorded func() (string, error)) error {
-	err := b.egressFor(ref.Local).install(ctx, b.ref(ref.Local))
+	err := b.egressFor(ref.Local).converge(ctx, b.ref(ref.Local), false)
 	if errors.Is(err, ErrActorNotFound) {
 		if lost := b.memoryActorGone(ctx, ref, recorded, err); lost != nil {
 			return lost
@@ -1261,10 +1264,12 @@ var ErrMemoryStateLost = fmt.Errorf("substrate: refusing to cold-create an actor
 
 // hiddenCause is err with cause added to its chain but not to its text. The session service
 // publishes the typed refusals (api.ErrMemoryStateLost, api.ErrSnapshotSuperseded,
-// api.ErrComputeBusy) of Fork, Suspend, and an Exec or Resume that parks for approval, and any
-// failure of a stateful Fork's parent read (requireSnapshot), as their Error() text, and a
-// ControlClient's error can carry substrate's own message, which is not part of that contract. Go
-// callers still reach cause through errors.Is and errors.As.
+// api.ErrComputeBusy) of Fork, Suspend, an Exec or Resume that parks for approval, the egress
+// converge, and a resume whose actor was replaced meanwhile (resumeFailed), and any failure of a
+// stateful Fork's parent read (requireSnapshot), as their Error() text, and a ControlClient's error
+// can carry substrate's own message, which is not part of that contract. An error of the
+// WithEgressPolicy function (egressFuncError) can carry a credential reference, and is hidden for
+// every sentinel it wraps. Go callers still reach cause through errors.Is and errors.As.
 type hiddenCause struct {
 	err   error
 	cause error
@@ -1274,9 +1279,9 @@ func (e *hiddenCause) Error() string   { return e.err.Error() }
 func (e *hiddenCause) Unwrap() []error { return []error{e.err, e.cause} }
 
 // busyRefusal is err, a busy refusal (api.ErrComputeBusy, which the session service publishes as
-// ABORTED) of the step msg names during a Fork or a Snapshot, as msg followed by ErrActorBusy's own
-// text, or by api.ErrComputeBusy's when err is not ErrActorBusy. err stays in the chain but not in
-// the text (hiddenCause), since it can carry substrate's own message.
+// ABORTED) of the step msg names during a Fork, a Snapshot or the egress converge, as msg followed
+// by ErrActorBusy's own text, or by api.ErrComputeBusy's when err is not ErrActorBusy. err stays in
+// the chain but not in the text (hiddenCause), since it can carry substrate's own message.
 func busyRefusal(msg string, err error) error {
 	busy := api.ErrComputeBusy
 	if errors.Is(err, ErrActorBusy) {
@@ -1371,7 +1376,7 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 	}
 	// Refuse a child policy that cannot be installed before the tag copies the parent's snapshot.
 	egress := b.egressFor(child)
-	if err := egress.resolve(ctx); err != nil {
+	if err := egress.check(ctx); err != nil {
 		return api.Incarnation{}, err
 	}
 
@@ -1424,13 +1429,10 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 	// The child holds the tag's snapshot, so resuming it restores the cloned RAM. The clone is
 	// SUSPENDED until then, so it can be deleted and another actor created under its name, and
 	// ResumeActor resolves the name, not the UID: compare the UID it reports with the clone's. It
-	// gets the child's egress policy first; a failed install is torn down as a failed resume is.
+	// gets the child's egress policy first; a failed converge is torn down as a failed resume is.
 	childRef := b.ref(child)
-	if err := egress.install(ctx, childRef); err != nil {
-		if errors.Is(err, api.ErrComputeBusy) {
-			// install's text names the call, but its busy cause carries the client's.
-			err = forkCallError(fmt.Sprintf("%v on actor %s/%s", errEgressPolicyInstall, childRef.Atespace, childRef.Name), err)
-		}
+	egress.clone = true
+	if err := egress.converge(ctx, childRef, true); err != nil {
 		return api.Incarnation{}, b.discardClone(ctx, cloner, childRef, created.UID, err)
 	}
 	info, err := b.ctl.ResumeActor(ctx, childRef)

@@ -1,7 +1,8 @@
 # Release build. Archives carry the two user-facing binaries (agentctl, agentsessionsd).
 #
 # harnessnode is built only for its image, never archived; agentnode is not built. Both are demo and
-# conformance scaffolding, and shipping them as archives would present them as products to run.
+# conformance scaffolding, and shipping them as archives would present them as products to run. The
+# Claude Code harness node is likewise built only for its image, which embedders copy it out of.
 version: 2
 
 # Pinned so the archive names stay agentsessions_<version>_<os>_<arch>.tar.gz, as v0.1.x published
@@ -44,6 +45,25 @@ builds:
 
   # Built for the image only; it is not a user-facing CLI, so it is not archived below.
   - id: harnessnode
+    main: ./cmd/harnessnode
+    binary: harnessnode
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/agent-primitives/sessions/internal/version.version={{.Version}}
+      - -X github.com/agent-primitives/sessions/internal/version.commit={{.FullCommit}}
+      - -X github.com/agent-primitives/sessions/internal/version.date={{.Date}}
+
+  # The Claude Code harness node, built for its image only, like harnessnode. It lives in the nested
+  # integrations/claudecode module, so the build runs there. That module's
+  # `replace github.com/agent-primitives/sessions => ../..` makes it build against the root module
+  # of this same checkout, so the binary is the tagged tree, not the root version its go.mod
+  # requires. Its kos entry below inherits this dir as ko's working directory.
+  - id: claudecode-harnessnode
+    dir: integrations/claudecode
     main: ./cmd/harnessnode
     binary: harnessnode
     env:
@@ -102,6 +122,27 @@ kos:
     base_image: gcr.io/distroless/static-debian13
     repositories:
       - ghcr.io/agent-primitives/sessions/harnessnode
+    bare: true
+    platforms: [linux/amd64, linux/arm64]
+    tags:
+      - "{{ .Tag }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    creation_time: "{{ .CommitTimestamp }}"
+    ko_data_creation_time: "{{ .CommitTimestamp }}"
+    sbom: spdx
+    labels: *image_labels
+
+  # The Claude Code harness node alone, at /ko-app/harnessnode, for an embedder to copy into its own
+  # image. It does not contain the claude CLI: the embedder adds it. Named for the module it serves,
+  # beside the generic harnessnode. The tag is the root release tag; an integrations/claudecode/v*
+  # module tag publishes nothing (see hack/release-tags.sh).
+  - id: claudecode-harnessnode
+    build: claudecode-harnessnode
+    # Relative to the build's dir, integrations/claudecode.
+    main: ./cmd/harnessnode
+    base_image: gcr.io/distroless/static-debian13
+    repositories:
+      - ghcr.io/agent-primitives/sessions/claudecode-harnessnode
     bare: true
     platforms: [linux/amd64, linux/arm64]
     tags:
@@ -195,7 +236,10 @@ release:
     ```
     ghcr.io/agent-primitives/sessions/agentsessionsd:{{ .Tag }}
     ghcr.io/agent-primitives/sessions/harnessnode:{{ .Tag }}
+    ghcr.io/agent-primitives/sessions/claudecode-harnessnode:{{ .Tag }}
     ```
 
     Multi-arch (amd64 and arm64), built with ko from the tagged source, each with an SBOM pushed
     alongside it. `agentsessionsd` runs as uid 65532; give its journal path a writable volume.
+    `claudecode-harnessnode` holds only the Claude Code harness node, at `/ko-app/harnessnode`; it
+    does not include the `claude` CLI, so add the CLI in the image you build from it.

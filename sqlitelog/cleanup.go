@@ -90,10 +90,14 @@ func newLedgerID() (string, error) {
 	return hex.EncodeToString(id[:]), nil
 }
 
-// BeginAllocation durably records an intent, and any resource plan, before runtime IO. Implicit
-// logs receive an incomplete metadata row in the same transaction; a tombstone can never be
-// resurrected by an attempt.
-func (l *Log) BeginAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error) {
+// BeginAllocation durably records an intent before runtime IO. Implicit logs receive an incomplete
+// metadata row in the same transaction; a tombstone can never be resurrected by an attempt.
+func (l *Log) BeginAllocation(ctx context.Context, backend, operation string) (string, error) {
+	return l.beginAllocation(ctx, backend, operation, true, nil)
+}
+
+// BeginPlannedAllocation is BeginAllocation with the resource plan of an owned backend (RT-4j).
+func (l *Log) BeginPlannedAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error) {
 	return l.beginAllocation(ctx, backend, operation, true, resources)
 }
 
@@ -165,7 +169,11 @@ func (l *Log) beginAllocation(ctx context.Context, backend, operation string, pu
 // succeed while the attempt is retained; compacted IDs return ErrAllocationNotFound.
 //
 // An attempt with a resource plan instead records the UIDs in in.Cleanup, which may be partial and
-// may come with a runtime error. Unproven resources stay unconfirmed; nothing is compacted.
+// may come with a runtime error. Unproven resources stay unconfirmed. Once every resource is proven,
+// other confirmed attempts of the session whose claims this one repeats (a later Restore of the same
+// actor) are compacted. A success with a handle but no evidence created nothing the backend can
+// prove (it re-attached, or resumed a stateless session): its plan is dropped and it is confirmed
+// and compacted as a handle attempt.
 func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Incarnation) error {
 	tx, err := l.store.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -185,8 +193,25 @@ func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Inca
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM allocation_resources WHERE allocation_id=?)`, attempt).Scan(&planned); err != nil {
 		return err
 	}
+	observed := in.Cleanup.Resources()
+	if planned && len(observed) == 0 && in.ID != "" {
+		var proven bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM allocation_resources WHERE allocation_id=? AND confirmed=1)`, attempt).Scan(&proven); err != nil {
+			return err
+		}
+		if proven {
+			return ErrAllocationConflict
+		}
+		if err := deletePlans(ctx, tx, attempt); err != nil {
+			return err
+		}
+		planned = false
+	}
 	if planned {
-		if err := confirmResources(ctx, tx, attempt, released, in.Cleanup.Resources()); err != nil {
+		if err := confirmResources(ctx, tx, attempt, released, observed); err != nil {
+			return err
+		}
+		if err := compactRepeatedClaims(ctx, tx, l.session, backend, attempt); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -242,6 +267,63 @@ func confirmResources(ctx context.Context, tx *sql.Tx, attempt string, released 
 	_, err := tx.ExecContext(ctx, `UPDATE allocations SET confirmed=NOT EXISTS
 		(SELECT 1 FROM allocation_resources WHERE allocation_id=? AND confirmed=0) WHERE id=?`, attempt, attempt)
 	return err
+}
+
+// deletePlans removes the resource rows and borrower edges of the given attempts.
+func deletePlans(ctx context.Context, tx *sql.Tx, attempts ...string) error {
+	for _, attempt := range attempts {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM allocation_borrowers WHERE resource_id IN
+			(SELECT id FROM allocation_resources WHERE allocation_id=?)`, attempt); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM allocation_resources WHERE allocation_id=?`, attempt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// borrowerOf is the SQL for the reference of the resource that borrows row r, empty if none.
+func borrowerOf(r string) string {
+	return `COALESCE((SELECT b.reference FROM allocation_borrowers e JOIN allocation_resources b
+		ON b.id=e.borrower_resource_id WHERE e.resource_id=` + r + `.id),'')`
+}
+
+// compactRepeatedClaims deletes the session's other confirmed, unreleased planned attempts whose
+// every claim (reference, UID and borrower) this fully confirmed attempt also holds.
+func compactRepeatedClaims(ctx context.Context, tx *sql.Tx, session, backend, attempt string) error {
+	rows, err := tx.QueryContext(ctx, `SELECT a.id FROM allocations a
+		WHERE a.session=? AND a.backend=? AND a.id<>? AND a.confirmed=1 AND a.released=0
+		AND EXISTS(SELECT 1 FROM allocations WHERE id=? AND confirmed=1)
+		AND EXISTS(SELECT 1 FROM allocation_resources WHERE allocation_id=a.id)
+		AND NOT EXISTS(SELECT 1 FROM allocation_resources o WHERE o.allocation_id=a.id AND NOT EXISTS(
+		  SELECT 1 FROM allocation_resources n WHERE n.allocation_id=? AND n.confirmed=1
+		  AND n.reference=o.reference AND n.uid=o.uid AND `+borrowerOf("n")+`=`+borrowerOf("o")+`))`, session, backend, attempt, attempt, attempt)
+	if err != nil {
+		return err
+	}
+	var repeated []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		repeated = append(repeated, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := deletePlans(ctx, tx, repeated...); err != nil {
+		return err
+	}
+	for _, id := range repeated {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM allocations WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Allocations returns all unreleased attempts, including unknown outcomes and backend routes.

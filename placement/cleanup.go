@@ -12,13 +12,20 @@ import (
 )
 
 // allocationRecorder is optional so standalone event logs retain their existing behavior.
-// Durable logs record an unresolved operation and, for owned backends, its complete resource plan
-// before compute I/O.
+// Durable logs record an unresolved operation before compute I/O.
 type allocationRecorder interface {
-	BeginAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error)
+	BeginAllocation(ctx context.Context, backend, operation string) (string, error)
 	ConfirmAllocation(ctx context.Context, attempt string, in api.Incarnation) error
 }
 
+// plannedAllocationRecorder is optional too: a journal with it also records an owned backend's
+// resource plan. Without it the attempt is recorded as before, with no plan.
+type plannedAllocationRecorder interface {
+	BeginPlannedAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error)
+}
+
+// forkAllocationRecorder records a fork child's plan without publishing the child. A child journal
+// without it forks untracked, as a journal without the allocation methods runs (STORE-7).
 type forkAllocationRecorder interface {
 	BeginUnpublishedAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error)
 	ConfirmAllocation(ctx context.Context, attempt string, in api.Incarnation) error
@@ -44,19 +51,23 @@ func (p *Placer) allocate(ctx context.Context, log eventlog.Store, sessionUID, o
 		return in, allocationStartError(ctx, err)
 	}
 	key := ""
-	var resources []api.CleanupResource
-	owned := false
-	if cleanup, ok := p.backend.(api.ResourceCleanupRuntime); ok && cleanup.CleanupKey() != "" {
+	planned, owned := log.(plannedAllocationRecorder)
+	var attempt string
+	var err error
+	if cleanup, ok := p.backend.(api.ResourceCleanupRuntime); ok && owned && cleanup.CleanupKey() != "" {
 		key = cleanup.CleanupKey()
-		resources = append([]api.CleanupResource(nil), cleanup.CleanupResources(cleanupOperation(operation), sessionUID)...)
+		resources := append([]api.CleanupResource(nil), cleanup.CleanupResources(cleanupOperation(operation), sessionUID)...)
 		if err := api.ValidateCleanupPlan(resources); err != nil {
 			return api.Incarnation{}, allocationStartError(ctx, fmt.Errorf("placement: %s allocation plan: %w", operation, err))
 		}
-		owned = true
-	} else if cleanup, ok := p.backend.(api.CleanupRuntime); ok {
-		key = cleanup.CleanupKey()
+		attempt, err = planned.BeginPlannedAllocation(ctx, key, operation, resources...)
+	} else {
+		owned = false
+		if cleanup, ok := p.backend.(api.CleanupRuntime); ok {
+			key = cleanup.CleanupKey()
+		}
+		attempt, err = recorder.BeginAllocation(ctx, key, operation)
 	}
-	attempt, err := recorder.BeginAllocation(ctx, key, operation, resources...)
 	if err != nil {
 		return api.Incarnation{}, allocationStartError(ctx, fmt.Errorf("placement: begin %s allocation: %w", operation, err))
 	}
@@ -68,7 +79,7 @@ func (p *Placer) allocate(ctx context.Context, log eventlog.Store, sessionUID, o
 	}
 	confirmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	confirmErr := recorder.ConfirmAllocation(confirmCtx, attempt, in)
+	confirmErr := recorder.ConfirmAllocation(confirmCtx, attempt, confirmable(in, effectErr))
 	if confirmErr != nil {
 		wrapped := fmt.Errorf("placement: confirm %s allocation: %w", operation, confirmErr)
 		if effectErr != nil {
@@ -77,6 +88,15 @@ func (p *Placer) allocate(ctx context.Context, log eventlog.Store, sessionUID, o
 		return in, wrapped
 	}
 	return in, allocationStartError(ctx, effectErr)
+}
+
+// confirmable is what placement confirms. A failed call confirms only the UIDs it proved; without
+// the session handle the journal cannot mistake it for a success that created nothing.
+func confirmable(in api.Incarnation, err error) api.Incarnation {
+	if err != nil {
+		return api.Incarnation{Cleanup: in.Cleanup}
+	}
+	return in
 }
 
 // CallerContextError records the caller's outcome at failure, independently of any

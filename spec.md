@@ -491,7 +491,11 @@ reads the catalog that registration writes; the reference daemon does.
   backend, operation)` and `ConfirmAllocation(ctx, attempt, incarnation)`. When it does, the
   reference host calls `BeginAllocation` before each runtime `Create` and `Restore` and
   `ConfirmAllocation` with the incarnation returned, and fails the operation if either call
-  fails. A journal without them runs without the allocation ledger (§13.4, `OPS-35`). A journal
+  fails. A journal without them runs without the allocation ledger (§13.4, `OPS-35`). To record a
+  resource plan (`RT-4j`) a journal MAY also implement `BeginPlannedAllocation(ctx, backend,
+  operation, resources...)`, used in place of `BeginAllocation`, and for fork children
+  `BeginUnpublishedAllocation` with the same arguments; without them the host records no plan, and a
+  fork child forks untracked. A journal
   MAY also implement `ReadProto(from_seq)`, returning the records of `LOG-16` with their stored
   protobuf events. The reference host's `Replay` uses it when present (§6.6); otherwise it
   converts the `Read` records, which keep the stored hashes but not field presence, so an audit
@@ -1816,7 +1820,10 @@ The reference host takes it as `placement.Backend` in
   The runtime returns the UIDs it proved it created in `Incarnation.Cleanup`, also alongside an
   error. The host records the plan before I/O and confirms only planned references with unchanged
   UIDs and borrowers. It never adopts an object it finds by name, and an unknown outcome stays
-  unconfirmed. Fork records each child's plan without publishing the child (§13.4).
+  unconfirmed. A success that proves no UID (an Exec that re-attaches, a stateless Resume) created
+  nothing the runtime owns: the host drops its plan and confirms its session handle instead. Fork
+  records each child's plan without publishing the child, just before that child's runtime `Fork`
+  (§13.4).
 - `RT-4f`: `Describe` returns the harness descriptor the host admits on. It MUST NOT provision
   compute: the host calls it before `Create`, `Restore`, and the fork source step (`RT-1`), in the
   memory-tier override check (`OPS-7`), and when the registry reports a harness's observed

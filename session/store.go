@@ -32,7 +32,8 @@ import (
 //     and before answering an approval retry, so a journal that wraps another forwards it.
 //   - A durable journal records allocation attempts through the optional BeginAllocation and
 //     ConfirmAllocation methods that placement checks for; a journal without them still runs,
-//     without the allocation ledger.
+//     without the allocation ledger. Resource plans need the optional BeginPlannedAllocation and,
+//     for fork children, BeginUnpublishedAllocation too.
 //   - Replay returns stored events with their protobuf field presence through a journal's optional
 //     ReadProto method, so an audit client can detect presence-only tampering; for a journal
 //     without it, Replay converts Read's domain records, which carry no presence.

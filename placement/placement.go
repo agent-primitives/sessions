@@ -1479,31 +1479,16 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 		ownedResourceCleanup = cleanup
 		cleanupKey = cleanup.CleanupKey()
 	}
-	type preparedForkAllocation struct {
-		child     ForkChild
-		resources []api.CleanupResource
-		recorder  forkAllocationRecorder
-		attempt   string
-	}
-	prepared := make([]preparedForkAllocation, len(children))
+	// Plans are validated now, before any I/O, but each child's attempt is begun just before its own
+	// runtime Fork, so a refused fork or a fan-out that stops early leaves no attempt for a child the
+	// runtime never saw.
+	plans := make([][]api.CleanupResource, len(children))
 	if ownedResourceCleanup != nil {
 		for i, child := range children {
-			recorder, ok := child.Log.(forkAllocationRecorder)
-			if !ok {
-				return fmt.Errorf("%w: fork child %q has no unpublished cleanup recorder", ErrUnplaceable, child.UID)
-			}
-			resources := append([]api.CleanupResource(nil), ownedResourceCleanup.CleanupResources(api.CleanupFork, child.UID)...)
-			if err := api.ValidateCleanupPlan(resources); err != nil {
+			plans[i] = append([]api.CleanupResource(nil), ownedResourceCleanup.CleanupResources(api.CleanupFork, child.UID)...)
+			if err := api.ValidateCleanupPlan(plans[i]); err != nil {
 				return fmt.Errorf("%w: fork child %q cleanup plan: %v", ErrUnplaceable, child.UID, err)
 			}
-			prepared[i] = preparedForkAllocation{child: child, resources: resources, recorder: recorder}
-		}
-		for i := range prepared {
-			attempt, err := prepared[i].recorder.BeginUnpublishedAllocation(ctx, cleanupKey, "fork", prepared[i].resources...)
-			if err != nil {
-				return fmt.Errorf("placement: begin fork child %q allocation: %w", prepared[i].child.UID, err)
-			}
-			prepared[i].attempt = attempt
 		}
 	}
 	// Check the records the children inherit before admission, the parent's checkpoint or any child
@@ -1529,11 +1514,19 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 		return err
 	}
 	for i, child := range children {
+		recorder, tracked := child.Log.(forkAllocationRecorder)
+		tracked = tracked && ownedResourceCleanup != nil
+		attempt := ""
+		if tracked {
+			if attempt, err = recorder.BeginUnpublishedAllocation(ctx, cleanupKey, "fork", plans[i]...); err != nil {
+				return abort(fmt.Errorf("placement: begin fork child %q allocation: %w", child.UID, err))
+			}
+		}
 		inc, effectErr := p.backend.Fork(ctx, ref, api.ForkOpts{ChildSessionUID: child.UID})
 		var confirmErr error
-		if ownedResourceCleanup != nil {
+		if tracked {
 			confirmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			confirmErr = prepared[i].recorder.ConfirmAllocation(confirmCtx, prepared[i].attempt, inc)
+			confirmErr = recorder.ConfirmAllocation(confirmCtx, attempt, confirmable(inc, effectErr))
 			cancel()
 			if confirmErr != nil {
 				confirmErr = fmt.Errorf("placement: confirm fork child %q allocation: %w", child.UID, confirmErr)

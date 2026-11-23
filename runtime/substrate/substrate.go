@@ -334,8 +334,9 @@ func (b *Backend) CleanupResources(operation api.CleanupOperation, sessionUID st
 	}
 }
 
-// actorEvidence and forkEvidence report the identities a call proved it created. Without a cleanup
-// key, or without a UID, they report nothing: an unknown outcome stays unconfirmed in the ledger.
+// actorEvidence and forkEvidence report the identities a call proved it created, each UID on its
+// own. Without a cleanup key, or for a UID not reported, they claim nothing: that resource stays
+// unconfirmed in the ledger.
 func (b *Backend) actorEvidence(name, uid string) api.CleanupEvidence {
 	if b.cleanupKey == "" || uid == "" {
 		return api.CleanupEvidence{}
@@ -345,11 +346,14 @@ func (b *Backend) actorEvidence(name, uid string) api.CleanupEvidence {
 }
 
 func (b *Backend) forkEvidence(child, tagUID, actorUID string) api.CleanupEvidence {
-	if b.cleanupKey == "" || tagUID == "" {
+	if b.cleanupKey == "" {
 		return api.CleanupEvidence{}
 	}
 	actor := cleanupReference("actor", b.atespace, child)
-	resources := []api.CleanupResource{{Reference: cleanupReference("tag", b.atespace, forkTag(child)), UID: tagUID, Borrower: actor}}
+	var resources []api.CleanupResource
+	if tagUID != "" {
+		resources = append(resources, api.CleanupResource{Reference: cleanupReference("tag", b.atespace, forkTag(child)), UID: tagUID, Borrower: actor})
+	}
 	if actorUID != "" {
 		resources = append(resources, api.CleanupResource{Reference: actor, UID: actorUID})
 	}

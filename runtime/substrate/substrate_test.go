@@ -263,11 +263,16 @@ type mockCloner struct {
 	// UID.
 	afterClone func(name string)
 	cloneNoUID bool
+	// tagNoUID makes TagActor report no UID, as a client that predates TagInfo may.
+	tagNoUID bool
 }
 
 func (m *mockCloner) TagActor(ctx context.Context, source substrate.ActorRef, tag substrate.SnapshotID) (substrate.TagInfo, error) {
 	m.calls = append(m.calls, "tag:"+source.Name+"->"+tag.Name)
 	// The UID comes back even with an error, the worst case a control client could report.
+	if m.tagNoUID {
+		return substrate.TagInfo{}, m.tagErr
+	}
 	return substrate.TagInfo{UID: "uid-" + tag.Name}, m.tagErr
 }
 

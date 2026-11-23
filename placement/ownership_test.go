@@ -21,7 +21,7 @@ type allocationLog struct {
 	confirmed                            api.Incarnation
 }
 
-func (l *allocationLog) BeginAllocation(_ context.Context, backend, operation string, _ ...api.CleanupResource) (string, error) {
+func (l *allocationLog) BeginAllocation(_ context.Context, backend, operation string) (string, error) {
 	*l.trace = append(*l.trace, "begin")
 	l.backend, l.operation = backend, operation
 	if l.fail == "begin" {

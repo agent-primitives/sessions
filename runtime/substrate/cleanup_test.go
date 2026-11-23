@@ -117,6 +117,13 @@ func TestForkClaimsTagAndChild(t *testing.T) {
 		t.Fatalf("calls=%v, want the tag still released by name", m.calls)
 	}
 
+	// A tag with no reported UID still leaves the actor's claim, unpaired: the tag stays pending.
+	m = newClonerWithSuspendedParent()
+	m.tagNoUID = true
+	if _, inc, err = fork(m); err != nil || !reflect.DeepEqual(inc.Cleanup.Resources(), []api.CleanupResource{want[1]}) {
+		t.Fatalf("tag without UID: err=%v claim=%+v, want only the actor claim", err, inc.Cleanup.Resources())
+	}
+
 	// A tag another caller already holds is never claimed.
 	m = newClonerWithSuspendedParent()
 	m.tagErr = substrate.ErrTagExists

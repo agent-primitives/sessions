@@ -15,7 +15,7 @@ type contextAllocationLog struct {
 	confirmErr error
 }
 
-func (*contextAllocationLog) BeginAllocation(context.Context, string, string, ...api.CleanupResource) (string, error) {
+func (*contextAllocationLog) BeginAllocation(context.Context, string, string) (string, error) {
 	return "attempt", nil
 }
 func (l *contextAllocationLog) ConfirmAllocation(context.Context, string, api.Incarnation) error {

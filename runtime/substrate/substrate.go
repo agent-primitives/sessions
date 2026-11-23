@@ -1267,8 +1267,9 @@ var ErrMemoryStateLost = fmt.Errorf("substrate: refusing to cold-create an actor
 // api.ErrComputeBusy) of Fork, Suspend, an Exec or Resume that parks for approval, the egress
 // converge, and a resume whose actor was replaced meanwhile (resumeFailed), and any failure of a
 // stateful Fork's parent read (requireSnapshot), as their Error() text, and a ControlClient's error
-// can carry substrate's own message, which is not part of that contract. Go callers still reach
-// cause through errors.Is and errors.As.
+// can carry substrate's own message, which is not part of that contract. An error of the
+// WithEgressPolicy function (egressFuncError) can carry a credential reference, and is hidden for
+// every sentinel it wraps. Go callers still reach cause through errors.Is and errors.As.
 type hiddenCause struct {
 	err   error
 	cause error
@@ -1432,11 +1433,6 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 	childRef := b.ref(child)
 	egress.clone = true
 	if err := egress.converge(ctx, childRef, true); err != nil {
-		if errors.Is(err, api.ErrComputeBusy) {
-			// converge already hides the client's text from a busy refusal; this hides the text of
-			// a busy error the WithEgressPolicy function returns.
-			err = forkCallError(fmt.Sprintf("%v on actor %s/%s", errEgressPolicyInstall, childRef.Atespace, childRef.Name), err)
-		}
 		return api.Incarnation{}, b.discardClone(ctx, cloner, childRef, created.UID, err)
 	}
 	info, err := b.ctl.ResumeActor(ctx, childRef)

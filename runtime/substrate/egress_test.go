@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/placement"
 	"github.com/agent-primitives/sessions/runtime/substrate"
 )
 
@@ -812,8 +813,8 @@ func TestForkCloneRefusesAPolicyCreatedFirst(t *testing.T) {
 		if !errors.Is(err, substrate.ErrActorBusy) || !errors.Is(err, substrate.ErrEgressPolicyExists) {
 			t.Fatalf("err=%v want ErrActorBusy retaining the create's conflict", err)
 		}
-		if !strings.Contains(err.Error(), "install egress policy on actor space/child") {
-			t.Fatalf("err=%q does not name the install and the actor", err)
+		if !strings.Contains(err.Error(), "install egress policy on actor space/child: the fork's clone already had a policy") {
+			t.Fatalf("err=%q does not say the clone already had a policy", err)
 		}
 		wantCalls(t, c.calls, append(slices.Clone(head), "get:child", "suspend:child", "delete:child", "untag:fork-child"))
 	})
@@ -1691,4 +1692,84 @@ func TestSyncFencesAStaleConverge(t *testing.T) {
 			"egress-get:sess-x", "egress:sess-x", // the Sync
 			"egress:sess-x", "egress-get:sess-x", "resume:sess-x"})
 	})
+}
+
+// An error from the WithEgressPolicy function keeps its text out of the backend's error on every
+// path that calls it, whatever sentinel it wraps: the session service publishes the text of an
+// error it maps to a code other than INTERNAL, and the function's text can name a credential
+// reference. The error still classifies by the function's (errors.Is and the logged error_kind),
+// and a busy one keeps busy text.
+func TestEgressPolicyFunctionErrorKeepsItsTextOut(t *testing.T) {
+	const secret = "ate-secret://provider/private-key"
+	type path struct {
+		name   string
+		failOn int // the call to the function that fails
+		run    func(t *testing.T, f *policyFunc, opts ...substrate.Option) error
+	}
+	create := func(newCtl func() egressControl) func(*testing.T, *policyFunc, ...substrate.Option) error {
+		return func(_ *testing.T, f *policyFunc, opts ...substrate.Option) error {
+			return createSess(newEgressBackend(newCtl(), append(opts, f.option())...))
+		}
+	}
+	fork := func(_ *testing.T, f *policyFunc, opts ...substrate.Option) error {
+		return forkMemory(newMemoryBackend(newEgressCloner(), append(opts, f.option())...), context.Background())
+	}
+	paths := []path{
+		{name: "create check", failOn: 1, run: create(newEgressControl)},
+		{name: "create converge", failOn: 2, run: create(newEgressControl)},
+		{name: "attach converge", failOn: 1, run: create(newSuspendedEgressControl)},
+		{name: "restore converge", failOn: 1, run: func(_ *testing.T, f *policyFunc, opts ...substrate.Option) error {
+			return restoreSess(newEgressBackend(newSuspendedEgressControl(), append(opts, f.option())...))
+		}},
+		{name: "fork check", failOn: 1, run: fork},
+		{name: "fork converge", failOn: 2, run: fork},
+		{name: "sync", failOn: 1, run: func(_ *testing.T, f *policyFunc, opts ...substrate.Option) error {
+			c := newEgressControl()
+			c.exists("sess-x", substrate.StatusRunning)
+			return newEgressBackend(c, append(opts, f.option())...).SyncEgressPolicy(context.Background(), "sess-x")
+		}},
+	}
+	for _, sentinel := range []struct {
+		name string
+		err  error
+		kind string
+	}{
+		{"compute busy", api.ErrComputeBusy, "actor_busy"},
+		{"actor busy", substrate.ErrActorBusy, "actor_busy"},
+		{"config invalid", api.ErrComputeConfigInvalid, "egress_policy_func_failed"},
+		{"session busy", placement.ErrSessionBusy, "egress_policy_func_failed"},
+		{"unclassified", errors.New("policy store unavailable"), "egress_policy_func_failed"},
+	} {
+		for _, p := range paths {
+			t.Run(sentinel.name+" "+p.name, func(t *testing.T) {
+				cause := fmt.Errorf("%w: policy lookup for %s failed", sentinel.err, secret)
+				f := staticPolicy()
+				f.onCall = func(f *policyFunc) {
+					if len(f.seen) == p.failOn {
+						f.err = cause
+					}
+				}
+				var logs bytes.Buffer
+				err := p.run(t, f, substrate.WithLogger(debugLogger(&logs)))
+				if len(f.seen) != p.failOn {
+					t.Fatalf("function called %d times, want %d", len(f.seen), p.failOn)
+				}
+				if !errors.Is(err, cause) || !errors.Is(err, sentinel.err) {
+					t.Fatalf("err=%v want it to retain %v", err, cause)
+				}
+				if strings.Contains(err.Error(), secret) || strings.Contains(logs.String(), secret) {
+					t.Fatalf("err=%q or the log carries the function's text", err)
+				}
+				if !strings.Contains(err.Error(), `substrate: egress policy function for session "`) {
+					t.Fatalf("err=%q does not name the egress policy function", err)
+				}
+				if busy := errors.Is(sentinel.err, api.ErrComputeBusy); busy != strings.Contains(err.Error(), api.ErrComputeBusy.Error()) {
+					t.Fatalf("err=%q: busy text present=%v, want %v", err, !busy, busy)
+				}
+				if p.name != "sync" && !strings.Contains(logs.String(), `"error_kind":"`+sentinel.kind+`"`) {
+					t.Fatalf("error_kind %q not logged: %s", sentinel.kind, logs.String())
+				}
+			})
+		}
+	}
 }

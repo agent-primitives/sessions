@@ -223,7 +223,9 @@ var errEgressPolicyInstall = errors.New("substrate: install egress policy")
 // (ErrEgressPolicyUnsupported, which refuses every resume of an existing actor whatever the
 // function returns), a policy the client refuses as invalid (ErrEgressPolicyInvalid), whose
 // message the error text leaves out, and a stored policy the client cannot read. An error from
-// policy itself, and any other egress call failure, is not classified.
+// policy itself, and any other egress call failure, is not classified. The error keeps one from
+// policy in its chain, so it classifies as policy's does, but not in its text, which names only the
+// session (and busy, for a busy one): Go callers reach it through errors.Is, errors.As and Unwrap.
 //
 // The backend issues no egress call for an actor it finds RUNNING (Create attaching to it, or
 // Restore of it): a turn does not pay for a policy read. Call Backend.SyncEgressPolicy after a
@@ -315,9 +317,23 @@ func (b *Backend) egressFor(sessionUID string) *egressConverge {
 func (e *egressConverge) desired(ctx context.Context) (*EgressPolicy, error) {
 	policy, err := e.b.egressPolicy(ctx, &api.SessionSpec{SessionUID: e.sessionUID})
 	if err != nil {
-		return nil, fmt.Errorf("%w for session %q: %w", errEgressPolicyFunc, e.sessionUID, err)
+		return nil, egressFuncError(e.sessionUID, err)
 	}
 	return policy, nil
+}
+
+// egressFuncError is err, returned by the WithEgressPolicy function for sessionUID, with err in its
+// chain but not in its text (hiddenCause): the session service publishes the text of any error
+// that wraps a sentinel it maps to a code other than INTERNAL, and the function's text can name a
+// credential reference. A busy error keeps busyRefusal's typed text; any other has fixed text and
+// is classified by its chain alone.
+func egressFuncError(sessionUID string, err error) error {
+	msg := fmt.Sprintf("%v for session %q", errEgressPolicyFunc, sessionUID)
+	cause := fmt.Errorf("%w: %w", errEgressPolicyFunc, err)
+	if errors.Is(err, api.ErrComputeBusy) {
+		return busyRefusal(msg, cause)
+	}
+	return &hiddenCause{err: errors.New(msg + " failed"), cause: cause}
 }
 
 // errEgressUnsupported is the refusal of a policy the ControlClient cannot install.

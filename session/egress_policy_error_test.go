@@ -129,19 +129,25 @@ func newEgressHost(t *testing.T, ctl substrate.ControlClient, policy *atomic.Poi
 // newEgressRegistry is the store and registry newEgressHost serves.
 func newEgressRegistry(t *testing.T, ctl substrate.ControlClient, policy *atomic.Pointer[substrate.EgressPolicy]) (*sqlitelog.Store, *placement.Registry) {
 	t.Helper()
+	if policy == nil {
+		policy = &atomic.Pointer[substrate.EgressPolicy]{}
+		policy.Store(&secretPolicy)
+	}
+	return newEgressRegistryFunc(t, ctl, func(context.Context, *api.SessionSpec) (*substrate.EgressPolicy, error) {
+		return policy.Load(), nil
+	})
+}
+
+// newEgressRegistryFunc is newEgressRegistry with fn as the WithEgressPolicy function.
+func newEgressRegistryFunc(t *testing.T, ctl substrate.ControlClient, fn func(context.Context, *api.SessionSpec) (*substrate.EgressPolicy, error)) (*sqlitelog.Store, *placement.Registry) {
+	t.Helper()
 	desc, err := echoagent.Harness{}.Describe(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	desc.ID = "mem"
 	desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
-	if policy == nil {
-		policy = &atomic.Pointer[substrate.EgressPolicy]{}
-		policy.Store(&secretPolicy)
-	}
-	opt := substrate.WithEgressPolicy(func(context.Context, *api.SessionSpec) (*substrate.EgressPolicy, error) {
-		return policy.Load(), nil
-	})
+	opt := substrate.WithEgressPolicy(fn)
 	backend := substrate.New(ctl, "space", substrate.ObjectRef{Atespace: "space", Name: "mem"}, desc, opt)
 	dial := placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 		return echoagent.Harness{}, func() error { return nil }, nil
@@ -322,5 +328,74 @@ func TestUninstallableEgressPolicyIsComputeConfigInvalid(t *testing.T) {
 	defer ctl.mu.Unlock()
 	if ctl.created != 0 {
 		t.Fatalf("created %d actors, want none", ctl.created)
+	}
+}
+
+// An error from the WithEgressPolicy function reaches an authorized caller under the code its
+// sentinel selects, and authorization sanitizes only INTERNAL, so its text, which can name a
+// credential reference, must stay out of the message on Exec (a new actor) and Resume (an existing
+// one).
+func TestEgressPolicyFunctionErrorTextWithAuthorization(t *testing.T) {
+	const secret = "ate-secret://provider/private-key"
+	for _, tc := range []struct {
+		name     string
+		sentinel error
+		code     codes.Code
+		reason   string
+	}{
+		{"compute busy", api.ErrComputeBusy, codes.Aborted, "COMPUTE_BUSY"},
+		{"config invalid", api.ErrComputeConfigInvalid, codes.FailedPrecondition, "COMPUTE_CONFIG_INVALID"},
+		{"session busy", placement.ErrSessionBusy, codes.Aborted, "SESSION_BUSY"},
+	} {
+		for _, op := range []string{"exec", "resume"} {
+			t.Run(tc.name+" "+op, func(t *testing.T) {
+				var fail atomic.Bool
+				ctl := &egressActorControl{actorControl: &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}}
+				store, r := newEgressRegistryFunc(t, ctl, func(context.Context, *api.SessionSpec) (*substrate.EgressPolicy, error) {
+					if fail.Load() {
+						return nil, fmt.Errorf("%w: policy lookup for %s failed", tc.sentinel, secret)
+					}
+					return &secretPolicy, nil
+				})
+				svc := session.NewService(store, r, session.WithAuthorization(policyFunc(func(context.Context, api.AuthorizationRequest) error { return nil })))
+				ctx := callerContext(t, authOwner)
+				created, err := svc.CreateSession(ctx, &v1.CreateSessionRequest{Session: &v1.Session{Harness: "mem"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				sess := created.GetMetadata().GetUid()
+				exec := &v1.ExecRequest{Session: sess, Inputs: []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))}}
+				if op == "resume" {
+					if err := svc.Exec(exec, &rpcStream{ctx: ctx}); err != nil {
+						t.Fatalf("first turn: %v", err)
+					}
+					if _, err := svc.Suspend(ctx, &v1.SuspendRequest{Session: sess}); err != nil {
+						t.Fatalf("suspend: %v", err)
+					}
+				}
+				fail.Store(true)
+				if op == "exec" {
+					err = svc.Exec(exec, &rpcStream{ctx: ctx})
+				} else {
+					_, err = svc.Resume(ctx, &v1.ResumeRequest{Session: sess})
+				}
+				st := status.Convert(err)
+				if st.Code() != tc.code {
+					t.Fatalf("err=%v, want %v", err, tc.code)
+				}
+				var reasons []string
+				for _, d := range st.Details() {
+					if info, ok := d.(*errdetails.ErrorInfo); ok {
+						reasons = append(reasons, info.GetReason())
+					}
+				}
+				if len(reasons) != 1 || reasons[0] != tc.reason {
+					t.Fatalf("reasons=%v, want [%s]", reasons, tc.reason)
+				}
+				if strings.Contains(st.Message(), "ate-secret") {
+					t.Fatalf("message carries the function's text: %q", st.Message())
+				}
+			})
+		}
 	}
 }

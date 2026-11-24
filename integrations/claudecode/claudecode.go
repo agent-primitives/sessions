@@ -40,9 +40,8 @@
 //
 // For its calls, Claude Code's included, the harness gives up host-bounded spend, model-call audit
 // and replay (EXE-41): the host neither sees nor limits them, the journal has no MODEL_CALL, and
-// reconstruction replay is not supported. Do not point controller.Replay at this harness: the host
-// does not refuse it, and on a fresh instance the first recorded execution looks like a genuine
-// first turn and runs a real, billed Claude Code turn with real tools.
+// reconstruction replay is not supported. Describe declares the harness UNMEDIATED, so the host
+// refuses reconstruction before Run and cannot start a billed Claude Code turn or its tools.
 //
 // Each turn's process runs in its own process group, which the harness kills before Run returns on
 // every path, a successful turn included: a background shell or a server a tool started ends with
@@ -382,9 +381,10 @@ func (h *Harness) Describe(context.Context) (api.Descriptor, error) {
 		models = []string{h.cfg.Model}
 	}
 	return api.Descriptor{
-		ID:      "claudecode",
-		Version: "1", // bump when execution behavior changes, not for host releases
-		Models:  models,
+		ID:           "claudecode",
+		Version:      "1", // bump when execution behavior changes, not for host releases
+		Models:       models,
+		HarnessClass: api.HarnessClassUnmediated,
 		Capabilities: api.Capabilities{
 			Resumability: api.ResumabilityRequiresMemorySnapshot,
 			ForkSafe:     false,

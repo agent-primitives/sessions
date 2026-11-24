@@ -236,7 +236,11 @@ type HarnessDescriptor struct {
 	// Change it when deterministic execution or config interpretation changes. Hosts record it
 	// in ExecutionStart and compare known recorded versions exactly on replay/recovery.
 	// Empty is supported for older/unversioned harnesses and records an unknown version.
-	Version       string `protobuf:"bytes,5,opt,name=version,proto3" json:"version,omitempty"`
+	Version string `protobuf:"bytes,5,opt,name=version,proto3" json:"version,omitempty"`
+	// Reconstruction replay refuses UNMEDIATED and unknown values before invoking the harness.
+	// UNSPECIFIED retains the legacy MEDIATED behavior. This declaration is not proof: a harness
+	// that calls a provider outside the model call operation is unmediated whatever it reports.
+	HarnessClass  HarnessClass `protobuf:"varint,6,opt,name=harness_class,json=harnessClass,proto3,enum=agentsessions.v1.HarnessClass" json:"harness_class,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -304,6 +308,13 @@ func (x *HarnessDescriptor) GetVersion() string {
 		return x.Version
 	}
 	return ""
+}
+
+func (x *HarnessDescriptor) GetHarnessClass() HarnessClass {
+	if x != nil {
+		return x.HarnessClass
+	}
+	return HarnessClass_HARNESS_CLASS_UNSPECIFIED
 }
 
 type DescribeRequest struct {
@@ -533,6 +544,44 @@ func (x *Cancel) GetReason() string {
 	return ""
 }
 
+// ReconstructionProbe asks the exact Harness.Connect peer to advertise its class before Start.
+// It has no fields; presence in ControllerFrame.frame distinguishes it from a malformed empty frame.
+type ReconstructionProbe struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReconstructionProbe) Reset() {
+	*x = ReconstructionProbe{}
+	mi := &file_harness_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReconstructionProbe) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReconstructionProbe) ProtoMessage() {}
+
+func (x *ReconstructionProbe) ProtoReflect() protoreflect.Message {
+	mi := &file_harness_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReconstructionProbe.ProtoReflect.Descriptor instead.
+func (*ReconstructionProbe) Descriptor() ([]byte, []int) {
+	return file_harness_proto_rawDescGZIP(), []int{7}
+}
+
 // ControllerFrame is sent by the host to the harness during an execution. Tool/approval control
 // frames MUST match the Start envelope's session and execution_id and the outstanding tool call
 // id. The session is the effect namespace; a reused tool id in another session is unrelated.
@@ -575,6 +624,7 @@ type ControllerFrame struct {
 	//	*ControllerFrame_Tool
 	//	*ControllerFrame_Model
 	//	*ControllerFrame_Park
+	//	*ControllerFrame_ReconstructionProbe
 	Frame         isControllerFrame_Frame `protobuf_oneof:"frame"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -582,7 +632,7 @@ type ControllerFrame struct {
 
 func (x *ControllerFrame) Reset() {
 	*x = ControllerFrame{}
-	mi := &file_harness_proto_msgTypes[7]
+	mi := &file_harness_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -594,7 +644,7 @@ func (x *ControllerFrame) String() string {
 func (*ControllerFrame) ProtoMessage() {}
 
 func (x *ControllerFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_harness_proto_msgTypes[7]
+	mi := &file_harness_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -607,7 +657,7 @@ func (x *ControllerFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControllerFrame.ProtoReflect.Descriptor instead.
 func (*ControllerFrame) Descriptor() ([]byte, []int) {
-	return file_harness_proto_rawDescGZIP(), []int{7}
+	return file_harness_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ControllerFrame) GetSession() string {
@@ -685,6 +735,15 @@ func (x *ControllerFrame) GetPark() *ApprovalRef {
 	return nil
 }
 
+func (x *ControllerFrame) GetReconstructionProbe() *ReconstructionProbe {
+	if x != nil {
+		if x, ok := x.Frame.(*ControllerFrame_ReconstructionProbe); ok {
+			return x.ReconstructionProbe
+		}
+	}
+	return nil
+}
+
 type isControllerFrame_Frame interface {
 	isControllerFrame_Frame()
 }
@@ -713,6 +772,10 @@ type ControllerFrame_Park struct {
 	Park *ApprovalRef `protobuf:"bytes,8,opt,name=park,proto3,oneof"` // host-owned unresolved request; requires correlated EVENT_PARKED
 }
 
+type ControllerFrame_ReconstructionProbe struct {
+	ReconstructionProbe *ReconstructionProbe `protobuf:"bytes,9,opt,name=reconstruction_probe,json=reconstructionProbe,proto3,oneof"` // transport-only, before Start
+}
+
 func (*ControllerFrame_Start) isControllerFrame_Frame() {}
 
 func (*ControllerFrame_Cancel) isControllerFrame_Frame() {}
@@ -724,6 +787,8 @@ func (*ControllerFrame_Tool) isControllerFrame_Frame() {}
 func (*ControllerFrame_Model) isControllerFrame_Frame() {}
 
 func (*ControllerFrame_Park) isControllerFrame_Frame() {}
+
+func (*ControllerFrame_ReconstructionProbe) isControllerFrame_Frame() {}
 
 // ModelResult is a model completion served to the harness (live invocation or replay).
 // The Message carries text, opaque reasoning, and tool_call parts, recorded verbatim for continuity.
@@ -738,7 +803,7 @@ type ModelResult struct {
 
 func (x *ModelResult) Reset() {
 	*x = ModelResult{}
-	mi := &file_harness_proto_msgTypes[8]
+	mi := &file_harness_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -750,7 +815,7 @@ func (x *ModelResult) String() string {
 func (*ModelResult) ProtoMessage() {}
 
 func (x *ModelResult) ProtoReflect() protoreflect.Message {
-	mi := &file_harness_proto_msgTypes[8]
+	mi := &file_harness_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -763,7 +828,7 @@ func (x *ModelResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelResult.ProtoReflect.Descriptor instead.
 func (*ModelResult) Descriptor() ([]byte, []int) {
-	return file_harness_proto_rawDescGZIP(), []int{8}
+	return file_harness_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ModelResult) GetMessage() *Message {
@@ -801,13 +866,14 @@ const file_harness_proto_rawDesc = "" +
 	"\bToolSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x129\n" +
-	"\tmediation\x18\x03 \x01(\x0e2\x1b.agentsessions.v1.MediationR\tmediation\"\xcb\x01\n" +
+	"\tmediation\x18\x03 \x01(\x0e2\x1b.agentsessions.v1.MediationR\tmediation\"\x90\x02\n" +
 	"\x11HarnessDescriptor\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06models\x18\x02 \x03(\tR\x06models\x120\n" +
 	"\x05tools\x18\x03 \x03(\v2\x1a.agentsessions.v1.ToolSpecR\x05tools\x12B\n" +
 	"\fcapabilities\x18\x04 \x01(\v2\x1e.agentsessions.v1.CapabilitiesR\fcapabilities\x12\x18\n" +
-	"\aversion\x18\x05 \x01(\tR\aversion\"\x11\n" +
+	"\aversion\x18\x05 \x01(\tR\aversion\x12C\n" +
+	"\rharness_class\x18\x06 \x01(\x0e2\x1e.agentsessions.v1.HarnessClassR\fharnessClass\"\x11\n" +
 	"\x0fDescribeRequest\"v\n" +
 	"\x0fIdentityContext\x12;\n" +
 	"\tprincipal\x18\x01 \x01(\v2\x1d.agentsessions.v1.IdentityRefR\tprincipal\x12&\n" +
@@ -820,7 +886,8 @@ const file_harness_proto_rawDesc = "" +
 	"\x0fresume_from_seq\x18\x05 \x01(\x03R\rresumeFromSeq\x12\x14\n" +
 	"\x05model\x18\x06 \x01(\tR\x05model\" \n" +
 	"\x06Cancel\x12\x16\n" +
-	"\x06reason\x18\x01 \x01(\tR\x06reason\"\x9c\x03\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\"\x15\n" +
+	"\x13ReconstructionProbe\"\xf8\x03\n" +
 	"\x0fControllerFrame\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12/\n" +
@@ -829,7 +896,8 @@ const file_harness_proto_rawDesc = "" +
 	"\bapproval\x18\x05 \x01(\v2 .agentsessions.v1.ApprovalResultH\x00R\bapproval\x122\n" +
 	"\x04tool\x18\x06 \x01(\v2\x1c.agentsessions.v1.ToolResultH\x00R\x04tool\x125\n" +
 	"\x05model\x18\a \x01(\v2\x1d.agentsessions.v1.ModelResultH\x00R\x05model\x123\n" +
-	"\x04park\x18\b \x01(\v2\x1d.agentsessions.v1.ApprovalRefH\x00R\x04parkB\a\n" +
+	"\x04park\x18\b \x01(\v2\x1d.agentsessions.v1.ApprovalRefH\x00R\x04park\x12Z\n" +
+	"\x14reconstruction_probe\x18\t \x01(\v2%.agentsessions.v1.ReconstructionProbeH\x00R\x13reconstructionProbeB\a\n" +
 	"\x05frame\"\x95\x01\n" +
 	"\vModelResult\x123\n" +
 	"\amessage\x18\x01 \x01(\v2\x19.agentsessions.v1.MessageR\amessage\x12-\n" +
@@ -856,53 +924,57 @@ func file_harness_proto_rawDescGZIP() []byte {
 }
 
 var file_harness_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_harness_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_harness_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_harness_proto_goTypes = []any{
-	(Resumability)(0),         // 0: agentsessions.v1.Resumability
-	(*Capabilities)(nil),      // 1: agentsessions.v1.Capabilities
-	(*ToolSpec)(nil),          // 2: agentsessions.v1.ToolSpec
-	(*HarnessDescriptor)(nil), // 3: agentsessions.v1.HarnessDescriptor
-	(*DescribeRequest)(nil),   // 4: agentsessions.v1.DescribeRequest
-	(*IdentityContext)(nil),   // 5: agentsessions.v1.IdentityContext
-	(*Start)(nil),             // 6: agentsessions.v1.Start
-	(*Cancel)(nil),            // 7: agentsessions.v1.Cancel
-	(*ControllerFrame)(nil),   // 8: agentsessions.v1.ControllerFrame
-	(*ModelResult)(nil),       // 9: agentsessions.v1.ModelResult
-	(Mediation)(0),            // 10: agentsessions.v1.Mediation
-	(*IdentityRef)(nil),       // 11: agentsessions.v1.IdentityRef
-	(*Event)(nil),             // 12: agentsessions.v1.Event
-	(*Message)(nil),           // 13: agentsessions.v1.Message
-	(*ApprovalResult)(nil),    // 14: agentsessions.v1.ApprovalResult
-	(*ToolResult)(nil),        // 15: agentsessions.v1.ToolResult
-	(*ApprovalRef)(nil),       // 16: agentsessions.v1.ApprovalRef
-	(*Usage)(nil),             // 17: agentsessions.v1.Usage
+	(Resumability)(0),           // 0: agentsessions.v1.Resumability
+	(*Capabilities)(nil),        // 1: agentsessions.v1.Capabilities
+	(*ToolSpec)(nil),            // 2: agentsessions.v1.ToolSpec
+	(*HarnessDescriptor)(nil),   // 3: agentsessions.v1.HarnessDescriptor
+	(*DescribeRequest)(nil),     // 4: agentsessions.v1.DescribeRequest
+	(*IdentityContext)(nil),     // 5: agentsessions.v1.IdentityContext
+	(*Start)(nil),               // 6: agentsessions.v1.Start
+	(*Cancel)(nil),              // 7: agentsessions.v1.Cancel
+	(*ReconstructionProbe)(nil), // 8: agentsessions.v1.ReconstructionProbe
+	(*ControllerFrame)(nil),     // 9: agentsessions.v1.ControllerFrame
+	(*ModelResult)(nil),         // 10: agentsessions.v1.ModelResult
+	(Mediation)(0),              // 11: agentsessions.v1.Mediation
+	(HarnessClass)(0),           // 12: agentsessions.v1.HarnessClass
+	(*IdentityRef)(nil),         // 13: agentsessions.v1.IdentityRef
+	(*Event)(nil),               // 14: agentsessions.v1.Event
+	(*Message)(nil),             // 15: agentsessions.v1.Message
+	(*ApprovalResult)(nil),      // 16: agentsessions.v1.ApprovalResult
+	(*ToolResult)(nil),          // 17: agentsessions.v1.ToolResult
+	(*ApprovalRef)(nil),         // 18: agentsessions.v1.ApprovalRef
+	(*Usage)(nil),               // 19: agentsessions.v1.Usage
 }
 var file_harness_proto_depIdxs = []int32{
 	0,  // 0: agentsessions.v1.Capabilities.resumability:type_name -> agentsessions.v1.Resumability
-	10, // 1: agentsessions.v1.ToolSpec.mediation:type_name -> agentsessions.v1.Mediation
+	11, // 1: agentsessions.v1.ToolSpec.mediation:type_name -> agentsessions.v1.Mediation
 	2,  // 2: agentsessions.v1.HarnessDescriptor.tools:type_name -> agentsessions.v1.ToolSpec
 	1,  // 3: agentsessions.v1.HarnessDescriptor.capabilities:type_name -> agentsessions.v1.Capabilities
-	11, // 4: agentsessions.v1.IdentityContext.principal:type_name -> agentsessions.v1.IdentityRef
-	12, // 5: agentsessions.v1.Start.history:type_name -> agentsessions.v1.Event
-	13, // 6: agentsessions.v1.Start.inputs:type_name -> agentsessions.v1.Message
-	5,  // 7: agentsessions.v1.Start.identity:type_name -> agentsessions.v1.IdentityContext
-	6,  // 8: agentsessions.v1.ControllerFrame.start:type_name -> agentsessions.v1.Start
-	7,  // 9: agentsessions.v1.ControllerFrame.cancel:type_name -> agentsessions.v1.Cancel
-	14, // 10: agentsessions.v1.ControllerFrame.approval:type_name -> agentsessions.v1.ApprovalResult
-	15, // 11: agentsessions.v1.ControllerFrame.tool:type_name -> agentsessions.v1.ToolResult
-	9,  // 12: agentsessions.v1.ControllerFrame.model:type_name -> agentsessions.v1.ModelResult
-	16, // 13: agentsessions.v1.ControllerFrame.park:type_name -> agentsessions.v1.ApprovalRef
-	13, // 14: agentsessions.v1.ModelResult.message:type_name -> agentsessions.v1.Message
-	17, // 15: agentsessions.v1.ModelResult.usage:type_name -> agentsessions.v1.Usage
-	4,  // 16: agentsessions.v1.Harness.Describe:input_type -> agentsessions.v1.DescribeRequest
-	8,  // 17: agentsessions.v1.Harness.Connect:input_type -> agentsessions.v1.ControllerFrame
-	3,  // 18: agentsessions.v1.Harness.Describe:output_type -> agentsessions.v1.HarnessDescriptor
-	12, // 19: agentsessions.v1.Harness.Connect:output_type -> agentsessions.v1.Event
-	18, // [18:20] is the sub-list for method output_type
-	16, // [16:18] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	12, // 4: agentsessions.v1.HarnessDescriptor.harness_class:type_name -> agentsessions.v1.HarnessClass
+	13, // 5: agentsessions.v1.IdentityContext.principal:type_name -> agentsessions.v1.IdentityRef
+	14, // 6: agentsessions.v1.Start.history:type_name -> agentsessions.v1.Event
+	15, // 7: agentsessions.v1.Start.inputs:type_name -> agentsessions.v1.Message
+	5,  // 8: agentsessions.v1.Start.identity:type_name -> agentsessions.v1.IdentityContext
+	6,  // 9: agentsessions.v1.ControllerFrame.start:type_name -> agentsessions.v1.Start
+	7,  // 10: agentsessions.v1.ControllerFrame.cancel:type_name -> agentsessions.v1.Cancel
+	16, // 11: agentsessions.v1.ControllerFrame.approval:type_name -> agentsessions.v1.ApprovalResult
+	17, // 12: agentsessions.v1.ControllerFrame.tool:type_name -> agentsessions.v1.ToolResult
+	10, // 13: agentsessions.v1.ControllerFrame.model:type_name -> agentsessions.v1.ModelResult
+	18, // 14: agentsessions.v1.ControllerFrame.park:type_name -> agentsessions.v1.ApprovalRef
+	8,  // 15: agentsessions.v1.ControllerFrame.reconstruction_probe:type_name -> agentsessions.v1.ReconstructionProbe
+	15, // 16: agentsessions.v1.ModelResult.message:type_name -> agentsessions.v1.Message
+	19, // 17: agentsessions.v1.ModelResult.usage:type_name -> agentsessions.v1.Usage
+	4,  // 18: agentsessions.v1.Harness.Describe:input_type -> agentsessions.v1.DescribeRequest
+	9,  // 19: agentsessions.v1.Harness.Connect:input_type -> agentsessions.v1.ControllerFrame
+	3,  // 20: agentsessions.v1.Harness.Describe:output_type -> agentsessions.v1.HarnessDescriptor
+	14, // 21: agentsessions.v1.Harness.Connect:output_type -> agentsessions.v1.Event
+	20, // [20:22] is the sub-list for method output_type
+	18, // [18:20] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_harness_proto_init() }
@@ -911,13 +983,14 @@ func file_harness_proto_init() {
 		return
 	}
 	file_common_proto_init()
-	file_harness_proto_msgTypes[7].OneofWrappers = []any{
+	file_harness_proto_msgTypes[8].OneofWrappers = []any{
 		(*ControllerFrame_Start)(nil),
 		(*ControllerFrame_Cancel)(nil),
 		(*ControllerFrame_Approval)(nil),
 		(*ControllerFrame_Tool)(nil),
 		(*ControllerFrame_Model)(nil),
 		(*ControllerFrame_Park)(nil),
+		(*ControllerFrame_ReconstructionProbe)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -925,7 +998,7 @@ func file_harness_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_harness_proto_rawDesc), len(file_harness_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   9,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

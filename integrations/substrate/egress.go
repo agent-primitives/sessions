@@ -18,13 +18,20 @@ var _ substrate.EgressPolicyClient = (*Adapter)(nil)
 const egressPolicyName = "default"
 
 // GetActorEgressPolicy reads the actor's EgressPolicy. NOT_FOUND, which substrate answers both for
-// an actor without a policy and for a missing actor, is substrate.ErrEgressPolicyNotFound.
+// an actor without a policy and for a missing actor, is substrate.ErrEgressPolicyNotFound, and a
+// stored policy the adapter cannot convert is substrate.ErrEgressPolicyInvalid.
 func (ad *Adapter) GetActorEgressPolicy(ctx context.Context, actor substrate.ActorRef) (substrate.EgressPolicyInfo, error) {
 	got, err := ad.ctl.GetActorEgressPolicy(ctx, &atepb.GetActorEgressPolicyRequest{Actor: objectRef(actor), Name: egressPolicyName})
 	if err != nil {
 		return substrate.EgressPolicyInfo{}, egressError(actor, err)
 	}
-	return egressPolicyInfo(got)
+	info, err := egressPolicyInfo(got)
+	if err != nil {
+		// The backend compares the stored policy with the configured one, and must not mistake
+		// one it cannot read for one it can overwrite.
+		return substrate.EgressPolicyInfo{}, fmt.Errorf("%w: stored policy: %w", substrate.ErrEgressPolicyInvalid, err)
+	}
+	return info, nil
 }
 
 // CreateActorEgressPolicy creates the actor's EgressPolicy. ALREADY_EXISTS is
@@ -43,6 +50,9 @@ func (ad *Adapter) CreateActorEgressPolicy(ctx context.Context, actor substrate.
 // UpdateActorEgressPolicy replaces the actor's EgressPolicy with policy, preconditioned on the UID
 // and version in precond. ABORTED, a precondition that no longer matches, is substrate.ErrActorBusy,
 // and INVALID_ARGUMENT, or a rule the message cannot express, is substrate.ErrEgressPolicyInvalid.
+// A returned policy the adapter cannot convert is an unclassified error, not
+// substrate.ErrEgressPolicyInvalid: the update has landed, so the configured policy was not
+// refused.
 func (ad *Adapter) UpdateActorEgressPolicy(ctx context.Context, actor substrate.ActorRef, policy substrate.EgressPolicy, precond substrate.EgressPolicyInfo) (substrate.EgressPolicyInfo, error) {
 	p, err := egressPolicyToProto(actor, policy)
 	if err != nil {
@@ -53,7 +63,12 @@ func (ad *Adapter) UpdateActorEgressPolicy(ctx context.Context, actor substrate.
 	if err != nil {
 		return substrate.EgressPolicyInfo{}, egressWriteError(actor, err)
 	}
-	return egressPolicyInfo(got)
+	info, err := egressPolicyInfo(got)
+	if err != nil {
+		return substrate.EgressPolicyInfo{}, fmt.Errorf("ateadapter: %s/%s: policy updated, but the stored result cannot be read: %w",
+			actor.Atespace, actor.Name, err)
+	}
+	return info, nil
 }
 
 // DeleteActorEgressPolicy deletes the actor's EgressPolicy, which leaves the actor deny-all.
@@ -98,6 +113,9 @@ func egressWriteError(actor substrate.ActorRef, err error) error {
 	return egressError(actor, err)
 }
 
+// egressPolicyInfo converts a stored EgressPolicy, as Get and Update return it. It fails on a
+// policy the conversion cannot express (a rule type this adapter does not know, or one that breaks
+// the conversion's rules), naming the rule by index only; each caller classifies that failure.
 func egressPolicyInfo(p *atepb.EgressPolicy) (substrate.EgressPolicyInfo, error) {
 	policy, err := EgressPolicyFromProto(p)
 	if err != nil {

@@ -9,6 +9,9 @@ on:
       - "**.go"
       - go.mod
       - go.sum
+      # The nested module the claudecode-harnessnode image builds from.
+      - integrations/claudecode/go.mod
+      - integrations/claudecode/go.sum
       - Dockerfile
       # Every release archive packs these; goreleaser fails when one is missing.
       - LICENSE
@@ -72,7 +75,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
 
       # Images are checked by kos id in dist/artifacts.json, where goreleaser records each image ko
-      # loaded. Counting daemon rows does not work: both kos entries are bare, so they share the
+      # loaded. Counting daemon rows does not work: every kos entry is bare, so they share the
       # goreleaser.ko.local repository, and ko tags each image by digest and by every configured tag.
       - name: every archive and image was built
         run: |
@@ -83,7 +86,7 @@ jobs:
           done
           # Every image a release publishes. A pull request that adds or drops a kos entry updates
           # this list too.
-          want="agentsessionsd harnessnode"
+          want="agentsessionsd claudecode-harnessnode harnessnode"
           got="$(jq -r '[.[] | select(.type == "Docker Manifest") | .extra.ID] | unique | join(" ")' dist/artifacts.json)"
           if [ "$got" != "$want" ]; then
             echo "expected ko images for kos ids: ${want}; goreleaser built: ${got:-none}"

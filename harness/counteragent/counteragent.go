@@ -27,8 +27,9 @@ type Harness struct {
 // substrate accepts it (MemorySnapshot:true). Not ForkSafe: in-RAM state is not replay-reconstructable.
 func (h *Harness) Describe(ctx context.Context) (api.Descriptor, error) {
 	return api.Descriptor{
-		ID:      "counter",
-		Version: "1", // bump when execution behavior changes, not for host releases
+		ID:           "counter",
+		Version:      "1", // bump when execution behavior changes, not for host releases
+		HarnessClass: api.HarnessClassMediated,
 		Capabilities: api.Capabilities{
 			Resumability: api.ResumabilityRequiresMemorySnapshot,
 			ForkSafe:     false,

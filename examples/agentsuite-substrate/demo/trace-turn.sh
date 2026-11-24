@@ -44,6 +44,17 @@ done
 kubectl ate logs actor "${session}" -a "${atespace}" --source lifecycle >"${dir}/actor-lifecycle.log"
 kubectl ate logs actor "${session}" -a "${atespace}" --source containers >"${dir}/harness.log"
 agentctl replay -v --server "${API:?}" --session "${session}" >"${dir}/journal.log"
+# The model call hop reads the journal as JSON, since the human view can change: only its MODEL_CALL
+# records, picked by their decoded kind (a regex could match a kind inside another record's data).
+# That copy stays out of DIR: the journal holds provider data, such as opaque reasoning bytes, that
+# the saved logs should not.
+journal="$(mktemp)"
+trap 'rm -f "${journal}"' EXIT
+agentctl replay --json --server "${API:?}" --session "${session}" |
+	python3 -c 'import json, sys
+for line in sys.stdin:
+    if line.startswith("{") and json.loads(line)["event"]["kind"] == "EVENT_MODEL_CALL":
+        print(line, end="")' >"${journal}"
 exec 2>&3 3>&-
 
 hop() { python3 "${here}/trace-hop.py" "$@"; }
@@ -54,4 +65,4 @@ hop worker "\"method\":\"/ateworker\\.Worker/(RestoreWorkload|RunWorkload)\".*\"
 hop micro-VM '"Actor (started|restored)' "" "${dir}/actor-lifecycle.log"
 hop atenet-router "Route ok.*${session}" actor.name,targetAddr "${dir}"/ate-system.atenet-router*.log
 hop harness 'harness: model .* used [0-9]+ input' "" "${dir}/harness.log"
-hop "model call" '^seq=[0-9]+ +EVENT_MODEL_CALL ' seq,model,input_hash "${dir}/journal.log"
+hop "model call" '^\{' seq,model=event.model.model,input_hash=event.model.input_hash "${journal}"

@@ -34,7 +34,8 @@ go build -o agentsessionsd ./cmd/agentsessionsd
 ```
 
 Release archives and container images are published only for tagged releases. The release pinned
-below, v0.4.0, runs every section as shown.
+below, v0.4.0, runs every section as shown except `exec --json`, which needs a build from `main`
+until the next release.
 
 ```bash
 # Release archive: both binaries, for linux/darwin on amd64/arm64.
@@ -198,8 +199,8 @@ local filesystem-only backend, resume reconstructs the session by replay (no mem
 memory-capable backend the same commands restore RAM instead. The CLI is identical either way.
 
 Use a fresh session so the sequence numbers are easy to follow. Take its UID from `create`, not by
-piping `exec` into `head -1`: `exec` streams records as they commit, and a reader that exits early
-stops it mid-turn with `SIGPIPE`.
+piping `exec` into `head -1`: without `--json`, `exec` exits on `SIGPIPE` when a reader stops early,
+which cancels the turn if it is still running.
 
 ```bash
 SID2=$(agentctl create --journal /tmp/sr.db)
@@ -276,7 +277,8 @@ replace `--journal ...` on the client commands with `--server 127.0.0.1:8080`.
 
 ### CLI output and server defaults
 
-This subsection needs `agentctl` v0.4.0 or later (see [Install](#install)). v0.3.0 ignores
+This subsection needs `agentctl` v0.4.0 or later (see [Install](#install)); `exec --json` needs a
+build from `main` until the next release. v0.3.0 ignores
 `AGENTSESSIONS_SERVER` and silently uses a local `agentsessions.db`; with that release, pass
 `--server 127.0.0.1:8080` on each command of the example below instead.
 
@@ -332,7 +334,9 @@ subsequent columns without expanding the other rows.
 Table alignment assumes single-width characters; wide characters and combining marks can shift
 columns. Use `--json` when character widths matter to a consumer.
 
-For agents and scripts, use `--json` rather than parsing the human views:
+For agents and scripts, use `--json` rather than parsing the human views. The human output of
+`exec`, `replay` and `fork` is for people and can change between releases; the JSON is the format
+to parse:
 
 | Commands | JSON response |
 |---|---|
@@ -340,6 +344,7 @@ For agents and scripts, use `--json` rather than parsing the human views:
 | `list` | One `ListSessionsResponse`, combining all pages with no next-page token |
 | `fork` | One `ForkResponse` containing `children` |
 | `approve`, `deny` | One `ApproveResponse` containing the original committed decision and resumed session |
+| `exec` | JSON Lines: one protobuf `ExecUpdate` per line as the turn runs, each a `session` or a committed `record` |
 | `replay` | JSON Lines: one complete protobuf `LogRecord` per line, in sequence order |
 
 All CLI JSON uses protobuf's snake_case field names, full enum names (for example,
@@ -350,10 +355,71 @@ matches CHAIN-1, but CLI JSON is not the RFC 8785 canonical byte representation 
 Harness commands retain their existing JSON format.
 
 ```bash
+set -o pipefail  # a failed agentctl fails the pipeline, not just jq
 agentctl get --server= --journal /tmp/qs.db --session "$SID" --json | jq '.compute_state'
 agentctl list --server= --journal /tmp/qs.db --json | jq -r '.sessions[]? | .metadata.uid'
 agentctl replay --server= --journal /tmp/qs.db --session "$SID" --json > records.jsonl
+# Model text is untrusted: -a keeps control and non-ASCII characters escaped in the quoted output.
+# Use -r only when the text goes to a program, not to a terminal.
+agentctl exec --server= --journal /tmp/qs.db --session "$SID" --input "hello again" --json |
+  jq -a 'select(.record.event.kind == "EVENT_OUTPUT") | [.record.event.message.parts[]?.text.text // empty] | join("")'
 ```
+
+For example, a turn on a new session with the default `echo` harness, `agentctl exec --server=
+--journal /tmp/qs.db --input hello --json`, prints six lines: the session, then records 1 to 5
+(`EXECUTION_START`, `INPUT`, `MODEL_CALL`, `OUTPUT`, `END`). Its first line and its `EVENT_OUTPUT`
+line, pretty-printed with `jq .`:
+
+```json
+{
+  "session": {
+    "metadata": {
+      "project": "default",
+      "uid": "sess-c8ee5796a843c2e1ab52574f",
+      "create_time": "2026-11-18T17:50:06.868696886Z",
+      "update_time": "2026-11-18T17:50:06.868696886Z"
+    },
+    "harness": "echo",
+    "exec_state": "EXEC_PENDING",
+    "compute_state": "COMPUTE_NONE",
+    "deletion_state": "DELETION_ACTIVE"
+  }
+}
+{
+  "record": {
+    "seq": "4",
+    "prev_hash": "04e48225040b1b85ad920f6c637463c324016f1c58e97f20b3caf9b3958a691a",
+    "content_hash": "7ba925d93b4dd7f231058a713916ba9d4e75fc2f4e5edece4d01177b41d81577",
+    "fence": "1",
+    "event": {
+      "execution_id": "f5e321cc1d47a8cb",
+      "kind": "EVENT_OUTPUT",
+      "message": {
+        "role": "assistant",
+        "parts": [
+          {
+            "text": {
+              "text": "echo:hello"
+            }
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+Exec JSON starts with a `session` update, so a script learns the UID of a session that `exec`
+created, then prints each record as it is committed. An `exec` record line holds the same
+`LogRecord` a `replay` line does, under `record`. The model's streamed chunks are left out: they are
+not committed, and a model call that completes records its whole response in `EVENT_OUTPUT`. A turn
+that pauses for approval exits successfully and ends with a `session` update, a snapshot of the
+session as the stream closes, whose `pending_approval` names the call unless a concurrent approval
+has already resolved it. Only a recorded `EVENT_END` shows that a turn completed. Ignore update
+kinds you do not expect, since later releases may add some. If the stream fails, the lines already
+written stay and the command exits with an error; it does not retry the turn. A reader may stop
+early, for example with `| head -1`: `exec --json` then stops writing, keeps the turn running to its
+end, and exits with an error that says its records are committed, so the turn is not cancelled.
 
 Replay JSON retains full hashes, sequence numbers and protobuf field presence; `--json` takes
 precedence over `-v`. It only reads recorded events, never calls a model, and does not itself verify
@@ -361,10 +427,14 @@ the chain; use `agentctl verify` for verification. An empty replay writes no lin
 as successful only when the command exits successfully.
 
 Human output is uncolored; color support is deferred. Diagnostics and the deletion PENDING warning
-go to stderr, including in JSON mode, so stdout remains parseable.
-On Unix, unary response commands report broken stdout pipes as output errors on stderr rather
-than exiting via SIGPIPE, noting that successful mutations remain committed. `exec` retains its
-existing streaming signal behavior.
+go to stderr, including in JSON mode, so stdout remains parseable. On Unix, unary response commands
+and `exec --json` report broken stdout pipes as output errors on stderr rather than exiting via
+SIGPIPE. For unary commands the error notes that successful mutations remain committed. `exec
+--json`, and `exec` for any other stdout write error, stops writing, reads the turn to its end so it
+is not cut short, then exits with an error noting that the turn's records are committed. Without
+`--json`, `exec` still exits via SIGPIPE when its pipe closes, which cancels the turn if it is still
+running, embedded or remote. The turn may already have ended, so its outcome is unknown: check the
+journal with `agentctl replay` before running it again.
 
 **Migration:** `get` no longer emits a single key/value line; `list` now has aligned columns and
 headings, even when empty. Lifecycle and approval summaries use short state values and include
@@ -373,8 +443,8 @@ for example, `decision.contentHash` becomes `decision.content_hash`, and `sessio
 `session.last_seq`. `create` still prints only the UID by default; `fork` retains its existing
 default summary. Deletion still warns that PENDING is durable
 intent, not resource cleanup. Approval still reports a committed decision if Resume fails; JSON
-does not turn that failure into a successful response. `exec` output is unchanged and has no
-`--json` flag.
+does not turn that failure into a successful response. `exec` human output is unchanged; scripts
+that parse it should switch to `exec --json`.
 
 ## 7. Verify the provenance chain with a non-Go verifier
 

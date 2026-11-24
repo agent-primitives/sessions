@@ -2,7 +2,7 @@
 //
 // The Event message is used by BOTH the session log (Sessions.Exec / Replay) and the
 // harness stream (Harness.Connect) — durable harness events become the log alongside host-owned
-// records. EVENT_PARKED is a transport-only acknowledgement and is never journaled.
+// records. EVENT_PARKED and EVENT_RECONSTRUCTION_INFO are transport-only and never journaled.
 //
 // The content model (Part) is aligned with A2A `Part` + MCP content for interop; the
 // event/log model is native. Derived from the durable-log & replay contract §7 (record
@@ -15,6 +15,23 @@ option go_package = "github.com/agent-primitives/sessions/api/genpb;agentsession
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
+
+// HarnessClass declares where a harness's model calls originate. The host trusts the declaration:
+// it cannot observe a model call that does not reach the model call operation. An omitted class is
+// read as MEDIATED for compatibility with older harnesses; new harnesses should declare one.
+enum HarnessClass {
+  HARNESS_CLASS_UNSPECIFIED = 0;
+  HARNESS_CLASS_MEDIATED = 1;   // every model call goes through the host
+  HARNESS_CLASS_UNMEDIATED = 2; // one or more model calls originate in harness compute
+}
+
+// ReconstructionInfo binds the harness class to the exact Connect stream that will receive Start.
+// In reconstruction mode the server sends this as its first Event, after a side-effect-free
+// Describe and before reading Start or invoking Harness.Run. It is transport-only and MUST NOT be
+// journaled.
+message ReconstructionInfo {
+  HarnessClass harness_class = 1;
+}
 
 // ResourceMetadata is carried by every top-level resource.
 message ResourceMetadata {
@@ -387,10 +404,14 @@ enum EventKind {
   // Harness acknowledgement of ControllerFrame.park with the exact ApprovalRef. Transport only:
   // the host MUST NOT journal/hash-chain it or treat it as a terminal execution outcome.
   EVENT_PARKED = 13;
+  // Harness class for reconstruction, sent before Start on a reconstruction probe. Transport only:
+  // the host MUST NOT journal/hash-chain it or treat it as an execution event.
+  EVENT_RECONSTRUCTION_INFO = 14;
 }
 
 // Event is the shared journal/stream content unit; EXECUTION_START, APPROVAL_REQUEST and
-// APPROVAL_RESULT are host-owned journal entries. PARKED is transport only, never journaled.
+// APPROVAL_RESULT are host-owned journal entries. PARKED and RECONSTRUCTION_INFO are transport
+// only, never journaled.
 // Ordering (seq) and integrity (prev_hash /
 // content_hash) are host-assigned and live on LogRecord — the harness, which does not know
 // seq/prev, emits a hash-free Event, so there is no circular hashing. Streaming deltas are
@@ -417,6 +438,7 @@ message Event {
     ExecutionStart execution_start = 19;
     // EVENT_PARKED echoes the park reference; Event.execution_id must match its execution_id.
     ApprovalRef parked = 20;
+    ReconstructionInfo reconstruction_info = 21;
   }
 
   IdentityRef actor = 18; // emitter principal -> provenance

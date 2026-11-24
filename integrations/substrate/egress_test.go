@@ -184,6 +184,38 @@ func TestEgressPolicyErrorMapping(t *testing.T) {
 	}
 }
 
+// A stored policy the adapter cannot convert, such as a rule type it does not know (no oneof it
+// reads is set), is substrate.ErrEgressPolicyInvalid from Get, so the backend refuses it rather
+// than treating it as a policy it could compare and overwrite. From Update's result it is
+// unclassified, since that write landed and the configured policy was not refused. Both errors
+// name the rule by index only.
+func TestEgressPolicyUndecodableStoredPolicyIsInvalid(t *testing.T) {
+	stored := &atepb.EgressPolicy{
+		Metadata: &atepb.ResourceMetadata{Atespace: "space", Name: "default", Uid: "policy-uid", Version: 2},
+		Rules: []*atepb.EgressRule{
+			{Https: &atepb.HttpsRule{Hostnames: []string{"secret-host.example.com"}}},
+			{},
+		},
+	}
+	ad := FromClient(&egressCtl{stored: stored})
+	_, getErr := ad.GetActorEgressPolicy(context.Background(), egressActor)
+	_, updateErr := ad.UpdateActorEgressPolicy(context.Background(), egressActor, fullPolicy(), substrate.EgressPolicyInfo{UID: "policy-uid", Version: 2})
+	if !errors.Is(getErr, substrate.ErrEgressPolicyInvalid) {
+		t.Fatalf("get: err=%v, want substrate.ErrEgressPolicyInvalid", getErr)
+	}
+	if updateErr == nil || errors.Is(updateErr, substrate.ErrEgressPolicyInvalid) {
+		t.Fatalf("update: err=%v, want an error that is not substrate.ErrEgressPolicyInvalid", updateErr)
+	}
+	for name, err := range map[string]error{"get": getErr, "update": updateErr} {
+		if !errors.Is(err, errEgressRule) {
+			t.Fatalf("%s: err=%v, want errEgressRule", name, err)
+		}
+		if !strings.Contains(err.Error(), "rule 1") || strings.Contains(err.Error(), "secret-host") {
+			t.Fatalf("%s: err=%q, want the rule named by index and no policy contents", name, err)
+		}
+	}
+}
+
 // A policy substrate's message cannot express is refused before any RPC as
 // substrate.ErrEgressPolicyInvalid, and the error names the rule by index only.
 func TestEgressPolicyToProtoRefusals(t *testing.T) {

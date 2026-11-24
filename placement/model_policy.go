@@ -63,6 +63,10 @@ func (p *Placer) ValidateModelPolicy(ctx context.Context) error {
 				"method", v1.Harness_Describe_FullMethodName, "error_kind", placementErrorKind(p.policyError), "error_category", "external")
 			return
 		}
+		if err := api.ValidateDescriptor(desc); err != nil {
+			p.policyError = err
+			return
+		}
 		p.policyError = p.modelPolicy.ValidateDescriptor(desc)
 	})
 	return p.policyError

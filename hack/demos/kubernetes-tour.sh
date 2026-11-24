@@ -5,7 +5,7 @@
 # call, fork into independent children, suspend and resume, listing, and finally pod death with
 # the session surviving it.
 #
-# Requires: a cluster, kubectl, agentctl on PATH, and deploy/kubernetes/agentsessionsd.yaml applied.
+# Requires: a cluster, kubectl, agentctl and jq on PATH, and deploy/kubernetes/agentsessionsd.yaml applied.
 set -euo pipefail
 
 NS=agentsessions
@@ -61,14 +61,10 @@ say "agentsessionsd on a plain Kubernetes Deployment. One pod, one PersistentVol
 run 'kubectl -n $NS get deploy,pvc,pod -l app=agentsessionsd -o name'
 note "SERVER=$SERVER, forwarded from svc/agentsessionsd:8080"
 
-say "1. Run a turn."
-OUT=$(agentctl exec --server "$SERVER" --input "plan a trip to Tokyo" 2>/dev/null)
-printf '%s$%s agentctl exec --input "plan a trip to Tokyo"\n' "$c_cmd" "$c_off"
-sleep 0.7
-echo "$OUT"
-SID=$(echo "$OUT" | head -1 | cut -d' ' -f2)
-note "four typed records: the input, the host-mediated model call, the output, the end"
-sleep 1.2
+say "1. Create a session and run a turn."
+run 'SID=$(agentctl create --server $SERVER) && echo $SID'
+run 'agentctl exec --server $SERVER --session $SID --input "plan a trip to Tokyo"'
+note "five typed records: the start, the input, the host-mediated model call, the output, the end"
 
 say "2. Keep talking. The sequence keeps climbing in one log."
 run 'agentctl exec --server $SERVER --session $SID --input "make it a week"'
@@ -82,8 +78,12 @@ FORKED=$(agentctl fork --server "$SERVER" --session "$SID" --at 4 --count 2 --na
 printf '%s$%s agentctl fork --session %s --at 4 --count 2 --names "budget,luxury"\n' "$c_cmd" "$c_off" "${SID:0:18}"
 sleep 0.7
 echo "$FORKED"
-# Reuse the first named child rather than forking a third one nobody saw being created.
-CHILD=$(echo "$FORKED" | head -1 | cut -d' ' -f2)
+# Reuse the child named "budget" rather than forking a third one nobody saw being created. Its UID
+# comes from the session list as JSON, not from the fork output above, which is for people.
+CHILD=$(agentctl list --server "$SERVER" --json | jq -r --arg p "$SID" \
+	'[.sessions[]? | select(.parent_uid == $p and .metadata.name == "budget")] | if length == 1 then .[0].metadata.uid else empty end')
+# stderr is discarded above, so the failure is reported on stdout.
+[ -n "$CHILD" ] || { echo "fork made no single child named budget"; exit 1; }
 sleep 1.3
 
 say "5. A child inherits the prefix, then diverges on its own."

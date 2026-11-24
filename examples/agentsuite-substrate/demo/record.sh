@@ -333,7 +333,7 @@ collect() {
 		echo "  logs/ch-N.log. Files are printed by bat with scripts/bat.conf (colors, line numbers, wrapping at"
 		echo "  the terminal's width); split screens are scripts/split-view.py. \$IMAGE, \$TEMPLATE, \$MEMTEMPLATE,"
 		echo "  \$API, \$API_MEM and \$ROUTER are set from setup's state before the title card (show.log has their"
-		echo "  values); \$CHILD is read from the line \`agentctl fork\` prints on screen (ch-9.log has it); the"
+		echo "  values); \$CHILD is the fork's child in \`agentctl list --json\` (ch-9.log has it); the"
 		echo "  other variables are set by a command on screen."
 		echo "- The diagrams (build.mmd, run.mmd) are rendered with ${MERMAID_CLI} and spliced over the blocks"
 		echo "  chapters 2 and 4 draw for them (splice.py): $(awk -F'\t' '{ printf "%sthe %s diagram %s-%s s", (NR > 1 ? ", " : ""), ($1 == "magenta" ? "build" : $1 == "green" ? "run" : $1), $2, $3 }' "${OUT}/splice.tsv")."

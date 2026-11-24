@@ -105,9 +105,10 @@ func (h Harness) Describe(context.Context) (api.Descriptor, error) {
 		resumability = api.ResumabilityRequiresMemorySnapshot
 	}
 	return api.Descriptor{
-		ID:      h.ID,
-		Version: "instructions-" + hex.EncodeToString(sum[:])[:12],
-		Models:  []string{h.Model},
+		ID:           h.ID,
+		Version:      "instructions-" + hex.EncodeToString(sum[:])[:12],
+		Models:       []string{h.Model},
+		HarnessClass: api.HarnessClassMediated,
 		Capabilities: api.Capabilities{
 			Resumability: resumability,
 			ForkSafe:     true,

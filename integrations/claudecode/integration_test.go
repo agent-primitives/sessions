@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"context"
+	"errors"
 	"net"
 	"slices"
 	"testing"
@@ -83,6 +84,32 @@ func TestControllerOverWire(t *testing.T) {
 	}
 	if err := store.Verify(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReconstructionReplayRefusedBeforeClaudeStarts(t *testing.T) {
+	t.Parallel()
+	const model = "claude-test-model-1"
+	live := newTestHarness(t, Config{})
+	log := eventlog.New()
+	exec := wireExec(t, live, serveWire(t, live), log, "uid", model)
+	if _, err := exec("text_turn.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh harness has no in-memory execution record to protect it. Before the class gate, replay
+	// would treat this as its first turn and launch the fake Claude process.
+	fresh := newTestHarness(t, Config{})
+	setScenario(t, fresh, scenario{Fixture: "text_turn.jsonl"})
+	replay, err := controller.New(eventlog.AsStore(log), nil, controller.WithSessionUID("uid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := replay.Replay(t.Context(), serveWire(t, fresh)); !errors.Is(err, controller.ErrReconstructionUnsupported) {
+		t.Fatalf("Replay = %v; want ErrReconstructionUnsupported", err)
+	}
+	if got := starts(t, fresh); len(got) != 0 {
+		t.Fatalf("refused reconstruction spawned %d Claude processes", len(got))
 	}
 }
 

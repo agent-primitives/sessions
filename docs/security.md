@@ -175,13 +175,16 @@ from binding the socket first. The host
 does refuse a harness that declares `REQUIRES_MEMORY_SNAPSHOT`, but that is a correctness check on
 what the harness declares, not authentication.
 
-That check also has a known limit. The host checks a harness's capabilities with a `Describe` call
-before it opens the turn's `Connect` stream, and the answer is not bound to that stream. If a
+That check also has a known limit. The host checks a harness's identity, version and capabilities
+with a `Describe` call before it opens the turn's `Connect` stream, and the answer is not bound to
+that stream. If a
 different harness takes over the same address between the two calls, for instance because the
 harness restarted, gRPC reconnected to another replica, or a proxy routed the two calls to different
 backends, the turn runs on that harness and the host does not detect it. Registering a harness by
 address assumes the operator controls what serves that address, and that every harness that can
-answer there declares the same resumability.
+answer there declares the same identity, version and capabilities. Reconstruction replay separately
+checks the harness class on the exact `Connect` stream before sending `Start`; heterogeneous class
+routing therefore fails before `Run`.
 
 **Registering a harness is an admin action.** A caller that can register a harness chooses what the
 host dials, which means where it sends every session's history and whose model credential pays for
@@ -218,8 +221,11 @@ classes; what differs is who upholds it and what the journal records.
   it makes itself leave its compute through the runtime's egress. The harness holds only a
   placeholder key, which the egress replaces with the real credential on the way out. The egress,
   not the host, keeps the key out, and the host cannot check that it does. An unmediated harness
-  must declare `REQUIRES_MEMORY_SNAPSHOT`, so it runs only on memory-snapshot compute. A call it
-  still makes through `EventSink.Model` is handled as for a mediated harness.
+  declares `HarnessClassUnmediated` and `REQUIRES_MEMORY_SNAPSHOT`, so reconstruction replay refuses
+  it and placement runs it only on memory-snapshot compute. These are trusted declarations, not
+  proof of where calls originate; the host does reject the contradictory explicit declaration
+  `UNMEDIATED + STATELESS_REPLAY`. A call it still makes through `EventSink.Model` is handled as for
+  a mediated harness.
 
 What an unmediated harness gives up for the calls it makes itself, and an operator accepts by
 running one:
@@ -232,9 +238,10 @@ running one:
   usage the harness reports. A verified chain proves the record was not altered after writing, not
   that a report matches what the provider returned.
 - **No replay.** Reconstructing an unmediated execution would call the provider again, so the
-  replay guarantee [above](#what-is-protected) does not apply. A turn interrupted by losing the
-  harness's memory fails, and the user re-prompts; once the compute is gone, that means a new
-  session (spec `EXE-43`).
+  replay guarantee [above](#what-is-protected) does not apply. The reference controller refuses an
+  explicitly unmediated harness before reconstruction runs it; raw journal replay remains safe. A
+  turn interrupted by losing the harness's memory fails, and the user re-prompts; once the compute
+  is gone, that means a new session (spec `EXE-43`).
 - **The egress sees session content.** It must read the request to inject the credential, so it is
   trusted with prompts and outputs as well as the key.
 
@@ -248,25 +255,66 @@ spec §17.
 
 The egress policy is runtime configuration: which hosts and ports the harness's compute may reach,
 and which credential the egress injects on a matching request. The journal does not record it. On
-substrate, `substrate.WithEgressPolicy` or the daemon's `-substrate-egress-policy-file` installs a
-Substrate `EgressPolicy` on each session's actor before the backend resumes it, so no turn runs on
-compute without the policy. The policy holds credential references (`ate-secret://...`) or an actor
-JWT audience, never a credential value. The backend's install log records the rule count and an
-`error_kind`, not the rules. A policy Substrate refuses as invalid reaches callers as fixed text
-(`FAILED_PRECONDITION`, `COMPUTE_CONFIG_INVALID`), without Substrate's message, which can name a
-rejected hostname or credential reference. Other install failures keep the backend error's text,
-which reaches callers when authorization is off. A daemon startup error for a policy file that
-does not parse can quote the offending JSON token; it goes only to the operator.
+substrate, `substrate.WithEgressPolicy` or the daemon's `-substrate-egress-policy-file` sets the
+Substrate `EgressPolicy` of each session's actor before every backend resume of a suspended actor,
+so while the option is set, the backend resumes an actor only once its stored policy matches the
+configuration. Substrate enforces a stored policy through its policy caches (about 10 seconds for
+requests and new connections, 5 seconds for DNS on v1.0.0), so requests a resumed actor makes soon
+after a change can still be judged by the policy cached before its suspend. Without the option, or
+with the flag empty, the backend makes no egress call, and an existing actor resumes with whatever
+policy it has stored. An actor already running when the backend reaches it, or woken by the
+Substrate router, keeps its stored policy until it is suspended and the backend resumes it, or until
+`substrate.Backend.SyncEgressPolicy` applies the change. The policy holds credential references
+(`ate-secret://...`) or an actor JWT audience, never a credential value. The backend's install log
+records the rule count, the outcome and an `error_kind`, not the rules. A policy Substrate
+refuses as invalid reaches callers as fixed text (`FAILED_PRECONDITION`,
+`COMPUTE_CONFIG_INVALID`), without Substrate's message, which can name a rejected hostname or
+credential reference. A policy call Substrate refuses because another operation holds the actor,
+and an `Exec` refused because the actor was replaced while its policy was converged or it was
+resumed, are `ABORTED` with `COMPUTE_BUSY` and leave Substrate's message out as well. An error the
+`WithEgressPolicy` function returns keeps its code (from the sentinel it wraps) but never its text,
+which only names the session (and says busy for a busy one): the function's own message can name a
+credential reference. Other install failures keep the backend error's text, which reaches callers
+when authorization is off. A daemon startup error for a policy file that does not parse can quote
+the offending JSON token; it goes only to the operator.
 
 - **Fail closed.** A configured policy that the control client cannot install, or that Substrate
-  refuses, fails the call and leaves the actor suspended. An actor without a policy is deny-all.
-- **Existing actors keep their policy.** A policy changed in the option or the file reaches only
-  actors created afterwards. Tightening it does not reach existing sessions until their actors are
-  recreated or their policy is updated in Substrate.
-- **Running compute is not changed.** An actor already running when the backend reaches it keeps
-  whatever policy it has, or stays deny-all without one.
+  refuses, fails the call and leaves the actor suspended. With the option set, a control client
+  that cannot read and update policies fails every resume of an existing actor and every Sync, even
+  when the function returns no policy, since only a read finds a stored policy and only an update
+  clears it. An actor without a policy is deny-all.
+- **Changes reach existing actors at their next backend resume.** The backend reads the stored
+  policy and replaces it when it differs from the configured one, under the stored version, so a
+  tightened policy is stored before the backend next resumes each existing session, and its traffic
+  follows within Substrate's policy caches. An actor the Substrate router wakes for a routed request
+  is resumed without the backend, so it keeps its stored policy, and the backend then finds it
+  running. A policy that no longer configures any rule is cleared to an empty rule set (deny-all),
+  never deleted.
+- **The configuration is authoritative, if the backend is the only policy writer.** A policy
+  edited in Substrate by anyone else is overwritten at the actor's next backend resume while the
+  option is set. A stored policy the control client cannot read is refused, not overwritten. The
+  backend's preconditions order its own converges and Syncs, not other writers: a policy another
+  identity stores between a converge and `ResumeActor`, or on a running actor, is enforced until
+  the actor's next converge. Keep the backend's identity the only writer of egress policies in its
+  atespace. Substrate v1 policy calls name the actor, not its UID, so a fork whose clone is
+  replaced, before its policy is created, by an actor with no policy creates the child's policy on
+  that actor and resumes it; the fork then fails `ABORTED` and leaves it running. A clone that
+  already has a policy is refused without a write.
+- **Running compute changes only on a Sync.** An actor already running when the backend reaches it
+  keeps whatever policy it has, or stays deny-all without one, until it is suspended and resumed.
+  `substrate.Backend.SyncEgressPolicy` applies a changed policy to a running actor. Change the
+  configuration, then call it: a Sync always writes, so a converge that read the stored policy
+  before it cannot undo it. Its effect on traffic is bounded by the same policy caches, and an open
+  TLS passthrough connection is not cut. The daemon does not call it.
+- **Removing the option does not revoke.** Without the option, or with the daemon's flag empty,
+  each stored policy stays in force on its actor. To revoke, keep the option with a function that
+  returns no policy, or restart the daemon with a file holding `{}` (no rules): each stored policy
+  is then cleared to an empty rule set (deny-all) at the actor's next backend resume. Until then a
+  running actor, and one the Substrate router wakes, keeps its rules, as above; a host clears a
+  running actor with a Sync, which the daemon does not call.
 
-See [Actor egress policy](substrate-conformance.md#actor-egress-policy) for the install points.
+See [Actor egress policy](substrate-conformance.md#actor-egress-policy) for the install points
+and the comparison.
 
 ## Deletion is not erasure or containment
 

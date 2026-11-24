@@ -16,7 +16,7 @@ Shared wire types for the agentsessions Session and Harness services.
 
 The Event message is used by BOTH the session log (Sessions.Exec / Replay) and the
 harness stream (Harness.Connect) — durable harness events become the log alongside host-owned
-records. EVENT_PARKED is a transport-only acknowledgement and is never journaled.
+records. EVENT_PARKED and EVENT_RECONSTRUCTION_INFO are transport-only and never journaled.
 
 The content model (Part) is aligned with A2A `Part` &#43; MCP content for interop; the
 event/log model is native. Derived from the durable-log &amp; replay contract §7 (record
@@ -141,7 +141,8 @@ DataPart is structured JSON (A2A data part; MCP structuredContent).
 
 ### Event
 Event is the shared journal/stream content unit; EXECUTION_START, APPROVAL_REQUEST and
-APPROVAL_RESULT are host-owned journal entries. PARKED is transport only, never journaled.
+APPROVAL_RESULT are host-owned journal entries. PARKED and RECONSTRUCTION_INFO are transport
+only, never journaled.
 Ordering (seq) and integrity (prev_hash /
 content_hash) are host-assigned and live on LogRecord — the harness, which does not know
 seq/prev, emits a hash-free Event, so there is no circular hashing. Streaming deltas are
@@ -166,6 +167,7 @@ transport (see Delta in session.proto) and coalesce into the finalized event (§
 | error | [Error](#agentsessions-v1-Error) |  |  |
 | execution_start | [ExecutionStart](#agentsessions-v1-ExecutionStart) |  |  |
 | parked | [ApprovalRef](#agentsessions-v1-ApprovalRef) |  | EVENT_PARKED echoes the park reference; Event.execution_id must match its execution_id. |
+| reconstruction_info | [ReconstructionInfo](#agentsessions-v1-ReconstructionInfo) |  |  |
 | actor | [IdentityRef](#agentsessions-v1-IdentityRef) |  | emitter principal -&gt; provenance |
 
 
@@ -435,6 +437,24 @@ per-provider sub-shapes, and no memory-snapshot edge (stateless verbatim replay)
 
 
 
+<a name="agentsessions-v1-ReconstructionInfo"></a>
+
+### ReconstructionInfo
+ReconstructionInfo binds the harness class to the exact Connect stream that will receive Start.
+In reconstruction mode the server sends this as its first Event, after a side-effect-free
+Describe and before reading Start or invoking Harness.Run. It is transport-only and MUST NOT be
+journaled.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| harness_class | [HarnessClass](#agentsessions-v1-HarnessClass) |  |  |
+
+
+
+
+
+
 <a name="agentsessions-v1-ResourceMetadata"></a>
 
 ### ResourceMetadata
@@ -590,6 +610,22 @@ itself is a separate host-owned APPROVAL_RESULT; it is not embedded in this mess
 | EVENT_ERROR | 11 |  |
 | EVENT_EXECUTION_START | 12 | host-owned config/cursor/input count, before inputs and harness effects |
 | EVENT_PARKED | 13 | Harness acknowledgement of ControllerFrame.park with the exact ApprovalRef. Transport only: the host MUST NOT journal/hash-chain it or treat it as a terminal execution outcome. |
+| EVENT_RECONSTRUCTION_INFO | 14 | Harness class for reconstruction, sent before Start on a reconstruction probe. Transport only: the host MUST NOT journal/hash-chain it or treat it as an execution event. |
+
+
+
+<a name="agentsessions-v1-HarnessClass"></a>
+
+### HarnessClass
+HarnessClass declares where a harness&#39;s model calls originate. The host trusts the declaration:
+it cannot observe a model call that does not reach the model call operation. An omitted class is
+read as MEDIATED for compatibility with older harnesses; new harnesses should declare one.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| HARNESS_CLASS_UNSPECIFIED | 0 |  |
+| HARNESS_CLASS_MEDIATED | 1 | every model call goes through the host |
+| HARNESS_CLASS_UNMEDIATED | 2 | one or more model calls originate in harness compute |
 
 
 
@@ -759,6 +795,7 @@ catching the error cannot authorize a later model/tool effect or mark recovery c
 | tool | [ToolResult](#agentsessions-v1-ToolResult) |  | result for a CONTROLLER_MEDIATED or decided REQUIRES_APPROVAL call |
 | model | [ModelResult](#agentsessions-v1-ModelResult) |  | served completion for a mediated/replayed model call |
 | park | [ApprovalRef](#agentsessions-v1-ApprovalRef) |  | host-owned unresolved request; requires correlated EVENT_PARKED |
+| reconstruction_probe | [ReconstructionProbe](#agentsessions-v1-ReconstructionProbe) |  | transport-only, before Start |
 
 
 
@@ -788,6 +825,7 @@ catching the error cannot authorize a later model/tool effect or mark recovery c
 | tools | [ToolSpec](#agentsessions-v1-ToolSpec) | repeated |  |
 | capabilities | [Capabilities](#agentsessions-v1-Capabilities) |  |  |
 | version | [string](#string) |  | Stable, opaque implementation replay-compatibility version, owned by the harness author. Change it when deterministic execution or config interpretation changes. Hosts record it in ExecutionStart and compare known recorded versions exactly on replay/recovery. Empty is supported for older/unversioned harnesses and records an unknown version. |
+| harness_class | [HarnessClass](#agentsessions-v1-HarnessClass) |  | Reconstruction replay refuses UNMEDIATED and unknown values before invoking the harness. UNSPECIFIED retains the legacy MEDIATED behavior. This declaration is not proof: a harness that calls a provider outside the model call operation is unmediated whatever it reports. |
 
 
 
@@ -823,6 +861,17 @@ The Message carries text, opaque reasoning, and tool_call parts, recorded verbat
 | message | [Message](#agentsessions-v1-Message) |  |  |
 | usage | [Usage](#agentsessions-v1-Usage) |  |  |
 | model_call_id | [string](#string) |  | correlates to the emitted ModelCall.id |
+
+
+
+
+
+
+<a name="agentsessions-v1-ReconstructionProbe"></a>
+
+### ReconstructionProbe
+ReconstructionProbe asks the exact Harness.Connect peer to advertise its class before Start.
+It has no fields; presence in ControllerFrame.frame distinguishes it from a malformed empty frame.
 
 
 
@@ -897,7 +946,7 @@ this against a runtime&#39;s RuntimeCapabilities.
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
 | Describe | [DescribeRequest](#agentsessions-v1-DescribeRequest) | [HarnessDescriptor](#agentsessions-v1-HarnessDescriptor) | Describe returns the static contract; used to match the harness to a runtime. |
-| Connect | [ControllerFrame](#agentsessions-v1-ControllerFrame) stream | [Event](#agentsessions-v1-Event) stream | Connect drives ONE execution. The host sends Start (and optional control frames). Normally the harness streams Events terminated by exactly one EVENT_END. An unresolved approval instead follows park -&gt; correlated EVENT_PARKED -&gt; stream closure, with no EVENT_END. Durable requests/decisions belong to the host; this protocol applies to STATELESS_REPLAY and REQUIRES_MEMORY_SNAPSHOT harnesses. After ACK and actual stream closure, the host closes the invocation connection, performs an external snapshot and commits SUSPEND before reporting a successful live pause. Handoff failures retain the durable request and their actual error; they are not park success. |
+| Connect | [ControllerFrame](#agentsessions-v1-ControllerFrame) stream | [Event](#agentsessions-v1-Event) stream | Connect drives ONE execution. The host normally sends Start first (and optional control frames). For reconstruction replay it first sends ControllerFrame.reconstruction_probe; a supporting server answers with an EVENT_RECONSTRUCTION_INFO carrying the class of the exact harness that will receive Start. The host sends Start only for MEDIATED or compatibility UNSPECIFIED. Older servers close that probe without invoking the harness, so reconstruction fails closed rather than sending Start. Normally the harness streams Events terminated by exactly one EVENT_END. An unresolved approval instead follows park -&gt; correlated EVENT_PARKED -&gt; stream closure, with no EVENT_END. Durable requests/decisions belong to the host; this protocol applies to STATELESS_REPLAY and REQUIRES_MEMORY_SNAPSHOT harnesses. After ACK and actual stream closure, the host closes the invocation connection, performs an external snapshot and commits SUSPEND before reporting a successful live pause. Handoff failures retain the durable request and their actual error; they are not park success. |
 
  
 

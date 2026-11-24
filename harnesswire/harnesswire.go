@@ -2,9 +2,10 @@
 // gRPC stream, in both directions:
 //
 //   - Server wraps an api.Harness as a v1.HarnessServer: it runs the harness with a streaming
-//     EventSink that emits each nondeterministic op as an Event on the wire and blocks for the
-//     host's ControllerFrame reply. The harness never invokes the model itself — the load-bearing
-//     rule holds across a process boundary.
+//     EventSink that emits each mediated nondeterministic op as an Event on the wire and blocks for
+//     the host's ControllerFrame reply. A MEDIATED harness never invokes the model itself, so the
+//     load-bearing replay rule holds across a process boundary; an UNMEDIATED harness declares that
+//     it does and is refused by reconstruction replay.
 //   - ClientHarness wraps a v1.HarnessClient as an api.Harness: its Run drives the Connect stream
 //     and translates each Event into a call on the host's sink (which invokes-and-records live or
 //     serves-from-journal on replay), sending the result back. So the controller and its sinks are
@@ -28,10 +29,13 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	grpccodes "google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/internal/ctxlock"
+	"github.com/agent-primitives/sessions/internal/replayctx"
 	"github.com/agent-primitives/sessions/observability"
 	"github.com/agent-primitives/sessions/wire"
 )
@@ -62,6 +66,31 @@ func (s *Server) Connect(stream v1.Harness_ConnectServer) error {
 	if err != nil {
 		return err
 	}
+	reconstruction := first.GetReconstructionProbe() != nil
+	if reconstruction {
+		if first.GetSession() != "" || first.GetExecutionId() != "" {
+			return status.Error(grpccodes.InvalidArgument, "harnesswire: reconstruction probe must have an empty envelope")
+		}
+		desc, err := s.harness.Describe(stream.Context())
+		if err != nil {
+			if _, ok := status.FromError(err); !ok {
+				return status.Error(grpccodes.Unavailable, "harnesswire: describe harness for reconstruction failed")
+			}
+			return err
+		}
+		if err := stream.Send(&v1.Event{
+			Kind: v1.EventKind_EVENT_RECONSTRUCTION_INFO,
+			Body: &v1.Event_ReconstructionInfo{ReconstructionInfo: &v1.ReconstructionInfo{
+				HarnessClass: harnessClassToProto(desc.HarnessClass),
+			}},
+		}); err != nil {
+			return err
+		}
+		first, err = stream.Recv()
+		if err != nil {
+			return err
+		}
+	}
 	start := first.GetStart()
 	if start == nil {
 		return errors.New("harnesswire: first ControllerFrame must be Start")
@@ -89,6 +118,11 @@ func (s *Server) Connect(stream v1.Harness_ConnectServer) error {
 		attribute.Int64("agentsessions.resume_from_seq", runStart.ResumeFromSeq),
 	))
 	defer span.End()
+	if reconstruction {
+		// Preserve reconstruction intent through a server that delegates to another harnesswire
+		// client, so every downstream Connect stream performs its own class handshake.
+		ctx = replayctx.WithReconstruction(ctx)
+	}
 	runErr := s.harness.Run(ctx, runStart, sink)
 	// Interrupt an in-flight await before taking the effect lock. Never wait for
 	// Recv: gRPC cancels the stream context after this handler returns.
@@ -444,13 +478,16 @@ func (s *streamSink) Usage(ctx context.Context, u api.Usage) error {
 // ClientHarness makes a remote harness (reached via HarnessClient) look like a local api.Harness,
 // so the controller drives it exactly as an in-process one.
 type ClientHarness struct {
-	client v1.HarnessClient
+	client                v1.HarnessClient
+	reconstructionTimeout time.Duration
 }
 
 var _ api.HarnessRunPreparer = (*ClientHarness)(nil)
 
 // NewClientHarness wraps client as an api.Harness.
-func NewClientHarness(client v1.HarnessClient) *ClientHarness { return &ClientHarness{client: client} }
+func NewClientHarness(client v1.HarnessClient) *ClientHarness {
+	return &ClientHarness{client: client, reconstructionTimeout: 10 * time.Second}
+}
 
 // Describe fetches the remote harness's contract.
 func (h *ClientHarness) Describe(ctx context.Context) (api.Descriptor, error) {
@@ -464,6 +501,13 @@ func (h *ClientHarness) Describe(ctx context.Context) (api.Descriptor, error) {
 // PrepareRun opens the actual Connect stream without sending Start. A Connect failure therefore
 // proves that the remote harness did not receive an execution. The returned stream is one-shot.
 func (h *ClientHarness) PrepareRun(ctx context.Context) (api.PreparedHarnessRun, error) {
+	if replayctx.IsReconstruction(ctx) {
+		return h.prepareReconstruction(ctx)
+	}
+	return h.prepareRun(ctx)
+}
+
+func (h *ClientHarness) prepareRun(ctx context.Context) (api.PreparedHarnessRun, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	stream, err := h.client.Connect(ctx)
 	if err != nil {
@@ -471,6 +515,102 @@ func (h *ClientHarness) PrepareRun(ctx context.Context) (api.PreparedHarnessRun,
 		return nil, err
 	}
 	return &preparedClientRun{stream: stream, ctx: ctx, cancel: cancel}, nil
+}
+
+// prepareReconstruction binds the class decision to the exact Connect stream. It sends a
+// transport-only probe and waits for the server's class before any Start can reach harness code.
+func (h *ClientHarness) prepareReconstruction(ctx context.Context) (api.PreparedHarnessRun, error) {
+	callerCtx := ctx
+	ctx, cancel := context.WithCancel(ctx)
+	var timedOut atomic.Bool
+	timerFinished := make(chan struct{})
+	timer := time.AfterFunc(h.reconstructionTimeout, func() {
+		defer close(timerFinished)
+		timedOut.Store(true)
+		cancel()
+	})
+	stopTimer := func() {
+		if !timer.Stop() {
+			<-timerFinished
+		}
+	}
+	stream, err := h.client.Connect(ctx)
+	if err != nil {
+		stopTimer()
+		cancel()
+		return nil, reconstructionHandshakeError(callerCtx, timedOut.Load(), err)
+	}
+	if sendErr := stream.Send(&v1.ControllerFrame{Frame: &v1.ControllerFrame_ReconstructionProbe{ReconstructionProbe: &v1.ReconstructionProbe{}}}); sendErr != nil {
+		err := sendErr
+		if sendErr == io.EOF {
+			// gRPC may surface a transport/server failure as EOF from Send; Recv owns the
+			// authoritative final status. A bare EOF here is still a transient handshake failure,
+			// not evidence that the peer lacks reconstruction support.
+			err = drainReconstructionStatus(stream)
+		}
+		stopTimer()
+		cancel()
+		return nil, reconstructionSendError(callerCtx, timedOut.Load(), err)
+	}
+	event, err := stream.Recv()
+	stopTimer()
+	if err != nil {
+		cancel()
+		return nil, reconstructionHandshakeError(callerCtx, timedOut.Load(), err)
+	}
+	if timedOut.Load() {
+		cancel()
+		return nil, fmt.Errorf("%w: %w", api.ErrReconstructionHandshake, context.DeadlineExceeded)
+	}
+	if event.GetKind() != v1.EventKind_EVENT_RECONSTRUCTION_INFO || event.GetReconstructionInfo() == nil {
+		cancel()
+		return nil, fmt.Errorf("%w: Connect peer sent %s before reconstruction metadata", api.ErrReconstructionUnsupported, event.GetKind())
+	}
+	class := harnessClassFromProto(event.GetReconstructionInfo().GetHarnessClass())
+	if class != "" && class != api.HarnessClassMediated {
+		cancel()
+		return nil, fmt.Errorf("%w: Connect peer declares %q", api.ErrReconstructionUnsupported, class)
+	}
+	return &preparedClientRun{stream: stream, ctx: ctx, cancel: cancel}, nil
+}
+
+func drainReconstructionStatus(stream v1.Harness_ConnectClient) error {
+	for {
+		if _, err := stream.Recv(); err != nil {
+			return err
+		}
+	}
+}
+
+func reconstructionHandshakeError(callerCtx context.Context, timedOut bool, err error) error {
+	if callerErr := callerCtx.Err(); callerErr != nil {
+		return callerErr
+	}
+	if timedOut {
+		return fmt.Errorf("%w: %w", api.ErrReconstructionHandshake, context.DeadlineExceeded)
+	}
+	if err == io.EOF {
+		return fmt.Errorf("%w: Connect peer closed before reconstruction metadata", api.ErrReconstructionUnsupported)
+	}
+	switch status.Code(err) {
+	case grpccodes.Unknown, grpccodes.Unimplemented, grpccodes.InvalidArgument, grpccodes.FailedPrecondition:
+		return fmt.Errorf("%w: Connect peer rejected reconstruction metadata: %w", api.ErrReconstructionUnsupported, err)
+	default:
+		return fmt.Errorf("%w: %w", api.ErrReconstructionHandshake, err)
+	}
+}
+
+func reconstructionSendError(callerCtx context.Context, timedOut bool, err error) error {
+	if callerErr := callerCtx.Err(); callerErr != nil {
+		return callerErr
+	}
+	if timedOut {
+		return fmt.Errorf("%w: %w", api.ErrReconstructionHandshake, context.DeadlineExceeded)
+	}
+	if err == io.EOF {
+		return fmt.Errorf("%w: %w", api.ErrReconstructionHandshake, err)
+	}
+	return reconstructionHandshakeError(callerCtx, false, err)
 }
 
 type preparedClientRun struct {
@@ -666,7 +806,7 @@ func runClientStream(ctx, streamCtx context.Context, stream v1.Harness_ConnectCl
 					return hostFailed(ctx, stream, cancel, err)
 				}
 			}
-		case v1.EventKind_EVENT_APPROVAL_REQUEST, v1.EventKind_EVENT_APPROVAL_RESULT, v1.EventKind_EVENT_EXECUTION_START, v1.EventKind_EVENT_PARKED:
+		case v1.EventKind_EVENT_APPROVAL_REQUEST, v1.EventKind_EVENT_APPROVAL_RESULT, v1.EventKind_EVENT_EXECUTION_START, v1.EventKind_EVENT_PARKED, v1.EventKind_EVENT_RECONSTRUCTION_INFO:
 			return fmt.Errorf("harnesswire: harness emitted host-owned control event %s", ev.GetKind())
 		case v1.EventKind_EVENT_END:
 			endErr := endError(ev.GetEnd())
@@ -877,6 +1017,7 @@ func DescriptorToProto(d api.Descriptor) *v1.HarnessDescriptor {
 		Version:      d.Version,
 		Models:       d.Models,
 		Capabilities: capabilitiesToProto(d.Capabilities),
+		HarnessClass: harnessClassToProto(d.HarnessClass),
 	}
 	for _, tool := range d.Tools {
 		out.Tools = append(out.Tools, wire.ToolSpecToProto(tool))
@@ -890,11 +1031,41 @@ func descriptorFromProto(p *v1.HarnessDescriptor) api.Descriptor {
 		Version:      p.GetVersion(),
 		Models:       p.GetModels(),
 		Capabilities: capabilitiesFromProto(p.GetCapabilities()),
+		HarnessClass: harnessClassFromProto(p.GetHarnessClass()),
 	}
 	for _, tool := range p.GetTools() {
 		out.Tools = append(out.Tools, wire.ToolSpecFromProto(tool))
 	}
 	return out
+}
+
+func harnessClassToProto(class api.HarnessClass) v1.HarnessClass {
+	switch class {
+	case "":
+		return v1.HarnessClass_HARNESS_CLASS_UNSPECIFIED
+	case api.HarnessClassMediated:
+		return v1.HarnessClass_HARNESS_CLASS_MEDIATED
+	case api.HarnessClassUnmediated:
+		return v1.HarnessClass_HARNESS_CLASS_UNMEDIATED
+	default:
+		// Preserve invalid in-process declarations as an unknown wire value rather than silently
+		// turning them into the legacy-mediated zero value.
+		return v1.HarnessClass(-1)
+	}
+}
+
+func harnessClassFromProto(class v1.HarnessClass) api.HarnessClass {
+	switch class {
+	case v1.HarnessClass_HARNESS_CLASS_UNSPECIFIED:
+		return ""
+	case v1.HarnessClass_HARNESS_CLASS_MEDIATED:
+		return api.HarnessClassMediated
+	case v1.HarnessClass_HARNESS_CLASS_UNMEDIATED:
+		return api.HarnessClassUnmediated
+	default:
+		// Keep unknown enum values distinguishable from omission so reconstruction fails closed.
+		return api.HarnessClass(fmt.Sprintf("UNKNOWN(%d)", class))
+	}
 }
 
 func capabilitiesToProto(c api.Capabilities) *v1.Capabilities {

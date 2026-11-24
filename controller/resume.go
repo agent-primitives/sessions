@@ -160,7 +160,7 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 			ErrUnansweredToolCall, execution.id, call.Tool, call.ID)
 	}
 	// Reject identity mismatches before Run or its best-effort ERROR append path.
-	desc, err := c.checkHarness(ctx, har, []recordedExecution{*execution})
+	desc, err := c.checkHarness(ctx, har, []recordedExecution{*execution}, false)
 	if err != nil {
 		return false, err
 	}

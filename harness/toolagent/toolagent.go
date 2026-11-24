@@ -61,10 +61,11 @@ func (h Harness) Describe(context.Context) (api.Descriptor, error) {
 		specs = append(specs, api.ToolSpec{Name: tool.Name, Description: tool.Description, Mediation: api.MediationRequiresApproval})
 	}
 	return api.Descriptor{
-		ID:      "tool",
-		Version: "1", // bump when execution or config interpretation changes, not for host releases
-		Models:  []string{h.Model},
-		Tools:   specs,
+		ID:           "tool",
+		Version:      "1", // bump when execution or config interpretation changes, not for host releases
+		Models:       []string{h.Model},
+		Tools:        specs,
+		HarnessClass: api.HarnessClassMediated,
 		Capabilities: api.Capabilities{
 			Resumability: api.ResumabilityStatelessReplay,
 			ForkSafe:     true,

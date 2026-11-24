@@ -159,6 +159,7 @@ func TestSubstrateStartupChecks(t *testing.T) {
 		{name: "bad atespace", args: []string{"-model", "m", "-substrate-harness", "w=t/w", "-substrate-atespace", "Bad_Space"}, want: "-substrate-atespace"},
 		{name: "built-in name", args: []string{"-model", "m", "-substrate-harness", "chat=t/c", "-substrate-atespace", "s"}, want: `harness "chat" is already served`},
 		{name: "also a remote", args: append(slices.Clone(base), "-harness", "w=127.0.0.1:9000"), want: `harness "w" is given with -harness and is also configured by this build's flags`},
+		{name: "padded control plane id", args: append(slices.Clone(base), "-substrate-control-plane-id", "east "), want: "-substrate-control-plane-id"},
 		{name: "bad ate-api address", args: append(slices.Clone(base), "-ateapi-addr", "https://api:443"), want: "-ateapi-addr"},
 		{name: "bad router address", args: append(slices.Clone(base), "-atenet-router", "router"), want: "-atenet-router"},
 		{name: "ca and insecure", args: append(slices.Clone(base), "-ateapi-ca-file", token, "-ateapi-insecure-skip-verify"), want: "mutually exclusive"},

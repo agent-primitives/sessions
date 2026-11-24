@@ -173,7 +173,9 @@ func (l *Log) beginAllocation(ctx context.Context, backend, operation string, pu
 // other confirmed attempts of the session whose claims this one repeats (a later Restore of the same
 // actor) are compacted. A success with a handle but no evidence created nothing the backend can
 // prove (it re-attached, or resumed a stateless session): its plan is dropped and it is confirmed
-// and compacted as a handle attempt.
+// and compacted as a handle attempt. Once released, a planned attempt accepts a confirmation only
+// if each claim in it repeats one the attempt already confirmed, and changes nothing; a new or
+// changed claim is a conflict.
 func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Incarnation) error {
 	tx, err := l.store.db.BeginTx(ctx, nil)
 	if err != nil {

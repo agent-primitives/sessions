@@ -1862,16 +1862,15 @@ The reference host takes it as `placement.Backend` in
 - `RT-4j`: A runtime with dedicated per-session resources MAY implement
   `api.ResourceCleanupRuntime`. `CleanupKey` names the control plane as the runtime's configuration
   identifies it, not a harness alias; an empty key opts out. Two control planes configured alike
-  share a key unless the operator names them (the substrate daemon's
-  `-substrate-control-plane-id`). `CleanupResources(operation, session_uid)` returns the complete
-  plan before I/O: opaque references with no UID, and at most one borrower each, which must be released first.
-  The runtime returns the UIDs it proved it created in `Incarnation.Cleanup`, also alongside an
-  error. The host records the plan before I/O and confirms only planned references with unchanged
-  UIDs and borrowers. It never adopts an object it finds by name, and an unknown outcome stays
-  unconfirmed. A success that proves no UID (an Exec that re-attaches, a stateless Resume) created
-  nothing the runtime owns: the host drops its plan and confirms its session handle instead. Fork
-  records each child's plan without publishing the child, just before that child's runtime `Fork`
-  (§13.4).
+  share a key unless the operator names them (the substrate daemon's `-substrate-control-plane-id`).
+  `CleanupResources(operation, session_uid)` returns the complete plan before I/O: opaque references
+  with no UID, and at most one borrower each, which must be released first. The runtime returns the
+  UIDs it proved it created in `Incarnation.Cleanup`, also alongside an error. The host records the
+  plan before I/O and confirms only planned references with unchanged UIDs and borrowers. It never
+  adopts an object it finds by name, and an unknown outcome stays unconfirmed. A success that proves
+  no UID (an Exec that re-attaches, a stateless Resume) created nothing the runtime owns: the host
+  drops its plan and confirms its session handle instead. Fork records each child's plan without
+  publishing the child, just before that child's runtime `Fork` (§13.4).
 - `RT-4f`: `Describe` returns the harness descriptor the host admits on. It MUST NOT provision
   compute: the host calls it before `Create`, `Restore`, and the fork source step (`RT-1`), in the
   memory-tier override check (`OPS-7`), and when the registry reports a harness's observed

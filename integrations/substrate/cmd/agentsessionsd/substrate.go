@@ -187,6 +187,11 @@ func (f *substrateFlags) Harnesses() ([]string, error) {
 	if !isShortName(*f.atespace) {
 		return nil, fmt.Errorf("-substrate-atespace %q: want the atespace session actors are created in, a lowercase DNS label", *f.atespace)
 	}
+	// The id is hashed verbatim into the cleanup key, so trimming it would silently change a key
+	// already in use; refuse the padding instead.
+	if *f.controlPlane != strings.TrimSpace(*f.controlPlane) {
+		return nil, fmt.Errorf("-substrate-control-plane-id %q: remove the surrounding whitespace", *f.controlPlane)
+	}
 	if err := agentsessionsd.CheckDialAddress(*f.ateapi); err != nil {
 		return nil, fmt.Errorf("-ateapi-addr: %w", err)
 	}

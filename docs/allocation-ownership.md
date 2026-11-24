@@ -24,9 +24,10 @@ or a per-call audit log.
 
 Repeating confirmation of a retained attempt with the same handle, or with UIDs it already
 confirmed, is harmless, including after release. After release, a UID not yet confirmed is a
-conflict, and the repeat retires no other attempt. Confirming or releasing a compacted attempt returns `sqlitelog.ErrAllocationNotFound`. If a
-late confirmation retires a row already paged for cleanup, reread the live inventory and retry its
-idempotent release; the surviving row remains unreleased.
+conflict, and the repeat retires no other attempt. Confirming or releasing a compacted attempt
+returns `sqlitelog.ErrAllocationNotFound`. If a late confirmation retires a row already paged for
+cleanup, reread the live inventory and retry its idempotent release; the surviving row remains
+unreleased.
 
 `api.CleanupRuntime` is an optional, non-destructive release contract. Local and remote backends
 opt in using configuration keys; unsupported backends record an empty key instead of guessing a

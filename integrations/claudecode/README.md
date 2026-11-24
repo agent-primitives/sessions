@@ -31,8 +31,10 @@ ghcr.io/agent-primitives/sessions/claudecode-harnessnode:<tag>
 - `<tag>` is the root release tag (`vX.Y.Z`), the same as the other images. The root release builds
   this module from the tagged commit, and the module's
   `replace github.com/agent-primitives/sessions => ../..` builds it against the root module of that
-  same commit, not the version its `go.mod` requires. An `integrations/claudecode/vX.Y.Z` module
-  tag publishes no image.
+  same commit. A release pull request sets the version this module's `go.mod` requires to the
+  release tag, so the image SBOM, which names the required version rather than the replacement,
+  describes the root module at `<tag>`. An `integrations/claudecode/vX.Y.Z` module tag publishes no
+  image.
 
 `go install github.com/agent-primitives/sessions/integrations/claudecode/cmd/harnessnode@<version>`
 does not work: `go install` refuses a module whose `go.mod` has a `replace` directive. To build

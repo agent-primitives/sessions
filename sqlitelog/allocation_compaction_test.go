@@ -124,6 +124,64 @@ func TestAllocationCompactionPreservesReleasedHistory(t *testing.T) {
 	assertCompactionState(t, s, current, "resource", true, false)
 }
 
+// The planned counterpart: on a released attempt an identical retry of confirmed evidence is a
+// no-op, but a new or changed claim is still a conflict.
+func TestReleasedPlannedAttemptAcceptsOnlyIdenticalRetry(t *testing.T) {
+	s := deletionStore(t, ":memory:")
+	log := s.Session("s")
+	attempt, err := log.BeginPlannedAllocation(t.Context(), "key", "fork",
+		api.CleanupResource{Reference: "tag", Borrower: "actor"}, api.CleanupResource{Reference: "actor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag := api.CleanupResource{Reference: "tag", UID: "tag-uid", Borrower: "actor"}
+	if err := log.ConfirmAllocation(t.Context(), attempt, owned(t, tag)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReleaseAllocation(t.Context(), "s", attempt); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.ConfirmAllocation(t.Context(), attempt, owned(t, tag)); err != nil {
+		t.Fatalf("identical retry after release: %v", err)
+	}
+	for name, claims := range map[string][]api.CleanupResource{
+		"new claim":   {tag, {Reference: "actor", UID: "actor-uid"}},
+		"changed uid": {{Reference: "tag", UID: "other", Borrower: "actor"}},
+	} {
+		if err := log.ConfirmAllocation(t.Context(), attempt, owned(t, claims...)); !errors.Is(err, ErrAllocationConflict) {
+			t.Fatalf("%s after release: err=%v, want ErrAllocationConflict", name, err)
+		}
+	}
+	if got := resourceRows(t, s, attempt); got["actor"].confirmed || got["tag"].uid != "tag-uid" {
+		t.Fatalf("released attempt changed: %+v", got)
+	}
+
+	// The retry must not compact a live attempt that repeats the released one's claims.
+	actor := api.CleanupResource{Reference: "actor", UID: "actor-uid"}
+	confirmed := func(op string) string {
+		t.Helper()
+		id, err := log.BeginPlannedAllocation(t.Context(), "key", op, api.CleanupResource{Reference: "actor"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := log.ConfirmAllocation(t.Context(), id, owned(t, actor)); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	old := confirmed("create")
+	if err := s.ReleaseAllocation(t.Context(), "s", old); err != nil {
+		t.Fatal(err)
+	}
+	live := confirmed("restore")
+	if err := log.ConfirmAllocation(t.Context(), old, owned(t, actor)); err != nil {
+		t.Fatalf("identical retry of a released full claim: %v", err)
+	}
+	if got, err := s.Allocations(t.Context(), "s"); err != nil || len(got) != 1 || got[0].ID != live {
+		t.Fatalf("live attempts after retry=%+v err=%v, want only %s", got, err, live)
+	}
+}
+
 // Confirmation order, not random attempt-ID order or begin order, chooses the retained row.
 func TestAllocationCompactionLateConfirmation(t *testing.T) {
 	s := deletionStore(t, ":memory:")

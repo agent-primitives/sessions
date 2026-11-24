@@ -1860,9 +1860,11 @@ The reference host takes it as `placement.Backend` in
   tag for an operator to delete), and the host writes no child journal. This reads only fields the
   journal already has; a backend that does not need it ignores it.
 - `RT-4j`: A runtime with dedicated per-session resources MAY implement
-  `api.ResourceCleanupRuntime`. `CleanupKey` names the exact control plane, not a harness alias;
-  an empty key opts out. `CleanupResources(operation, session_uid)` returns the complete plan before
-  I/O: opaque references with no UID, and at most one borrower each, which must be released first.
+  `api.ResourceCleanupRuntime`. `CleanupKey` names the control plane as the runtime's configuration
+  identifies it, not a harness alias; an empty key opts out. Two control planes configured alike
+  share a key unless the operator names them (the substrate daemon's
+  `-substrate-control-plane-id`). `CleanupResources(operation, session_uid)` returns the complete
+  plan before I/O: opaque references with no UID, and at most one borrower each, which must be released first.
   The runtime returns the UIDs it proved it created in `Incarnation.Cleanup`, also alongside an
   error. The host records the plan before I/O and confirms only planned references with unchanged
   UIDs and borrowers. It never adopts an object it finds by name, and an unknown outcome stays

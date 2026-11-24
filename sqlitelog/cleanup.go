@@ -208,7 +208,7 @@ func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Inca
 		planned = false
 	}
 	if planned {
-		if err := confirmResources(ctx, tx, attempt, released, observed); err != nil {
+		if err := confirmResources(ctx, tx, attempt, released, observed); err != nil || released {
 			return err
 		}
 		if err := compactRepeatedClaims(ctx, tx, l.session, backend, attempt); err != nil {
@@ -239,26 +239,28 @@ func (l *Log) ConfirmAllocation(ctx context.Context, attempt string, in api.Inca
 }
 
 // confirmResources records observed UIDs against the attempt's plan. A resource outside the plan, a
-// different borrower or a changed UID is a conflict; repeating the same evidence is a no-op.
+// different borrower or a changed UID is a conflict; repeating the same evidence is a no-op. On a
+// released attempt only that repeat is accepted: a claim not already confirmed is a conflict.
 func confirmResources(ctx context.Context, tx *sql.Tx, attempt string, released bool, observed []api.CleanupResource) error {
 	if len(observed) == 0 {
 		return nil
 	}
-	if released {
-		return ErrAllocationConflict
-	}
 	for _, resource := range observed {
 		var rowID, uid, borrower string
-		err := tx.QueryRowContext(ctx, `SELECT r.id,r.uid,COALESCE(b.reference,'')
+		var confirmed bool
+		err := tx.QueryRowContext(ctx, `SELECT r.id,r.uid,r.confirmed,COALESCE(b.reference,'')
 			FROM allocation_resources r
 			LEFT JOIN allocation_borrowers e ON e.resource_id=r.id
 			LEFT JOIN allocation_resources b ON b.id=e.borrower_resource_id
-			WHERE r.allocation_id=? AND r.reference=?`, attempt, resource.Reference).Scan(&rowID, &uid, &borrower)
-		if errors.Is(err, sql.ErrNoRows) || err == nil && (borrower != resource.Borrower || uid != "" && uid != resource.UID) {
+			WHERE r.allocation_id=? AND r.reference=?`, attempt, resource.Reference).Scan(&rowID, &uid, &confirmed, &borrower)
+		if errors.Is(err, sql.ErrNoRows) || err == nil && (borrower != resource.Borrower || uid != "" && uid != resource.UID || released && !confirmed) {
 			return ErrAllocationConflict
 		}
 		if err != nil {
 			return err
+		}
+		if released {
+			continue
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE allocation_resources SET uid=?,confirmed=1 WHERE id=?`, resource.UID, rowID); err != nil {
 			return err

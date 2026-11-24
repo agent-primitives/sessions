@@ -114,6 +114,7 @@ type substrateFlags struct {
 	atespace       *string
 	ateapi         *string
 	serverName     *string
+	controlPlane   *string
 	caFile         *string
 	insecureVerify *bool
 	tokenFile      *string
@@ -153,6 +154,7 @@ func (f *substrateFlags) RegisterFlags(fs *flag.FlagSet) {
 	f.atespace = fs.String("substrate-atespace", "", "atespace the session actors are created in; required with -substrate-harness. Must not change while sessions exist: their actors stay in the old atespace, and a REQUIRES_MEMORY_SNAPSHOT session with a started turn is then refused")
 	f.ateapi = fs.String("ateapi-addr", "api.ate-system.svc:443", "address of the substrate ate-api Control service (TLS)")
 	f.serverName = fs.String("ateapi-server-name", "", "TLS server name for the ate-api; empty uses the host of -ateapi-addr")
+	f.controlPlane = fs.String("substrate-control-plane-id", "", "stable name of the substrate control plane, such as its cluster name, recorded with every resource the daemon creates so cleanup can tell control planes apart. Empty identifies it only by -ateapi-server-name (or the host of -ateapi-addr) and -substrate-atespace, so daemons that reach different clusters under the same name and atespace share one key. Must not change while sessions exist")
 	f.caFile = fs.String("ateapi-ca-file", "", "PEM CA bundle that signs the ate-api serving certificate; empty uses the system roots")
 	f.insecureVerify = fs.Bool("ateapi-insecure-skip-verify", false, "do not verify the ate-api serving certificate, so a server impersonating the ate-api receives the -ateapi-token-file bearer token; for a dev cluster only")
 	f.tokenFile = fs.String("ateapi-token-file", "", "file holding the bearer token for the ate-api, re-read on every call so a rotated projected token is picked up")
@@ -257,8 +259,10 @@ func ateapiDeadline(timeout time.Duration) grpc.UnaryClientInterceptor {
 }
 
 // substrateCleanupKey names the control plane and atespace whose resources the ledger records. It
-// uses the TLS server name, or the host without its port, so a changed port keeps the same key.
-func substrateCleanupKey(address, serverName, atespace string) string {
+// uses the TLS server name, or the host without its port, so a changed port keeps the same key. Two
+// clusters reached under the same name, such as the default in-cluster address, share it unless the
+// operator names the control plane; an empty controlPlane keeps the key it had without one.
+func substrateCleanupKey(address, serverName, atespace, controlPlane string) string {
 	if atespace == "" || address == "" {
 		return ""
 	}
@@ -269,6 +273,9 @@ func substrateCleanupKey(address, serverName, atespace string) string {
 		} else {
 			identity = address
 		}
+	}
+	if controlPlane != "" {
+		identity += "\x00" + controlPlane
 	}
 	sum := sha256.Sum256([]byte("substrate-cleanup-v1\x00" + identity + "\x00" + atespace))
 	return hex.EncodeToString(sum[:])
@@ -316,7 +323,7 @@ func (f *substrateFlags) Backends(logger *slog.Logger) (map[string]placement.Bac
 	opts := []substrate.Option{
 		substrate.WithLogger(logger),
 		substrate.WithRouter(*f.router),
-		substrate.WithCleanupKey(substrateCleanupKey(*f.ateapi, *f.serverName, *f.atespace)),
+		substrate.WithCleanupKey(substrateCleanupKey(*f.ateapi, *f.serverName, *f.atespace, *f.controlPlane)),
 	}
 	if f.egressPolicy != nil {
 		// The backend refuses each session the same way, but a control client that cannot install

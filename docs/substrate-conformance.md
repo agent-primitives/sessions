@@ -63,8 +63,11 @@ interface must change for this: `CreateActor` returns `ActorInfo` and `TagActor`
 If `CreateActor` leaves the UID empty, a call that succeeds is still recorded by session handle, as
 before, and one that fails after creating the actor stays unconfirmed. A fork needs `TagActor` to
 return the tag's UID; otherwise the child's attempt stays unconfirmed.
-The daemon sets a cleanup key from its ate-api server identity and atespace; a backend built
-without one records no plan.
+The daemon sets a cleanup key from the ate-api TLS server name (or the host of `-ateapi-addr`), the
+atespace and `-substrate-control-plane-id`; a backend built without one records no plan. Without
+`-substrate-control-plane-id`, daemons that reach different clusters under the same name and
+atespace, such as the default in-cluster address or two port-forwards to `localhost`, share one key,
+and the ledger cannot tell which cluster an actor or tag UID belongs to.
 
 - `runtime/substrate` (in the core module) implements `api.Runtime` over that interface — no substrate
   import.
@@ -90,6 +93,7 @@ The substrate build of `agentsessionsd` adds these flags:
 | `-ateapi-addr` | ate-api Control address, TLS (default `api.ate-system.svc:443`). |
 | `-ateapi-token-file` | Bearer token file, re-read on every call, so a projected ServiceAccount token rotates. |
 | `-ateapi-ca-file`, `-ateapi-server-name` | Verify the ate-api certificate against this CA and name; the default is the system roots and the host of `-ateapi-addr`. |
+| `-substrate-control-plane-id` | Stable name of the control plane, such as its cluster name, folded into the cleanup key (above). Empty keeps the key of a daemon started without it. Set it before the first session when one journal may see more than one cluster, and don't change it while sessions exist. |
 | `-ateapi-insecure-skip-verify` | Skip certificate verification (dev clusters; the conformance Job does the same). A server impersonating the ate-api then receives the `-ateapi-token-file` bearer token. Exclusive with `-ateapi-ca-file`. |
 | `-atenet-router` | Router address harnesses are reached through, over mTLS (default `atenet-router.ate-system.svc:443`). See [the transport](#the-transport-harnesswire-through-atenet-router). |
 | `-atenet-router-cert-file`, `-atenet-router-ca-file` | Required. The host's SPIFFE certificate bundle (private key and chain, from a `podCertificate` volume for signer `podidentity.podcert.ate.dev/identity`) and the router's trust bundle (a `clusterTrustBundle` volume for signer `servicedns.podcert.ate.dev/identity`). Both are re-read on every router connection. The daemon refuses to start if either is missing, the certificate has expired or is not yet valid, or it does not carry exactly one SPIFFE ID. |

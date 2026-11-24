@@ -22,8 +22,9 @@ configurations returning the same handle for the same session compact into one r
 no safe release route. This is an incomplete intent ledger, not an authoritative cleanup inventory
 or a per-call audit log.
 
-Repeating confirmation of a retained attempt with the same handle is harmless, including after
-release. Confirming or releasing a compacted attempt returns `sqlitelog.ErrAllocationNotFound`. If a
+Repeating confirmation of a retained attempt with the same handle, or with UIDs it already
+confirmed, is harmless, including after release. After release, a UID not yet confirmed is a
+conflict, and the repeat retires no other attempt. Confirming or releasing a compacted attempt returns `sqlitelog.ErrAllocationNotFound`. If a
 late confirmation retires a row already paged for cleanup, reread the live inventory and retry its
 idempotent release; the surviving row remains unreleased.
 

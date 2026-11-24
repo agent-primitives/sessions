@@ -5,9 +5,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -857,22 +859,29 @@ func (s *syncBuffer) String() string {
 }
 
 // The cleanup key names one control plane and atespace. It survives a port change, so recorded
-// attempts keep their key, and is empty without an atespace.
+// attempts keep their key, and is empty without an atespace. Without -substrate-control-plane-id it
+// is the key journals already hold; with one, two clusters reached under the same name differ.
 func TestSubstrateCleanupKeyBindsControlPlaneAndAtespace(t *testing.T) {
-	a := substrateCleanupKey("api.cluster:443", "", "space")
-	if a == "" || a != substrateCleanupKey("api.cluster:7443", "api.cluster", "space") {
-		t.Fatalf("key changed across port or server name: %q", a)
+	a := substrateCleanupKey("api.cluster:443", "", "space", "")
+	want := sha256.Sum256([]byte("substrate-cleanup-v1\x00api.cluster\x00space"))
+	if a != hex.EncodeToString(want[:]) || a != substrateCleanupKey("api.cluster:7443", "api.cluster", "space", "") {
+		t.Fatalf("default key changed: %q", a)
 	}
+	east := substrateCleanupKey("api.cluster:443", "", "space", "east")
 	for _, other := range []string{
-		substrateCleanupKey("other.cluster:443", "", "space"),
-		substrateCleanupKey("api.cluster:443", "other.cluster", "space"),
-		substrateCleanupKey("api.cluster:443", "", "other-space"),
+		substrateCleanupKey("other.cluster:443", "", "space", ""),
+		substrateCleanupKey("api.cluster:443", "other.cluster", "space", ""),
+		substrateCleanupKey("api.cluster:443", "", "other-space", ""),
+		east,
 	} {
 		if other == "" || other == a {
 			t.Fatalf("cleanup key collision: %q", other)
 		}
 	}
-	if got := substrateCleanupKey("api.cluster:443", "", ""); got != "" {
+	if east == substrateCleanupKey("api.cluster:443", "", "space", "west") {
+		t.Fatalf("two named control planes share key %q", east)
+	}
+	if got := substrateCleanupKey("api.cluster:443", "", "", "east"); got != "" {
 		t.Fatalf("key without atespace=%q, want empty", got)
 	}
 }

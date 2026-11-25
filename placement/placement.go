@@ -450,7 +450,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	defer guard.settle(ctx, &err)
 	callCtx, createFinished := observability.BeginDebug(ctx, p.logger, "placement", "create_compute",
 		"session_uid", sessionUID)
-	inc, err = p.allocate(callCtx, log, "create", func() (api.Incarnation, error) {
+	inc, err = p.allocate(callCtx, log, sessionUID, "create", func() (api.Incarnation, error) {
 		in, err := p.backend.Create(callCtx, spec)
 		if err == nil {
 			guard.arm(in)
@@ -1302,7 +1302,7 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	// before resume and classify permanent loss after a failure. Each callback reads the journal
 	// when the backend decides, so a turn another host journals between those checks is seen.
 	defer guard.settle(ctx, &err)
-	inc, err = p.allocate(ctx, log, "restore", func() (in api.Incarnation, err error) {
+	inc, err = p.allocate(ctx, log, sessionUID, "restore", func() (in api.Incarnation, err error) {
 		defer func() {
 			if err == nil {
 				guard.arm(in)
@@ -1485,6 +1485,24 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 			return fmt.Errorf("placement: fork child %q: %w", child.UID, err)
 		}
 	}
+	var ownedResourceCleanup api.ResourceCleanupRuntime
+	cleanupKey := ""
+	if cleanup, ok := p.backend.(api.ResourceCleanupRuntime); ok && cleanup.CleanupKey() != "" {
+		ownedResourceCleanup = cleanup
+		cleanupKey = cleanup.CleanupKey()
+	}
+	// Plans are validated now, before any I/O, but each child's attempt is begun just before its own
+	// runtime Fork, so a refused fork or a fan-out that stops early leaves no attempt for a child the
+	// runtime never saw.
+	plans := make([][]api.CleanupResource, len(children))
+	if ownedResourceCleanup != nil {
+		for i, child := range children {
+			plans[i] = append([]api.CleanupResource(nil), ownedResourceCleanup.CleanupResources(api.CleanupFork, child.UID)...)
+			if err := api.ValidateCleanupPlan(plans[i]); err != nil {
+				return fmt.Errorf("%w: fork child %q cleanup plan: %v", ErrUnplaceable, child.UID, err)
+			}
+		}
+	}
 	// Check the records the children inherit before admission, the parent's checkpoint or any child
 	// compute (CHAIN-12): a memory-tier fork appends SUSPEND to the parent in forkSource, before
 	// ForkWithComputeInstance would see the tamper.
@@ -1507,13 +1525,38 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 		p.rollbackFork(ctx, created)
 		return err
 	}
-	for _, child := range children {
-		inc, err := p.backend.Fork(ctx, ref, api.ForkOpts{ChildSessionUID: child.UID})
-		if err != nil {
-			// Classify the runtime failure before rollback, not a later journal refusal.
-			return abort(allocationStartError(ctx, err))
+	for i, child := range children {
+		recorder, tracked := child.Log.(forkAllocationRecorder)
+		tracked = tracked && ownedResourceCleanup != nil
+		attempt := ""
+		if tracked {
+			if attempt, err = recorder.BeginUnpublishedAllocation(ctx, cleanupKey, "fork", plans[i]...); err != nil {
+				return abort(fmt.Errorf("placement: begin fork child %q allocation: %w", child.UID, err))
+			}
+		}
+		inc, effectErr := p.backend.Fork(ctx, ref, api.ForkOpts{ChildSessionUID: child.UID})
+		var confirmErr error
+		if tracked {
+			confirmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			confirmErr = recorder.ConfirmAllocation(confirmCtx, attempt, confirmable(inc, effectErr))
+			cancel()
+			if confirmErr != nil {
+				confirmErr = fmt.Errorf("placement: confirm fork child %q allocation: %w", child.UID, confirmErr)
+			}
+		}
+		if effectErr != nil {
+			// Classify the runtime failure before rollback, not a later journal refusal. The backend
+			// already tore down what it created for this child.
+			primary := allocationStartError(ctx, effectErr)
+			if confirmErr != nil {
+				primary = errors.Join(primary, confirmErr)
+			}
+			return abort(primary)
 		}
 		created = append(created, child.UID)
+		if confirmErr != nil {
+			return abort(confirmErr)
+		}
 		_, copyFinished := observability.BeginDebug(ctx, p.logger, "placement", "copy_fork_log",
 			"parent_session_uid", parentUID,
 			"child_session_uid", child.UID,

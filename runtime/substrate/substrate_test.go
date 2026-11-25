@@ -122,16 +122,16 @@ func (m *mockControl) uid(name string) string {
 	return m.uids[name]
 }
 
-func (m *mockControl) CreateActor(ctx context.Context, a substrate.ActorRef, _ substrate.ObjectRef) error {
+func (m *mockControl) CreateActor(ctx context.Context, a substrate.ActorRef, _ substrate.ObjectRef) (substrate.ActorInfo, error) {
 	m.calls = append(m.calls, "create:"+a.Name)
 	if _, ok := m.actors[a.Name]; ok {
-		return fmt.Errorf("%w: %q", substrate.ErrActorExists, a.Name)
+		return substrate.ActorInfo{}, fmt.Errorf("%w: %q", substrate.ErrActorExists, a.Name)
 	}
 	m.exists(a.Name, substrate.StatusRunning)
 	if m.afterCreate != nil {
 		m.afterCreate(a.Name)
 	}
-	return nil
+	return substrate.ActorInfo{UID: m.uid(a.Name)}, nil
 }
 func (m *mockControl) ResumeActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	m.calls = append(m.calls, "resume:"+a.Name)
@@ -263,11 +263,17 @@ type mockCloner struct {
 	// UID.
 	afterClone func(name string)
 	cloneNoUID bool
+	// tagNoUID makes TagActor report no UID, as a client that predates TagInfo may.
+	tagNoUID bool
 }
 
-func (m *mockCloner) TagActor(ctx context.Context, source substrate.ActorRef, tag substrate.SnapshotID) error {
+func (m *mockCloner) TagActor(ctx context.Context, source substrate.ActorRef, tag substrate.SnapshotID) (substrate.TagInfo, error) {
 	m.calls = append(m.calls, "tag:"+source.Name+"->"+tag.Name)
-	return m.tagErr
+	// The UID comes back even with an error, the worst case a control client could report.
+	if m.tagNoUID {
+		return substrate.TagInfo{}, m.tagErr
+	}
+	return substrate.TagInfo{UID: "uid-" + tag.Name}, m.tagErr
 }
 
 func (m *mockCloner) CreateActorFromTag(ctx context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {

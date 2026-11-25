@@ -15,6 +15,8 @@ import (
 // eventlog.SessionJournal return type.
 type allocationTracker interface {
 	BeginAllocation(ctx context.Context, backend, operation string) (string, error)
+	BeginPlannedAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error)
+	BeginUnpublishedAllocation(ctx context.Context, backend, operation string, resources ...api.CleanupResource) (string, error)
 	ConfirmAllocation(ctx context.Context, attempt string, in api.Incarnation) error
 }
 

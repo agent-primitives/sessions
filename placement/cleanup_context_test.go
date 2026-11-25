@@ -51,7 +51,7 @@ func TestAllocationContextFailureBoundaries(t *testing.T) {
 			if tc.tracked {
 				log = &contextAllocationLog{confirmErr: tc.confirmErr}
 			}
-			_, err := p.allocate(ctx, log, "create", func() (api.Incarnation, error) {
+			_, err := p.allocate(ctx, log, "s", "create", func() (api.Incarnation, error) {
 				if tc.cancelCause != nil {
 					cancel(tc.cancelCause)
 				}

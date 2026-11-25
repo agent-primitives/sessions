@@ -5,9 +5,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -157,6 +159,7 @@ func TestSubstrateStartupChecks(t *testing.T) {
 		{name: "bad atespace", args: []string{"-model", "m", "-substrate-harness", "w=t/w", "-substrate-atespace", "Bad_Space"}, want: "-substrate-atespace"},
 		{name: "built-in name", args: []string{"-model", "m", "-substrate-harness", "chat=t/c", "-substrate-atespace", "s"}, want: `harness "chat" is already served`},
 		{name: "also a remote", args: append(slices.Clone(base), "-harness", "w=127.0.0.1:9000"), want: `harness "w" is given with -harness and is also configured by this build's flags`},
+		{name: "padded control plane id", args: append(slices.Clone(base), "-substrate-control-plane-id", "east "), want: "-substrate-control-plane-id"},
 		{name: "bad ate-api address", args: append(slices.Clone(base), "-ateapi-addr", "https://api:443"), want: "-ateapi-addr"},
 		{name: "bad router address", args: append(slices.Clone(base), "-atenet-router", "router"), want: "-atenet-router"},
 		{name: "ca and insecure", args: append(slices.Clone(base), "-ateapi-ca-file", token, "-ateapi-insecure-skip-verify"), want: "mutually exclusive"},
@@ -586,12 +589,12 @@ func (f *fakeControl) log() []string {
 	return slices.Clone(f.calls)
 }
 
-func (f *fakeControl) CreateActor(_ context.Context, a substrate.ActorRef, tmpl substrate.ObjectRef) error {
+func (f *fakeControl) CreateActor(_ context.Context, a substrate.ActorRef, tmpl substrate.ObjectRef) (substrate.ActorInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "create:"+a.Atespace+"/"+a.Name+":tmpl="+tmpl.Atespace+"/"+tmpl.Name)
 	f.actors[a.Name] = substrate.StatusSuspended
-	return nil
+	return substrate.ActorInfo{}, nil
 }
 
 func (f *fakeControl) ResumeActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -854,4 +857,32 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// The cleanup key names one control plane and atespace. It survives a port change, so recorded
+// attempts keep their key, and is empty without an atespace. Without -substrate-control-plane-id it
+// is the key journals already hold; with one, two clusters reached under the same name differ.
+func TestSubstrateCleanupKeyBindsControlPlaneAndAtespace(t *testing.T) {
+	a := substrateCleanupKey("api.cluster:443", "", "space", "")
+	want := sha256.Sum256([]byte("substrate-cleanup-v1\x00api.cluster\x00space"))
+	if a != hex.EncodeToString(want[:]) || a != substrateCleanupKey("api.cluster:7443", "api.cluster", "space", "") {
+		t.Fatalf("default key changed: %q", a)
+	}
+	east := substrateCleanupKey("api.cluster:443", "", "space", "east")
+	for _, other := range []string{
+		substrateCleanupKey("other.cluster:443", "", "space", ""),
+		substrateCleanupKey("api.cluster:443", "other.cluster", "space", ""),
+		substrateCleanupKey("api.cluster:443", "", "other-space", ""),
+		east,
+	} {
+		if other == "" || other == a {
+			t.Fatalf("cleanup key collision: %q", other)
+		}
+	}
+	if east == substrateCleanupKey("api.cluster:443", "", "space", "west") {
+		t.Fatalf("two named control planes share key %q", east)
+	}
+	if got := substrateCleanupKey("api.cluster:443", "", "", "east"); got != "" {
+		t.Fatalf("key without atespace=%q, want empty", got)
+	}
 }

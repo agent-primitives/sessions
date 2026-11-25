@@ -101,7 +101,9 @@ func (f *fakeControl) CreateTag(_ context.Context, in *atepb.CreateTagRequest, _
 	if f.tagErr != nil {
 		return nil, f.tagErr
 	}
-	return tg, nil
+	stored := proto.Clone(tg).(*atepb.Tag)
+	stored.Metadata.Uid = "uid-" + tg.GetMetadata().GetName()
+	return stored, nil
 }
 func (f *fakeControl) DeleteTag(_ context.Context, in *atepb.DeleteTagRequest, _ ...grpc.CallOption) (*atepb.Tag, error) {
 	f.calls = append(f.calls, "untag:"+in.GetTag().GetAtespace()+"/"+in.GetTag().GetName())
@@ -165,11 +167,15 @@ func durableSnapshot(gen int32, uri string, st atepb.SnapshotStorageState) *atep
 // The template is an atespaced substrate resource, referenced by (atespace, name) on the actor.
 func TestCreateMapsTemplate(t *testing.T) {
 	f := &fakeControl{}
-	err := FromClient(f).CreateActor(context.Background(),
+	created, err := FromClient(f).CreateActor(context.Background(),
 		substrate.ActorRef{Atespace: "space", Name: "sess-x"},
 		substrate.ObjectRef{Atespace: "tmpl", Name: "echo"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Cleanup records the UID the server assigned to this create.
+	if created.UID != "uid-sess-x" {
+		t.Fatalf("created UID=%q, want the server-assigned uid-sess-x", created.UID)
 	}
 	if want := []string{"create:space/sess-x:tmpl=tmpl/echo"}; !reflect.DeepEqual(f.calls, want) {
 		t.Fatalf("calls=%v want %v", f.calls, want)
@@ -185,12 +191,12 @@ func TestCreateReportsATakenName(t *testing.T) {
 	ref := substrate.ActorRef{Atespace: "space", Name: "sess-x"}
 	tmpl := substrate.ObjectRef{Atespace: "space", Name: "echo"}
 	taken := status.Error(codes.AlreadyExists, "actor space/sess-x already exists")
-	err := FromClient(&fakeControl{createErr: taken}).CreateActor(context.Background(), ref, tmpl)
+	_, err := FromClient(&fakeControl{createErr: taken}).CreateActor(context.Background(), ref, tmpl)
 	if !errors.Is(err, substrate.ErrActorExists) || !errors.Is(err, taken) {
 		t.Fatalf("taken name: err=%v, want ErrActorExists wrapping the AlreadyExists error", err)
 	}
 	other := status.Error(codes.FailedPrecondition, "template has no golden snapshot")
-	err = FromClient(&fakeControl{createErr: other}).CreateActor(context.Background(), ref, tmpl)
+	_, err = FromClient(&fakeControl{createErr: other}).CreateActor(context.Background(), ref, tmpl)
 	if errors.Is(err, substrate.ErrActorExists) || !errors.Is(err, other) {
 		t.Fatalf("other create error: err=%v, want it unchanged", err)
 	}
@@ -423,12 +429,12 @@ func TestHeldSnapshotDoesNotFallBack(t *testing.T) {
 // so it does not delete someone else's tag while cleaning up its own failed attempt.
 func TestTagActorReportsAlreadyExistsAsSentinel(t *testing.T) {
 	f := &fakeControl{tagErr: status.Error(codes.AlreadyExists, "Tag space/fork-c already exists")}
-	err := FromClient(f).TagActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: "p"}, substrate.SnapshotID{Atespace: "space", Name: "fork-c"})
+	_, err := FromClient(f).TagActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: "p"}, substrate.SnapshotID{Atespace: "space", Name: "fork-c"})
 	if !errors.Is(err, substrate.ErrTagExists) {
 		t.Fatalf("err=%v want ErrTagExists", err)
 	}
 	f.tagErr = status.Error(codes.Unavailable, "object store unavailable")
-	err = FromClient(f).TagActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: "p"}, substrate.SnapshotID{Atespace: "space", Name: "fork-c"})
+	_, err = FromClient(f).TagActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: "p"}, substrate.SnapshotID{Atespace: "space", Name: "fork-c"})
 	if err == nil || errors.Is(err, substrate.ErrTagExists) {
 		t.Fatalf("err=%v want a failure that is not ErrTagExists", err)
 	}
@@ -652,8 +658,12 @@ func TestCloneTagsParentThenCreatesFromTag(t *testing.T) {
 	parent := substrate.ActorRef{Atespace: "space", Name: "parent"}
 	tag := substrate.SnapshotID{Atespace: "space", Name: "fork-child"}
 
-	if err := ad.TagActor(context.Background(), parent, tag); err != nil {
+	tagged, err := ad.TagActor(context.Background(), parent, tag)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if tagged.UID != "uid-fork-child" {
+		t.Fatalf("tag UID=%q, want the server-assigned uid-fork-child", tagged.UID)
 	}
 	created, err := ad.CreateActorFromTag(context.Background(),
 		substrate.ActorRef{Atespace: "space", Name: "child"},
@@ -730,7 +740,8 @@ func TestAbortedResumeAndSuspendAreBusy(t *testing.T) {
 			return err
 		},
 		"tag": func(f *fakeControl) error {
-			return FromClient(f).TagActor(context.Background(), ref, substrate.SnapshotID{Atespace: "space", Name: "fork-c"})
+			_, err := FromClient(f).TagActor(context.Background(), ref, substrate.SnapshotID{Atespace: "space", Name: "fork-c"})
+			return err
 		},
 	}
 	for name, op := range ops {

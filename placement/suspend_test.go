@@ -90,13 +90,13 @@ func newSuspendControl() *suspendControl {
 	}
 }
 
-func (c *suspendControl) CreateActor(_ context.Context, ref substrate.ActorRef, template substrate.ObjectRef) error {
+func (c *suspendControl) CreateActor(_ context.Context, ref substrate.ActorRef, template substrate.ObjectRef) (substrate.ActorInfo, error) {
 	c.calls = append(c.calls, "create:"+ref.Name)
 	if _, exists := c.actors[ref]; exists {
-		return fmt.Errorf("%w: %s", substrate.ErrActorExists, ref.Name)
+		return substrate.ActorInfo{}, fmt.Errorf("%w: %s", substrate.ErrActorExists, ref.Name)
 	}
 	c.actors[ref] = &suspendActor{status: substrate.StatusSuspended, template: template, uid: c.newUID()}
-	return nil
+	return substrate.ActorInfo{}, nil
 }
 
 func (c *suspendControl) ResumeActor(_ context.Context, ref substrate.ActorRef) (substrate.ActorInfo, error) {
@@ -209,23 +209,23 @@ func (c *suspendControl) info(ref substrate.ActorRef, a *suspendActor) substrate
 }
 
 // TagActor tags the snapshot the suspended source actor holds now, as substrate's CreateTag does.
-func (c *suspendControl) TagActor(_ context.Context, ref substrate.ActorRef, tag substrate.SnapshotID) error {
+func (c *suspendControl) TagActor(_ context.Context, ref substrate.ActorRef, tag substrate.SnapshotID) (substrate.TagInfo, error) {
 	c.calls = append(c.calls, "tag:"+ref.Name+"->"+tag.Name)
 	a, exists := c.actors[ref]
 	if !exists {
-		return status.Error(codes.NotFound, "actor does not exist")
+		return substrate.TagInfo{}, status.Error(codes.NotFound, "actor does not exist")
 	}
 	if a.status != substrate.StatusSuspended || a.worker {
-		return status.Error(codes.FailedPrecondition, "source actor must be suspended")
+		return substrate.TagInfo{}, status.Error(codes.FailedPrecondition, "source actor must be suspended")
 	}
 	if _, exists := c.snapshots[a.snapshot]; !exists {
-		return status.Error(codes.NotFound, "snapshot does not exist")
+		return substrate.TagInfo{}, status.Error(codes.NotFound, "snapshot does not exist")
 	}
 	if _, exists := c.tags[tag]; exists {
-		return fmt.Errorf("%w: %s", substrate.ErrTagExists, tag.Name)
+		return substrate.TagInfo{}, fmt.Errorf("%w: %s", substrate.ErrTagExists, tag.Name)
 	}
 	c.tags[tag] = a.snapshot
-	return nil
+	return substrate.TagInfo{}, nil
 }
 
 func (c *suspendControl) CreateActorFromTag(_ context.Context, ref substrate.ActorRef, template substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {

@@ -22,16 +22,34 @@ configurations returning the same handle for the same session compact into one r
 no safe release route. This is an incomplete intent ledger, not an authoritative cleanup inventory
 or a per-call audit log.
 
-Repeating confirmation of a retained attempt with the same handle is harmless, including after
-release. Confirming or releasing a compacted attempt returns `sqlitelog.ErrAllocationNotFound`. If a
-late confirmation retires a row already paged for cleanup, reread the live inventory and retry its
-idempotent release; the surviving row remains unreleased.
+Repeating confirmation of a retained attempt with the same handle, or with UIDs it already
+confirmed, is harmless, including after release. After release, a UID not yet confirmed is a
+conflict, and the repeat retires no other attempt. Confirming or releasing a compacted attempt
+returns `sqlitelog.ErrAllocationNotFound`. If a late confirmation retires a row already paged for
+cleanup, reread the live inventory and retry its idempotent release; the surviving row remains
+unreleased.
 
 `api.CleanupRuntime` is an optional, non-destructive release contract. Local and remote backends
 opt in using configuration keys; unsupported backends record an empty key instead of guessing a
 safe release route. The ledger runs no cleanup and does not change Fork's rollback semantics. Apart
 from the ledger, a failed `Exec` or `Resume` releases the compute it allocated through
 `ReleaseSession` when the journal records nothing that owns it (spec `RT-7`).
+
+## Resource plans
+
+A runtime with dedicated per-session resources can implement `api.ResourceCleanupRuntime` (spec
+`RT-4j`). Substrate does when the daemon gives it a cleanup key. Placement then records the
+operation's complete resource plan before I/O: provider-opaque references, and which resource
+borrows which (a memory-tier fork child borrows its tag's snapshot). The runtime returns the UIDs it
+proved it created in `Incarnation.Cleanup`, also with an error, and placement confirms them on the
+same bounded context. A reference outside the plan, a changed UID or a changed borrower is a
+conflict. A lost response leaves the resource unconfirmed. A success that proves no UID, such as an
+Exec that re-attaches to an existing actor, drops its plan and is confirmed by its handle like any
+other attempt, and a Restore that proves the same UIDs as an earlier attempt replaces it, so the
+ledger does not grow by a row per turn. A Fork child's plan is recorded just before its runtime
+Fork, without publishing the child. A journal records plans only through the optional
+`BeginPlannedAllocation` and `BeginUnpublishedAllocation`. These rows are not released yet;
+teardown is unchanged.
 
 ## Compatibility
 
@@ -45,3 +63,6 @@ Create/Restore alone cannot cover a subsequent legacy Fork. Neither an empty led
 fork nor a later tracked restore establishes completeness. A host embedding `sqlitelog` may call
 `Store.CertifyInventory` only after reconciling every namespace, runtime override and failed-fork
 allocation; its evidence is persisted. Resource confirmation/release never auto-certifies inventory.
+
+Version 10 adds the resource plan tables. Its rollout steps are in
+[spec §18](../spec.md#18-versioning-and-compatibility).

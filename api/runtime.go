@@ -157,6 +157,109 @@ type CleanupRuntime interface {
 	ReleaseSession(ctx context.Context, sessionUID string) error
 }
 
+// CleanupOperation names a runtime effect whose owned resources placement records before I/O.
+type CleanupOperation string
+
+const (
+	CleanupCreate  CleanupOperation = "create"
+	CleanupRestore CleanupOperation = "restore"
+	CleanupFork    CleanupOperation = "fork"
+)
+
+// ErrCleanupResource classifies invalid resource plans or ownership evidence. Messages intentionally
+// omit references and provider payloads, since RPC errors can carry this text outside authorization.
+var ErrCleanupResource = errors.New("cleanup resource: invalid")
+
+// CleanupResource is provider-opaque ownership evidence. Reference names one planned resource;
+// UID becomes required only after the backend proves it owns that exact resource. Borrower names at
+// most one other resource in the complete plan that must be released before this resource.
+type CleanupResource struct {
+	Reference string
+	UID       string
+	Borrower  string
+}
+
+// ValidateCleanupPlan validates UID-empty targets and complete borrower closure before runtime I/O.
+func ValidateCleanupPlan(resources []CleanupResource) error {
+	refs := make(map[string]CleanupResource, len(resources))
+	for _, resource := range resources {
+		if resource.Reference == "" || resource.UID != "" {
+			return ErrCleanupResource
+		}
+		if _, exists := refs[resource.Reference]; exists {
+			return ErrCleanupResource
+		}
+		if resource.Borrower == resource.Reference {
+			return ErrCleanupResource
+		}
+		refs[resource.Reference] = resource
+	}
+	for _, resource := range resources {
+		if resource.Borrower != "" {
+			if _, exists := refs[resource.Borrower]; !exists {
+				return ErrCleanupResource
+			}
+		}
+	}
+	state := make(map[string]uint8, len(resources))
+	var visit func(string) bool
+	visit = func(ref string) bool {
+		switch state[ref] {
+		case 1:
+			return true
+		case 2:
+			return false
+		}
+		state[ref] = 1
+		if next := refs[ref].Borrower; next != "" && visit(next) {
+			return true
+		}
+		state[ref] = 2
+		return false
+	}
+	for ref := range refs {
+		if visit(ref) {
+			return ErrCleanupResource
+		}
+	}
+	return nil
+}
+
+// CleanupEvidence is immutable ownership evidence returned alongside an incarnation or error. Its
+// unexported storage means ordinary Incarnation copies cannot mutate the evidence in place.
+type CleanupEvidence struct {
+	resources []CleanupResource
+}
+
+// NewCleanupEvidence validates partial ownership evidence. A borrower may name a resource omitted
+// from partial evidence because the complete plan is durable before the runtime call.
+func NewCleanupEvidence(resources []CleanupResource) (CleanupEvidence, error) {
+	seen := make(map[string]struct{}, len(resources))
+	for _, resource := range resources {
+		if resource.Reference == "" || resource.UID == "" || resource.Borrower == resource.Reference {
+			return CleanupEvidence{}, ErrCleanupResource
+		}
+		if _, exists := seen[resource.Reference]; exists {
+			return CleanupEvidence{}, ErrCleanupResource
+		}
+		seen[resource.Reference] = struct{}{}
+	}
+	return CleanupEvidence{resources: append([]CleanupResource(nil), resources...)}, nil
+}
+
+// Resources returns a defensive copy of the observed ownership evidence.
+func (e CleanupEvidence) Resources() []CleanupResource {
+	return append([]CleanupResource(nil), e.resources...)
+}
+
+// ResourceCleanupRuntime opts a backend with dedicated resources into identity-bearing cleanup
+// records. CleanupKey identifies the control-plane configuration; CleanupResources returns the
+// complete, UID-empty plan before I/O. Releasing recorded resources is not part of this interface yet.
+type ResourceCleanupRuntime interface {
+	CleanupKey() string
+	CleanupResources(CleanupOperation, string) []CleanupResource
+}
+
 // SnapshotKind selects local (warm/pause) vs external (cold/suspend) storage.
 type SnapshotKind string
 
@@ -202,6 +305,10 @@ type Incarnation struct {
 	// fork pass that recorded instance to Snapshot, which refuses another one.
 	// Empty records nothing and skips the check.
 	ComputeInstance string
+	// Cleanup is provider-opaque ownership evidence. It is separate from routing fields and
+	// ComputeInstance, which identifies memory continuity rather than all dedicated compute. A
+	// backend may return it with an error after a control-plane effect succeeded.
+	Cleanup CleanupEvidence
 	// RecordedCheckpoint, on the Incarnation passed to Snapshot, is the checkpoint the session's
 	// journal last recorded for the session (see SessionSpec.RecordedCheckpoint); the zero value
 	// means none. Suspend and a stateful fork set it. A backend whose compute can hold a snapshot

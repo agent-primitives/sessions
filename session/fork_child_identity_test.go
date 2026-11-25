@@ -99,7 +99,7 @@ func TestForkChildWhoseCloneIsReplacedBeforeItsFirstTurnIsRefused(t *testing.T) 
 			if err := ctl.DeleteActor(ctx, ref); err != nil {
 				t.Fatal(err)
 			}
-			if err := ctl.CreateActor(ctx, ref, substrate.ObjectRef{Atespace: "space", Name: "mem"}); err != nil {
+			if _, err := ctl.CreateActor(ctx, ref, substrate.ObjectRef{Atespace: "space", Name: "mem"}); err != nil {
 				t.Fatal(err)
 			}
 			ctl.mu.Lock()
@@ -185,7 +185,7 @@ func TestForkChildWithoutARecordedCloneIsNotCompared(t *testing.T) {
 		t.Fatalf("legacy FORK marker records instance %q, want none", got)
 	}
 	ref := substrate.ActorRef{Atespace: "space", Name: child}
-	if err := ctl.CreateActor(ctx, ref, substrate.ObjectRef{Atespace: "space", Name: "mem"}); err != nil {
+	if _, err := ctl.CreateActor(ctx, ref, substrate.ObjectRef{Atespace: "space", Name: "mem"}); err != nil {
 		t.Fatal(err)
 	}
 	ctl.mu.Lock()
@@ -233,7 +233,7 @@ func TestForkWhoseCloneIsReplacedDuringTheForkIsAborted(t *testing.T) {
 		if err := ctl.DeleteActor(ctx, ref); err != nil {
 			t.Error(err)
 		}
-		if err := ctl.CreateActor(ctx, ref, substrate.ObjectRef{Atespace: "space", Name: "mem"}); err != nil {
+		if _, err := ctl.CreateActor(ctx, ref, substrate.ObjectRef{Atespace: "space", Name: "mem"}); err != nil {
 			t.Error(err)
 		}
 		ctl.mu.Lock()

@@ -508,7 +508,11 @@ reads the catalog that registration writes; the reference daemon does.
   backend, operation)` and `ConfirmAllocation(ctx, attempt, incarnation)`. When it does, the
   reference host calls `BeginAllocation` before each runtime `Create` and `Restore` and
   `ConfirmAllocation` with the incarnation returned, and fails the operation if either call
-  fails. A journal without them runs without the allocation ledger (§13.4, `OPS-35`). A journal
+  fails. A journal without them runs without the allocation ledger (§13.4, `OPS-35`). To record a
+  resource plan (`RT-4j`) a journal MAY also implement `BeginPlannedAllocation(ctx, backend,
+  operation, resources...)`, used in place of `BeginAllocation`, and for fork children
+  `BeginUnpublishedAllocation` with the same arguments; without them the host records no plan, and a
+  fork child forks untracked. A journal
   MAY also implement `ReadProto(from_seq)`, returning the records of `LOG-16` with their stored
   protobuf events. The reference host's `Replay` uses it when present (§6.6); otherwise it
   converts the `Read` records, which keep the stored hashes but not field presence, so an audit
@@ -1855,6 +1859,18 @@ The reference host takes it as `placement.Backend` in
   cannot, such as one whose lease another caller holds, is logged at `WARN` naming the clone and its
   tag for an operator to delete), and the host writes no child journal. This reads only fields the
   journal already has; a backend that does not need it ignores it.
+- `RT-4j`: A runtime with dedicated per-session resources MAY implement
+  `api.ResourceCleanupRuntime`. `CleanupKey` names the control plane as the runtime's configuration
+  identifies it, not a harness alias; an empty key opts out. Two control planes configured alike
+  share a key unless the operator names them (the substrate daemon's `-substrate-control-plane-id`).
+  `CleanupResources(operation, session_uid)` returns the complete plan before I/O: opaque references
+  with no UID, and at most one borrower each, which must be released first. The runtime returns the
+  UIDs it proved it created in `Incarnation.Cleanup`, also alongside an error. The host records the
+  plan before I/O and confirms only planned references with unchanged UIDs and borrowers. It never
+  adopts an object it finds by name, and an unknown outcome stays unconfirmed. A success that proves
+  no UID (an Exec that re-attaches, a stateless Resume) created nothing the runtime owns: the host
+  drops its plan and confirms its session handle instead. Fork records each child's plan without
+  publishing the child, just before that child's runtime `Fork` (§13.4).
 - `RT-4f`: `Describe` returns the harness descriptor the host admits on. It MUST NOT provision
   compute: the host calls it before `Create`, `Restore`, and the fork source step (`RT-1`), in the
   memory-tier override check (`OPS-7`), and when the registry reports a harness's observed
@@ -1982,6 +1998,12 @@ incomplete, as does every migrated row; tracking a later restore does not certif
 untracked fork. A host embedding `sqlitelog` can establish coverage by calling
 `Store.CertifyInventory` only after explicit reconciliation. Stop all old writers before migration
 and never downgrade the migrated journal to v0.3.0 or older.
+
+Version 10 adds one `allocation_resources` row per planned resource and `allocation_borrowers`
+edges (`RT-4j`). A Fork child's plan is recorded without a `sessions` row, so a failed fan-out does
+not publish the child. Nothing releases these rows yet: teardown is unchanged, and the cleanup
+reaper and cleanup-complete state come later. The `canonical_resource_id` column ships empty for
+that later work. Rollout is in §18.
 
 - `runtime/local`: serves the harness in the host process over a unix socket shared by all
   sessions. `Describe` asks that in-process harness. All capabilities false.
@@ -2438,6 +2460,12 @@ The reference implementation protects the integrity of the record, not access to
     embedded `agentctl`, and back up the database and WAL before the first version 8 open: Open
     stamps the journal even when the process only reads metadata, and there is no downgrade to
     version 7.
+  - Version 10 adds the `allocation_resources` and `allocation_borrowers` tables (§13.4). It adds
+    no proto fields and changes no event bytes, and existing allocation rows are kept as they are.
+    The migration is one-way. Stop every older host and embedded client sharing the journal, then
+    back up the database and WAL before the first version 10 open. An older binary refuses a
+    version 10 journal at Open, but one that already has it open is not stopped by the stamp. There
+    is no downgrade; restore the backup to roll back.
   - Version 9 extends `approval_executions` with an execution outcome and rebuilds the shared
     execution/approval projection from the journal. Events, canonical bytes, hashes and fences
     do not change. An undecodable session reports RUNNING without an approval reference; SQL

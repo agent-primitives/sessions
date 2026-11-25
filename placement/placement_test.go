@@ -329,8 +329,8 @@ func TestDescriptorMismatchPrecedesInvalidHarnessClass(t *testing.T) {
 // without a real ate-api-server.
 type stubControl struct{}
 
-func (stubControl) CreateActor(context.Context, substrate.ActorRef, substrate.ObjectRef) error {
-	return nil
+func (stubControl) CreateActor(context.Context, substrate.ActorRef, substrate.ObjectRef) (substrate.ActorInfo, error) {
+	return substrate.ActorInfo{}, nil
 }
 func (stubControl) ResumeActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
 	return substrate.ActorInfo{}, nil
@@ -502,9 +502,9 @@ func (c *cloningControl) GetActor(_ context.Context, a substrate.ActorRef) (subs
 	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot, SnapshotFidelity: substrate.SnapshotFidelityMemory, UID: "uid-" + a.Name, CaptureLineage: c.lineage(), NoCapture: true}, nil
 }
 
-func (c *cloningControl) TagActor(_ context.Context, source substrate.ActorRef, tag substrate.SnapshotID) error {
+func (c *cloningControl) TagActor(_ context.Context, source substrate.ActorRef, tag substrate.SnapshotID) (substrate.TagInfo, error) {
 	c.calls = append(c.calls, "tag:"+source.Name+"->"+tag.Name)
-	return nil
+	return substrate.TagInfo{}, nil
 }
 
 func (c *cloningControl) CreateActorFromTag(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {

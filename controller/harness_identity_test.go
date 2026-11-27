@@ -329,6 +329,38 @@ func TestResumeCompleteDoesNotCheckNewHarnessIdentity(t *testing.T) {
 	}
 }
 
+// TestExecDoesNotCheckCompletedHarnessVersion: a new turn runs on a harness whose version changed
+// since the session's completed turns; only the new turn records the new version.
+func TestExecDoesNotCheckCompletedHarnessVersion(t *testing.T) {
+	log := identityLog(t,
+		api.Event{ExecutionID: "done", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Harness: "harness", HarnessVersion: "1", InputCount: inputCount(0)}},
+		api.Event{ExecutionID: "done", Kind: api.EventOutput, Message: api.TextMessage("assistant", "reply")},
+		api.Event{ExecutionID: "done", Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}},
+	)
+	c, err := controller.New(log, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	har := identityHarness{desc: api.Descriptor{ID: "harness", Version: "2", HarnessClass: api.HarnessClassUnmediated,
+		Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}}}
+	if err := c.Exec(t.Context(), har, nil, 3); err != nil {
+		t.Fatalf("Exec after a version change = %v", err)
+	}
+	records, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var versions []string
+	for _, record := range records {
+		if record.Event.Kind == api.EventExecutionStart {
+			versions = append(versions, record.Event.ExecutionStart.HarnessVersion)
+		}
+	}
+	if !reflect.DeepEqual(versions, []string{"1", "2"}) {
+		t.Fatalf("recorded harness versions = %q, want [1 2]", versions)
+	}
+}
+
 func TestHarnessDescribeFailureHasNoExecutionEffects(t *testing.T) {
 	for _, op := range []string{"exec", "resume", "replay"} {
 		for _, canceled := range []bool{false, true} {

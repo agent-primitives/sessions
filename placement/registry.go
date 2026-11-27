@@ -82,7 +82,7 @@ func WithReservedNames(names ...string) RegistryOption {
 // per-session connections and checkpoint marks; Add does the same for a Placer added later.
 // session.Service routes a turn by ExecRequest.harness but a Suspend or Fork by the session's
 // recorded harness, so the two can land on different Placers; sharing them is what lets Suspend
-// refuse a turn (ErrSessionBusy), and a stateful fork end and refuse one, whichever Placer runs it.
+// refuse a turn and a stateful fork refuse a journaled incomplete turn, whichever Placer runs it.
 // Separate Registries do not fence each other.
 //
 // NewRegistry rejects a Placer that already belongs to a registry, and one with an operation in
@@ -153,7 +153,7 @@ func NewRegistry(defaultHarness string, placers map[string]*Placer, opts ...Regi
 // On success p shares the Registry's session guard and its per-session connections and checkpoint
 // marks, exactly as the Placers given to NewRegistry do: an operation on a session through p and
 // one through any other Placer in this Registry refuse to overlap with ErrSessionBusy, and a
-// stateful fork through either ends and refuses a turn through the other. Add refuses a p that
+// stateful fork through either refuses a turn through the other without ending it. Add refuses a p that
 // belongs to another Registry or has an operation in progress, as NewRegistry does; the check
 // cannot see an operation that starts while Add runs, so p must not be in use until Add returns.
 // Adding a Placer already in this Registry under another name shares nothing new. A refused p is

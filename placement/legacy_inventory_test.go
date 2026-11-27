@@ -25,14 +25,8 @@ func TestLegacyForkInventoryStaysIncomplete(t *testing.T) {
 				}
 				t.Cleanup(func() { s.Close() })
 				parent := s.Session("parent")
-				fence, err := parent.NewFence()
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := parent.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "hi")}); err != nil {
-					t.Fatal(err)
-				}
-				meta := sqlitelog.SessionMeta{UID: "c1", ParentUID: "parent", ForkSeq: 1, ModelPolicyEligible: modern}
+				head := appendCompletedLegacyTurn(t, parent, "hi")
+				meta := sqlitelog.SessionMeta{UID: "c1", ParentUID: "parent", ForkSeq: head, ModelPolicyEligible: modern}
 				child := s.Session("c1")
 				if modern {
 					child = s.ForkSession(meta)
@@ -61,7 +55,7 @@ func TestLegacyForkInventoryStaysIncomplete(t *testing.T) {
 					ctl.failCloneOf = "c2"
 				}
 				children := []placement.ForkChild{{UID: "c1", Log: first}, {UID: "c2", Log: inventoryFenceLog{Store: s.Session("c2")}}}
-				err = memorySubstratePlacer(ctl).Fork(t.Context(), parent, "parent", children, 1)
+				err = memorySubstratePlacer(ctl).Fork(t.Context(), parent, "parent", children, head)
 				if outcome == "success" && err != nil {
 					t.Fatal(err)
 				}

@@ -38,13 +38,13 @@ func TestSuspendRefusesAStreamOpenedByAnAddedPlacer(t *testing.T) {
 }
 
 // A Placer added to a running host shares the checkpoint state: a stateful fork through the
-// static harness ends a parent turn running through the added one, and the reverse.
-func TestForkEndsAParentStreamOpenedByAnAddedPlacer(t *testing.T) {
-	testCheckpointEndsOpenStream(t, forkCheckpoint, addedPair)
+// static harness refuses a parent turn running through the added one, and the reverse.
+func TestForkRefusesAParentStreamOpenedByAnAddedPlacer(t *testing.T) {
+	testForkRefusesOpenStream(t, addedPair)
 }
 
-func TestForkThroughAnAddedPlacerEndsAStaticPlacersStream(t *testing.T) {
-	testCheckpointEndsOpenStream(t, forkCheckpoint, addedPairReversed)
+func TestForkThroughAnAddedPlacerRefusesAStaticPlacersStream(t *testing.T) {
+	testForkRefusesOpenStream(t, addedPairReversed)
 }
 
 func TestForkRefusesAParentTurnOnAnAddedPlacer(t *testing.T) {

@@ -47,14 +47,15 @@ var ErrSessionBusy = errors.New("placement: another operation is in progress for
 // ErrDescriptorMismatch is returned when the harness reports a descriptor id other than the one the
 // Placer expects (WithDescriptorID): the address reaches a different harness than the one that was
 // configured. Like ErrUnplaceable it is raised by the admission check, before any compute is
-// provisioned or anything is written to the log, and again on the turn's own connection for a
-// LiveDescriber backend. session.Service surfaces it as codes.FailedPrecondition.
+// provisioned or anything is written to the log, including a memory-capable Suspend, and again on
+// the turn's own connection for a LiveDescriber backend. session.Service surfaces it as
+// codes.FailedPrecondition.
 var ErrDescriptorMismatch = errors.New("placement: harness is not the expected one")
 
 // ErrHarnessUnavailable is returned when the harness could not be reached to describe itself during
-// admission or the controller's connected-harness identity check, or to prepare its Connect stream
-// before a new execution. None runs the harness or appends execution records; the connected checks
-// may follow compute allocation and fence minting.
+// admission (including memory-capable Suspend), the controller's connected-harness identity check,
+// or Connect preparation before a new execution. None runs the harness or appends execution records;
+// the connected checks may follow compute allocation and fence minting.
 // session.Service surfaces it as codes.Unavailable. If the caller's own deadline or cancellation
 // ended the check, it is ErrAdmissionInterrupted instead: the same expired call cannot succeed.
 var ErrHarnessUnavailable = errors.New("placement: harness unavailable")
@@ -311,9 +312,9 @@ func WithDurableDedup(declared func(tool string) bool) Option {
 func WithLogger(logger *slog.Logger) Option { return func(p *Placer) { p.logger = logger } }
 
 // WithDescriptorID makes the Placer refuse a harness whose Describe reports a HarnessDescriptor.id
-// other than id, with ErrDescriptorMismatch, wherever it applies the CanPlace gate: Exec, Resume and
-// Fork, and the turn's own connection for a LiveDescriber backend. Empty, the default, means the id
-// is not checked.
+// other than id, with ErrDescriptorMismatch, wherever it applies the CanPlace gate: Exec, Resume,
+// memory-capable Suspend and Fork, and the turn's own connection for a LiveDescriber backend. Empty,
+// the default, means the id is not checked.
 //
 // The id is what the harness reports about itself, so the check catches an address that reaches the
 // wrong harness, not a harness that lies about what it is. It is not authentication.
@@ -799,9 +800,8 @@ func tcpDial(address string, opts []grpc.DialOption) (api.Harness, func() error,
 	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
 }
 
-// ErrCheckpointing is returned when another operation holds the session's checkpoint mark,
-// or a checkpoint ended the harness connection a turn was using. It is retryable once that
-// operation returns; session.Service maps it to codes.Aborted.
+// ErrCheckpointing is returned when another operation holds the session's checkpoint mark. It is
+// retryable once that operation returns; session.Service maps it to codes.Aborted.
 var ErrCheckpointing = errors.New("placement: session is being checkpointed")
 
 // errSuperseded is the cancellation cause of a turn whose harness connection a checkpoint ended. The
@@ -931,12 +931,10 @@ func (p *Placer) refuseDuringCheckpoint(sessionUID string) error {
 	return nil
 }
 
-// beginCheckpoint marks the session as being checkpointed, so openHarness refuses new connections
-// for it, and returns the connections already open, each marked superseded. Taking the mark and the
-// set under one lock is what leaves no window for a turn to slip a stream in between. The caller
-// mints its fence after this returns, so a turn that mints a newer fence still sees the superseded
-// mark (checkSuperseded) and writes nothing. A connection stays marked even if the checkpoint
-// aborts. Every successful call must be paired with endCheckpoint.
+// beginCheckpoint marks the session as being checkpointed, so openHarness refuses new connections.
+// The caller holds ordinary operation admission through this call, so there can be no existing local
+// connection; taking the mark under the same session-set lock closes the mark-to-registration race.
+// Every successful call must be paired with endCheckpoint.
 //
 // Checkpoints do not nest: while another operation holds the mark, beginCheckpoint fails with
 // ErrCheckpointing and changes nothing. A second fork would otherwise mint a fence that fails the
@@ -949,12 +947,11 @@ func (p *Placer) beginCheckpoint(sessionUID string) ([]*liveHarness, error) {
 	if err := p.sessions.setCheckpointLocked(sessionUID); err != nil {
 		return nil, err
 	}
-	open := make([]*liveHarness, 0, len(p.sessions.live[sessionUID]))
-	for l := range p.sessions.live[sessionUID] {
-		l.superseded.Store(true)
-		open = append(open, l)
+	if len(p.sessions.live[sessionUID]) != 0 {
+		delete(p.sessions.checkpoints, sessionUID)
+		return nil, fmt.Errorf("%w: session %q has an open harness connection", ErrSessionBusy, sessionUID)
 	}
-	return open, nil
+	return nil, nil
 }
 
 // markCheckpoint excludes a stateful Fork during a guarded Suspend, approval decision,
@@ -988,30 +985,8 @@ func (s *sessionSet) endCheckpoint(sessionUID string) {
 	delete(s.checkpoints, sessionUID)
 }
 
-// endHarnesses ends the harness connections beginCheckpoint returned, and must run before a stateful
-// fork checkpoints the session's compute. Substrate drains the actor's in-flight requests before it
-// snapshots, and an open Connect stream idling on a model call counts as one: left open, it stalls
-// the checkpoint until that drain times out. Ending the stream also stops a turn the checkpoint has
-// just fenced from talking to a harness that will be frozen mid-call.
-//
-// Suspend does not call it: it refuses to run beside an Exec or Resume of the session
-// (ErrSessionBusy), and they hold the session guard until their harness connection is closed.
-//
-// The caller mints its fence first, so the turn being ended can no longer write: it records no
-// ERROR for an interruption the host caused, and it returns errSuperseded. A turn that minted a newer
-// fence in between is stopped by the superseded mark beginCheckpoint set (checkSuperseded).
-//
-// Ending a stream only cancels the turn's context, and a turn that registered but has not yet
-// minted its fence still mints one. So endHarnesses then waits, bounded by ctx, until every ended
-// turn has made its fence call or returned. After it returns nil, no turn run by a Placer sharing
-// this session set can mint a fence on the session, and the fence the caller mints next is the
-// newest one the checkpoint will see. If ctx ends first, it returns an error and the caller must
-// abort before checkpointing.
-//
-// It covers connections opened by every Placer sharing this Placer's session set: all Placers of
-// one Registry, so a turn routed by ExecRequest.harness to another harness's Placer is ended too.
-// A turn driven by another process is fenced by the log as before, but its stream stays open until
-// that turn next touches the log or returns.
+// endHarnesses is retained for a checkpoint caller that explicitly collected connections. Stateful
+// Fork holds operation admission through beginCheckpoint, so its set is empty and this is a no-op.
 func (p *Placer) endHarnesses(ctx context.Context, sessionUID string, open []*liveHarness) (err error) {
 	if len(open) == 0 {
 		return nil
@@ -1101,6 +1076,53 @@ func (p *Placer) suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	if err != nil {
 		return api.SnapshotRef{}, fmt.Errorf("placement: read session journal: %w", err)
 	}
+	// Stateless snapshots carry no process memory, so replaying an incomplete turn is safe. A
+	// memory-capable backend can host either tier, so read its descriptor before applying the
+	// memory-only checkpoint rule. Backends without memory snapshots keep Suspend's no-admission path.
+	memoryCheckpoint := false
+	if p.backend.Capabilities().MemorySnapshot {
+		desc, describeErr := p.admit(ctx, sessionUID)
+		if describeErr != nil {
+			return api.SnapshotRef{}, describeErr
+		}
+		memoryCheckpoint = desc.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+		if memoryCheckpoint {
+			if checkpointErr := controller.ValidateCheckpointState(recs); checkpointErr != nil {
+				return api.SnapshotRef{}, checkpointErr
+			}
+		}
+	}
+	head := int64(0)
+	if len(recs) > 0 {
+		head = recs[len(recs)-1].Seq
+	}
+	fence := int64(0)
+	if cursor != nil {
+		head, fence = cursor.head, cursor.fence
+	} else if memoryCheckpoint {
+		// Bind the irreversible capture to the exact journal state validated above. A peer writer
+		// that moves the head after this fence makes the later SUSPEND CAS fail instead of widening
+		// the accepted checkpoint boundary over its incomplete turn.
+		fence, err = log.NewFence()
+		if err != nil {
+			return api.SnapshotRef{}, err
+		}
+		current, err := log.Read(1)
+		if err != nil {
+			return api.SnapshotRef{}, fmt.Errorf("placement: reread session journal: %w", err)
+		}
+		currentHead := int64(0)
+		if len(current) > 0 {
+			currentHead = current[len(current)-1].Seq
+		}
+		if currentHead != head {
+			return api.SnapshotRef{}, fmt.Errorf("%w: session advanced from seq %d to %d while Suspend was being prepared", eventlog.ErrConflict, head, currentHead)
+		}
+		if err := controller.ValidateCheckpointState(current); err != nil {
+			return api.SnapshotRef{}, err
+		}
+		recs = current
+	}
 	// Pass the checkpoint the journal last recorded too, so the backend refuses compute holding a
 	// snapshot the journal never recorded (one an earlier Snapshot refused) instead of capturing it.
 	instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
@@ -1116,12 +1138,12 @@ func (p *Placer) suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	}
 	_, appendFinished := observability.BeginDebug(ctx, p.logger, "placement", "append_suspend_event", "session_uid", sessionUID)
 	lc := api.Lifecycle{Kind: api.LifecycleSuspend, Snapshot: &ref}
-	if cursor == nil {
+	if cursor == nil && !memoryCheckpoint {
 		err = appendLifecycle(log, lc)
 	} else {
 		var record eventlog.Record
-		record, err = log.Append(cursor.head, cursor.fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &lc})
-		if err == nil && cursor.observer.OnRecord != nil {
+		record, err = log.Append(head, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &lc})
+		if err == nil && cursor != nil && cursor.observer.OnRecord != nil {
 			cursor.observer.OnRecord(record)
 		}
 	}
@@ -1424,6 +1446,8 @@ func placementErrorKind(err error) string {
 		return "harness_unavailable"
 	case errors.Is(err, ErrCheckpointing):
 		return "checkpointing"
+	case errors.Is(err, controller.ErrCheckpointIncompleteTurn):
+		return "checkpoint_incomplete_turn"
 	case errors.Is(err, api.ErrMemoryStateLost):
 		return "memory_state_lost"
 	case errors.Is(err, eventlog.ErrTampered):
@@ -1455,7 +1479,8 @@ func closeErrorKind(err error) string {
 // The compute half depends on the harness's resumability. A STATELESS_REPLAY harness replay-forks —
 // each child cold-boots and the copied journal reconstructs it, leaving the parent untouched. A
 // REQUIRES_MEMORY_SNAPSHOT harness holds live state the journal cannot reconstruct (I4), so the
-// parent is checkpointed first and every child is cloned from that snapshot.
+// parent is checkpointed first and every child is cloned from that snapshot. A live or durably
+// incomplete parent turn is refused before any checkpoint side effect occurs.
 //
 // The whole fan-out shares ONE parent checkpoint: N children cost one snapshot and N clones, and all
 // of them branch from the identical state. The parent's checkpoint mark is held until the last child
@@ -1629,6 +1654,26 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if desc.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
 		return api.SnapshotRef{Local: parentUID}, func() {}, nil
 	}
+	if err := p.refuseDuringCheckpoint(parentUID); err != nil {
+		return api.SnapshotRef{}, nil, err
+	}
+	// Exclude a local turn through the read-to-mark window. If another checkpoint already owns the
+	// session, retain ErrCheckpointing rather than reporting its operation hold as ordinary traffic.
+	operationRelease, err := p.trySessionLock(parentUID)
+	if err != nil {
+		if checkpointErr := p.refuseDuringCheckpoint(parentUID); checkpointErr != nil {
+			return api.SnapshotRef{}, nil, checkpointErr
+		}
+		return api.SnapshotRef{}, nil, err
+	}
+	defer func() {
+		if operationRelease != nil {
+			operationRelease()
+		}
+	}()
+	if err := p.refuseDuringCheckpoint(parentUID); err != nil {
+		return api.SnapshotRef{}, nil, err
+	}
 	// Check the head BEFORE minting a fence. Minting is an autocommitted bump that supersedes any
 	// in-flight writer, so doing it first would let a fork that is then REFUSED as unplaceable still
 	// kill a turn racing on the parent — a request that changes nothing would leave the session worse
@@ -1644,13 +1689,29 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 		return api.SnapshotRef{}, nil, fmt.Errorf("%w: harness %q requires %s, which can only fork at the log head (%d), not seq %d",
 			ErrUnplaceable, desc.ID, desc.Capabilities.Resumability, head, atSeq)
 	}
-	// Past this point the fork is committing, so superseding the current writer is intended.
-	// Fencing before the snapshot stops an in-flight turn advancing the head underneath an
-	// irreversible checkpoint. The mark refuses new harness streams until every child is cloned.
+	// Refuse before the checkpoint mark, fence, or stream cancellation. A memory snapshot must not
+	// capture RAM changed by a turn whose END is absent: Resume could otherwise run that turn again
+	// and apply the mutation twice.
+	recs, err := parent.Read(1)
+	if err != nil {
+		return api.SnapshotRef{}, nil, fmt.Errorf("placement: read parent journal: %w", err)
+	}
+	if len(recs) > 0 && recs[len(recs)-1].Seq != atSeq {
+		return api.SnapshotRef{}, nil, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, recs[len(recs)-1].Seq)
+	}
+	if err := controller.ValidateCheckpointState(recs); err != nil {
+		return api.SnapshotRef{}, nil, err
+	}
+	// Atomically prevent a new stream from opening. The operation hold above excludes both running
+	// turns and pre-journal connection preparation, so no stream is cancelled by Fork.
 	open, err := p.beginCheckpoint(parentUID)
 	if err != nil {
 		return api.SnapshotRef{}, nil, err
 	}
+	// The mark now excludes new local turns and competing checkpoints. Release ordinary operation
+	// admission so calls during snapshot/fan-out keep the established ErrCheckpointing result.
+	operationRelease()
+	operationRelease = nil
 	release := sync.OnceFunc(func() { p.sessions.endCheckpoint(parentUID) })
 	// Lift the mark on every path but the one that hands release to the caller, a panic included:
 	// a recovered panic in the runtime's Snapshot must not leave the parent refused for good.
@@ -1663,7 +1724,8 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if _, err := parent.NewFence(); err != nil {
 		return api.SnapshotRef{}, nil, err
 	}
-	// A turn could still have committed in the window before that fence landed. Re-check now, while
+	// A writer on another host could still have committed in the window before that fence landed.
+	// Re-check now, while
 	// aborting is free: after the snapshot the parent is cold whether or not the fork proceeds.
 	if head, err = parent.Head(); err != nil {
 		return api.SnapshotRef{}, nil, err
@@ -1674,11 +1736,9 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if err := p.endHarnesses(ctx, parentUID, open); err != nil {
 		return api.SnapshotRef{}, nil, allocationStartError(ctx, err)
 	}
-	// A turn ended above may have minted a newer fence after ours. It wrote nothing
-	// (checkSuperseded), but its fence would leave ours stale and fail the SUSPEND append after the
-	// parent is already cold. endHarnesses returned only once every such turn had minted, and no new
-	// turn can open, so mint the fence the record is written under now, and re-check the head while
-	// aborting is still free.
+	// Mint the fence the record is written under now, and re-check the head while aborting is still
+	// free. The local checkpoint mark excludes new streams; the second fence narrows the race with a
+	// writer on another host.
 	fence, err := parent.NewFence()
 	if err != nil {
 		return api.SnapshotRef{}, nil, err
@@ -1696,9 +1756,12 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	// FORK marker records in place of the parent's. Pass the instance the journal last recorded so
 	// the backend refuses a replacement (api.ErrMemoryStateLost). The records read here are the
 	// history the SUSPEND append below extends under its CAS on atSeq.
-	recs, err := parent.Read(1)
+	recs, err = parent.Read(1)
 	if err != nil {
 		return api.SnapshotRef{}, nil, fmt.Errorf("placement: read parent journal: %w", err)
+	}
+	if err := controller.ValidateCheckpointState(recs); err != nil {
+		return api.SnapshotRef{}, nil, err
 	}
 	// The parent's recorded checkpoint goes along, as in suspend, so a capture an earlier Snapshot
 	// refused is not captured again and handed to the children.

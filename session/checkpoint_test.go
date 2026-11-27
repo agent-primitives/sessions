@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -21,13 +22,15 @@ import (
 )
 
 // memoryBackend presents the local backend as memory-capable and its harness as
-// REQUIRES_MEMORY_SNAPSHOT, so a Fork of a session checkpoints the parent: the one operation that
-// supersedes a running turn. onSnapshot runs inside Snapshot, standing in for a runtime checkpoint
-// in progress. forkErr, when set, fails every Fork.
+// REQUIRES_MEMORY_SNAPSHOT, so a Fork of an idle session checkpoints the parent. onSnapshot runs
+// inside Snapshot, standing in for a runtime checkpoint in progress. forkErr, when set, fails every
+// Fork.
 type memoryBackend struct {
 	*local.Backend
-	onSnapshot func()
-	forkErr    error
+	onSnapshot  func()
+	forkErr     error
+	describeErr error
+	descriptor  *api.Descriptor
 }
 
 func (b *memoryBackend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOpts) (api.Incarnation, error) {
@@ -38,9 +41,76 @@ func (b *memoryBackend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.
 }
 
 func (b *memoryBackend) Describe(ctx context.Context) (api.Descriptor, error) {
+	if b.describeErr != nil {
+		return api.Descriptor{}, b.describeErr
+	}
+	if b.descriptor != nil {
+		return *b.descriptor, nil
+	}
 	desc, err := b.Backend.Describe(ctx)
 	desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
 	return desc, err
+}
+
+func TestMemorySuspendAdmissionErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cause  error
+		desc   *api.Descriptor
+		option placement.Option
+		code   codes.Code
+		reason string
+	}{
+		{name: "unavailable", cause: status.Error(codes.Unavailable, "offline"), code: codes.Unavailable, reason: "HARNESS_UNAVAILABLE"},
+		{name: "descriptor mismatch", option: placement.WithDescriptorID("other"), code: codes.FailedPrecondition},
+		{name: "invalid class", desc: &api.Descriptor{ID: "memory", HarnessClass: api.HarnessClassUnmediated,
+			Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, code: codes.FailedPrecondition},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := local.New(echoagent.Harness{})
+			t.Cleanup(func() { _ = inner.Close() })
+			snapshots := 0
+			backend := &memoryBackend{Backend: inner, describeErr: tc.cause, descriptor: tc.desc, onSnapshot: func() { snapshots++ }}
+			opts := []placement.Option{}
+			if tc.option != nil {
+				opts = append(opts, tc.option)
+			}
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			if err := store.PutSession(sqlitelog.SessionMeta{UID: "s", Harness: "echo"}); err != nil {
+				t.Fatal(err)
+			}
+			r, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": placement.New(backend, echoagent.Model, opts...)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := serveRegistry(t, store, r)
+
+			_, err = client.Suspend(t.Context(), &v1.SuspendRequest{Session: "s"})
+			if status.Code(err) != tc.code {
+				t.Fatalf("Suspend = %v, want %s", err, tc.code)
+			}
+			if tc.reason != "" {
+				details := status.Convert(err).Details()
+				if len(details) != 1 {
+					t.Fatalf("Suspend details=%v, want %s", details, tc.reason)
+				}
+				info, ok := details[0].(*errdetails.ErrorInfo)
+				if !ok || info.Domain != "agentsessions" || info.Reason != tc.reason {
+					t.Fatalf("Suspend details=%v, want agentsessions/%s", details, tc.reason)
+				}
+			}
+			if snapshots != 0 {
+				t.Fatalf("refused Suspend reached Snapshot %d time(s)", snapshots)
+			}
+			if head, headErr := store.Session("s").Head(); headErr != nil || head != 0 {
+				t.Fatalf("refused Suspend head=%d err=%v", head, headErr)
+			}
+		})
+	}
 }
 
 func (b *memoryBackend) Capabilities() api.RuntimeCapabilities {
@@ -87,7 +157,11 @@ func checkpointClient(t *testing.T, backend placement.Backend, model *parkingMod
 }
 
 func execHi(c v1.SessionsClient, sess string) error {
-	stream, err := c.Exec(context.Background(), &v1.ExecRequest{
+	return execHiContext(context.Background(), c, sess)
+}
+
+func execHiContext(ctx context.Context, c v1.SessionsClient, sess string) error {
+	stream, err := c.Exec(ctx, &v1.ExecRequest{
 		Session: sess,
 		Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))},
 	})
@@ -102,10 +176,10 @@ func forkParent(c v1.SessionsClient, sess string) error {
 	return err
 }
 
-// A turn that a stateful fork supersedes is a lost race with a newer writer, which callers retry. It
-// must surface as Aborted, as a fenced turn always has, not as Internal because its stream was
-// closed.
-func TestExecSupersededByAStatefulForkIsAborted(t *testing.T) {
+// A stateful fork must refuse an incomplete memory-tier turn without ending that turn. The journal
+// cannot prove whether the harness changed RAM after its last record, so snapshotting it would let
+// recovery apply the mutation twice.
+func TestStatefulForkRefusesAnIncompleteTurn(t *testing.T) {
 	inner := local.New(echoagent.Harness{})
 	t.Cleanup(func() { _ = inner.Close() })
 	model := &parkingModel{called: make(chan struct{})}
@@ -113,22 +187,27 @@ func TestExecSupersededByAStatefulForkIsAborted(t *testing.T) {
 	sess := mustCreate(t, c)
 
 	execErr := make(chan error, 1)
-	go func() { execErr <- execHi(c, sess) }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { execErr <- execHiContext(ctx, c, sess) }()
 	select {
 	case <-model.called:
 	case <-time.After(10 * time.Second):
 		t.Fatal("turn never reached the model call")
 	}
-	if err := forkParent(c, sess); err != nil {
-		t.Fatalf("fork: %v", err)
+	if err := forkParent(c, sess); status.Code(err) != codes.Aborted {
+		t.Fatalf("fork: want Aborted, got %v", err)
 	}
 	select {
 	case err := <-execErr:
-		if status.Code(err) != codes.Aborted {
-			t.Fatalf("superseded Exec: want Aborted, got %v", err)
-		}
+		t.Fatalf("refused Fork ended Exec: %v", err)
+	default:
+	}
+	cancel()
+	select {
+	case <-execErr:
 	case <-time.After(10 * time.Second):
-		t.Fatal("superseded Exec never returned")
+		t.Fatal("cancelled Exec never returned")
 	}
 }
 
@@ -280,9 +359,9 @@ func (h *parkedDescribe) Describe(ctx context.Context) (api.Descriptor, error) {
 	return api.Descriptor{}, ctx.Err()
 }
 
-// A stateful fork that ends a turn while the turn is still checking the harness on its connection
-// supersedes it like any other turn: Aborted, not the Canceled of a caller that gave up.
-func TestExecSupersededDuringTheHarnessCheckIsAborted(t *testing.T) {
+// A stateful fork is refused while the turn is still checking the harness on its connection. It
+// must not cancel that Describe or turn.
+func TestForkDuringTheHarnessCheckIsAbortedWithoutEndingExec(t *testing.T) {
 	h := &parkedDescribe{parked: make(chan struct{})}
 	inner := local.New(h)
 	t.Cleanup(func() { _ = inner.Close() })
@@ -290,7 +369,9 @@ func TestExecSupersededDuringTheHarnessCheckIsAborted(t *testing.T) {
 	sess := mustCreate(t, c)
 
 	execErr := make(chan error, 1)
-	go func() { execErr <- execHi(c, sess) }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { execErr <- execHiContext(ctx, c, sess) }()
 	select {
 	case <-h.parked:
 	case err := <-execErr:
@@ -298,16 +379,19 @@ func TestExecSupersededDuringTheHarnessCheckIsAborted(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("turn never checked the harness on its connection")
 	}
-	if err := forkParent(c, sess); err != nil {
-		t.Fatalf("fork: %v", err)
+	if err := forkParent(c, sess); status.Code(err) != codes.Aborted {
+		t.Fatalf("fork: want Aborted, got %v", err)
 	}
 	select {
 	case err := <-execErr:
-		if status.Code(err) != codes.Aborted {
-			t.Fatalf("Exec superseded during the harness check: want Aborted, got %v", err)
-		}
+		t.Fatalf("refused Fork ended Exec: %v", err)
+	default:
+	}
+	cancel()
+	select {
+	case <-execErr:
 	case <-time.After(10 * time.Second):
-		t.Fatal("superseded Exec never returned")
+		t.Fatal("cancelled Exec never returned")
 	}
 }
 
@@ -329,9 +413,8 @@ func (h *controllerParkedDescribe) Describe(ctx context.Context) (api.Descriptor
 	return api.Descriptor{}, ctx.Err()
 }
 
-// A stateful fork that ends a turn while the controller is describing the connected harness
-// supersedes it: Aborted, not the Canceled that a cut Describe reports when the caller gave up.
-func TestExecSupersededDuringTheControllersHarnessDescribeIsAborted(t *testing.T) {
+// The same refusal applies while the controller is describing the connected harness.
+func TestForkDuringTheControllersHarnessDescribeIsAbortedWithoutEndingExec(t *testing.T) {
 	h := &controllerParkedDescribe{parked: make(chan struct{})}
 	inner := local.New(h)
 	t.Cleanup(func() { _ = inner.Close() })
@@ -339,7 +422,9 @@ func TestExecSupersededDuringTheControllersHarnessDescribeIsAborted(t *testing.T
 	sess := mustCreate(t, c)
 
 	execErr := make(chan error, 1)
-	go func() { execErr <- execHi(c, sess) }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { execErr <- execHiContext(ctx, c, sess) }()
 	select {
 	case <-h.parked:
 	case err := <-execErr:
@@ -347,15 +432,18 @@ func TestExecSupersededDuringTheControllersHarnessDescribeIsAborted(t *testing.T
 	case <-time.After(10 * time.Second):
 		t.Fatal("the controller never described the harness")
 	}
-	if err := forkParent(c, sess); err != nil {
-		t.Fatalf("fork: %v", err)
+	if err := forkParent(c, sess); status.Code(err) != codes.Aborted {
+		t.Fatalf("fork: want Aborted, got %v", err)
 	}
 	select {
 	case err := <-execErr:
-		if status.Code(err) != codes.Aborted {
-			t.Fatalf("Exec superseded during the controller's Describe: want Aborted, got %v", err)
-		}
+		t.Fatalf("refused Fork ended Exec: %v", err)
+	default:
+	}
+	cancel()
+	select {
+	case <-execErr:
 	case <-time.After(10 * time.Second):
-		t.Fatal("superseded Exec never returned")
+		t.Fatal("cancelled Exec never returned")
 	}
 }

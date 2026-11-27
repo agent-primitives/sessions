@@ -1063,7 +1063,10 @@ How the session layer uses it:
 - **A fan-out shares one checkpoint.** `Fork(count: N)` snapshots the parent once and clones N
   children from that single snapshot, so the whole fleet branches from identical state. A turn on
   the parent would wake it and replace that snapshot, so the Placer refuses one with
-  `ErrCheckpointing` (ABORTED) until the last child is cloned. A second stateful fork or a
+  `ErrCheckpointing` (ABORTED) until the last child is cloned. Before that mark is installed, an
+  active turn is refused with `ErrSessionBusy` (ABORTED), and a journal tail without `END` is refused
+  with `CHECKPOINT_INCOMPLETE_TURN` (FAILED_PRECONDITION): the runtime may already contain an
+  unjournaled mutation that recovery would otherwise apply again. A second stateful fork or a
   `Suspend` of the parent in that time is refused the same way, before it fences or snapshots
   anything, so it can neither fail the first fork's SUSPEND record nor replace its snapshot; a fork
   that arrives while a `Suspend` runs is refused too. A fan-out that fails partway
@@ -1125,8 +1128,10 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
 - The fork checkpoint is committed under a fence and a CAS on the seq the caller validated, so a turn
   racing the fork can never widen the children's prefix past the RAM they were cloned from. A fork
   that is *refused* takes the fence path not at all: a request that changes nothing must not
-  supersede a turn in flight on the parent. A stateful fork that proceeds does supersede it,
-  closing its harness stream before checkpointing; Suspend instead refuses overlap with a turn.
+  supersede a turn in flight on the parent. A stateful fork refuses an in-flight or durably
+  incomplete turn before checkpointing. It transiently holds ordinary operation admission through
+  checkpoint-mark installation, so pre-journal connection preparation is refused too; Fork closes
+  no local stream. Suspend likewise refuses overlap with a turn.
   Fork holds shared deletion admission through checkpoint, fan-out and rollback, so Delete is
   refused until it returns. Failed fan-out releases the checkpoint before rollback, allowing new
   parent turns while the failed children are stopped. Independent Registries or hosts are outside
@@ -1134,18 +1139,10 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   the writer that beat it even though it gives up. Closing that needs a read-only fence
   accessor on `eventlog.Store` (`NewFence` is currently the only way to obtain one, and it mutates),
   which is a wider API change than this path warrants.
-- Ending the parent's harness streams sits between two fences. The first stops an in-flight turn
-  from writing an `ERROR` for the interruption; a turn that mints a newer fence in that window sees
-  that the checkpoint claimed its connection and writes nothing. Ending a stream only cancels the
-  turn, so the checkpoint then waits, bounded by the caller's context, until every ended turn has
-  made its fence call or returned. Only then is the second fence minted, the one the SUSPEND record
-  is written under, so no turn this Registry drives can fail the record after the parent is already
-  cold.
-  The connections and the checkpoint mark are per session and shared by every Placer of a
+- The operation guard and checkpoint mark are per session and shared by every Placer of a
   `placement.Registry`, including one `Registry.Add` registers later, so a turn routed to a
-  different harness by `ExecRequest.harness` is covered.
-  If the context ends first, the fork aborts before it snapshots. A turn driven by another process
-  is outside this: only the log fences it.
+  different harness by `ExecRequest.harness` is covered. A turn driven by another process is outside
+  this local admission: only the log fences it, and its open stream can still delay runtime drain.
 
 Two properties make the failure paths above safe, both read off substrate's suspend/delete workflows
 (`cmd/ateapi/internal/controlapi/`) rather than assumed:
@@ -1318,8 +1315,10 @@ taken on the envoy router (at `362637f9` and `fc0e3586`).
   harness on gVisor, at `362637f9`, `SuspendActor` under such a stream took **5m30s**: it waited for
   the router to reset the stream. `Placer.Suspend` therefore never checkpoints under a turn it knows
   of: while an `Exec` or `Resume` of the session runs, it is refused with `ErrSessionBusy`
-  (ABORTED), and once the turn has returned its stream is closed. A stateful `Fork`, which
-  supersedes the running turn instead, closes the parent's harness streams before it checkpoints.
+  (ABORTED), and once the turn has returned its stream is closed. A stateful `Fork` likewise refuses
+  a running or durably incomplete turn before it checkpoints instead of closing that stream.
+  A memory-tier Suspend fences and revalidates the exact head before `SuspendActor`, then appends at
+  that head, so a peer writer cannot be included after the checkpoint decision.
   `TestSuspendUnderAnIdleHarnessStream` checks the Suspend half on a live cluster. Both cover turns
   any Placer of this process's `placement.Registry` drives; a turn driven outside this Registry is
   fenced by the log, but its stream stays open until it next touches the log and can still stall a

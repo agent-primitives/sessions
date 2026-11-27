@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
 	"github.com/agent-primitives/sessions/harness/echoagent"
 	"github.com/agent-primitives/sessions/placement"
@@ -186,6 +187,9 @@ func TestDeleteAndEarlyAdmissionReasons(t *testing.T) {
 		assertErrorInfo(t, withStatusCause(tc.code, tc.cause), tc.code, tc.reason)
 	}
 	assertErrorInfo(t, forkError("uid", api.ErrSnapshotSuperseded), codes.Aborted, "SNAPSHOT_SUPERSEDED")
+	assertErrorInfo(t, forkError("uid", controller.ErrCheckpointIncompleteTurn), codes.FailedPrecondition, "CHECKPOINT_INCOMPLETE_TURN")
+	assertErrorInfo(t, suspendError("uid", controller.ErrCheckpointIncompleteTurn), codes.FailedPrecondition, "CHECKPOINT_INCOMPLETE_TURN")
+	assertErrorInfo(t, suspendError("uid", fmt.Errorf("%w: %w", controller.ErrJournalTampered, eventlog.ErrTampered)), codes.DataLoss, "")
 	supersededAndBusy := errors.Join(api.ErrSnapshotSuperseded, api.ErrComputeBusy)
 	assertErrorInfo(t, forkError("uid", supersededAndBusy), codes.Aborted, "SNAPSHOT_SUPERSEDED")
 	for _, mapper := range []func(string, error) error{execError, resumeError, forkError} {

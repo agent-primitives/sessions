@@ -143,6 +143,14 @@ func checkMemoryOverrideRefusal(t *testing.T, operation string) {
 		// Refusal leaves the pre-existing approval intent and its route untouched.
 		return
 	}
+	if operation == "Resume" {
+		// The interrupted override remains recoverable. A memory checkpoint must not capture A while
+		// that turn has no END, even though routing refused the recovery first.
+		if _, err := c.Suspend(t.Context(), &v1.SuspendRequest{Session: uid}); status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("Suspend of interrupted override = %v, want FailedPrecondition", err)
+		}
+		return
+	}
 	// With no B approval written, Suspend must retain A's route and checkpoint its memory.
 	suspended, err := c.Suspend(t.Context(), &v1.SuspendRequest{Session: uid})
 	if err != nil || suspended.GetComputeState() != v1.ComputeState_COMPUTE_COLD {

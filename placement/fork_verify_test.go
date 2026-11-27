@@ -48,13 +48,7 @@ func TestForkRefusesATamperedParentBeforeEffects(t *testing.T) {
 			var p *placement.Placer
 			if tc.memory {
 				p = memorySubstratePlacer(ctl)
-				fence, err := parent.NewFence()
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := parent.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "hi")}); err != nil {
-					t.Fatal(err)
-				}
+				appendCompletedLegacyTurn(t, parent, "hi")
 			} else {
 				p = newLocalPlacer(t, echoagent.Harness{})
 				if _, err := p.Exec(context.Background(), parent, "parent", []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {

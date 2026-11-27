@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
 	"github.com/agent-primitives/sessions/harness/echoagent"
 	"github.com/agent-primitives/sessions/sqlitelog"
@@ -44,6 +45,19 @@ func (b *ownedBackend) Fork(_ context.Context, _ api.SnapshotRef, opts api.ForkO
 type recordingLog struct {
 	allocationLog
 	plan []api.CleanupResource
+}
+
+type ownedMemoryBackend struct{ *ownedBackend }
+
+func (b *ownedMemoryBackend) Describe(ctx context.Context) (api.Descriptor, error) {
+	if b.refuse != nil {
+		return api.Descriptor{}, b.refuse
+	}
+	return api.Descriptor{ID: "memory", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}}, nil
+}
+
+func (*ownedMemoryBackend) Capabilities() api.RuntimeCapabilities {
+	return api.RuntimeCapabilities{MemorySnapshot: true}
 }
 
 func (l *recordingLog) BeginPlannedAllocation(ctx context.Context, backend, operation string, plan ...api.CleanupResource) (string, error) {
@@ -172,5 +186,42 @@ func TestForkRecordsUnpublishedPlanAndPartialEvidence(t *testing.T) {
 	again, _ := api.NewCleanupEvidence([]api.CleanupResource{{Reference: "tag", UID: "other", Borrower: "actor"}})
 	if err := child.ConfirmAllocation(t.Context(), allocations[0].ID, api.Incarnation{Cleanup: again}); !errors.Is(err, sqlitelog.ErrAllocationConflict) {
 		t.Fatalf("tag UID was not recorded: confirm with another UID err=%v", err)
+	}
+}
+
+func TestIncompleteMemoryForkRecordsNoResourcePlan(t *testing.T) {
+	s, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	parent := s.Session("parent")
+	zero := int64(0)
+	fence, err := parent.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parent.Append(0, fence, api.Event{ExecutionID: "e", Kind: api.EventExecutionStart,
+		ExecutionStart: &api.ExecutionStart{InputCount: &zero}}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &ownedBackend{
+		allocationBackend: &allocationBackend{trace: new([]string)},
+		key:               "k",
+		plan:              []api.CleanupResource{{Reference: "actor"}},
+	}
+	p := New(&ownedMemoryBackend{ownedBackend: backend}, echoagent.Model)
+	child := s.ForkSession(sqlitelog.SessionMeta{UID: "child", ParentUID: "parent"})
+
+	err = p.Fork(t.Context(), parent, "parent", []ForkChild{{UID: "child", Log: child}}, 1)
+	if !errors.Is(err, controller.ErrCheckpointIncompleteTurn) || backend.forks != 0 {
+		t.Fatalf("Fork = %v forks=%d, want ErrCheckpointIncompleteTurn before runtime", err, backend.forks)
+	}
+	allocations, err := s.Allocations(t.Context(), "child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allocations) != 0 {
+		t.Fatalf("refused Fork recorded allocations: %+v", allocations)
 	}
 }

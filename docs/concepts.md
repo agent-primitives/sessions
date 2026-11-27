@@ -298,9 +298,10 @@ the harness nor the model runs.
 
 The marker also records the executing **registry name**, which may differ from the harness's
 `Descriptor.ID`, and its advertised `Descriptor.Version`. Standalone controller/Placer calls use
-the descriptor ID as the name unless an explicit host harness option supplies an alias. The
-reference harnesses advertise replay version `"1"`; this is an author-owned implementation token,
-not the host binary's release/build version.
+the descriptor ID as the name unless an explicit host harness option supplies an alias. The in-repo
+reference harnesses advertise replay version `"1"`, except `integrations/claudecode`, which
+advertises `"2"`; this is an author-owned implementation token, not the host binary's
+release/build version.
 
 Versioning is opt-in. Exec accepts an unversioned harness and records an empty version. Controller
 Replay checks all completed invocations against its single supplied harness before the first `Run`;

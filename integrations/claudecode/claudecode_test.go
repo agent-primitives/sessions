@@ -43,7 +43,7 @@ func TestDescribe(t *testing.T) {
 			// behavior changes.
 			want := api.Descriptor{
 				ID:           "claudecode",
-				Version:      "1",
+				Version:      "2",
 				Models:       test.want,
 				HarnessClass: api.HarnessClassUnmediated,
 				Capabilities: api.Capabilities{

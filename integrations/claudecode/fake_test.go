@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -53,6 +54,7 @@ type scenario struct {
 	Grandchild    bool     `json:"grandchild,omitempty"`     // leave a sleeping child holding stdout
 	Detached      bool     `json:"detached,omitempty"`       // leave a sleeping child on /dev/null stdio
 	Trickle       bool     `json:"trickle,omitempty"`        // leave a child writing a blank line every 20ms
+	EnvValues     []string `json:"env_values,omitempty"`     // variables whose values the start record keeps
 }
 
 // record is one fake claude observation.
@@ -62,6 +64,8 @@ type record struct {
 	Env   []string `json:"env,omitempty"` // names only
 	Stdin string   `json:"stdin,omitempty"`
 	PID   int      `json:"pid,omitempty"`
+	// Values holds the scenario's EnvValues variables that are set, with their values.
+	Values map[string]string `json:"values,omitempty"`
 }
 
 func fakeClaude(args []string) int {
@@ -80,11 +84,18 @@ func fakeClaude(args []string) int {
 	}
 	stdin, _ := io.ReadAll(os.Stdin)
 	var env []string
+	var values map[string]string
 	for _, kv := range os.Environ() {
-		name, _, _ := strings.Cut(kv, "=")
+		name, v, _ := strings.Cut(kv, "=")
 		env = append(env, name)
+		if slices.Contains(sc.EnvValues, name) {
+			if values == nil {
+				values = make(map[string]string)
+			}
+			values[name] = v
+		}
 	}
-	writeRecord(record{Event: "start", Args: args, Env: env, Stdin: string(stdin)})
+	writeRecord(record{Event: "start", Args: args, Env: env, Values: values, Stdin: string(stdin)})
 	if sc.Stderr != "" {
 		fmt.Fprintln(os.Stderr, sc.Stderr)
 	}

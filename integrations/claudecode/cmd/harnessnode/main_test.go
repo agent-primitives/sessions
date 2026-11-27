@@ -49,6 +49,12 @@ func TestNewHarness(t *testing.T) {
 		{name: "bypass opt-in not a boolean", set: map[string]string{"HARNESS_CLAUDE_ALLOW_BYPASS_PERMISSIONS": "yes"}, want: "HARNESS_CLAUDE_ALLOW_BYPASS_PERMISSIONS"},
 		{name: "env allowlist", set: map[string]string{"HARNESS_CLAUDE_ENV_ALLOWLIST": " HTTPS_PROXY, NO_PROXY ,,"}},
 		{name: "env allowlist invalid name", set: map[string]string{"HARNESS_CLAUDE_ENV_ALLOWLIST": "HTTPS_PROXY,A=B"}, want: "invalid EnvAllowlist name"},
+		{name: "turn env allowlist", set: map[string]string{"HARNESS_CLAUDE_TURN_ENV_ALLOWLIST": " ANTHROPIC_BASE_URL, GIT_CONFIG_* ,,"}},
+		{name: "turn env allowlist reserved", set: map[string]string{"HARNESS_CLAUDE_TURN_ENV_ALLOWLIST": "GIT_CONFIG_*,PATH"}, want: `TurnEnvAllowlist entry "PATH" is a reserved variable`},
+		{name: "turn env allowlist covers reserved", set: map[string]string{"HARNESS_CLAUDE_TURN_ENV_ALLOWLIST": "ANTHROPIC_*"}, want: "covers a reserved variable"},
+		{name: "turn env allowlist covers OAuth credential", set: map[string]string{"HARNESS_CLAUDE_TURN_ENV_ALLOWLIST": "CLAUDE_CODE_*"}, want: `"CLAUDE_CODE_*" covers a reserved variable`},
+		{name: "turn env allowlist OAuth token", set: map[string]string{"HARNESS_CLAUDE_TURN_ENV_ALLOWLIST": "CLAUDE_CODE_OAUTH_TOKEN"}, want: `"CLAUDE_CODE_OAUTH_TOKEN" is a reserved variable`},
+		{name: "turn env allowlist invalid entry", set: map[string]string{"HARNESS_CLAUDE_TURN_ENV_ALLOWLIST": "*"}, want: "invalid TurnEnvAllowlist entry"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			for k, v := range valid {

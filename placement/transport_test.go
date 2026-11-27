@@ -429,9 +429,11 @@ func TestForkRefusesPreparedHarnessBeforeExecutionIsRecorded(t *testing.T) {
 		return h, func() error { return nil }, nil
 	}))
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	execErr := make(chan error, 1)
 	go func() {
-		_, err := p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+		_, err := p.Exec(ctx, log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
 		execErr <- err
 	}()
 	select {
@@ -455,6 +457,20 @@ func TestForkRefusesPreparedHarnessBeforeExecutionIsRecorded(t *testing.T) {
 	}
 	if kinds := journalKinds(t, log); len(kinds) != 0 {
 		t.Fatalf("journal=%v, want no checkpoint record", kinds)
+	}
+	cancel()
+	select {
+	case <-h.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled Connect preparation did not return")
+	}
+	select {
+	case err := <-execErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled Exec returned %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled Exec did not return")
 	}
 }
 

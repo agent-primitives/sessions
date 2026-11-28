@@ -130,6 +130,12 @@ func TestEventRoundTrip(t *testing.T) {
 			ExecutionID: "e1", SchemaVersion: 1, Timestamp: ts, Kind: api.EventOutput,
 			Message: richMessage(), Actor: actor,
 		},
+		"output_model_result": {
+			ExecutionID: "e1", Kind: api.EventOutput, Message: richMessage(), ModelCallID: proto.String("mc-1"),
+		},
+		"output_model_result_empty": {
+			ExecutionID: "e1", Kind: api.EventOutput, Message: richMessage(), ModelCallID: proto.String(""),
+		},
 		"output_tool_calls": {
 			ExecutionID: "e1", SchemaVersion: 1, Timestamp: ts, Kind: api.EventOutput,
 			Message: toolCallMessage(), Actor: actor,
@@ -142,7 +148,7 @@ func TestEventRoundTrip(t *testing.T) {
 			Kind: api.EventModelCall,
 			ModelCall: &api.ModelCall{
 				Model: "azure-openai/gpt-x", Params: map[string]string{"temperature": "0"},
-				InputHash: "sha256:dd", ID: "mc-1",
+				InputHash: "sha256:dd", ID: "mc-1", ResultCorrelation: api.ModelResultCorrelationByID,
 			},
 		},
 		"tool_call": {
@@ -215,8 +221,8 @@ func TestHashStableAcrossWire(t *testing.T) {
 		{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(0)}},
 		{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{}},
 		{Kind: api.EventInput, Message: api.TextMessage("user", "drive")},
-		{Kind: api.EventModelCall, ModelCall: &api.ModelCall{Model: "m", Params: map[string]string{"a": "b"}, InputHash: "h", ID: "c1"}},
-		{Kind: api.EventOutput, Message: richMessage()},
+		{Kind: api.EventModelCall, ModelCall: &api.ModelCall{Model: "m", Params: map[string]string{"a": "b"}, InputHash: "h", ID: "c1", ResultCorrelation: api.ModelResultCorrelationByID}},
+		{Kind: api.EventOutput, Message: richMessage(), ModelCallID: proto.String("c1")},
 		{Kind: api.EventOutput, Message: toolCallMessage()},
 		{Kind: api.EventInput, Message: toolResultMessage()},
 		{Kind: api.EventToolResult, Result: toolResultMessage().Parts[0].ToolResult},

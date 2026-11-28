@@ -244,6 +244,10 @@ type resumeSink struct {
 	// awaitingGate is set by continueAtGate until the first sink call: only the gated ToolCall
 	// may come first (APR-16).
 	awaitingGate bool
+	// ambiguousLegacyFailure marks a failed re-drive of a pre-v11 positional call. A direct OUTPUT
+	// cannot be the next durable effect: later replay would mistake it for that call's completion.
+	// Any other successfully appended effect, including a fresh BY_ID model-call retry, clears it.
+	ambiguousLegacyFailure bool
 }
 
 // continueAtGate positions a memory-tier recovery at its decided, unreceipted approval gate
@@ -326,8 +330,11 @@ func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 		if mc.ModelCall == nil || mc.ModelCall.InputHash != hashModelInput(req) {
 			return api.ModelResponse{}, s.diverged(errors.New("resume: model input hash mismatch (I0)"))
 		}
-		out, ok := s.recordedNext(api.EventOutput)
-		if !ok {
+		out, found, correlationErr := recordedModelResult(s.stream, s.i, mc.ModelCall)
+		if correlationErr != nil {
+			return api.ModelResponse{}, s.diverged(fmt.Errorf("resume: %w", correlationErr))
+		}
+		if !found {
 			if s.i != len(s.stream) {
 				return api.ModelResponse{}, errors.New("resume: recorded completion missing")
 			}
@@ -341,8 +348,19 @@ func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 				// without calling the model; only journals with execution IDs are re-driven.
 				return api.ModelResponse{}, errors.New("resume: recorded completion missing")
 			}
-			return s.live.completeModel(ctx, req)
+			if mc.ModelCall == nil || mc.ModelCall.ID == "" {
+				if mc.ModelCall != nil && mc.ModelCall.ResultCorrelation == api.ModelResultCorrelationUnspecified {
+					s.ambiguousLegacyFailure = true
+				}
+				return api.ModelResponse{}, errors.New("resume: recorded model call has no ID")
+			}
+			resp, err := s.live.completeModel(ctx, req, mc.ModelCall.ID)
+			if err != nil && mc.ModelCall.ResultCorrelation == api.ModelResultCorrelationUnspecified {
+				s.ambiguousLegacyFailure = true
+			}
+			return resp, err
 		}
+		s.i++
 		var msg api.Message
 		if out.Message != nil {
 			msg = *out.Message
@@ -355,7 +373,12 @@ func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 		}
 		return api.ModelResponse{Message: msg, Usage: usage}, nil
 	}
-	return s.live.model(ctx, req) // past the crash point: first-ever execution
+	before := s.live.appends
+	resp, err := s.live.model(ctx, req) // past the crash point: first-ever execution
+	if s.live.appends > before {
+		s.ambiguousLegacyFailure = false
+	}
+	return resp, err
 }
 
 func (s *resumeSink) Output(ctx context.Context, delta string) error {
@@ -380,6 +403,9 @@ func (s *resumeSink) Output(ctx context.Context, delta string) error {
 		if !ok {
 			return s.diverged(errors.New("resume: recorded stream diverged (expected output)"))
 		}
+		if out.ModelCallID != nil {
+			return s.diverged(errors.New("resume: direct output matched a model result"))
+		}
 		recorded := ""
 		if out.Message != nil {
 			recorded = out.Message.Text()
@@ -388,6 +414,9 @@ func (s *resumeSink) Output(ctx context.Context, delta string) error {
 			return s.diverged(fmt.Errorf("resume: output mismatch — %q != recorded %q", delta, recorded))
 		}
 		return nil
+	}
+	if s.ambiguousLegacyFailure {
+		return s.diverged(errors.New("resume: direct output immediately after a failed legacy model call is ambiguous"))
 	}
 	return s.live.output(ctx, delta)
 }
@@ -475,7 +504,12 @@ func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolRes
 		// outcomes, not evidence failures: the harness may handle them and finish the turn.
 		return s.live.execTool(ctx, *call.ToolCall)
 	}
-	return s.live.toolCall(ctx, tc)
+	before := s.live.appends
+	result, err := s.live.toolCall(ctx, tc)
+	if s.live.appends > before {
+		s.ambiguousLegacyFailure = false
+	}
+	return result, err
 }
 
 func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {
@@ -515,7 +549,12 @@ func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {
 		}
 		return nil
 	}
-	return s.live.report(ctx, tr)
+	before := s.live.appends
+	err := s.live.report(ctx, tr)
+	if s.live.appends > before {
+		s.ambiguousLegacyFailure = false
+	}
+	return err
 }
 
 func (s *resumeSink) Usage(ctx context.Context, u api.Usage) error {
@@ -554,5 +593,10 @@ func (s *resumeSink) Usage(ctx context.Context, u api.Usage) error {
 		}
 		return nil
 	}
-	return s.live.usage(ctx, u)
+	before := s.live.appends
+	err := s.live.usage(ctx, u)
+	if s.live.appends > before {
+		s.ambiguousLegacyFailure = false
+	}
+	return err
 }

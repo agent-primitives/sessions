@@ -48,9 +48,9 @@ func owned(t *testing.T, resources ...api.CleanupResource) api.Incarnation {
 	return api.Incarnation{ID: "child", Cleanup: evidence}
 }
 
-// A journal written by the v0.4.0 release migrates to v10 with its legacy attempt intact and its
-// inventory still uncertified.
-func TestCleanupV9FixtureMigratesToV10(t *testing.T) {
+// A journal written by the v0.4.0 release migrates through v10 to the current schema with its legacy
+// attempt intact and its inventory still uncertified.
+func TestCleanupV9FixtureMigratesToCurrent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cleanup-v9.db")
 	blob, err := os.ReadFile("testdata/cleanup-v9.db")
 	if err != nil {
@@ -71,8 +71,8 @@ func TestCleanupV9FixtureMigratesToV10(t *testing.T) {
 	raw.Close()
 
 	s := deletionStore(t, path)
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 10 {
-		t.Fatalf("migrated user_version=%d err=%v, want 10", version, err)
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != SchemaVersion {
+		t.Fatalf("migrated user_version=%d err=%v, want %d", version, err, SchemaVersion)
 	}
 	allocations, err := s.Allocations(t.Context(), "v9-session")
 	if err != nil || len(allocations) != 1 || allocations[0].ResourceID != "v9-handle" || !allocations[0].Confirmed {

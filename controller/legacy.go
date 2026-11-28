@@ -133,7 +133,11 @@ func (c *Controller) legacyExecutionID(record eventlog.Record) (string, error) {
 // into a later Exec. Streaming deltas also retain the empty legacy identity without journaling it.
 func (s *liveSink) append(event api.Event) (eventlog.Record, error) {
 	if !s.legacyRecovery {
-		return s.c.appendSeq(s.executionID, event)
+		record, err := s.c.appendSeq(s.executionID, event)
+		if err == nil {
+			s.appends++
+		}
+		return record, err
 	}
 	head, err := s.c.log.Head()
 	if err != nil {
@@ -143,6 +147,7 @@ func (s *liveSink) append(event api.Event) (eventlog.Record, error) {
 	event.ExecutionID = ""
 	record, err := s.c.log.Append(head, s.c.fence, event)
 	if err == nil {
+		s.appends++
 		s.c.observe(record)
 	}
 	return record, err

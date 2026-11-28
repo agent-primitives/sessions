@@ -33,6 +33,7 @@ func EventToProto(e api.Event) *v1.Event {
 		SchemaVersion: e.SchemaVersion,
 		Kind:          kindToProto(e.Kind),
 		Actor:         identityToProto(e.Actor),
+		ModelCallId:   e.ModelCallID,
 	}
 	if !e.Timestamp.IsZero() {
 		out.Ts = timestamppb.New(e.Timestamp)
@@ -81,6 +82,10 @@ func EventFromProto(p *v1.Event) api.Event {
 		SchemaVersion: p.GetSchemaVersion(),
 		Kind:          kindFromProto(p.GetKind()),
 		Actor:         identityFromProto(p.GetActor()),
+	}
+	if p.ModelCallId != nil {
+		id := p.GetModelCallId()
+		out.ModelCallID = &id
 	}
 	if p.GetTs() != nil {
 		out.Timestamp = p.GetTs().AsTime()
@@ -340,14 +345,20 @@ func modelCallToProto(m *api.ModelCall) *v1.ModelCall {
 	if m == nil {
 		return nil
 	}
-	return &v1.ModelCall{Model: m.Model, Params: m.Params, InputHash: m.InputHash, Id: m.ID}
+	return &v1.ModelCall{
+		Model: m.Model, Params: m.Params, InputHash: m.InputHash, Id: m.ID,
+		ResultCorrelation: v1.ModelCall_ResultCorrelation(m.ResultCorrelation),
+	}
 }
 
 func modelCallFromProto(m *v1.ModelCall) *api.ModelCall {
 	if m == nil {
 		return nil
 	}
-	return &api.ModelCall{Model: m.GetModel(), Params: m.GetParams(), InputHash: m.GetInputHash(), ID: m.GetId()}
+	return &api.ModelCall{
+		Model: m.GetModel(), Params: m.GetParams(), InputHash: m.GetInputHash(), ID: m.GetId(),
+		ResultCorrelation: api.ModelResultCorrelation(m.GetResultCorrelation()),
+	}
 }
 
 func toolCallToProto(t *api.ToolCall) *v1.ToolCall {

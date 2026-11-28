@@ -66,6 +66,53 @@ func (retryHarness) Run(ctx context.Context, s *api.Start, sink api.EventSink) e
 	return err
 }
 
+// fallbackHarness handles a model error by emitting direct fallback output. Replay and recovery
+// must return the model failure again rather than reinterpret that output as provider success.
+type fallbackHarness struct {
+	id      string
+	crash   func()
+	success *int
+}
+
+type swallowCorrelationHarness struct {
+	first, later error
+}
+
+func (*swallowCorrelationHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, nil
+}
+
+func (h *swallowCorrelationHarness) Run(ctx context.Context, s *api.Start, sink api.EventSink) error {
+	_, h.first = sink.Model(ctx, api.ModelRequest{Model: "echo", Messages: []api.Message{s.Inputs[0]}})
+	h.later = sink.Output(ctx, "later")
+	return nil
+}
+
+func (h fallbackHarness) Describe(context.Context) (api.Descriptor, error) {
+	id := h.id
+	if id == "" {
+		id = "fallback"
+	}
+	return api.Descriptor{ID: id, Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, nil
+}
+
+func (h fallbackHarness) Run(ctx context.Context, s *api.Start, sink api.EventSink) error {
+	_, err := sink.Model(ctx, api.ModelRequest{Model: "echo", Messages: []api.Message{s.Inputs[0]}})
+	if err == nil {
+		if h.success != nil {
+			(*h.success)++
+		}
+		return errors.New("model unexpectedly succeeded")
+	}
+	if err := sink.Output(ctx, "fallback"); err != nil {
+		return err
+	}
+	if h.crash != nil {
+		h.crash()
+	}
+	return nil
+}
+
 func journalKinds(t *testing.T, log eventlog.Store) []api.EventKind {
 	t.Helper()
 	recs, err := log.Read(1)
@@ -131,14 +178,27 @@ func resumeOnce(t *testing.T, log eventlog.Store, har api.Harness, model *script
 // replays with zero provider calls.
 func assertRecovered(t *testing.T, log eventlog.Store) {
 	t.Helper()
-	kinds := journalKinds(t, log)
+	records, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := make([]api.EventKind, 0, len(records))
 	var calls, outputs int
-	for _, k := range kinds {
-		switch k {
+	var callID string
+	for _, record := range records {
+		kinds = append(kinds, record.Event.Kind)
+		switch record.Event.Kind {
 		case api.EventModelCall:
 			calls++
+			if record.Event.ModelCall == nil || record.Event.ModelCall.ResultCorrelation != api.ModelResultCorrelationByID || record.Event.ModelCall.ID == "" {
+				t.Fatalf("recorded model call lacks ID correlation: %+v", record.Event.ModelCall)
+			}
+			callID = record.Event.ModelCall.ID
 		case api.EventOutput:
 			outputs++
+			if record.Event.ModelCallID == nil || *record.Event.ModelCallID != callID {
+				t.Fatalf("recorded model result ID = %v, want %q", record.Event.ModelCallID, callID)
+			}
 		}
 	}
 	if calls != 1 || outputs != 1 {
@@ -275,6 +335,282 @@ func TestResumeRetryAfterFailedRedrive(t *testing.T) {
 		t.Fatalf("replay outputs = %v with %d provider calls, want %v with 0", out, replay.calls, want)
 	}
 }
+
+func TestModelResultIDsDistinguishProviderResultsFromFallbackOutput(t *testing.T) {
+	log := memStore(t)
+	store := &crashStore{Store: log}
+	model := &scriptedModel{failures: 1}
+	c, err := controller.New(store, model.call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := fallbackHarness{crash: func() { store.crashed = true }}
+	if err := c.Exec(t.Context(), h, []api.Message{msg("hi")}, 0); !errors.Is(err, errCrashed) {
+		t.Fatalf("Exec = %v, want crash after fallback", err)
+	}
+	recs, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 4 || recs[2].Event.ModelCall == nil || recs[2].Event.ModelCall.ResultCorrelation != api.ModelResultCorrelationByID ||
+		recs[3].Event.Kind != api.EventOutput || recs[3].Event.ModelCallID != nil {
+		t.Fatalf("journal does not distinguish call and direct fallback: %+v", recs)
+	}
+
+	success := 0
+	recoveryModel := &scriptedModel{}
+	if err := resumeOnce(t, log, fallbackHarness{success: &success}, recoveryModel); err != nil {
+		t.Fatalf("Resume = %v", err)
+	}
+	if recoveryModel.calls != 0 || success != 0 {
+		t.Fatalf("Resume treated fallback as model success: provider=%d success-path=%d", recoveryModel.calls, success)
+	}
+	assertKinds(t, log, api.EventExecutionStart, api.EventInput, api.EventModelCall, api.EventOutput, api.EventEnd)
+
+	replayModel := &scriptedModel{}
+	replay, err := controller.New(log, replayModel.call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := replay.Replay(t.Context(), fallbackHarness{success: &success})
+	if err != nil || !reflect.DeepEqual(out, []string{"fallback"}) || replayModel.calls != 0 || success != 0 {
+		t.Fatalf("Replay = outputs %v err %v provider=%d success-path=%d", out, err, replayModel.calls, success)
+	}
+}
+
+func TestModelResultCorrelationIsExact(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*api.Event, *api.Event)
+	}{
+		{name: "wrong result ID", change: func(_ *api.Event, output *api.Event) { output.ModelCallID = stringPointer("other") }},
+		{name: "empty result ID", change: func(_ *api.Event, output *api.Event) { output.ModelCallID = stringPointer("") }},
+		{name: "empty call ID", change: func(call, _ *api.Event) { call.ModelCall.ID = "" }},
+		{name: "unknown mode", change: func(call, _ *api.Event) { call.ModelCall.ResultCorrelation = 99 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := memStore(t)
+			c, err := controller.New(source, echoModel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Exec(t.Context(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
+				t.Fatal(err)
+			}
+			records, err := source.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.change(&records[2].Event, &records[3].Event)
+
+			log := memStore(t)
+			fence, err := log.NewFence()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, record := range records {
+				if _, err := log.Append(int64(i), fence, record.Event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			replay, err := controller.New(log, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := replay.Replay(t.Context(), &echoHarness{}); !errors.Is(err, controller.ErrReplayDiverged) {
+				t.Fatalf("Replay = %v, want ErrReplayDiverged", err)
+			}
+		})
+	}
+}
+
+func TestResumeModelResultCorrelationIsExactAndSticky(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*api.Event, *api.Event)
+	}{
+		{name: "wrong result ID", change: func(_ *api.Event, output *api.Event) { output.ModelCallID = stringPointer("other") }},
+		{name: "empty result ID", change: func(_ *api.Event, output *api.Event) { output.ModelCallID = stringPointer("") }},
+		{name: "empty call ID", change: func(call, _ *api.Event) { call.ModelCall.ID = "" }},
+		{name: "unknown mode", change: func(call, _ *api.Event) { call.ModelCall.ResultCorrelation = 99 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := memStore(t)
+			store := &crashStore{Store: source}
+			c, err := controller.New(store, echoModel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Exec(t.Context(), &crashAfterModelHarness{crash: func() { store.crashed = true }}, []api.Message{msg("hi")}, 0); !errors.Is(err, errCrashed) {
+				t.Fatal(err)
+			}
+			records, err := source.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.change(&records[2].Event, &records[3].Event)
+			log := memStore(t)
+			fence, err := log.NewFence()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, record := range records {
+				if _, err := log.Append(int64(i), fence, record.Event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			model := &scriptedModel{}
+			err = resumeOnce(t, log, &echoHarness{}, model)
+			if !errors.Is(err, controller.ErrReplayDiverged) || model.calls != 0 {
+				t.Fatalf("Resume = %v provider=%d, want divergence without provider", err, model.calls)
+			}
+			assertKinds(t, log, api.EventExecutionStart, api.EventInput, api.EventModelCall, api.EventOutput, api.EventError)
+		})
+	}
+}
+
+func TestModelResultCorrelationDivergenceStaysSticky(t *testing.T) {
+	log := memStore(t)
+	c, err := controller.New(log, echoModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Exec(t.Context(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	records, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records[3].Event.ModelCallID = stringPointer("wrong")
+	tampered := memStore(t)
+	fence, err := tampered.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, record := range records {
+		if _, err := tampered.Append(int64(i), fence, record.Event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := &swallowCorrelationHarness{}
+	replay, err := controller.New(tampered, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := replay.Replay(t.Context(), h); !errors.Is(err, controller.ErrReplayDiverged) ||
+		!errors.Is(h.first, controller.ErrReplayDiverged) || h.later != h.first {
+		t.Fatalf("Replay=%v first=%v later=%v, want the same sticky divergence", err, h.first, h.later)
+	}
+}
+
+func TestLegacyPositionalModelResultStillReplays(t *testing.T) {
+	source := memStore(t)
+	c, err := controller.New(source, echoModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Exec(t.Context(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	records, err := source.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records[2].Event.ModelCall.ResultCorrelation = api.ModelResultCorrelationUnspecified
+	records[3].Event.ModelCallID = nil
+	legacy := memStore(t)
+	fence, err := legacy.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, record := range records {
+		if _, err := legacy.Append(int64(i), fence, record.Event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	replay, err := controller.New(legacy, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := replay.Replay(t.Context(), &echoHarness{})
+	if err != nil || !reflect.DeepEqual(out, []string{"echo:hi"}) {
+		t.Fatalf("legacy Replay = %v, %v", out, err)
+	}
+}
+
+func TestFailedLegacyRedriveRefusesImmediateFallback(t *testing.T) {
+	log := memStore(t)
+	execCutAtModelCall(t, log, true)
+	records, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if records[2].Event.ModelCall == nil {
+		t.Fatal("missing recorded model call")
+	}
+	records[2].Event.ModelCall.ResultCorrelation = api.ModelResultCorrelationUnspecified
+	legacy := memStore(t)
+	fence, err := legacy.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, record := range records {
+		if _, err := legacy.Append(int64(i), fence, record.Event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model := &scriptedModel{failures: 1}
+	err = resumeOnce(t, legacy, fallbackHarness{id: "echo"}, model)
+	if !errors.Is(err, controller.ErrReplayDiverged) || model.calls != 1 {
+		t.Fatalf("Resume = %v provider=%d, want divergence after one failed re-drive", err, model.calls)
+	}
+	assertKinds(t, legacy, api.EventExecutionStart, api.EventInput, api.EventModelCall, api.EventError)
+}
+
+func TestFailedLegacyRedriveAllowsFreshCorrelatedRetry(t *testing.T) {
+	log := memStore(t)
+	execCutAtModelCall(t, log, true)
+	records, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records[2].Event.ModelCall.ResultCorrelation = api.ModelResultCorrelationUnspecified
+	legacy := memStore(t)
+	fence, err := legacy.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, record := range records {
+		if _, err := legacy.Append(int64(i), fence, record.Event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model := &scriptedModel{failures: 1}
+	if err := resumeOnce(t, legacy, retryHarness{}, model); err != nil {
+		t.Fatalf("Resume = %v", err)
+	}
+	records, err = legacy.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls []*api.ModelCall
+	var resultID string
+	for _, record := range records {
+		if record.Event.ModelCall != nil {
+			calls = append(calls, record.Event.ModelCall)
+		}
+		if record.Event.ModelCallID != nil {
+			resultID = *record.Event.ModelCallID
+		}
+	}
+	if len(calls) != 2 || calls[0].ResultCorrelation != api.ModelResultCorrelationUnspecified ||
+		calls[1].ResultCorrelation != api.ModelResultCorrelationByID || calls[0].ID == calls[1].ID || resultID != calls[1].ID {
+		t.Fatalf("retry correlation calls=%+v resultID=%q", calls, resultID)
+	}
+}
+
+func stringPointer(value string) *string { return &value }
 
 // A re-issued request whose input hash differs from the recorded MODEL_CALL is divergence: no
 // provider call, nothing recorded for the call, and the turn stays recoverable by a matching

@@ -232,6 +232,54 @@ func (EventKind) EnumDescriptor() ([]byte, []int) {
 	return file_common_proto_rawDescGZIP(), []int{2}
 }
 
+type ModelCall_ResultCorrelation int32
+
+const (
+	// Legacy journals correlate the next OUTPUT by position. New writers never select this mode.
+	ModelCall_RESULT_CORRELATION_UNSPECIFIED ModelCall_ResultCorrelation = 0
+	// The provider-result OUTPUT must carry this ModelCall.id in Event.model_call_id.
+	ModelCall_RESULT_CORRELATION_BY_ID ModelCall_ResultCorrelation = 1
+)
+
+// Enum value maps for ModelCall_ResultCorrelation.
+var (
+	ModelCall_ResultCorrelation_name = map[int32]string{
+		0: "RESULT_CORRELATION_UNSPECIFIED",
+		1: "RESULT_CORRELATION_BY_ID",
+	}
+	ModelCall_ResultCorrelation_value = map[string]int32{
+		"RESULT_CORRELATION_UNSPECIFIED": 0,
+		"RESULT_CORRELATION_BY_ID":       1,
+	}
+)
+
+func (x ModelCall_ResultCorrelation) Enum() *ModelCall_ResultCorrelation {
+	p := new(ModelCall_ResultCorrelation)
+	*p = x
+	return p
+}
+
+func (x ModelCall_ResultCorrelation) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ModelCall_ResultCorrelation) Descriptor() protoreflect.EnumDescriptor {
+	return file_common_proto_enumTypes[3].Descriptor()
+}
+
+func (ModelCall_ResultCorrelation) Type() protoreflect.EnumType {
+	return &file_common_proto_enumTypes[3]
+}
+
+func (x ModelCall_ResultCorrelation) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ModelCall_ResultCorrelation.Descriptor instead.
+func (ModelCall_ResultCorrelation) EnumDescriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{11, 0}
+}
+
 type ToolChoice_Mode int32
 
 const (
@@ -268,11 +316,11 @@ func (x ToolChoice_Mode) String() string {
 }
 
 func (ToolChoice_Mode) Descriptor() protoreflect.EnumDescriptor {
-	return file_common_proto_enumTypes[3].Descriptor()
+	return file_common_proto_enumTypes[4].Descriptor()
 }
 
 func (ToolChoice_Mode) Type() protoreflect.EnumType {
-	return &file_common_proto_enumTypes[3]
+	return &file_common_proto_enumTypes[4]
 }
 
 func (x ToolChoice_Mode) Number() protoreflect.EnumNumber {
@@ -341,11 +389,11 @@ func (x ToolResult_Code) String() string {
 }
 
 func (ToolResult_Code) Descriptor() protoreflect.EnumDescriptor {
-	return file_common_proto_enumTypes[4].Descriptor()
+	return file_common_proto_enumTypes[5].Descriptor()
 }
 
 func (ToolResult_Code) Type() protoreflect.EnumType {
-	return &file_common_proto_enumTypes[4]
+	return &file_common_proto_enumTypes[5]
 }
 
 func (x ToolResult_Code) Number() protoreflect.EnumNumber {
@@ -404,11 +452,11 @@ func (x Lifecycle_Kind) String() string {
 }
 
 func (Lifecycle_Kind) Descriptor() protoreflect.EnumDescriptor {
-	return file_common_proto_enumTypes[5].Descriptor()
+	return file_common_proto_enumTypes[6].Descriptor()
 }
 
 func (Lifecycle_Kind) Type() protoreflect.EnumType {
-	return &file_common_proto_enumTypes[5]
+	return &file_common_proto_enumTypes[6]
 }
 
 func (x Lifecycle_Kind) Number() protoreflect.EnumNumber {
@@ -1299,8 +1347,8 @@ type ModelCall struct {
 	// the provider. Rejection is execution-fatal even if caught: the provider is not invoked, no new
 	// MODEL_CALL is appended, and subsequent effects are refused. An existing trailing intent remains
 	// recorded. Without policy, existing semantics apply.
-	// Replay uses recorded invocation state, not today's default. The recorded ModelCall format
-	// is unchanged; admitted policy-enabled calls record the resolved model in this field.
+	// Replay uses recorded invocation state, not today's default. Admitted policy-enabled calls
+	// record the resolved model in this field.
 	Model     string            `protobuf:"bytes,1,opt,name=model,proto3" json:"model,omitempty"`
 	Params    map[string]string `protobuf:"bytes,2,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	InputHash string            `protobuf:"bytes,3,opt,name=input_hash,json=inputHash,proto3" json:"input_hash,omitempty"` // §7/§9.1: required for STATELESS_REPLAY so the I0 check can run
@@ -1314,9 +1362,12 @@ type ModelCall struct {
 	Tools []*ToolDefinition `protobuf:"bytes,6,rep,name=tools,proto3" json:"tools,omitempty"`
 	// tool_choice constrains whether and which tool the model calls. Wire-only like messages and
 	// covered by input_hash. Unset means the provider default.
-	ToolChoice    *ToolChoice `protobuf:"bytes,7,opt,name=tool_choice,json=toolChoice,proto3" json:"tool_choice,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ToolChoice *ToolChoice `protobuf:"bytes,7,opt,name=tool_choice,json=toolChoice,proto3" json:"tool_choice,omitempty"`
+	// Host-owned durable correlation mode. New journaled calls use BY_ID; omitted preserves the
+	// positional interpretation of journals written before model-result correlation.
+	ResultCorrelation ModelCall_ResultCorrelation `protobuf:"varint,8,opt,name=result_correlation,json=resultCorrelation,proto3,enum=agentsessions.v1.ModelCall_ResultCorrelation" json:"result_correlation,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ModelCall) Reset() {
@@ -1396,6 +1447,13 @@ func (x *ModelCall) GetToolChoice() *ToolChoice {
 		return x.ToolChoice
 	}
 	return nil
+}
+
+func (x *ModelCall) GetResultCorrelation() ModelCall_ResultCorrelation {
+	if x != nil {
+		return x.ResultCorrelation
+	}
+	return ModelCall_RESULT_CORRELATION_UNSPECIFIED
 }
 
 // ToolDefinition is a tool offered to a model on one call. It aligns with an MCP Tool (name,
@@ -2350,8 +2408,11 @@ type Event struct {
 	//	*Event_ExecutionStart
 	//	*Event_Parked
 	//	*Event_ReconstructionInfo
-	Body          isEvent_Body `protobuf_oneof:"body"`
-	Actor         *IdentityRef `protobuf:"bytes,18,opt,name=actor,proto3" json:"actor,omitempty"` // emitter principal -> provenance
+	Body  isEvent_Body `protobuf_oneof:"body"`
+	Actor *IdentityRef `protobuf:"bytes,18,opt,name=actor,proto3" json:"actor,omitempty"` // emitter principal -> provenance
+	// Present only on an EVENT_OUTPUT that records the provider result for a MODEL_CALL. Direct
+	// EventSink.Output leaves it absent. Presence is significant: an explicitly empty ID is invalid.
+	ModelCallId   *string `protobuf:"bytes,22,opt,name=model_call_id,json=modelCallId,proto3,oneof" json:"model_call_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2543,6 +2604,13 @@ func (x *Event) GetActor() *IdentityRef {
 		return x.Actor
 	}
 	return nil
+}
+
+func (x *Event) GetModelCallId() string {
+	if x != nil && x.ModelCallId != nil {
+		return *x.ModelCallId
+	}
+	return ""
 }
 
 type isEvent_Body interface {
@@ -2776,7 +2844,7 @@ const file_common_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"B\n" +
 	"\x0eCallerIdentity\x12\x16\n" +
 	"\x06issuer\x18\x01 \x01(\tR\x06issuer\x12\x18\n" +
-	"\asubject\x18\x02 \x01(\tR\asubject\"\xfa\x02\n" +
+	"\asubject\x18\x02 \x01(\tR\asubject\"\xaf\x04\n" +
 	"\tModelCall\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12?\n" +
 	"\x06params\x18\x02 \x03(\v2'.agentsessions.v1.ModelCall.ParamsEntryR\x06params\x12\x1d\n" +
@@ -2786,10 +2854,14 @@ const file_common_proto_rawDesc = "" +
 	"\bmessages\x18\x05 \x03(\v2\x19.agentsessions.v1.MessageR\bmessages\x126\n" +
 	"\x05tools\x18\x06 \x03(\v2 .agentsessions.v1.ToolDefinitionR\x05tools\x12=\n" +
 	"\vtool_choice\x18\a \x01(\v2\x1c.agentsessions.v1.ToolChoiceR\n" +
-	"toolChoice\x1a9\n" +
+	"toolChoice\x12\\\n" +
+	"\x12result_correlation\x18\b \x01(\x0e2-.agentsessions.v1.ModelCall.ResultCorrelationR\x11resultCorrelation\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x82\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"U\n" +
+	"\x11ResultCorrelation\x12\"\n" +
+	"\x1eRESULT_CORRELATION_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18RESULT_CORRELATION_BY_ID\x10\x01\"\x82\x01\n" +
 	"\x0eToolDefinition\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12:\n" +
@@ -2885,7 +2957,7 @@ const file_common_proto_rawDesc = "" +
 	"\x0fharness_version\x18\x05 \x01(\tR\x0eharnessVersion\x12)\n" +
 	"\x10compute_instance\x18\x06 \x01(\tR\x0fcomputeInstance\x12\x14\n" +
 	"\x05model\x18\a \x01(\tR\x05modelB\x0e\n" +
-	"\f_input_count\"\x91\b\n" +
+	"\f_input_count\"\xcc\b\n" +
 	"\x05Event\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12*\n" +
 	"\x02ts\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x02ts\x12%\n" +
@@ -2905,8 +2977,10 @@ const file_common_proto_rawDesc = "" +
 	"\x0fexecution_start\x18\x13 \x01(\v2 .agentsessions.v1.ExecutionStartH\x00R\x0eexecutionStart\x127\n" +
 	"\x06parked\x18\x14 \x01(\v2\x1d.agentsessions.v1.ApprovalRefH\x00R\x06parked\x12W\n" +
 	"\x13reconstruction_info\x18\x15 \x01(\v2$.agentsessions.v1.ReconstructionInfoH\x00R\x12reconstructionInfo\x123\n" +
-	"\x05actor\x18\x12 \x01(\v2\x1d.agentsessions.v1.IdentityRefR\x05actorB\x06\n" +
-	"\x04bodyJ\x04\b\x01\x10\x02J\x04\b\x05\x10\x06J\x04\b\x06\x10\a\"\xa2\x01\n" +
+	"\x05actor\x18\x12 \x01(\v2\x1d.agentsessions.v1.IdentityRefR\x05actor\x12'\n" +
+	"\rmodel_call_id\x18\x16 \x01(\tH\x01R\vmodelCallId\x88\x01\x01B\x06\n" +
+	"\x04bodyB\x10\n" +
+	"\x0e_model_call_idJ\x04\b\x01\x10\x02J\x04\b\x05\x10\x06J\x04\b\x06\x10\a\"\xa2\x01\n" +
 	"\tLogRecord\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x03R\x03seq\x12\x1b\n" +
 	"\tprev_hash\x18\x02 \x01(\tR\bprevHash\x12!\n" +
@@ -2952,96 +3026,98 @@ func file_common_proto_rawDescGZIP() []byte {
 	return file_common_proto_rawDescData
 }
 
-var file_common_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
+var file_common_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
 var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_common_proto_goTypes = []any{
-	(HarnessClass)(0),             // 0: agentsessions.v1.HarnessClass
-	(Mediation)(0),                // 1: agentsessions.v1.Mediation
-	(EventKind)(0),                // 2: agentsessions.v1.EventKind
-	(ToolChoice_Mode)(0),          // 3: agentsessions.v1.ToolChoice.Mode
-	(ToolResult_Code)(0),          // 4: agentsessions.v1.ToolResult.Code
-	(Lifecycle_Kind)(0),           // 5: agentsessions.v1.Lifecycle.Kind
-	(*ReconstructionInfo)(nil),    // 6: agentsessions.v1.ReconstructionInfo
-	(*ResourceMetadata)(nil),      // 7: agentsessions.v1.ResourceMetadata
-	(*Part)(nil),                  // 8: agentsessions.v1.Part
-	(*TextPart)(nil),              // 9: agentsessions.v1.TextPart
-	(*FilePart)(nil),              // 10: agentsessions.v1.FilePart
-	(*DataPart)(nil),              // 11: agentsessions.v1.DataPart
-	(*ReasoningPart)(nil),         // 12: agentsessions.v1.ReasoningPart
-	(*Message)(nil),               // 13: agentsessions.v1.Message
-	(*IdentityRef)(nil),           // 14: agentsessions.v1.IdentityRef
-	(*Origin)(nil),                // 15: agentsessions.v1.Origin
-	(*CallerIdentity)(nil),        // 16: agentsessions.v1.CallerIdentity
-	(*ModelCall)(nil),             // 17: agentsessions.v1.ModelCall
-	(*ToolDefinition)(nil),        // 18: agentsessions.v1.ToolDefinition
-	(*ToolChoice)(nil),            // 19: agentsessions.v1.ToolChoice
-	(*Usage)(nil),                 // 20: agentsessions.v1.Usage
-	(*ToolCall)(nil),              // 21: agentsessions.v1.ToolCall
-	(*ToolResult)(nil),            // 22: agentsessions.v1.ToolResult
-	(*ApprovalRequest)(nil),       // 23: agentsessions.v1.ApprovalRequest
-	(*ApprovalResult)(nil),        // 24: agentsessions.v1.ApprovalResult
-	(*ApprovalRef)(nil),           // 25: agentsessions.v1.ApprovalRef
-	(*Error)(nil),                 // 26: agentsessions.v1.Error
-	(*HarnessEnd)(nil),            // 27: agentsessions.v1.HarnessEnd
-	(*Lifecycle)(nil),             // 28: agentsessions.v1.Lifecycle
-	(*ExecutionStart)(nil),        // 29: agentsessions.v1.ExecutionStart
-	(*Event)(nil),                 // 30: agentsessions.v1.Event
-	(*LogRecord)(nil),             // 31: agentsessions.v1.LogRecord
-	nil,                           // 32: agentsessions.v1.Origin.AttributesEntry
-	nil,                           // 33: agentsessions.v1.ModelCall.ParamsEntry
-	(*timestamppb.Timestamp)(nil), // 34: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),       // 35: google.protobuf.Struct
+	(HarnessClass)(0),                // 0: agentsessions.v1.HarnessClass
+	(Mediation)(0),                   // 1: agentsessions.v1.Mediation
+	(EventKind)(0),                   // 2: agentsessions.v1.EventKind
+	(ModelCall_ResultCorrelation)(0), // 3: agentsessions.v1.ModelCall.ResultCorrelation
+	(ToolChoice_Mode)(0),             // 4: agentsessions.v1.ToolChoice.Mode
+	(ToolResult_Code)(0),             // 5: agentsessions.v1.ToolResult.Code
+	(Lifecycle_Kind)(0),              // 6: agentsessions.v1.Lifecycle.Kind
+	(*ReconstructionInfo)(nil),       // 7: agentsessions.v1.ReconstructionInfo
+	(*ResourceMetadata)(nil),         // 8: agentsessions.v1.ResourceMetadata
+	(*Part)(nil),                     // 9: agentsessions.v1.Part
+	(*TextPart)(nil),                 // 10: agentsessions.v1.TextPart
+	(*FilePart)(nil),                 // 11: agentsessions.v1.FilePart
+	(*DataPart)(nil),                 // 12: agentsessions.v1.DataPart
+	(*ReasoningPart)(nil),            // 13: agentsessions.v1.ReasoningPart
+	(*Message)(nil),                  // 14: agentsessions.v1.Message
+	(*IdentityRef)(nil),              // 15: agentsessions.v1.IdentityRef
+	(*Origin)(nil),                   // 16: agentsessions.v1.Origin
+	(*CallerIdentity)(nil),           // 17: agentsessions.v1.CallerIdentity
+	(*ModelCall)(nil),                // 18: agentsessions.v1.ModelCall
+	(*ToolDefinition)(nil),           // 19: agentsessions.v1.ToolDefinition
+	(*ToolChoice)(nil),               // 20: agentsessions.v1.ToolChoice
+	(*Usage)(nil),                    // 21: agentsessions.v1.Usage
+	(*ToolCall)(nil),                 // 22: agentsessions.v1.ToolCall
+	(*ToolResult)(nil),               // 23: agentsessions.v1.ToolResult
+	(*ApprovalRequest)(nil),          // 24: agentsessions.v1.ApprovalRequest
+	(*ApprovalResult)(nil),           // 25: agentsessions.v1.ApprovalResult
+	(*ApprovalRef)(nil),              // 26: agentsessions.v1.ApprovalRef
+	(*Error)(nil),                    // 27: agentsessions.v1.Error
+	(*HarnessEnd)(nil),               // 28: agentsessions.v1.HarnessEnd
+	(*Lifecycle)(nil),                // 29: agentsessions.v1.Lifecycle
+	(*ExecutionStart)(nil),           // 30: agentsessions.v1.ExecutionStart
+	(*Event)(nil),                    // 31: agentsessions.v1.Event
+	(*LogRecord)(nil),                // 32: agentsessions.v1.LogRecord
+	nil,                              // 33: agentsessions.v1.Origin.AttributesEntry
+	nil,                              // 34: agentsessions.v1.ModelCall.ParamsEntry
+	(*timestamppb.Timestamp)(nil),    // 35: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),          // 36: google.protobuf.Struct
 }
 var file_common_proto_depIdxs = []int32{
 	0,  // 0: agentsessions.v1.ReconstructionInfo.harness_class:type_name -> agentsessions.v1.HarnessClass
-	34, // 1: agentsessions.v1.ResourceMetadata.create_time:type_name -> google.protobuf.Timestamp
-	34, // 2: agentsessions.v1.ResourceMetadata.update_time:type_name -> google.protobuf.Timestamp
-	9,  // 3: agentsessions.v1.Part.text:type_name -> agentsessions.v1.TextPart
-	10, // 4: agentsessions.v1.Part.file:type_name -> agentsessions.v1.FilePart
-	11, // 5: agentsessions.v1.Part.data:type_name -> agentsessions.v1.DataPart
-	12, // 6: agentsessions.v1.Part.reasoning:type_name -> agentsessions.v1.ReasoningPart
-	21, // 7: agentsessions.v1.Part.tool_call:type_name -> agentsessions.v1.ToolCall
-	22, // 8: agentsessions.v1.Part.tool_result:type_name -> agentsessions.v1.ToolResult
-	35, // 9: agentsessions.v1.DataPart.data:type_name -> google.protobuf.Struct
-	8,  // 10: agentsessions.v1.ReasoningPart.summary:type_name -> agentsessions.v1.Part
-	8,  // 11: agentsessions.v1.Message.parts:type_name -> agentsessions.v1.Part
-	32, // 12: agentsessions.v1.Origin.attributes:type_name -> agentsessions.v1.Origin.AttributesEntry
-	33, // 13: agentsessions.v1.ModelCall.params:type_name -> agentsessions.v1.ModelCall.ParamsEntry
-	13, // 14: agentsessions.v1.ModelCall.messages:type_name -> agentsessions.v1.Message
-	18, // 15: agentsessions.v1.ModelCall.tools:type_name -> agentsessions.v1.ToolDefinition
-	19, // 16: agentsessions.v1.ModelCall.tool_choice:type_name -> agentsessions.v1.ToolChoice
-	35, // 17: agentsessions.v1.ToolDefinition.input_schema:type_name -> google.protobuf.Struct
-	3,  // 18: agentsessions.v1.ToolChoice.mode:type_name -> agentsessions.v1.ToolChoice.Mode
-	35, // 19: agentsessions.v1.ToolCall.args:type_name -> google.protobuf.Struct
-	1,  // 20: agentsessions.v1.ToolCall.mediation:type_name -> agentsessions.v1.Mediation
-	35, // 21: agentsessions.v1.ToolResult.output:type_name -> google.protobuf.Struct
-	8,  // 22: agentsessions.v1.ToolResult.content:type_name -> agentsessions.v1.Part
-	4,  // 23: agentsessions.v1.ToolResult.code:type_name -> agentsessions.v1.ToolResult.Code
-	16, // 24: agentsessions.v1.ApprovalResult.verified_approver:type_name -> agentsessions.v1.CallerIdentity
-	26, // 25: agentsessions.v1.HarnessEnd.error:type_name -> agentsessions.v1.Error
-	5,  // 26: agentsessions.v1.Lifecycle.kind:type_name -> agentsessions.v1.Lifecycle.Kind
-	34, // 27: agentsessions.v1.Event.ts:type_name -> google.protobuf.Timestamp
-	2,  // 28: agentsessions.v1.Event.kind:type_name -> agentsessions.v1.EventKind
-	13, // 29: agentsessions.v1.Event.message:type_name -> agentsessions.v1.Message
-	17, // 30: agentsessions.v1.Event.model:type_name -> agentsessions.v1.ModelCall
-	21, // 31: agentsessions.v1.Event.tool:type_name -> agentsessions.v1.ToolCall
-	22, // 32: agentsessions.v1.Event.result:type_name -> agentsessions.v1.ToolResult
-	23, // 33: agentsessions.v1.Event.approval:type_name -> agentsessions.v1.ApprovalRequest
-	24, // 34: agentsessions.v1.Event.approval_result:type_name -> agentsessions.v1.ApprovalResult
-	20, // 35: agentsessions.v1.Event.usage:type_name -> agentsessions.v1.Usage
-	28, // 36: agentsessions.v1.Event.lifecycle:type_name -> agentsessions.v1.Lifecycle
-	27, // 37: agentsessions.v1.Event.end:type_name -> agentsessions.v1.HarnessEnd
-	26, // 38: agentsessions.v1.Event.error:type_name -> agentsessions.v1.Error
-	29, // 39: agentsessions.v1.Event.execution_start:type_name -> agentsessions.v1.ExecutionStart
-	25, // 40: agentsessions.v1.Event.parked:type_name -> agentsessions.v1.ApprovalRef
-	6,  // 41: agentsessions.v1.Event.reconstruction_info:type_name -> agentsessions.v1.ReconstructionInfo
-	14, // 42: agentsessions.v1.Event.actor:type_name -> agentsessions.v1.IdentityRef
-	30, // 43: agentsessions.v1.LogRecord.event:type_name -> agentsessions.v1.Event
-	44, // [44:44] is the sub-list for method output_type
-	44, // [44:44] is the sub-list for method input_type
-	44, // [44:44] is the sub-list for extension type_name
-	44, // [44:44] is the sub-list for extension extendee
-	0,  // [0:44] is the sub-list for field type_name
+	35, // 1: agentsessions.v1.ResourceMetadata.create_time:type_name -> google.protobuf.Timestamp
+	35, // 2: agentsessions.v1.ResourceMetadata.update_time:type_name -> google.protobuf.Timestamp
+	10, // 3: agentsessions.v1.Part.text:type_name -> agentsessions.v1.TextPart
+	11, // 4: agentsessions.v1.Part.file:type_name -> agentsessions.v1.FilePart
+	12, // 5: agentsessions.v1.Part.data:type_name -> agentsessions.v1.DataPart
+	13, // 6: agentsessions.v1.Part.reasoning:type_name -> agentsessions.v1.ReasoningPart
+	22, // 7: agentsessions.v1.Part.tool_call:type_name -> agentsessions.v1.ToolCall
+	23, // 8: agentsessions.v1.Part.tool_result:type_name -> agentsessions.v1.ToolResult
+	36, // 9: agentsessions.v1.DataPart.data:type_name -> google.protobuf.Struct
+	9,  // 10: agentsessions.v1.ReasoningPart.summary:type_name -> agentsessions.v1.Part
+	9,  // 11: agentsessions.v1.Message.parts:type_name -> agentsessions.v1.Part
+	33, // 12: agentsessions.v1.Origin.attributes:type_name -> agentsessions.v1.Origin.AttributesEntry
+	34, // 13: agentsessions.v1.ModelCall.params:type_name -> agentsessions.v1.ModelCall.ParamsEntry
+	14, // 14: agentsessions.v1.ModelCall.messages:type_name -> agentsessions.v1.Message
+	19, // 15: agentsessions.v1.ModelCall.tools:type_name -> agentsessions.v1.ToolDefinition
+	20, // 16: agentsessions.v1.ModelCall.tool_choice:type_name -> agentsessions.v1.ToolChoice
+	3,  // 17: agentsessions.v1.ModelCall.result_correlation:type_name -> agentsessions.v1.ModelCall.ResultCorrelation
+	36, // 18: agentsessions.v1.ToolDefinition.input_schema:type_name -> google.protobuf.Struct
+	4,  // 19: agentsessions.v1.ToolChoice.mode:type_name -> agentsessions.v1.ToolChoice.Mode
+	36, // 20: agentsessions.v1.ToolCall.args:type_name -> google.protobuf.Struct
+	1,  // 21: agentsessions.v1.ToolCall.mediation:type_name -> agentsessions.v1.Mediation
+	36, // 22: agentsessions.v1.ToolResult.output:type_name -> google.protobuf.Struct
+	9,  // 23: agentsessions.v1.ToolResult.content:type_name -> agentsessions.v1.Part
+	5,  // 24: agentsessions.v1.ToolResult.code:type_name -> agentsessions.v1.ToolResult.Code
+	17, // 25: agentsessions.v1.ApprovalResult.verified_approver:type_name -> agentsessions.v1.CallerIdentity
+	27, // 26: agentsessions.v1.HarnessEnd.error:type_name -> agentsessions.v1.Error
+	6,  // 27: agentsessions.v1.Lifecycle.kind:type_name -> agentsessions.v1.Lifecycle.Kind
+	35, // 28: agentsessions.v1.Event.ts:type_name -> google.protobuf.Timestamp
+	2,  // 29: agentsessions.v1.Event.kind:type_name -> agentsessions.v1.EventKind
+	14, // 30: agentsessions.v1.Event.message:type_name -> agentsessions.v1.Message
+	18, // 31: agentsessions.v1.Event.model:type_name -> agentsessions.v1.ModelCall
+	22, // 32: agentsessions.v1.Event.tool:type_name -> agentsessions.v1.ToolCall
+	23, // 33: agentsessions.v1.Event.result:type_name -> agentsessions.v1.ToolResult
+	24, // 34: agentsessions.v1.Event.approval:type_name -> agentsessions.v1.ApprovalRequest
+	25, // 35: agentsessions.v1.Event.approval_result:type_name -> agentsessions.v1.ApprovalResult
+	21, // 36: agentsessions.v1.Event.usage:type_name -> agentsessions.v1.Usage
+	29, // 37: agentsessions.v1.Event.lifecycle:type_name -> agentsessions.v1.Lifecycle
+	28, // 38: agentsessions.v1.Event.end:type_name -> agentsessions.v1.HarnessEnd
+	27, // 39: agentsessions.v1.Event.error:type_name -> agentsessions.v1.Error
+	30, // 40: agentsessions.v1.Event.execution_start:type_name -> agentsessions.v1.ExecutionStart
+	26, // 41: agentsessions.v1.Event.parked:type_name -> agentsessions.v1.ApprovalRef
+	7,  // 42: agentsessions.v1.Event.reconstruction_info:type_name -> agentsessions.v1.ReconstructionInfo
+	15, // 43: agentsessions.v1.Event.actor:type_name -> agentsessions.v1.IdentityRef
+	31, // 44: agentsessions.v1.LogRecord.event:type_name -> agentsessions.v1.Event
+	45, // [45:45] is the sub-list for method output_type
+	45, // [45:45] is the sub-list for method input_type
+	45, // [45:45] is the sub-list for extension type_name
+	45, // [45:45] is the sub-list for extension extendee
+	0,  // [0:45] is the sub-list for field type_name
 }
 
 func init() { file_common_proto_init() }
@@ -3086,7 +3162,7 @@ func file_common_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_common_proto_rawDesc), len(file_common_proto_rawDesc)),
-			NumEnums:      6,
+			NumEnums:      7,
 			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   0,

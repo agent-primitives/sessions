@@ -255,6 +255,64 @@ func TestToolCallPartGoldenVector(t *testing.T) {
 	}
 }
 
+func TestModelResultCorrelationGoldenVectors(t *testing.T) {
+	call := api.Event{ExecutionID: "exec-model", Kind: api.EventModelCall, ModelCall: &api.ModelCall{
+		Model: "gpt-test", InputHash: "sha256:input", ID: "model-call-1",
+		ResultCorrelation: api.ModelResultCorrelationByID,
+	}}
+	result := api.Event{ExecutionID: "exec-model", Kind: api.EventOutput,
+		Message: api.TextMessage("assistant", "answer"), ModelCallID: proto.String("model-call-1")}
+	for _, tc := range []struct {
+		name     string
+		event    api.Event
+		want     string
+		wantHash string
+	}{
+		{
+			name: "call", event: call,
+			want:     `{"event":{"execution_id":"exec-model","kind":"EVENT_MODEL_CALL","model":{"id":"model-call-1","input_hash":"sha256:input","model":"gpt-test","result_correlation":"RESULT_CORRELATION_BY_ID"}},"prev_hash":"","seq":"1"}`,
+			wantHash: "8e5c3dfd99d817ef8123b158230fc1839bdb409e5485674fb6cff46c59d4406d",
+		},
+		{
+			name: "result", event: result,
+			want:     `{"event":{"execution_id":"exec-model","kind":"EVENT_OUTPUT","message":{"parts":[{"text":{"text":"answer"}}],"role":"assistant"},"model_call_id":"model-call-1"},"prev_hash":"","seq":"1"}`,
+			wantHash: "f93c67086837ff8a9b4e865e00b52964b35dcd7d3ca94611fde1e49b1ddc1a07",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := canon.Record("", 1, tc.event)
+			if err != nil || string(got) != tc.want {
+				t.Fatalf("canonical %s = %s, %v; want %s", tc.name, got, err, tc.want)
+			}
+			hash, err := canon.HashRecord("", 1, tc.event)
+			if err != nil || hash != tc.wantHash {
+				t.Fatalf("%s hash = %s, %v; want %s (also update hack/verify_chain.py)", tc.name, hash, err, tc.wantHash)
+			}
+			roundTrip, err := canon.HashRecord("", 1, wire.EventFromProto(wire.EventToProto(tc.event)))
+			if err != nil || roundTrip != hash {
+				t.Fatalf("%s hash after wire round-trip = %s, %v; want %s", tc.name, roundTrip, err, hash)
+			}
+		})
+	}
+}
+
+func TestModelResultCorrelationPresenceIsHashBound(t *testing.T) {
+	absent := api.Event{Kind: api.EventOutput, Message: api.TextMessage("assistant", "answer")}
+	empty := absent
+	empty.ModelCallID = proto.String("")
+	absentHash, err := canon.HashRecord("", 1, absent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyHash, err := canon.HashRecord("", 1, empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if absentHash == emptyHash {
+		t.Fatal("absent and explicitly empty model_call_id hash alike")
+	}
+}
+
 // A FORK marker's compute_instance (the clone a stateful fork made) is part of its canonical bytes
 // only when set, so a marker that records none, which every marker written before the field existed
 // is, keeps its canonical bytes and hash. Both are interop vectors (hack/verify_chain.py) and must

@@ -273,8 +273,8 @@ cost, audit, and tool approval are first-class rather than parsed out of text af
 |---|---|
 | `EXECUTION_START` | Host-owned execution config, cursor, input count, resolved harness name and advertised version, recorded before inputs for every new execution. |
 | `INPUT` | A user or producer input message. |
-| `MODEL_CALL` | A call to a model was made (records the model, params, and an input hash for the replay check). |
-| `OUTPUT` | Assistant output (a delta or a full message). |
+| `MODEL_CALL` | A call to a model was made (records the model, params, input hash, call ID and durable result-correlation mode). |
+| `OUTPUT` | Assistant output. A provider result names its `MODEL_CALL`; direct harness output leaves that correlation absent. |
 | `TOOL_CALL` / `TOOL_RESULT` | A tool invocation and its outcome. Aligned with an MCP tool call. |
 | `APPROVAL_REQUEST` / `APPROVAL_RESULT` | A host-owned request and explicit caller decision around a tool call. |
 | `USAGE` | Per-call token and cost accounting. |

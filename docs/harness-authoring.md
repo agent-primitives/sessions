@@ -277,9 +277,12 @@ diverge or re-spend the call. This single rule is why replay never invokes the m
 that calls its provider anyway is unmediated, whether or not it means to be, and loses that
 guarantee.
 
-The host records `MODEL_CALL` (with the request's input hash) before it invokes the provider and records
-the completion as `OUTPUT` after. A process death or provider error between the two leaves a turn whose
-last effect is a `MODEL_CALL` with no completion. On `Resume`, when your harness re-issues that request,
+The host records `MODEL_CALL` (with the request's input hash, call ID and ID-correlation mode) before
+it invokes the provider, and records the completion as `OUTPUT` naming that call. Output your harness
+emits directly carries no model-call ID, so a handled provider error followed by fallback output is
+not replayed as provider success. A process death or provider error between intent and completion
+leaves a turn whose last effect is a `MODEL_CALL` with no correlated completion. On `Resume`, when
+your harness re-issues that request,
 the host serves everything recorded before it, checks the re-issued request's input hash against the
 recorded one, then invokes the provider live and records the completion after that same `MODEL_CALL`. It
 never records a second `MODEL_CALL` or a second `OUTPUT` for it. This applies to journals with
@@ -296,7 +299,9 @@ provider call.
 If the recovering call fails and your harness returns the error, that `MODEL_CALL` is still the turn's
 last effect and the next `Resume` re-drives it again. Do not retry a failed `sink.Model` call inside
 the run. Over the harness wire a `sink.Model` error ends the bridge, so a remote harness never sees it
-and cannot retry. An in-process harness that retries only some errors can leave `MODEL_CALL`, `ERROR`,
+and cannot retry. After upgrading a markerless pre-v11 call, direct fallback output immediately after
+a failed re-drive is refused because it would be positionally ambiguous; issue a fresh model call or
+return the error. An in-process harness that retries only some errors can leave `MODEL_CALL`, `ERROR`,
 `MODEL_CALL`, `OUTPUT`, `END`, which `Replay` rejects when the harness does not reproduce the same
 retry. A harness that retries every error replays that journal, but returning the error and letting
 `Resume` re-drive the call is the supported path.

@@ -100,8 +100,8 @@ sending a JSON object with an `env` member of string values as `Start.Config`:
   number, boolean, array or object refuses the turn even when a later one is a string.
 - Reserved names cannot be allowlisted or set: `PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, `LANG`,
   `LC_ALL`, `LC_CTYPE`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CONFIG_DIR`,
-  `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `PS4`, `PROMPT_COMMAND` and any name starting with `LD_`,
-  `DYLD_`, `BASH_FUNC_` or `CLAUDE_CODE_OAUTH_` (Claude Code's OAuth token, refresh token and
+  `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `PS4`, `PROMPT_COMMAND`, `ZDOTDIR` and any name starting with
+  `LD_`, `DYLD_`, `BASH_FUNC_` or `CLAUDE_CODE_OAUTH_` (Claude Code's OAuth token, refresh token and
   token file descriptor). An allowlist prefix that covers one of them, such as `ANTHROPIC_*` or
   `CLAUDE_CODE_*`, is refused at startup, so allowlist Claude Code settings by exact name. The
   reserved list covers the credentials known when this was written; checking that an exact name

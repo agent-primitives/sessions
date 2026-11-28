@@ -115,7 +115,7 @@
 // array or object refuses the turn even when a later one is a string. Each name must match an
 // allowlist entry and must not be reserved: PATH, HOME, USER, SHELL, TMPDIR, LANG, LC_ALL,
 // LC_CTYPE, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDE_CONFIG_DIR, NODE_OPTIONS, BASH_ENV,
-// ENV, PS4, PROMPT_COMMAND, and every name starting with LD_, DYLD_, BASH_FUNC_ or
+// ENV, PS4, PROMPT_COMMAND, ZDOTDIR, and every name starting with LD_, DYLD_, BASH_FUNC_ or
 // CLAUDE_CODE_OAUTH_. An allowlist entry that covers a reserved name is refused, ANTHROPIC_* and
 // CLAUDE_CODE_* included, so Claude Code settings are allowlisted by exact name. A turn's value
 // replaces the variable's base value for that turn; the next turn starts from the base environment

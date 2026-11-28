@@ -25,7 +25,7 @@ var (
 	reservedEnv = []string{
 		"PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
 		"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CONFIG_DIR",
-		"NODE_OPTIONS", "BASH_ENV", "ENV", "PS4", "PROMPT_COMMAND",
+		"NODE_OPTIONS", "BASH_ENV", "ENV", "PS4", "PROMPT_COMMAND", "ZDOTDIR",
 	}
 	reservedEnvPrefixes = []string{"LD_", "DYLD_", "BASH_FUNC_", "CLAUDE_CODE_OAUTH_"}
 )

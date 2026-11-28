@@ -1703,6 +1703,48 @@ sequenceDiagram
   code as its number.
 - If an `Event` has more than one body set, only the first in the converter's order is kept.
 
+### 12.4 Per-turn environment in `Start.config` (informative)
+
+The host passes `Start.config` to the harness without interpreting it. The reference Claude Code
+harness ([`integrations/claudecode`](integrations/claudecode/)) gives it one optional meaning,
+described here as an example of a harness-defined `config` shape. Nothing in this section is a
+requirement on a host or on other harnesses.
+
+- Opt-in. The harness reads `Start.config` only when its operator sets `TurnEnvAllowlist`. With
+  the allowlist empty, the default, `config` is not read, and a node that predates the feature
+  ignores it and runs the turn with its own environment.
+- Shape. `config` is a JSON object whose member `env`, matched case-sensitively, maps variable
+  names to string values: `{"env": {"GIT_CONFIG_COUNT": "1"}}`. Other members are ignored, so a
+  producer can add its own. An empty `config`, a missing `env` member, or an empty `env` sets
+  nothing.
+- Allowlist. Each name must match an allowlist entry: an exact name, or a nonempty name prefix
+  followed by `*`. A name that does not match refuses the turn.
+- Reserved names. These can be neither set nor allowlisted: `PATH`, `HOME`, `USER`, `SHELL`,
+  `TMPDIR`, `LANG`, `LC_ALL`, `LC_CTYPE`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `CLAUDE_CONFIG_DIR`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `PS4`, `PROMPT_COMMAND`, `ZDOTDIR`, and
+  any name starting with `LD_`, `DYLD_`, `BASH_FUNC_` or `CLAUDE_CODE_OAUTH_`. An allowlist entry
+  that is, or whose prefix could match, a reserved name is refused when the harness starts, so
+  `ANTHROPIC_*` and `CLAUDE_CODE_*` are refused and such settings are allowlisted by exact name.
+- Limits. `env` holds at most 256 names, each at most 256 bytes, and at most 64 KiB of names and
+  values together.
+- Duplicates. With a duplicate name in `env` the last one is used, but a duplicate name whose
+  earlier value is a number, boolean, array or object refuses the turn even when a later value is
+  a string. An earlier duplicate `env` member is ignored whatever its value.
+- Invalid input. The harness refuses the turn, before it starts `claude`, when `config` is not a
+  JSON object, `env` is not valid UTF-8 (an escaped unpaired surrogate such as `\ud800` included)
+  or not an object of strings (a `null` value included), a name is not a valid variable name, is
+  reserved or is not allowlisted, a value holds NUL, or a limit above is exceeded. The refusal
+  names the variable when it concerns one and never holds a value.
+- Effect. The entries replace same-named variables in that turn's `claude` process only; the next
+  turn starts again from the node's environment. A retry or `Resume` of the same execution reads
+  the same journaled `config`, so it gets the same environment.
+- Security. `config` is durable and returned by `Replay` (`OPS-15`), so a value must not be a
+  credential. An allowed variable can redirect where the process sends data or make a tool run
+  commands (`GIT_CONFIG_*`, `ANTHROPIC_BASE_URL`), so an operator allowlists only what the
+  producer building `config` needs. The reserved list covers the credentials and code-loading
+  variables known when written; checking that an allowed name is not a credential is the
+  operator's responsibility.
+
 ## 13. Placement and runtime contract
 
 ### 13.1 Resumability tiers

@@ -31,6 +31,11 @@ type recordedExecution struct {
 // runs. It preserves an ID-less legacy prefix, then groups modern events by ID in first-seen order.
 // Lifecycle is session-scoped.
 func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
+	for i, event := range events {
+		if event.ModelCallID != nil && event.Kind != api.EventOutput {
+			return nil, fmt.Errorf("%w: event %d (%s) carries model result correlation", ErrInvalidExecutionLog, i+1, event.Kind)
+		}
+	}
 	prefixEnd, err := legacyPrefix(events)
 	if err != nil {
 		return nil, err

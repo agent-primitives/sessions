@@ -330,8 +330,8 @@ no flattened lifecycle enum.
 |---|---|---|---|
 | `EVENT_EXECUTION_START` | `ExecutionStart` | host | First record of every new execution (§8.1). |
 | `EVENT_INPUT` | `Message` | host | One per input message. |
-| `EVENT_MODEL_CALL` | `ModelCall` | host | Recorded before the provider is invoked. Journal form keeps `model`, `params`, `input_hash`, `id`; the reference host records only `model`, `input_hash` and `id`, so `params` is covered by `input_hash` alone (`EXE-11`). |
-| `EVENT_OUTPUT` | `Message` | host | The finalized model completion (`EXE-12`), or text the harness emits through `Output`: one `assistant` text record per call (a wire harness's message keeps only its text parts). Streaming deltas (`ExecUpdate.delta`) are never journaled. |
+| `EVENT_MODEL_CALL` | `ModelCall` | host | Recorded before the provider is invoked. Journal form keeps `model`, `params`, `input_hash`, `id` and `result_correlation`; the reference host records only `model`, `input_hash`, `id` and the correlation mode, so `params` is covered by `input_hash` alone (`EXE-11`). |
+| `EVENT_OUTPUT` | `Message` | host | The finalized model completion (`EXE-12`), with `model_call_id` naming its `MODEL_CALL` for new records; or text the harness emits through `Output`, with no model-call ID: one `assistant` text record per call (a wire harness's message keeps only its text parts). Streaming deltas (`ExecUpdate.delta`) are never journaled. |
 | `EVENT_TOOL_CALL` | `ToolCall` | host | Intent, recorded before a host-executed tool runs. |
 | `EVENT_TOOL_RESULT` | `ToolResult` | host | Receipt, or a harness-reported result. |
 | `EVENT_APPROVAL_REQUEST` | `ApprovalRequest` | host only | §10. |
@@ -697,9 +697,14 @@ other operations but never sees those calls.
 
 ### 8.3 Model calls
 
-- `EXE-10`: On the live path the host MUST append `EVENT_MODEL_CALL` (with `input_hash` and a fresh
-  call id) before invoking the provider, then append the completion as `EVENT_OUTPUT`. The
-  `OUTPUT` carries no call id; its position after the `MODEL_CALL` is the correlation.
+- `EXE-10`: On the live path the host MUST append `EVENT_MODEL_CALL` (with `input_hash`, a fresh
+  call id and `result_correlation = BY_ID`) before invoking the provider, then append the completion
+  as `EVENT_OUTPUT` with `model_call_id` present and equal to that call id. `EventSink.Output`
+  produces a direct `OUTPUT` with no `model_call_id`. Replay and recovery consume a new call's
+  provider result only when the IDs match; an empty or different present ID is sticky divergence.
+  A markerless call retains the positional interpretation of pre-v11 journals: an immediately
+  following ID-less `OUTPUT` is its completion. This compatibility rule cannot distinguish a
+  historical fallback output and therefore does not retroactively repair old ambiguous histories.
 - `EXE-11`: `input_hash` MUST cover the full model request: model, messages, params, tool
   definitions, and tool choice. In the reference host it is SHA-256 over the Go JSON encoding of
   `api.ModelRequest`, with later-added fields omitted when empty so older hashes stay stable. It is
@@ -721,8 +726,8 @@ other operations but never sees those calls.
   New live effects of a policy-aware invocation face the current policy, if configured. Removing
   policy removes membership checks, not the invocation's recorded default. Invocations with an
   empty recorded default, including markerless journals, retain their old model behavior without
-  default resolution or membership checks. Per-call IDs remain in the existing `ModelCall.model`;
-  its format is unchanged.
+  default resolution or membership checks. Per-call IDs remain in `ModelCall.id`; new calls also
+  declare their result-correlation mode (`EXE-10`).
 - `EXE-12`: Model streaming deltas (`ExecUpdate.delta`) MUST NOT be journaled. Exactly one
   `EVENT_OUTPUT` records each finalized completion. Text a harness passes to `Output` is not a
   delta: each call is journaled as its own `EVENT_OUTPUT`.
@@ -734,7 +739,8 @@ These are named in the reference controller. The numbering is the code's. `I0`, 
 concerns host-executed tools and applies to both classes.
 
 - `I0`: On reconstruction replay, each model call the harness re-issues MUST have the same
-  `input_hash` as the recorded `MODEL_CALL` at that position, its output text MUST equal the
+  `input_hash` as the recorded `MODEL_CALL` at that position, its correlated provider output MUST
+  name that call for new records, and its output text MUST equal the
   recorded `OUTPUT` text, and reported usage MUST equal the recorded `USAGE` (except in the legacy
   execution, `EXE-32`). Any mismatch is divergence (`ErrReplayDiverged`). Recovery checks served
   effects the same way, except that a `REQUIRES_MEMORY_SNAPSHOT` recovery at a decided approval
@@ -779,13 +785,18 @@ concerns host-executed tools and applies to both classes.
   the live path for new effects only. The exception is a `REQUIRES_MEMORY_SNAPSHOT` execution whose
   latest gate is decided without a receipt: recovery serves from that gate (`APR-16`).
 - `EXE-22`: Model cut rule, outside legacy recovery (`EXE-30`): if the trailing effect is a
-  `MODEL_CALL` with no `OUTPUT` and the re-issued `input_hash` matches, recovery MUST invoke the
-  provider once and append the `OUTPUT` after the existing `MODEL_CALL`. A hash mismatch is
+  `MODEL_CALL` with no correlated `OUTPUT` and the re-issued `input_hash` matches, recovery MUST
+  invoke the provider once and append the `OUTPUT` after the existing `MODEL_CALL`, carrying that
+  call's ID. A hash mismatch is
   divergence: the provider is not called and no `OUTPUT` is appended (the failed run's
   `EVENT_ERROR`, `EXE-23`, still applies). A non-trailing `MODEL_CALL` without `OUTPUT` MUST NOT
   reach the provider: the re-issued call returns an error to the harness, which is not
   divergence. The execution fails only if the harness does not handle that error; over
   `Harness.Connect` it always fails (`EXE-33`).
+  A failed re-drive of a markerless pre-v11 call MUST NOT be followed immediately by direct output:
+  later replay would interpret that ID-less output as the old call's positional completion. The
+  reference host returns sticky divergence before appending it. The harness MAY instead issue a new
+  model call, whose `BY_ID` marker makes its later result unambiguous.
 - `EXE-23`: Recovery that fails after the harness has started running appends a best-effort
   `EVENT_ERROR`; recovery that succeeds appends `EVENT_END`. Failures raised before the harness
   runs (a chain mismatch `CHAIN-12`, invalid log, incomplete invocation `EXE-24`, harness identity
@@ -2466,6 +2477,13 @@ The reference implementation protects the integrity of the record, not access to
     back up the database and WAL before the first version 10 open. An older binary refuses a
     version 10 journal at Open, but one that already has it open is not stopped by the stamp. There
     is no downgrade; restore the backup to roll back.
+  - Version 11 changes no table and rewrites no event. Its stamp marks a journal whose new
+    `MODEL_CALL` records may carry `result_correlation = BY_ID` and whose provider-result `OUTPUT`
+    records may carry `model_call_id`. Existing calls and outputs retain positional behavior and
+    unchanged hashes. Stop every older host and embedded client sharing the journal before the first
+    version 11 open, and back up the database and WAL. An older binary refuses v11 on open; one that
+    already has the journal open drops the new hash-bound fields and fails verification on a session
+    that carries them. There is no downgrade; restore the backup to roll back.
   - Version 9 extends `approval_executions` with an execution outcome and rebuilds the shared
     execution/approval projection from the journal. Events, canonical bytes, hashes and fences
     do not change. An undecodable session reports RUNNING without an approval reference; SQL

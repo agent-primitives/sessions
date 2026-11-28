@@ -131,6 +131,9 @@ type Event struct {
 	Err            *Error
 	ExecutionStart *ExecutionStart
 	Parked         *ApprovalRef `json:",omitempty"` // transport only, excluded from durable history
+	// ModelCallID is present only when this OUTPUT is a provider result. Nil identifies direct
+	// harness output; a non-nil empty value is malformed correlation evidence.
+	ModelCallID *string
 
 	Actor IdentityRef // emitter principal -> provenance on every action
 }
@@ -180,11 +183,21 @@ const (
 
 // ModelCall records a call to a model (model-agnostic) for audit and cost.
 type ModelCall struct {
-	Model     string
-	Params    map[string]string
-	InputHash string // required for STATELESS_REPLAY so the §9.1 I0 check can run
-	ID        string // correlation id for the served ModelResult (proto ModelCall.id)
+	Model             string
+	Params            map[string]string
+	InputHash         string // required for STATELESS_REPLAY so the §9.1 I0 check can run
+	ID                string // correlation id for the served ModelResult (proto ModelCall.id)
+	ResultCorrelation ModelResultCorrelation
 }
+
+// ModelResultCorrelation selects the durable provider-result correlation rule. The zero value is
+// positional compatibility for old journals; new calls use ModelResultCorrelationByID.
+type ModelResultCorrelation int32
+
+const (
+	ModelResultCorrelationUnspecified ModelResultCorrelation = iota
+	ModelResultCorrelationByID
+)
 
 // Usage is per-model-call token/cost accounting.
 type Usage struct {

@@ -169,6 +169,7 @@ transport (see Delta in session.proto) and coalesce into the finalized event (§
 | parked | [ApprovalRef](#agentsessions-v1-ApprovalRef) |  | EVENT_PARKED echoes the park reference; Event.execution_id must match its execution_id. |
 | reconstruction_info | [ReconstructionInfo](#agentsessions-v1-ReconstructionInfo) |  |  |
 | actor | [IdentityRef](#agentsessions-v1-IdentityRef) |  | emitter principal -&gt; provenance |
+| model_call_id | [string](#string) | optional | Present only on an EVENT_OUTPUT that records the provider result for a MODEL_CALL. Direct EventSink.Output leaves it absent. Presence is significant: an explicitly empty ID is invalid. |
 
 
 
@@ -325,13 +326,14 @@ message. Under STATELESS_REPLAY the harness never calls a provider directly.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| model | [string](#string) |  | On new policy-enabled turns, an empty request model resolves to Start.model; explicit per-call overrides are allowed within the host&#39;s allowed set. Membership is checked before invoking the provider. Rejection is execution-fatal even if caught: the provider is not invoked, no new MODEL_CALL is appended, and subsequent effects are refused. An existing trailing intent remains recorded. Without policy, existing semantics apply. Replay uses recorded invocation state, not today&#39;s default. The recorded ModelCall format is unchanged; admitted policy-enabled calls record the resolved model in this field. |
+| model | [string](#string) |  | On new policy-enabled turns, an empty request model resolves to Start.model; explicit per-call overrides are allowed within the host&#39;s allowed set. Membership is checked before invoking the provider. Rejection is execution-fatal even if caught: the provider is not invoked, no new MODEL_CALL is appended, and subsequent effects are refused. An existing trailing intent remains recorded. Without policy, existing semantics apply. Replay uses recorded invocation state, not today&#39;s default. Admitted policy-enabled calls record the resolved model in this field. |
 | params | [ModelCall.ParamsEntry](#agentsessions-v1-ModelCall-ParamsEntry) | repeated |  |
 | input_hash | [string](#string) |  | §7/§9.1: required for STATELESS_REPLAY so the I0 check can run |
 | id | [string](#string) |  | correlation id for the served ModelResult |
 | messages | [Message](#agentsessions-v1-Message) | repeated | messages is the request context the host needs to INVOKE the model on the live path. It is wire-only: the host records the call with input_hash alone (messages stripped), since the recorded form only needs the hash to re-check I0 on replay. |
 | tools | [ToolDefinition](#agentsessions-v1-ToolDefinition) | repeated | tools are the definitions offered to the model on this call. Wire-only like messages: the recorded form keeps input_hash, which covers them. |
 | tool_choice | [ToolChoice](#agentsessions-v1-ToolChoice) |  | tool_choice constrains whether and which tool the model calls. Wire-only like messages and covered by input_hash. Unset means the provider default. |
+| result_correlation | [ModelCall.ResultCorrelation](#agentsessions-v1-ModelCall-ResultCorrelation) |  | Host-owned durable correlation mode. New journaled calls use BY_ID; omitted preserves the positional interpretation of journals written before model-result correlation. |
 
 
 
@@ -657,6 +659,18 @@ Mediation controls how a tool call is executed / who enforces record-before-effe
 | MEDIATION_IN_HARNESS_REPORTED | 1 | harness runs it, reports for audit (cooperative WAL) |
 | MEDIATION_CONTROLLER_MEDIATED | 2 | host/gateway executes (host-enforced WAL; trustless) |
 | MEDIATION_REQUIRES_APPROVAL | 3 | Host-owned durable approval gate for STATELESS_REPLAY and REQUIRES_MEMORY_SNAPSHOT harnesses. The harness emits a tool call, then awaits a decision/receipt or park control frame; it never executes the effect itself. An in-process harness with an empty or unknown tier fails closed before the effect. A wire harness that omits its tier or sends an unknown one is read as STATELESS_REPLAY, the Resumability default, and gets the gate. |
+
+
+
+<a name="agentsessions-v1-ModelCall-ResultCorrelation"></a>
+
+### ModelCall.ResultCorrelation
+
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| RESULT_CORRELATION_UNSPECIFIED | 0 | Legacy journals correlate the next OUTPUT by position. New writers never select this mode. |
+| RESULT_CORRELATION_BY_ID | 1 | The provider-result OUTPUT must carry this ModelCall.id in Event.model_call_id. |
 
 
 

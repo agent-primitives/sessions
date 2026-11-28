@@ -90,8 +90,9 @@ CREATE INDEX IF NOT EXISTS sessions_project_created
 // version 6 records explicit session model-policy eligibility; version 7 adds the allocation
 // ledger and inventory completeness/evidence columns; version 8 marks a journal whose
 // APPROVAL_RESULT records may carry a verified approver; version 9 adds execution outcomes;
-// version 10 records immutable backend resource identity for cleanup attempts.
-const SchemaVersion = 10
+// version 10 records immutable backend resource identity for cleanup attempts; version 11 marks a
+// journal whose MODEL_CALL and provider-result OUTPUT records may carry ID-correlation fields.
+const SchemaVersion = 11
 
 // migrations[i] moves a database from version i+1 to i+2, inside the migration transaction. The
 // array length is tied to SchemaVersion, so bumping one without the other does not compile.
@@ -105,6 +106,7 @@ var migrations = [SchemaVersion - 1]func(*sql.Tx) error{
 	migrateV7ToV8,
 	migrateV8ToV9,
 	migrateCleanupIdentity,
+	migrateV10ToV11,
 }
 
 // migrateV7ToV8 changes no table and rewrites no event. The stamp alone is the change: this build
@@ -113,6 +115,10 @@ var migrations = [SchemaVersion - 1]func(*sql.Tx) error{
 // whole journal, before any read or append. Existing decisions carry no approver and are read as
 // they were.
 func migrateV7ToV8(*sql.Tx) error { return nil }
+
+// migrateV10ToV11 changes no table and rewrites no event. The stamp prevents an older build from
+// opening a journal whose model correlation fields it would drop before hash verification.
+func migrateV10ToV11(*sql.Tx) error { return nil }
 
 // migrateV5ToV6 leaves every existing session on legacy model semantics, including empty logs.
 func migrateV5ToV6(tx *sql.Tx) error {

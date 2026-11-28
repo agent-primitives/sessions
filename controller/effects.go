@@ -25,6 +25,9 @@ type liveSink struct {
 	// runCtx is the context Exec or Resume passed to Harness.Run. It, not the per-call context a
 	// harness may narrow for ToolCall, decides whether the host ended the turn.
 	runCtx context.Context
+	// appends counts durable sink writes in this run. Resume uses it to tell whether another effect
+	// made a failed legacy model call's later direct output unambiguous.
+	appends int
 }
 
 var _ api.EventSink = (*liveSink)(nil)
@@ -54,21 +57,24 @@ func (s *liveSink) model(ctx context.Context, req api.ModelRequest) (api.ModelRe
 	if err := s.validateModel(req); err != nil {
 		return api.ModelResponse{}, err
 	}
+	callID := newID()
 	if _, err := s.append(api.Event{
-		Kind:      api.EventModelCall,
-		ModelCall: &api.ModelCall{Model: req.Model, InputHash: hashModelInput(req), ID: newID()},
+		Kind: api.EventModelCall,
+		ModelCall: &api.ModelCall{
+			Model: req.Model, InputHash: hashModelInput(req), ID: callID,
+			ResultCorrelation: api.ModelResultCorrelationByID,
+		},
 	}); err != nil {
 		return api.ModelResponse{}, err
 	}
-	return s.completeModel(ctx, req)
+	return s.completeModel(ctx, req, callID)
 }
 
 // completeModel invokes the model for a MODEL_CALL that is already recorded and appends the
-// completion as the OUTPUT that answers it: OUTPUT carries no call ID, so its position directly
-// after the MODEL_CALL in the execution's effect stream is the correlation. It is reused verbatim
-// when Resume re-drives a call cut before its completion was recorded, so both paths get the
+// completion as the OUTPUT that answers callID. It is reused when Resume re-drives a call cut before
+// its completion was recorded, so both paths keep the original durable ID and get the
 // controller.model_call span; a completion served from the journal gets none.
-func (s *liveSink) completeModel(ctx context.Context, req api.ModelRequest) (resp api.ModelResponse, err error) {
+func (s *liveSink) completeModel(ctx context.Context, req api.ModelRequest, callID string) (resp api.ModelResponse, err error) {
 	ctx, finish := observability.BeginDebug(ctx, s.c.logger, "controller", "model_call",
 		"session_uid", s.c.sessionUID,
 		"execution_id", s.executionID,
@@ -95,7 +101,7 @@ func (s *liveSink) completeModel(ctx context.Context, req api.ModelRequest) (res
 	}
 	s.c.liveModelCalls++
 	msg := resp.Message
-	if _, err := s.append(api.Event{Kind: api.EventOutput, Message: &msg}); err != nil {
+	if _, err := s.append(api.Event{Kind: api.EventOutput, Message: &msg, ModelCallID: &callID}); err != nil {
 		return api.ModelResponse{}, err
 	}
 	return resp, nil
@@ -321,12 +327,16 @@ func (s *replaySink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 	if mc.ModelCall == nil || mc.ModelCall.InputHash != hashModelInput(req) {
 		return api.ModelResponse{}, s.diverged(errors.New("replay: model input hash mismatch — harness violated STATELESS_REPLAY (I0)"))
 	}
-	out, ok := s.nextOf(api.EventOutput)
-	if !ok {
+	out, found, correlationErr := recordedModelResult(s.stream, s.i, mc.ModelCall)
+	if correlationErr != nil {
+		return api.ModelResponse{}, s.diverged(fmt.Errorf("replay: %w", correlationErr))
+	}
+	if !found {
 		// A handled provider failure can leave a call without completion. Preserve its
 		// bounded, handleable historical outcome rather than latching identity divergence.
 		return api.ModelResponse{}, errors.New("replay: expected a recorded completion, found none")
 	}
+	s.i++
 	var msg api.Message
 	if out.Message != nil {
 		msg = *out.Message
@@ -372,6 +382,9 @@ func (s *replaySink) Output(ctx context.Context, delta string) error {
 	ev, ok := s.nextOf(api.EventOutput)
 	if !ok {
 		return s.diverged(errors.New("replay: unexpected output (no matching recorded event)"))
+	}
+	if ev.ModelCallID != nil {
+		return s.diverged(errors.New("replay: direct output matched a model result"))
 	}
 	recorded := ""
 	if ev.Message != nil {

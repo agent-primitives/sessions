@@ -249,6 +249,10 @@ event. Events in one turn share an `execution_id`. The principal event kinds are
 
 `PARKED` is a transport acknowledgement and is not journaled.
 
+New `MODEL_CALL` records use ID correlation. Their provider-result `OUTPUT` carries the same
+`model_call_id`; output emitted directly by the harness carries none. Calls written before SQLite
+schema v11 retain positional result matching for compatibility.
+
 SQLite maintains bounded `approval_executions` and `approval_calls` projections so `GetSession` and
 `ListSessions` do not need to decode every event. Those tables are reporting evidence only. The
 controller independently inspects the journal for admission, approval decisions, replay, and

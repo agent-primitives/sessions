@@ -106,6 +106,19 @@ APPROVAL_GOLDEN = (
     "0d1ff028379c892d4f15b1f331a6a8baabfa2dfb43bf32fbb8095fe03725e0a2",
 )
 
+# ID-correlated MODEL_CALL and provider-result OUTPUT (canon
+# TestModelResultCorrelationGoldenVectors). The mode marker distinguishes new calls from legacy
+# positional calls; model_call_id is present only on the provider result, never direct output.
+MODEL_CORRELATION_GOLDENS = [
+    ({"execution_id": "exec-model", "kind": "EVENT_MODEL_CALL",
+      "model": {"model": "gpt-test", "input_hash": "sha256:input", "id": "model-call-1",
+                "result_correlation": "RESULT_CORRELATION_BY_ID"}},
+     "8e5c3dfd99d817ef8123b158230fc1839bdb409e5485674fb6cff46c59d4406d"),
+    ({"execution_id": "exec-model", "kind": "EVENT_OUTPUT", "model_call_id": "model-call-1",
+      "message": {"role": "assistant", "parts": [{"text": {"text": "answer"}}]}},
+     "f93c67086837ff8a9b4e865e00b52964b35dcd7d3ca94611fde1e49b1ddc1a07"),
+]
+
 EVENT_TYPE = "agentsessions.v1.Event"
 
 
@@ -123,7 +136,7 @@ def golden_check():
         return 1
     print("DELETE canonical:", DELETE_CANONICAL.decode("utf-8"))
     vectors = [(GOLDEN_EVENT, GOLDEN_EXPECTED), *START_GOLDENS, TOOL_CALL_GOLDEN, DELETE_GOLDEN,
-               *FORK_GOLDENS, APPROVAL_GOLDEN]
+               *FORK_GOLDENS, APPROVAL_GOLDEN, *MODEL_CORRELATION_GOLDENS]
     for event, expected in vectors:
         record = {"event": event, "prev_hash": "", "seq": "1"}
         digest = hashlib.sha256(_stdlib_jcs(record)).hexdigest()

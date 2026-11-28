@@ -48,8 +48,8 @@ const (
 // is classified.
 // ABORTED: STALE_CURSOR, SESSION_BUSY, COMPUTE_BUSY, CHECKPOINT_IN_PROGRESS, FENCED,
 // SNAPSHOT_SUPERSEDED (Fork only).
-// FAILED_PRECONDITION: SESSION_DELETED, MEMORY_STATE_LOST, CHECKPOINT_INVALID,
-// COMPUTE_CONFIG_INVALID.
+// FAILED_PRECONDITION: SESSION_DELETED, CHECKPOINT_INCOMPLETE_TURN, MEMORY_STATE_LOST,
+// CHECKPOINT_INVALID, COMPUTE_CONFIG_INVALID.
 // UNAVAILABLE: CHECKPOINT_PENDING, HARNESS_UNAVAILABLE, COMPUTE_UNAVAILABLE.
 // RESOURCE_EXHAUSTED: COMPUTE_RESOURCE_EXHAUSTED.
 // DeleteSession reports SESSION_BUSY and SESSION_DELETED; Exec, Resume, Suspend, Fork, Approve
@@ -171,7 +171,9 @@ type SessionsClient interface {
 	// node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
 	// Suspend routes an owned unreceipted approval to its recorded harness; inherited approvals
 	// and ordinary sessions use their stored default. An unserved recorded name is
-	// FAILED_PRECONDITION, with no fallback.
+	// FAILED_PRECONDITION, with no fallback. On a memory-capable backend Suspend admits the harness
+	// before fencing or snapshotting so it can apply memory-tier checkpoint safety: an unreachable
+	// harness is UNAVAILABLE; a descriptor mismatch or invalid class is FAILED_PRECONDITION.
 	Suspend(ctx context.Context, in *SuspendRequest, opts ...grpc.CallOption) (*Session, error)
 	// A recorded override where either harness is REQUIRES_MEMORY_SNAPSHOT is
 	// FAILED_PRECONDITION before compute changes or journal repair, as for Exec admission.
@@ -352,8 +354,8 @@ func (c *sessionsClient) Fork(ctx context.Context, in *ForkRequest, opts ...grpc
 // is classified.
 // ABORTED: STALE_CURSOR, SESSION_BUSY, COMPUTE_BUSY, CHECKPOINT_IN_PROGRESS, FENCED,
 // SNAPSHOT_SUPERSEDED (Fork only).
-// FAILED_PRECONDITION: SESSION_DELETED, MEMORY_STATE_LOST, CHECKPOINT_INVALID,
-// COMPUTE_CONFIG_INVALID.
+// FAILED_PRECONDITION: SESSION_DELETED, CHECKPOINT_INCOMPLETE_TURN, MEMORY_STATE_LOST,
+// CHECKPOINT_INVALID, COMPUTE_CONFIG_INVALID.
 // UNAVAILABLE: CHECKPOINT_PENDING, HARNESS_UNAVAILABLE, COMPUTE_UNAVAILABLE.
 // RESOURCE_EXHAUSTED: COMPUTE_RESOURCE_EXHAUSTED.
 // DeleteSession reports SESSION_BUSY and SESSION_DELETED; Exec, Resume, Suspend, Fork, Approve
@@ -475,7 +477,9 @@ type SessionsServer interface {
 	// node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
 	// Suspend routes an owned unreceipted approval to its recorded harness; inherited approvals
 	// and ordinary sessions use their stored default. An unserved recorded name is
-	// FAILED_PRECONDITION, with no fallback.
+	// FAILED_PRECONDITION, with no fallback. On a memory-capable backend Suspend admits the harness
+	// before fencing or snapshotting so it can apply memory-tier checkpoint safety: an unreachable
+	// harness is UNAVAILABLE; a descriptor mismatch or invalid class is FAILED_PRECONDITION.
 	Suspend(context.Context, *SuspendRequest) (*Session, error)
 	// A recorded override where either harness is REQUIRES_MEMORY_SNAPSHOT is
 	// FAILED_PRECONDITION before compute changes or journal repair, as for Exec admission.

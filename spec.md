@@ -1314,11 +1314,19 @@ records only.
   only for a `Resume` with `expected_last_seq` set (`OPS-29`); otherwise it can append
   `APPROVAL_REQUEST` under a new fence during a checkpoint. TODO(spike): Should the call-only
   approval repair refuse with `ABORTED` during a checkpoint?
-- `OPS-3`: A `REQUIRES_MEMORY_SNAPSHOT` fork MUST end any in-flight execution on the parent; that
-  execution fails with `ABORTED`.
-- `CreateSession`, `GetSession`, `ListSessions`, and `Replay` take no guard. `Fork` (either tier)
-  does not take the `OPS-1` session guard, only the deletion exclusion (`OPS-30`). A
-  `REQUIRES_MEMORY_SNAPSHOT` fork holds the checkpoint mark instead (`OPS-2`).
+- `OPS-3`: A `REQUIRES_MEMORY_SNAPSHOT` fork MUST refuse a locally active parent execution with
+  `ABORTED`, without ending its harness stream, fencing it, snapshotting or writing. A trailing
+  execution without `END` that is no longer locally active MUST be `FAILED_PRECONDITION`
+  (`CHECKPOINT_INCOMPLETE_TURN`) before those effects: its RAM may contain a mutation not represented
+  by the journal, and recovery could apply it again. The approval park in `APR-3` is an intentional
+  exception while it remains undecided, as are an inherited unresolved gate that recovery refuses
+  and a partial input prefix that never reached `Harness.Run`. A decided unreceipted gate is refused:
+  a prior recovery may have changed RAM before failing without a receipt.
+- `CreateSession`, `GetSession`, `ListSessions`, and `Replay` take no guard. Every Fork takes only
+  the deletion exclusion (`OPS-30`) for its full operation. A `REQUIRES_MEMORY_SNAPSHOT` fork also
+  takes the `OPS-1` session guard transiently through validation and checkpoint-mark installation,
+  then releases it while retaining the checkpoint mark (`OPS-2`) through the fan-out. Thus an active
+  or pre-journal local turn is refused, while a later operation sees checkpoint-in-progress.
 
 ### 11.2 Create, Get, List
 
@@ -1404,9 +1412,15 @@ records only.
 
 ### 11.5 Suspend
 
-- `OPS-17`: `Suspend` MUST call the runtime's `Snapshot(EXTERNAL)`, then mint a fence and append
-  `LIFECYCLE_SUSPEND` carrying the returned `SnapshotRef` at the current head. It takes no
-  caller cursor. `compute_state` becomes `COMPUTE_COLD`.
+- `OPS-17`: `Suspend` MUST call the runtime's `Snapshot(EXTERNAL)`, then append
+  `LIFECYCLE_SUSPEND` carrying the returned `SnapshotRef`. It takes no caller cursor. For a memory
+  checkpoint the host mints the fence before Snapshot, revalidates the journal, and appends with a
+  compare-and-swap on that exact head; a peer writer cannot widen the accepted checkpoint boundary
+  after RAM is captured. `compute_state` becomes `COMPUTE_COLD`.
+- Before a `REQUIRES_MEMORY_SNAPSHOT` Suspend, the host applies the incomplete-turn check in
+  `OPS-3`. A refusal takes no snapshot and appends no lifecycle record. A `STATELESS_REPLAY`
+  Suspend remains allowed because its snapshot carries no process memory and recovery reconstructs
+  from the journal.
 - `OPS-18`: `Suspend` routes to the stored harness, except that an owned unreceipted approval routes
   to its recorded harness (`OPS-8`).
 - The reference host accepts `Suspend` on a session that is already cold or has never run, and
@@ -1473,11 +1487,12 @@ records only.
   under a new child fence, and appends `LIFECYCLE_FORK`. The child's `compute_state` is
   `COMPUTE_COLD`.
 - `OPS-25`: `REQUIRES_MEMORY_SNAPSHOT` fork: `at_seq` other than the head MUST be
-  `FAILED_PRECONDITION` before any side effect. The host then takes the checkpoint mark, fences the
-  parent, ends its open streams, re-checks the head (moved is `ABORTED`), snapshots once, appends
-  `SUSPEND` to the parent with compare-and-swap at `at_seq`, and clones every child from that one
-  snapshot. A snapshot without an external handle is `FAILED_PRECONDITION`; the parent's `SUSPEND`
-  remains committed.
+  `FAILED_PRECONDITION` before any side effect. It applies `OPS-3`, installs the checkpoint mark
+  while still holding transient operation admission, fences the parent, re-checks the head (moved is
+  `ABORTED`), snapshots once, appends `SUSPEND` to the parent with compare-and-swap at `at_seq`, and
+  clones every child from that one snapshot. It never ends a local turn or pre-journal harness
+  preparation. A snapshot without an external handle is `FAILED_PRECONDITION`; the parent's
+  `SUSPEND` remains committed.
 - `OPS-26`: Children inherit `project`, `harness`, `model`, `annotations`, and `origin`. `labels`
   come from the request only (never merged). `name` is `child_names[i]` or empty. `identity` is
   unset. `parent_uid` and `fork_seq` record lineage. Children are returned in creation order.
@@ -1543,7 +1558,7 @@ does not erase data or reclaim compute.
 | Missing required field, bad page token, unknown harness name, fork `count > 128`, `child_names` length mismatch, fork `identity` set | `INVALID_ARGUMENT` |
 | Unknown session (Get, Exec, Suspend, Resume, Fork, Approve, Delete) | `NOT_FOUND` |
 | Compare-and-swap conflict, stale fence, session busy (including an overlap with `DeleteSession`, `OPS-30`), checkpoint in progress, snapshot superseded, compute busy with another operation (`api.ErrComputeBusy`) | `ABORTED` |
-| Unplaceable harness, descriptor mismatch, pin violation, memory-tier override (`OPS-7`), retired or unservable harness, static harness name with a registration row, approval state violation, inherited intent, undeclared trailing tool intent (`TOOL-10`), memory fork at a historical `seq`, deleted session (`OPS-34`), memory-tier compute gone or replaced (`api.ErrMemoryStateLost`, `RT-4e`, `RT-4h`), invalid, stale or local-only runtime checkpoint (`api.ErrInvalidCheckpoint`) | `FAILED_PRECONDITION` |
+| Unplaceable harness, descriptor mismatch, pin violation, memory-tier override (`OPS-7`), retired or unservable harness, static harness name with a registration row, approval state violation, inherited intent, undeclared trailing tool intent (`TOOL-10`), memory fork at a historical `seq`, memory checkpoint with an incomplete turn (`OPS-3`), deleted session (`OPS-34`), memory-tier compute gone or replaced (`api.ErrMemoryStateLost`, `RT-4e`, `RT-4h`), invalid, stale or local-only runtime checkpoint (`api.ErrInvalidCheckpoint`) | `FAILED_PRECONDITION` |
 | A suspended actor's newest checkpoint still uploading to durable storage on `Exec`, `Suspend`, `Resume` or `Fork` (`api.ErrCheckpointPending`); once it completes, `Suspend` again to record it before `Resume` | `UNAVAILABLE` |
 | Harness `Describe` (admission `RT-1`, the `RT-3` recheck, or a `Describe` during the turn) could not reach the harness while the caller's context is live: the peer returned `UNAVAILABLE` or `DEADLINE_EXCEEDED`; or, on admission and the recheck, the host's own bound expired; or, during the turn, the error wraps `context.DeadlineExceeded` | `UNAVAILABLE` |
 | Any other `Describe` error on those paths, for example a peer `UNIMPLEMENTED` or `INTERNAL`, or a plain error from an in-process harness (during the turn, even one returned after the host's bound expired) | `INTERNAL` |
@@ -1567,7 +1582,7 @@ or an unclassified error may supply none.
 | Code | Condition → reason (first matching condition within the code wins) |
 |---|---|
 | `ABORTED` | Append-CAS conflict → `STALE_CURSOR`; local session contention → `SESSION_BUSY`; fork snapshot superseded → `SNAPSHOT_SUPERSEDED`; compute contention → `COMPUTE_BUSY`; checkpoint in progress → `CHECKPOINT_IN_PROGRESS`; superseded writer fence → `FENCED` |
-| `FAILED_PRECONDITION` | Deleted session → `SESSION_DELETED`; lost memory-tier state → `MEMORY_STATE_LOST`; refused checkpoint → `CHECKPOINT_INVALID`; known invalid compute configuration → `COMPUTE_CONFIG_INVALID` |
+| `FAILED_PRECONDITION` | Deleted session → `SESSION_DELETED`; incomplete memory checkpoint boundary → `CHECKPOINT_INCOMPLETE_TURN`; lost memory-tier state → `MEMORY_STATE_LOST`; refused runtime checkpoint → `CHECKPOINT_INVALID`; known invalid compute configuration → `COMPUTE_CONFIG_INVALID` |
 | `UNAVAILABLE` | Checkpoint uploading → `CHECKPOINT_PENDING`; unreachable harness → `HARNESS_UNAVAILABLE`; compute unavailable → `COMPUTE_UNAVAILABLE` |
 | `RESOURCE_EXHAUSTED` | No eligible compute capacity → `COMPUTE_RESOURCE_EXHAUSTED` |
 
@@ -1753,7 +1768,9 @@ sequenceDiagram
 - A refusal at the repeated check of a cursor-checked `Resume` leaves its early fence minted, so
   older writers are superseded (`LOG-12`) even though `Resume` refused.
 - `Fork` opens no execution connection and does not repeat admission.
-- `Suspend` applies no admission check.
+- On a backend that advertises `memory_snapshot`, `Suspend` runs admission to determine whether the
+  harness is `REQUIRES_MEMORY_SNAPSHOT` and must apply `OPS-3`; a refusal occurs before a fence,
+  snapshot or lifecycle append. A backend without memory snapshots retains no Suspend admission.
 
 ### 13.3 Runtime SPI
 
@@ -1845,7 +1862,7 @@ The reference host takes it as `placement.Backend` in
   session, as `RT-5` reads it), or none. `Create` gets a reader for it in
   `SessionSpec.RecordedCheckpoint`, `Snapshot` gets it in `Incarnation.RecordedCheckpoint` (from
   `Suspend` and a stateful fork's capture of the parent), and `Restore` gets it as its ref. A
-  backend whose compute can hold a snapshot the journal never recorded MAY refuse, with
+  backend whose compute can hold a snapshot the journal never recorded MUST refuse, with
   `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) and before it resumes, attaches to or suspends
   anything, compute that holds another one; `runtime/substrate` does for a
   `REQUIRES_MEMORY_SNAPSHOT` harness (§13.4). A backend MAY also refuse that way, from `Create` or

@@ -437,22 +437,6 @@ func TestComputeGuard(t *testing.T) {
 			e.expected = &head
 			e.log.onConfirm = func() { e.peerAppend(suspendEvent) }
 		}},
-		// A checkpoint that superseded the turn may be snapshotting the compute or may fail before it
-		// does; here it never records a SUSPEND, as a stateful Fork whose Snapshot fails does not.
-		{name: "superseded by a checkpoint", ops: both, want: guardSkips, cause: errSuperseded, setup: func(e *guardEnv) {
-			e.log.onFence = func() {
-				if _, err := e.p.beginCheckpoint(e.uid); err != nil {
-					e.t.Fatal(err)
-				}
-			}
-		}},
-		{name: "superseded by a checkpoint, live before allocation", ops: both, seed: "live", want: guardUnchanged, cause: errSuperseded, setup: func(e *guardEnv) {
-			e.log.onFence = func() {
-				if _, err := e.p.beginCheckpoint(e.uid); err != nil {
-					e.t.Fatal(err)
-				}
-			}
-		}},
 		{name: "caller cancelled", ops: both, want: guardReleases, cause: context.Canceled, setup: func(e *guardEnv) {
 			e.log.onFence = e.cancel
 		}},

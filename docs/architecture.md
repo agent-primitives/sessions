@@ -126,9 +126,10 @@ The `Placer` wires Sessions to the `Runtime` SPI and owns the incarnation lifecy
 - **Dial** — the harness is reached by dialing `Incarnation.Address` with `Incarnation.CallMetadata` on
   every call. One dial path, two address forms: a `unix://` socket for `runtime/local`; the
   `atenet-router` `host:port` for `runtime/substrate`, whose `ate-target-actor` metadata names the actor.
-  Before a stateful fork checkpoints its parent the Placer closes the parent's open harness streams,
-  because substrate waits for an actor's in-flight requests to drain before it snapshots; `Suspend`
-  instead refuses a session whose turn is still running.
+  Before a stateful fork checkpoints its parent the Placer refuses any running or durably incomplete
+  turn. A turn may have changed RAM before its next journal write, so cancelling and snapshotting it
+  could make recovery apply that mutation twice. `Suspend` applies the same memory-tier rule and
+  binds its memory snapshot to the exact validated journal head with a fence and append CAS.
 - **Lifecycle map** — session `Suspend → Runtime.Snapshot` checkpoints compute and `Resume →
   Runtime.Restore` restores it. Execution `END` does not automatically call `Runtime.Stop`.
   `DeleteSession` records permanent `PENDING` intent without releasing actors, pins or snapshots.
@@ -220,7 +221,7 @@ stateDiagram-v2
 - **One session guard per registry.** `Registry.Add` gives a registered harness's Placer the same
   session guard and per-session checkpoint state as the static ones, so overlapping `Exec`,
   `Suspend` and `Resume` on one session are `ABORTED` whichever of its Placers each call reaches,
-  a stateful `Fork` through any of them ends and refuses a turn through another, and a `Suspend`
+  a stateful `Fork` through any of them refuses a turn through another without ending it, and a `Suspend`
   and a stateful `Fork` of one session refuse each other (`ABORTED`). A
   `PlacerFactory` returns a new Placer for each call; `Add` refuses one that belongs to another
   registry or has an operation in progress.

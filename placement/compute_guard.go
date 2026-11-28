@@ -148,9 +148,8 @@ func (g *computeGuard) settle(ctx context.Context, errp *error) {
 		// the operation. A takeover by a caller's own stale cursor moves nothing and is not this.
 		left.Cleanup = fmt.Errorf("release skipped: the journal moved past seq %d during the operation", g.headBefore)
 	case errors.Is(err, ErrCheckpointing):
-		// Including a checkpoint that superseded this turn (errSuperseded): a stateful Fork may
-		// still be snapshotting the compute, or may fail before it suspends it, and only the
-		// Fork's SUSPEND record would show which.
+		// A checkpoint may still be snapshotting the compute, or may fail before it suspends it, and
+		// only its SUSPEND record would show which.
 		left.Cleanup = errors.New("release skipped: a checkpoint of the session may hold it")
 	case errors.Is(err, eventlog.ErrFenced):
 		left.Cleanup = errors.New("release skipped: a newer writer fenced this operation")

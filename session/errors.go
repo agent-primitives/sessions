@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
 	"github.com/agent-primitives/sessions/placement"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
@@ -63,6 +64,7 @@ func errorReason(code codes.Code, err error) string {
 	case codes.FailedPrecondition:
 		reasons = []mapping{
 			{eventlog.ErrDeleted, "SESSION_DELETED"},
+			{controller.ErrCheckpointIncompleteTurn, "CHECKPOINT_INCOMPLETE_TURN"},
 			{api.ErrMemoryStateLost, "MEMORY_STATE_LOST"},
 			{api.ErrInvalidCheckpoint, "CHECKPOINT_INVALID"},
 			{api.ErrComputeConfigInvalid, "COMPUTE_CONFIG_INVALID"},

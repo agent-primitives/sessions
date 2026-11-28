@@ -98,8 +98,10 @@ type Runtime interface {
 	// ErrMemoryStateLost when another instance is there, or none is, before it captures anything
 	// if it can tell, and in any case before returning a ref: a snapshot of a replacement would
 	// hand its callers compute that holds none of the session's state. in.RecordedCheckpoint is
-	// the checkpoint the journal last recorded; a backend may refuse, with ErrMemoryStateLost,
-	// compute that holds another one (see Incarnation.RecordedCheckpoint).
+	// the checkpoint the journal last recorded. A backend whose compute can retain captures must
+	// refuse, with ErrMemoryStateLost and before recapturing, compute that holds another one (see
+	// Incarnation.RecordedCheckpoint). This quarantines a physical capture whose journal append lost
+	// a race after Snapshot returned.
 	Snapshot(ctx context.Context, in Incarnation, kind SnapshotKind) (SnapshotRef, error)
 
 	// Restore brings an incarnation back from a snapshot and returns a nonempty ID.
@@ -344,8 +346,8 @@ type SessionSpec struct {
 	// its first Suspend (a parent's SUSPEND in a child's copied prefix is not the child's).
 	//
 	// A backend whose compute can hold a snapshot the journal never recorded (substrate: a capture a
-	// memory-tier Snapshot refused stays on the actor) compares it with the snapshot the existing
-	// compute holds before attaching to or resuming it, and refuses another with
+	// memory-tier Snapshot refused stays on the actor) must compare it with the snapshot the existing
+	// compute holds before attaching to, resuming or snapshotting it, and refuses another with
 	// ErrMemoryStateLost. Like StartedTurns it is a function, so the backend reads the journal only
 	// after it has read the compute, and sees a SUSPEND another host recorded in between. A backend
 	// that does not need it does not call it. Nil declares no recorded checkpoint.

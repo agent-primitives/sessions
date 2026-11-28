@@ -175,7 +175,7 @@ func (b *resumeRestoreProbe) Restore(ctx context.Context, ref api.SnapshotRef) (
 	return b.Backend.Restore(ctx, ref)
 }
 
-func TestCheckedResumeRefusesForkCommittedDuringRestore(t *testing.T) {
+func TestCheckedResumeRestoreRefusesAnIncompleteMemoryFork(t *testing.T) {
 	store := newSuspendStore(t)
 	log := store.Session("s")
 	seedPlacementApproval(t, log, "mem", api.EventExecutionStart)
@@ -205,32 +205,31 @@ func TestCheckedResumeRefusesForkCommittedDuringRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var afterFork []eventlog.Record
+	beforeFork := suspendRecords(t, log)
+	var forkErr error
 	b.beforeRestore = func() {
-		// Fork cannot see the turn until Restore returns and openHarness registers it.
-		if err := p.Fork(t.Context(), log, "s", []placement.ForkChild{{UID: "child", Log: store.Session("child")}}, expected); err != nil {
-			t.Fatal(err)
-		}
-		afterFork = suspendRecords(t, log)
+		// Restore has not opened a harness connection yet, but the durable incomplete turn is enough
+		// to refuse the memory checkpoint before a fence, snapshot or child write.
+		forkErr = p.Fork(t.Context(), log, "s", []placement.ForkChild{{UID: "child", Log: store.Session("child")}}, expected)
 	}
 	wrapped := &checkpointApprovalLog{Store: log}
 	err = r.Resume(t.Context(), wrapped, "s", "mem", placement.WithResumeExpectedLastSeq(expected))
-	values := fmt.Sprintf("expected_last_seq %d, head %d", expected, len(afterFork))
-	if !errors.Is(err, eventlog.ErrConflict) || !strings.Contains(err.Error(), values) {
-		t.Fatalf("Resume=%v runs=%d tools=%d, want conflict with %q before effects", err, runs.Load(), effects.Load(), values)
+	if forkErr == nil || !errors.Is(forkErr, placement.ErrSessionBusy) {
+		t.Fatalf("Fork during Restore = %v, want ErrSessionBusy", forkErr)
 	}
-	if wrapped.fences != 2 || b.restores != 1 || runs.Load() != 0 || effects.Load() != 0 || backend.snapshots != 1 {
+	if err != nil {
+		t.Fatalf("Resume = %v", err)
+	}
+	if wrapped.fences != 2 || b.restores != 1 || runs.Load() != 1 || effects.Load() != 1 || backend.snapshots != 0 {
 		t.Fatalf("fences=%d restores=%d runs=%d tools=%d snapshots=%d", wrapped.fences, b.restores, runs.Load(), effects.Load(), backend.snapshots)
 	}
-	if !reflect.DeepEqual(afterFork, suspendRecords(t, log)) {
-		t.Fatal("refused Resume changed the fork's committed prefix")
+	after := suspendRecords(t, log)
+	if len(after) <= len(beforeFork) || after[len(after)-1].Event.Kind != api.EventLifecycle || after[len(after)-1].Event.Lifecycle.Kind != api.LifecycleResume {
+		t.Fatalf("successful Resume records=%v", after)
 	}
-	b.beforeRestore = nil
-	if err := r.Resume(t.Context(), log, "s", "mem", placement.WithResumeExpectedLastSeq(int64(len(afterFork)))); err != nil {
-		t.Fatalf("retry from the new cursor: %v", err)
-	}
-	if effects.Load() != 1 || runs.Load() != 1 {
-		t.Fatalf("retry duplicated effects: runs=%d tools=%d", runs.Load(), effects.Load())
+	child, childErr := store.Session("child").Read(1)
+	if childErr != nil || len(child) != 0 {
+		t.Fatalf("refused Fork child records=%v err=%v", child, childErr)
 	}
 	if err := log.Verify(); err != nil {
 		t.Fatal(err)

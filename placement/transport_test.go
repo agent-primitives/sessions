@@ -16,6 +16,7 @@ import (
 	"github.com/agent-primitives/sessions/api"
 	v1 "github.com/agent-primitives/sessions/api/genpb"
 	"github.com/agent-primitives/sessions/client"
+	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
 	"github.com/agent-primitives/sessions/harness/echoagent"
 	"github.com/agent-primitives/sessions/harnesswire"
@@ -379,18 +380,27 @@ func testSuspendRefusesOpenStream(t *testing.T, pair placerPair) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the cancelled turn never returned")
 	}
-	if _, err := p.Suspend(context.Background(), log, "s1"); err != nil {
-		t.Fatalf("Suspend after the turn returned: %v", err)
+	if _, err := p.Suspend(context.Background(), log, "s1"); !errors.Is(err, controller.ErrCheckpointIncompleteTurn) {
+		t.Fatalf("Suspend after the interrupted turn returned %v, want ErrCheckpointIncompleteTurn", err)
 	}
-	if !<-streamEnded {
-		t.Fatal("the harness's Connect stream was still open when the runtime checkpointed")
+	backend.mu.Lock()
+	snapshots = backend.snapshots
+	backend.mu.Unlock()
+	if snapshots != 0 {
+		t.Fatalf("Suspend of the interrupted turn took %d snapshot(s)", snapshots)
+	}
+	select {
+	case <-streamEnded:
+		t.Fatal("refused Suspend reached the runtime checkpoint")
+	default:
 	}
 }
 
-// A stateful fork supersedes the parent's running turn instead, so it must end the parent's stream
-// before it checkpoints.
-func TestForkEndsTheParentsOpenHarnessStreamBeforeTheCheckpoint(t *testing.T) {
-	testCheckpointEndsOpenStream(t, forkCheckpoint)
+// A stateful fork must leave the parent's running turn and stream alone. The turn may already have
+// changed RAM before its next journal write, so cancelling it and snapshotting would let recovery
+// apply that mutation twice.
+func TestForkRefusesTheParentsOpenHarnessStreamBeforeTheCheckpoint(t *testing.T) {
+	testForkRefusesOpenStream(t)
 }
 
 type blockedPrepareHarness struct {
@@ -406,7 +416,7 @@ func (h *blockedPrepareHarness) PrepareRun(ctx context.Context) (api.PreparedHar
 	return nil, ctx.Err()
 }
 
-func TestForkCancelsPreparedHarnessBeforeExecutionIsRecorded(t *testing.T) {
+func TestForkRefusesPreparedHarnessBeforeExecutionIsRecorded(t *testing.T) {
 	store, err := sqlitelog.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -419,9 +429,11 @@ func TestForkCancelsPreparedHarnessBeforeExecutionIsRecorded(t *testing.T) {
 		return h, func() error { return nil }, nil
 	}))
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	execErr := make(chan error, 1)
 	go func() {
-		_, err := p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+		_, err := p.Exec(ctx, log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
 		execErr <- err
 	}()
 	select {
@@ -430,31 +442,41 @@ func TestForkCancelsPreparedHarnessBeforeExecutionIsRecorded(t *testing.T) {
 		t.Fatal("turn never began Connect preparation")
 	}
 
-	if err := forkCheckpoint(p, log, "s1"); err != nil {
-		t.Fatalf("checkpoint: %v", err)
+	if err := forkCheckpoint(p, log, "s1"); !errors.Is(err, placement.ErrSessionBusy) {
+		t.Fatalf("Fork = %v, want ErrSessionBusy", err)
 	}
 	select {
 	case <-h.done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("checkpoint did not cancel prepared Connect")
+		t.Fatal("refused Fork cancelled Connect preparation")
+	default:
 	}
 	select {
 	case err := <-execErr:
-		if !errors.Is(err, placement.ErrCheckpointing) || !errors.Is(err, eventlog.ErrFenced) {
-			t.Fatalf("turn returned %v, want ErrCheckpointing and ErrFenced", err)
+		t.Fatalf("refused Fork ended Connect preparation: %v", err)
+	default:
+	}
+	if kinds := journalKinds(t, log); len(kinds) != 0 {
+		t.Fatalf("journal=%v, want no checkpoint record", kinds)
+	}
+	cancel()
+	select {
+	case <-h.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled Connect preparation did not return")
+	}
+	select {
+	case err := <-execErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled Exec returned %v, want context.Canceled", err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("superseded turn did not return")
-	}
-	kinds := journalKinds(t, log)
-	if len(kinds) != 1 || kinds[0] != api.EventLifecycle {
-		t.Fatalf("journal=%v, want only checkpoint lifecycle record", kinds)
+		t.Fatal("cancelled Exec did not return")
 	}
 }
 
-// The fork must end the turn's stream whichever Placer of the Registry runs the turn.
-func TestForkEndsAParentStreamOpenedByAnotherPlacerOfTheRegistry(t *testing.T) {
-	testCheckpointEndsOpenStream(t, forkCheckpoint, registryPair)
+// The refusal applies whichever Placer of the Registry runs the turn.
+func TestForkRefusesAParentStreamOpenedByAnotherPlacerOfTheRegistry(t *testing.T) {
+	testForkRefusesOpenStream(t, registryPair)
 }
 
 // placerPair returns the Placer a checkpoint runs on and the one a turn runs on.
@@ -477,7 +499,7 @@ func registryPair(t *testing.T, b placement.Backend, model func(context.Context,
 	return def, other
 }
 
-func testCheckpointEndsOpenStream(t *testing.T, checkpoint func(*placement.Placer, *sqlitelog.Log, string) error, pair ...placerPair) {
+func testForkRefusesOpenStream(t *testing.T, pair ...placerPair) {
 	t.Helper()
 	hs := startHarnessServer(t, echoagent.Harness{})
 	store, err := sqlitelog.Open(":memory:")
@@ -494,29 +516,18 @@ func testCheckpointEndsOpenStream(t *testing.T, checkpoint func(*placement.Place
 		<-ctx.Done()
 		return api.ModelResponse{}, ctx.Err() // what a real model client returns: not the cause
 	}
-	streamEnded := make(chan bool, 1)
-	backend := &routedBackend{
-		address: hs.addr,
-		desc:    memDescriptor,
-		onSnapshot: func() {
-			// Give the server a bounded moment to observe the reset, as substrate's drain would.
-			select {
-			case <-hs.finished:
-				streamEnded <- true
-			case <-time.After(5 * time.Second):
-				streamEnded <- false
-			}
-		},
-	}
+	backend := &routedBackend{address: hs.addr, desc: memDescriptor}
 	mk := placerPair(samePlacer)
 	if len(pair) > 0 {
 		mk = pair[0]
 	}
 	p, turn := mk(t, backend, model)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	execErr := make(chan error, 1)
 	go func() {
-		_, err := turn.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+		_, err := turn.Exec(ctx, log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
 		execErr <- err
 	}()
 	select {
@@ -528,29 +539,38 @@ func testCheckpointEndsOpenStream(t *testing.T, checkpoint func(*placement.Place
 	}
 	<-hs.started
 
-	if err := checkpoint(p, log, "s1"); err != nil {
-		t.Fatalf("checkpoint: %v", err)
+	before, err := log.Head()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !<-streamEnded {
-		t.Fatal("the harness's Connect stream was still open when the runtime checkpointed")
+	if err := forkCheckpoint(p, log, "s1"); !errors.Is(err, placement.ErrSessionBusy) {
+		t.Fatalf("Fork = %v, want ErrSessionBusy", err)
 	}
 	select {
 	case err := <-execErr:
-		// The checkpoint fenced the turn before ending its stream, so the turn reports that, not
-		// the incidental cancellation, and the service maps it to a retryable Aborted.
-		if !errors.Is(err, placement.ErrCheckpointing) || !errors.Is(err, eventlog.ErrFenced) {
-			t.Fatalf("interrupted turn returned %v, want ErrCheckpointing and eventlog.ErrFenced", err)
+		t.Fatalf("refused Fork ended the running turn: %v", err)
+	default:
+	}
+	if n := len(hs.finished); n != 0 {
+		t.Fatalf("refused Fork closed %d harness stream(s)", n)
+	}
+	backend.mu.Lock()
+	snapshots := backend.snapshots
+	backend.mu.Unlock()
+	if snapshots != 0 {
+		t.Fatalf("refused Fork took %d snapshot(s)", snapshots)
+	}
+	if after, err := log.Head(); err != nil || after != before {
+		t.Fatalf("refused Fork moved the journal head from %d to %d (err %v)", before, after, err)
+	}
+	cancel()
+	select {
+	case err := <-execErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled turn returned %v, want context.Canceled", err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the interrupted turn never returned")
-	}
-	// The host interrupted the turn; the fence keeps that out of the journal as a harness ERROR.
-	kinds := journalKinds(t, log)
-	if slices.Contains(kinds, api.EventError) {
-		t.Fatalf("journal %v records the checkpoint's interruption as a harness ERROR", kinds)
-	}
-	if kinds[len(kinds)-1] != api.EventLifecycle {
-		t.Fatalf("journal %v does not end in the checkpoint's SUSPEND", kinds)
+		t.Fatal("the cancelled turn never returned")
 	}
 }
 
@@ -732,10 +752,10 @@ func TestNewRegistryRejectsAPlacerWithACheckpointInProgress(t *testing.T) {
 // when the fork's checkpoint begins. Registration must still be refused. (Suspend cannot begin while
 // a turn is past its early checks: the turn holds the session guard.)
 func TestForkRefusesAParentTurnRegisteringAsTheCheckpointBegins(t *testing.T) {
-	testCheckpointRefusesARegisteringTurn(t, forkCheckpoint)
+	testForkRefusesARegisteringTurn(t)
 }
 
-func testCheckpointRefusesARegisteringTurn(t *testing.T, checkpoint func(*placement.Placer, *sqlitelog.Log, string) error) {
+func testForkRefusesARegisteringTurn(t *testing.T) {
 	t.Helper()
 	hs := startHarnessServer(t, echoagent.Harness{})
 	store, err := sqlitelog.Open(":memory:")
@@ -754,38 +774,34 @@ func testCheckpointRefusesARegisteringTurn(t *testing.T, checkpoint func(*placem
 	execErr := make(chan error, 1)
 	backend := &routedBackend{address: hs.addr, desc: memDescriptor}
 	p := placement.New(backend, echoagent.Model, placement.WithDialer(dial))
-	var gotErr error
-	backend.onSnapshot = func() {
-		// The checkpoint has begun; now let the held turn try to register, and wait for it.
-		close(release)
-		select {
-		case gotErr = <-execErr:
-		case <-time.After(10 * time.Second):
-			gotErr = errors.New("held turn did not return while the checkpoint ran")
-		}
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go func() {
-		_, err := p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+		_, err := p.Exec(ctx, log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
 		execErr <- err
 	}()
 	<-dialing
-	if err := checkpoint(p, log, "s1"); err != nil {
-		t.Fatalf("checkpoint: %v", err)
+	if err := forkCheckpoint(p, log, "s1"); !errors.Is(err, placement.ErrSessionBusy) {
+		t.Fatalf("Fork = %v, want ErrSessionBusy", err)
 	}
-	if !errors.Is(gotErr, placement.ErrCheckpointing) {
-		t.Fatalf("turn registering as the checkpoint began returned %v, want ErrCheckpointing", gotErr)
+	select {
+	case err := <-execErr:
+		t.Fatalf("refused Fork ended the registering turn: %v", err)
+	default:
 	}
-	if n := len(hs.started); n != 0 {
-		t.Fatalf("%d harness stream(s) opened while the session was being checkpointed", n)
+	close(release)
+	cancel()
+	select {
+	case <-execErr:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled registering turn did not return")
 	}
 }
 
-// Ending the streams cannot wait for the checkpoint to succeed: the checkpoint is what an open
-// stream stalls. So a stateful fork that reaches its checkpoint supersedes the parent's in-flight
-// turn even when the checkpoint then fails. The contract that makes that safe: nothing is recorded
-// for the failed attempt, the parent stays live, and the caller can run the next turn or retry the
-// fork at the new head.
-func TestFailedForkCheckpointSupersedesTheParentTurnAndARetryRecovers(t *testing.T) {
+// A stateful fork must refuse an in-flight turn before reaching a checkpoint that could capture
+// unjournaled RAM. The turn remains usable; once it completes, a retry reaches the runtime and keeps
+// the runtime's checkpoint failure as the result.
+func TestForkRefusesTheParentTurnBeforeAFailedCheckpoint(t *testing.T) {
 	hs := startHarnessServer(t, echoagent.Harness{})
 	store, err := sqlitelog.Open(":memory:")
 	if err != nil {
@@ -810,47 +826,53 @@ func TestFailedForkCheckpointSupersedesTheParentTurnAndARetryRecovers(t *testing
 		<-ctx.Done()
 		return api.ModelResponse{}, ctx.Err() // what a real model client returns: not the cause
 	}
-	backend := &routedBackend{address: hs.addr, desc: memDescriptor, snapshotErr: errors.New("checkpoint failed")}
+	checkpointErr := errors.New("checkpoint failed")
+	backend := &routedBackend{address: hs.addr, desc: memDescriptor, snapshotErr: checkpointErr}
 	p := placement.New(backend, model)
 
+	ctx, cancel := context.WithCancel(context.Background())
 	execErr := make(chan error, 1)
 	go func() {
-		_, err := p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+		_, err := p.Exec(ctx, log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
 		execErr <- err
 	}()
 	<-modelCalled
 
-	if err := forkCheckpoint(p, log, "s1"); err == nil {
-		t.Fatal("Fork reported success for a failed checkpoint")
+	if err := forkCheckpoint(p, log, "s1"); !errors.Is(err, placement.ErrSessionBusy) {
+		t.Fatalf("Fork = %v, want ErrSessionBusy", err)
 	}
 	select {
 	case err := <-execErr:
-		if !errors.Is(err, placement.ErrCheckpointing) || !errors.Is(err, eventlog.ErrFenced) {
-			t.Fatalf("turn returned %v, want it superseded (ErrCheckpointing, ErrFenced)", err)
+		t.Fatalf("refused Fork ended the in-flight turn: %v", err)
+	default:
+	}
+	backend.mu.Lock()
+	snapshots := backend.snapshots
+	backend.mu.Unlock()
+	if snapshots != 0 {
+		t.Fatalf("refused Fork took %d snapshot(s)", snapshots)
+	}
+	cancel()
+	select {
+	case err := <-execErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled turn returned %v, want context.Canceled", err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the in-flight turn survived a failed fork checkpoint")
+		t.Fatal("the cancelled turn never returned")
 	}
-	kinds := journalKinds(t, log)
-	if slices.Contains(kinds, api.EventError) || slices.Contains(kinds, api.EventLifecycle) || slices.Contains(kinds, api.EventEnd) {
-		t.Fatalf("failed fork left journal %v, want only the incomplete execution", kinds)
-	}
-
 	head, err := log.Head()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "again")}, head); err != nil {
-		t.Fatalf("next turn after a failed fork: %v", err)
+		t.Fatalf("new turn after the interrupted one: %v", err)
 	}
-	if kinds := journalKinds(t, log); kinds[len(kinds)-1] != api.EventEnd {
-		t.Fatalf("next turn after a failed fork did not complete: %v", kinds)
+	if err := forkCheckpoint(p, log, "s1"); !errors.Is(err, checkpointErr) {
+		t.Fatalf("Fork after the parent completed = %v, want %v", err, checkpointErr)
 	}
 	if err := forkCheckpoint(p, log, "s1"); err != nil {
-		t.Fatalf("retried fork: %v", err)
-	}
-	if kinds := journalKinds(t, log); kinds[len(kinds)-1] != api.EventLifecycle {
-		t.Fatalf("retried fork did not record the parent checkpoint's SUSPEND: %v", kinds)
+		t.Fatalf("Fork retry after the runtime failure: %v", err)
 	}
 }
 
@@ -867,349 +889,5 @@ func TestSuspendWithNoOpenStreamStillCheckpoints(t *testing.T) {
 	}
 	if backend.snapshots != 1 {
 		t.Fatalf("snapshots=%d want 1", backend.snapshots)
-	}
-}
-
-// gatedStore holds the turn's fence mint until the checkpoint has minted its own, then holds the
-// checkpoint until the turn has either reached the model or returned. That forces the one ordering
-// the checkpoint's own fence does not cover: a turn already registered when the checkpoint began
-// mints a NEWER fence just before the checkpoint ends its stream.
-type gatedStore struct {
-	eventlog.Store
-
-	mu              sync.Mutex
-	fences          int
-	turnAtFence     chan struct{} // closed when the turn asks for its fence
-	checkpointFence chan struct{} // closed once the checkpoint's fence is minted
-	turnMoved       <-chan struct{}
-	turnDone        <-chan struct{}
-}
-
-func (g *gatedStore) NewFence() (int64, error) {
-	g.mu.Lock()
-	g.fences++
-	n := g.fences
-	g.mu.Unlock()
-	switch n {
-	case 1: // the turn's
-		close(g.turnAtFence)
-		<-g.checkpointFence
-		return g.Store.NewFence()
-	case 2: // the checkpoint's, minted before it ends the turn's stream
-		f, err := g.Store.NewFence()
-		close(g.checkpointFence)
-		select {
-		case <-g.turnMoved:
-		case <-g.turnDone:
-		case <-time.After(10 * time.Second):
-		}
-		return f, err
-	default:
-		return g.Store.NewFence()
-	}
-}
-
-// A turn that registered before a stateful fork's checkpoint began but mints its fence after the
-// checkpoint's is not fenced by it. The checkpoint still ends that turn's stream, so the turn must not
-// be allowed to write under its newer fence: it would journal the host's interruption as a harness
-// ERROR. The fork must not abort because the turn advanced the parent's head under that fence either.
-func TestForkSupersedesAParentTurnThatMintsANewerFence(t *testing.T) {
-	testCheckpointSupersedesNewerFence(t, func(p *placement.Placer, log eventlog.Store, uid string) error {
-		head, err := log.Head()
-		if err != nil {
-			return err
-		}
-		store, err := sqlitelog.Open(":memory:")
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		return p.Fork(context.Background(), log, uid, []placement.ForkChild{{UID: uid + "-child", Log: store.Session(uid + "-child")}}, head)
-	})
-}
-
-func testCheckpointSupersedesNewerFence(t *testing.T, checkpoint func(*placement.Placer, eventlog.Store, string) error) {
-	t.Helper()
-	hs := startHarnessServer(t, echoagent.Harness{})
-	store, err := sqlitelog.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	modelCalled, turnDone := make(chan struct{}), make(chan struct{})
-	model := func(ctx context.Context, _ api.ModelRequest) (api.ModelResponse, error) {
-		close(modelCalled)
-		<-ctx.Done()
-		return api.ModelResponse{}, ctx.Err()
-	}
-	log := &gatedStore{
-		Store:           store.Session("s1"),
-		turnAtFence:     make(chan struct{}),
-		checkpointFence: make(chan struct{}),
-		turnMoved:       modelCalled,
-		turnDone:        turnDone,
-	}
-	p := placement.New(&routedBackend{address: hs.addr, desc: memDescriptor}, model)
-
-	var execErr error
-	go func() {
-		defer close(turnDone)
-		_, execErr = p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
-	}()
-	select {
-	case <-log.turnAtFence: // registered, so the checkpoint will see and end its stream
-	case <-turnDone:
-		t.Fatalf("turn returned before minting its fence: %v", execErr)
-	}
-	if err := checkpoint(p, log, "s1"); err != nil {
-		t.Fatalf("checkpoint: %v", err)
-	}
-	select {
-	case <-turnDone:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the superseded turn never returned")
-	}
-	if !errors.Is(execErr, placement.ErrCheckpointing) || !errors.Is(execErr, eventlog.ErrFenced) {
-		t.Fatalf("superseded turn returned %v, want ErrCheckpointing and eventlog.ErrFenced", execErr)
-	}
-	kinds := journalKinds(t, log)
-	if slices.Contains(kinds, api.EventError) {
-		t.Fatalf("journal %v records the checkpoint's interruption as a harness ERROR", kinds)
-	}
-	if kinds[len(kinds)-1] != api.EventLifecycle {
-		t.Fatalf("journal %v does not end in the checkpoint's SUSPEND", kinds)
-	}
-}
-
-// lateFenceStore holds the turn's fence mint (call 1) past the checkpoint's first fence (call 2).
-// The turn is let go either when the checkpoint asks for its next fence, the one its record is
-// written under, or after lateFenceDelay, whichever is first. When the next fence comes first, it is
-// minted BEFORE the turn's, which is the ordering that stales the checkpoint's record. A checkpoint
-// that waits for its ended turns to mint never asks for that fence while the turn is held, so only
-// the delay can let the turn go and the record fence is minted last.
-type lateFenceStore struct {
-	eventlog.Store
-
-	mu          sync.Mutex
-	fences      int
-	turnAtFence chan struct{} // closed when the turn asks for its fence
-	release     chan struct{} // closed to let the turn mint
-	releaseOnce sync.Once
-	turnMinted  chan struct{} // closed once the turn's fence is minted
-}
-
-const lateFenceDelay = 300 * time.Millisecond
-
-func (g *lateFenceStore) letTurnMint() { g.releaseOnce.Do(func() { close(g.release) }) }
-
-func (g *lateFenceStore) NewFence() (int64, error) {
-	g.mu.Lock()
-	g.fences++
-	n := g.fences
-	g.mu.Unlock()
-	switch n {
-	case 1: // the turn's
-		close(g.turnAtFence)
-		<-g.release
-		defer close(g.turnMinted)
-		return g.Store.NewFence()
-	case 2: // the checkpoint's first, minted before it ends the turn's stream
-		time.AfterFunc(lateFenceDelay, g.letTurnMint)
-		return g.Store.NewFence()
-	default: // the fence the checkpoint's record is written under
-		f, err := g.Store.NewFence()
-		g.letTurnMint()
-		select {
-		case <-g.turnMinted:
-		case <-time.After(10 * time.Second):
-		}
-		return f, err
-	}
-}
-
-// Ending a turn's stream only cancels its context. A turn that registered but had not yet minted its
-// fence still mints one, and if that lands after the fence a stateful fork records the parent's
-// checkpoint under, the record fails after the parent is already cold. The fork must wait for the
-// turn to mint.
-func TestForkWaitsForAnEndedParentTurnToMintBeforeRecording(t *testing.T) {
-	testCheckpointWaitsForLateFence(t, func(p *placement.Placer, log eventlog.Store, uid string) error {
-		head, err := log.Head()
-		if err != nil {
-			return err
-		}
-		store, err := sqlitelog.Open(":memory:")
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		return p.Fork(context.Background(), log, uid, []placement.ForkChild{{UID: uid + "-child", Log: store.Session(uid + "-child")}}, head)
-	})
-}
-
-func testCheckpointWaitsForLateFence(t *testing.T, checkpoint func(*placement.Placer, eventlog.Store, string) error) {
-	t.Helper()
-	hs := startHarnessServer(t, echoagent.Harness{})
-	store, err := sqlitelog.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	log := &lateFenceStore{
-		Store:       store.Session("s1"),
-		turnAtFence: make(chan struct{}),
-		release:     make(chan struct{}),
-		turnMinted:  make(chan struct{}),
-	}
-	backend := &routedBackend{address: hs.addr, desc: memDescriptor}
-	p := placement.New(backend, echoagent.Model)
-
-	turnDone := make(chan struct{})
-	var execErr error
-	go func() {
-		defer close(turnDone)
-		_, execErr = p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
-	}()
-	select {
-	case <-log.turnAtFence:
-	case <-turnDone:
-		t.Fatalf("turn returned before minting its fence: %v", execErr)
-	}
-	var turnMintedBeforeSnapshot bool
-	backend.onSnapshot = func() {
-		select {
-		case <-log.turnMinted:
-			turnMintedBeforeSnapshot = true
-		default:
-		}
-	}
-	if err := checkpoint(p, log, "s1"); err != nil {
-		t.Fatalf("checkpoint: %v", err)
-	}
-	<-turnDone
-	if !turnMintedBeforeSnapshot {
-		t.Fatal("the checkpoint snapshotted while the superseded turn could still mint a fence")
-	}
-	if !errors.Is(execErr, placement.ErrCheckpointing) || !errors.Is(execErr, eventlog.ErrFenced) {
-		t.Fatalf("superseded turn returned %v, want ErrCheckpointing and eventlog.ErrFenced", execErr)
-	}
-	kinds := journalKinds(t, log)
-	if len(kinds) != 1 || kinds[0] != api.EventLifecycle {
-		t.Fatalf("journal %v, want only the checkpoint's SUSPEND", kinds)
-	}
-}
-
-// The wait is bounded by the caller's context. When it ends first the fork aborts before it
-// snapshots the parent, and nothing is recorded, so the parent stays live.
-func TestForkAbortsBeforeSnapshotWhenAnEndedParentTurnDoesNotMintInTime(t *testing.T) {
-	hs := startHarnessServer(t, echoagent.Harness{})
-	store, err := sqlitelog.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	log := &lateFenceStore{
-		Store:       store.Session("s1"),
-		turnAtFence: make(chan struct{}),
-		release:     make(chan struct{}),
-		turnMinted:  make(chan struct{}),
-	}
-	backend := &routedBackend{address: hs.addr, desc: memDescriptor}
-	p := placement.New(backend, echoagent.Model)
-
-	turnDone := make(chan struct{})
-	var execErr error
-	go func() {
-		defer close(turnDone)
-		_, execErr = p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
-	}()
-	<-log.turnAtFence
-	ctx, cancel := context.WithTimeout(context.Background(), lateFenceDelay/6)
-	defer cancel()
-	child, err := sqlitelog.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer child.Close()
-	err = p.Fork(ctx, log, "s1", []placement.ForkChild{{UID: "s1-child", Log: child.Session("s1-child")}}, 0)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Fork returned %v, want context.DeadlineExceeded", err)
-	}
-	<-turnDone
-	backend.mu.Lock()
-	snapshots := backend.snapshots
-	backend.mu.Unlock()
-	if snapshots != 0 {
-		t.Fatalf("Fork took %d snapshot(s) after giving up on the parent's turn", snapshots)
-	}
-	if kinds := journalKinds(t, log); len(kinds) != 0 {
-		t.Fatalf("journal %v, want nothing recorded for the aborted fork", kinds)
-	}
-	// The turn's Create returned compute that nothing recorded and the aborted fork did not take.
-	if !errors.Is(execErr, placement.ErrComputeLeftRunning) || !errors.Is(execErr, placement.ErrCheckpointing) {
-		t.Fatalf("superseded turn returned %v, want ErrComputeLeftRunning wrapping ErrCheckpointing", execErr)
-	}
-}
-
-// A stateful fork that supersedes a turn and then fails before it suspends the parent leaves the
-// compute the turn's Create returned running, with nothing in the journal that owns it: on
-// runtime/substrate, Snapshot refuses an actor that is still transitioning after the turn's Create
-// woke it. The turn's error must report that compute (RT-7) instead of assuming the fork took it,
-// and nothing calls Stop.
-func TestTurnSupersededByAForkWhoseSnapshotFailsReportsItsCompute(t *testing.T) {
-	hs := startHarnessServer(t, echoagent.Harness{})
-	store, err := sqlitelog.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	log := &lateFenceStore{
-		Store:       store.Session("s1"),
-		turnAtFence: make(chan struct{}),
-		release:     make(chan struct{}),
-		turnMinted:  make(chan struct{}),
-	}
-	errSnapshot := errors.New("injected: actor is transitioning")
-	stops := 0
-	backend := &routedBackend{address: hs.addr, desc: memDescriptor, snapshotErr: errSnapshot, onStop: func() { stops++ }}
-	p := placement.New(backend, echoagent.Model)
-
-	turnDone := make(chan struct{})
-	var execErr error
-	go func() {
-		defer close(turnDone)
-		_, execErr = p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
-	}()
-	select {
-	case <-log.turnAtFence: // compute allocated and the stream registered, nothing journaled
-	case <-turnDone:
-		t.Fatalf("turn returned before minting its fence: %v", execErr)
-	}
-	child, err := sqlitelog.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer child.Close()
-	err = p.Fork(context.Background(), log, "s1", []placement.ForkChild{{UID: "s1-child", Log: child.Session("s1-child")}}, 0)
-	if !errors.Is(err, errSnapshot) {
-		t.Fatalf("Fork returned %v, want the Snapshot failure", err)
-	}
-	<-turnDone
-	var left *placement.ComputeLeftRunningError
-	if !errors.As(execErr, &left) {
-		t.Fatalf("superseded turn returned %v, want a ComputeLeftRunningError", execErr)
-	}
-	if !errors.Is(execErr, placement.ErrCheckpointing) || !errors.Is(execErr, eventlog.ErrFenced) {
-		t.Fatalf("superseded turn returned %v, want its cause to stay ErrCheckpointing and eventlog.ErrFenced", execErr)
-	}
-	if left.Instance != "s1" {
-		t.Fatalf("Instance = %q, want the turn's incarnation", left.Instance)
-	}
-	if kinds := journalKinds(t, log); len(kinds) != 0 {
-		t.Fatalf("journal %v, want nothing recorded for the failed fork", kinds)
-	}
-	if stops != 0 {
-		t.Fatalf("Stop called %d times", stops)
 	}
 }

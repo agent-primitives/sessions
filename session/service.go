@@ -1078,7 +1078,8 @@ func forkError(parent string, err error) error {
 	case errors.Is(err, api.ErrInvalidCheckpoint):
 		return checkpointRefusal("fork", parent, err)
 	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, api.ErrInvalidHarnessClass),
-		errors.Is(err, api.ErrMemoryStateLost):
+		errors.Is(err, api.ErrMemoryStateLost), errors.Is(err, controller.ErrCheckpointIncompleteTurn),
+		errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, controller.ErrReplayDiverged):
 		return statusError(codes.FailedPrecondition, err, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return statusError(codes.Unavailable, err, err.Error())
@@ -1212,14 +1213,20 @@ func suspendError(uid string, err error) error {
 	switch {
 	case errors.Is(err, eventlog.ErrDeleted):
 		return withStatusCause(codes.FailedPrecondition, err)
+	case errors.Is(err, eventlog.ErrTampered):
+		return statusError(codes.DataLoss, err, err.Error())
 	case errors.Is(err, placement.ErrSessionBusy), errors.Is(err, placement.ErrCheckpointing), errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced),
 		errors.Is(err, api.ErrComputeBusy):
 		return statusError(codes.Aborted, err, err.Error())
 	case errors.Is(err, api.ErrInvalidCheckpoint):
 		return checkpointRefusal("suspend", uid, err)
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, api.ErrInvalidHarnessClass):
+		return statusError(codes.FailedPrecondition, err, fmt.Sprintf("suspend: %v", err))
+	case errors.Is(err, placement.ErrHarnessUnavailable):
+		return statusError(codes.Unavailable, err, fmt.Sprintf("suspend: %v", err))
 	// api.ErrMemoryStateLost: the compute the session's turns ran on is gone or replaced; retrying
 	// cannot help.
-	case errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, controller.ErrReplayDiverged),
+	case errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, controller.ErrReplayDiverged), errors.Is(err, controller.ErrCheckpointIncompleteTurn),
 		errors.Is(err, api.ErrMemoryStateLost):
 		return statusError(codes.FailedPrecondition, err, fmt.Sprintf("suspend: %v", err))
 	case errors.Is(err, placement.ErrUnknownHarness):

@@ -3,8 +3,9 @@ package placement
 import "sync"
 
 // sessionGuard preserves exclusive turn/lifecycle admission while separately fencing deletion.
-// Fork and routing reads hold shared deletion admission without blocking an ordinary operation:
-// a stateful fork may supersede a running turn, and rollback releases the parent for new turns.
+// Fork and routing reads hold shared deletion admission without blocking an ordinary operation. A
+// memory-tier Fork refuses a journaled incomplete turn before it checkpoints; rollback releases the
+// parent for new turns.
 // Every admission and release shares mu; entries disappear only after the last hold is released.
 type sessionGuard struct {
 	mu      sync.Mutex

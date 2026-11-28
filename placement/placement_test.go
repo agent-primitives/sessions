@@ -540,6 +540,23 @@ func memorySubstratePlacer(ctl substrate.ControlClient) *placement.Placer {
 		echoagent.Model)
 }
 
+func appendCompletedLegacyTurn(t *testing.T, log eventlog.Store, text string) int64 {
+	t.Helper()
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := log.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", text)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	end, err := log.Append(input.Seq, fence, api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return end.Seq
+}
+
 // Forking a REQUIRES_MEMORY_SNAPSHOT session must checkpoint the parent first and clone the child
 // from that snapshot: the parent's live RAM is not in the journal, so a replay-fork would silently
 // hand back a divergent child. The parent must SURVIVE (snapshot, not Stop/delete), and the ref must
@@ -552,14 +569,7 @@ func TestForkOfMemoryHarnessClonesParentSnapshot(t *testing.T) {
 	defer store.Close()
 	parent, child := store.Session("parent"), store.Session("child")
 
-	fence, err := parent.NewFence()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := parent.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "hi")}); err != nil {
-		t.Fatal(err)
-	}
-	head, _ := parent.Head()
+	head := appendCompletedLegacyTurn(t, parent, "hi")
 
 	ctl := &cloningControl{snapshot: "snap-parent-1"}
 	if err := memorySubstratePlacer(ctl).Fork(context.Background(), parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, head); err != nil {
@@ -675,14 +685,7 @@ func TestForkOfMemoryHarnessWithoutExternalHandleRefusesCheckpoint(t *testing.T)
 	defer store.Close()
 	parent, child := store.Session("parent"), store.Session("child")
 
-	fence, err := parent.NewFence()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := parent.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "hi")}); err != nil {
-		t.Fatal(err)
-	}
-	head, _ := parent.Head()
+	head := appendCompletedLegacyTurn(t, parent, "hi")
 
 	ctl := &cloningControl{} // every suspend reports no held snapshot
 	err = memorySubstratePlacer(ctl).Fork(context.Background(), parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, head)
@@ -720,18 +723,12 @@ func TestForkOfMemoryHarnessWithoutExternalHandleIsUnplaceable(t *testing.T) {
 	}
 	defer store.Close()
 	parent, child := store.Session("parent"), store.Session("child")
-	fence, err := parent.NewFence()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := parent.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "hi")}); err != nil {
-		t.Fatal(err)
-	}
+	head := appendCompletedLegacyTurn(t, parent, "hi")
 	ctl := &cloningControl{}
 	backend := substrate.New(ctl, "space", substrate.ObjectRef{Name: "counter"},
 		api.Descriptor{ID: "mem", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}})
 	p := placement.New(checkpointWithoutURI{Backend: backend}, echoagent.Model)
-	err = p.Fork(context.Background(), parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, 1)
+	err = p.Fork(context.Background(), parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, head)
 	if !errors.Is(err, placement.ErrUnplaceable) || errors.Is(err, substrate.ErrNoSnapshotToClone) {
 		t.Fatalf("err=%v want ErrUnplaceable, not ErrNoSnapshotToClone", err)
 	}
@@ -790,14 +787,7 @@ func TestForkFanOutTakesOneParentCheckpoint(t *testing.T) {
 	defer store.Close()
 	parent := store.Session("parent")
 
-	fence, err := parent.NewFence()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := parent.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "hi")}); err != nil {
-		t.Fatal(err)
-	}
-	head, _ := parent.Head()
+	head := appendCompletedLegacyTurn(t, parent, "hi")
 
 	children := []placement.ForkChild{
 		{UID: "c1", Log: store.Session("c1")},
@@ -864,6 +854,10 @@ func TestResumeIgnoresInheritedParentSnapshotRef(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rec, err = parent.Append(rec.Seq, fence, api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec, err = parent.Append(rec.Seq, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{
 		Kind:     api.LifecycleSuspend,
 		Snapshot: &api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-now", Memory: true},
@@ -873,6 +867,10 @@ func TestResumeIgnoresInheritedParentSnapshotRef(t *testing.T) {
 	}
 	parentSuspendSeq := rec.Seq
 	rec, err = parent.Append(rec.Seq, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "again")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err = parent.Append(rec.Seq, fence, api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -925,15 +923,7 @@ func TestForkAbortsWhenParentAdvancesUnderIt(t *testing.T) {
 	defer store.Close()
 	parent, child := store.Session("parent"), store.Session("child")
 
-	fence, err := parent.NewFence()
-	if err != nil {
-		t.Fatal(err)
-	}
-	rec, err := parent.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "one")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	head := rec.Seq
+	head := appendCompletedLegacyTurn(t, parent, "one")
 
 	ctl := &cloningControl{snapshot: "snap-parent-1"}
 	ctl.beforeSuspend = func() {
@@ -970,14 +960,7 @@ func TestForkFanOutRollsBackProvisionedChildren(t *testing.T) {
 	defer store.Close()
 	parent := store.Session("parent")
 
-	fence, err := parent.NewFence()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := parent.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "hi")}); err != nil {
-		t.Fatal(err)
-	}
-	head, _ := parent.Head()
+	head := appendCompletedLegacyTurn(t, parent, "hi")
 
 	children := []placement.ForkChild{
 		{UID: "c1", Log: store.Session("c1")},
@@ -1013,14 +996,7 @@ func TestForkRollbackSurvivesACancelledCaller(t *testing.T) {
 	defer store.Close()
 	parent := store.Session("parent")
 
-	fence, err := parent.NewFence()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := parent.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "hi")}); err != nil {
-		t.Fatal(err)
-	}
-	head, _ := parent.Head()
+	head := appendCompletedLegacyTurn(t, parent, "hi")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ctl := &cloningControl{snapshot: "snap-parent-1", failCloneOf: "c2"}
@@ -1056,14 +1032,7 @@ func TestForkRollbackBudgetsEachChildSeparately(t *testing.T) {
 	defer store.Close()
 	parent := store.Session("parent")
 
-	fence, err := parent.NewFence()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := parent.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "hi")}); err != nil {
-		t.Fatal(err)
-	}
-	head, _ := parent.Head()
+	head := appendCompletedLegacyTurn(t, parent, "hi")
 
 	const cost = 100 * time.Millisecond
 	children := []placement.ForkChild{

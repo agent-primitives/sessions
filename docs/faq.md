@@ -75,8 +75,11 @@ swap on append is what makes "single writer" enforceable rather than a hope.
 Across all Placers in one Registry, Exec, Suspend and Resume refuse conflicting operations for one
 session with gRPC `ABORTED`, without changing compute or the journal. Suspend will not interrupt a
 running turn. Delete also refuses overlap with those operations or a fork's fan-out and rollback.
-Fork holds shared deletion admission instead of the exclusive turn guard: a stateful fork can
-supersede a running turn, and its checkpoint mark remains held through the last child clone.
+Fork holds shared deletion admission for its full operation. A stateful fork also takes the turn
+guard briefly while it validates and installs its checkpoint mark, refusing a running turn rather
+than cancelling it because RAM may contain an unjournaled mutation. The mark remains held through
+the last child clone. A crash-left incomplete turn similarly refuses a memory Suspend or Fork with
+`FAILED_PRECONDITION` until it is recovered or superseded.
 Retry refused calls after the holder finishes, using the current cursor for Exec. Other sessions
 remain independent. A standalone Placer has its own guard; separate Registries or hosts are not
 fenced by this local guard.

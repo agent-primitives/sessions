@@ -415,7 +415,14 @@ func TestInheritedApprovalSuspendUsesSessionHarness(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := memory.Fork(t.Context(), parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, head); err != nil {
+			err = memory.Fork(t.Context(), parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, head)
+			if decided {
+				if !errors.Is(err, controller.ErrCheckpointIncompleteTurn) {
+					t.Fatalf("decided inherited fork=%v, want ErrCheckpointIncompleteTurn", err)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatal(err)
 			}
 			state, err := controller.InspectApproval(child, 0)

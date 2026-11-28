@@ -150,8 +150,18 @@ func TestMemoryTierApprovalParkedForkAndInheritedGate(t *testing.T) {
 			if len(ctl.calls) != calls {
 				t.Fatal("refused fork touched compute")
 			}
-			if err := p.Fork(t.Context(), parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, head); err != nil {
-				t.Fatalf("fork at head = %v", err)
+			err = p.Fork(t.Context(), parent, "parent", []placement.ForkChild{{UID: "child", Log: child}}, head)
+			if decided {
+				if !errors.Is(err, controller.ErrCheckpointIncompleteTurn) {
+					t.Fatalf("decided fork at head = %v, want ErrCheckpointIncompleteTurn", err)
+				}
+				if childHead, headErr := child.Head(); headErr != nil || childHead != 0 {
+					t.Fatalf("refused decided fork child head=%d err=%v", childHead, headErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("pending fork at head = %v", err)
 			}
 			state, err := controller.InspectApproval(child, 0)
 			if err != nil || state == nil || !state.Inherited || state.Receipt != nil {

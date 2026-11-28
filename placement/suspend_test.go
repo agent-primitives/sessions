@@ -10,8 +10,10 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/agent-primitives/sessions/api"
+	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/eventlog"
 	"github.com/agent-primitives/sessions/harness/echoagent"
 	"github.com/agent-primitives/sessions/placement"
@@ -869,9 +871,9 @@ func TestSuspendRefusesLostMemoryWithoutARecordedInstance(t *testing.T) {
 		memory bool
 		legacy bool
 	}{
-		{name: "memory, journal without compute_instance", memory: true, legacy: true},
+		{name: "memory, completed journal without compute_instance", memory: true, legacy: true},
 		{name: "memory, no turn yet", memory: true},
-		{name: "stateless, journal without compute_instance", legacy: true},
+		{name: "stateless, completed journal without compute_instance", legacy: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := newSuspendControl()
@@ -887,7 +889,11 @@ func TestSuspendRefusesLostMemoryWithoutARecordedInstance(t *testing.T) {
 					t.Fatal(err)
 				}
 				if _, err := log.Append(0, fence, api.Event{ExecutionID: "e1", Kind: api.EventExecutionStart,
-					ExecutionStart: &api.ExecutionStart{Harness: desc.ID, HarnessVersion: desc.Version}}); err != nil {
+					ExecutionStart: &api.ExecutionStart{Harness: desc.ID, HarnessVersion: desc.Version, InputCount: proto.Int64(0)}}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := log.Append(1, fence, api.Event{ExecutionID: "e1", Kind: api.EventEnd,
+					End: &api.HarnessEnd{State: "COMPLETED"}}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -916,6 +922,146 @@ func TestSuspendRefusesLostMemoryWithoutARecordedInstance(t *testing.T) {
 				t.Fatalf("journal grew from %d to %d records: no SUSPEND may be recorded", before, after)
 			}
 		})
+	}
+}
+
+func TestMemorySuspendRefusesAnAbandonedIncompleteTurn(t *testing.T) {
+	ctl := newSuspendControl()
+	p, _ := newSuspendPlacer(t, ctl, true)
+	store := newSuspendStore(t)
+	log := store.Session("session")
+	ref := substrate.ActorRef{Atespace: "space", Name: "session"}
+	ctl.actors[ref] = &suspendActor{status: substrate.StatusRunning, worker: true, uid: ctl.newUID()}
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := api.Event{ExecutionID: "e1", Kind: api.EventExecutionStart,
+		ExecutionStart: &api.ExecutionStart{Harness: "mem", InputCount: proto.Int64(0)}}
+	if _, err := log.Append(0, fence, start); err != nil {
+		t.Fatal(err)
+	}
+	before := suspendRecords(t, log)
+
+	got, err := p.Suspend(t.Context(), log, "session")
+	if !errors.Is(err, controller.ErrCheckpointIncompleteTurn) || got != (api.SnapshotRef{}) {
+		t.Fatalf("Suspend = %+v, %v, want ErrCheckpointIncompleteTurn", got, err)
+	}
+	if len(ctl.calls) != 0 || !reflect.DeepEqual(before, suspendRecords(t, log)) {
+		t.Fatalf("refused Suspend calls=%v records=%v", ctl.calls, suspendRecords(t, log))
+	}
+	if actor := ctl.actors[ref]; actor.status != substrate.StatusRunning || !actor.worker || actor.snapshot.Name != "" {
+		t.Fatalf("refused Suspend changed actor: %+v", actor)
+	}
+}
+
+type suspendRaceLog struct {
+	eventlog.Store
+	onSecondRead func()
+	reads        int
+}
+
+func (l *suspendRaceLog) Read(from int64) ([]eventlog.Record, error) {
+	l.reads++
+	if l.reads == 2 && l.onSecondRead != nil {
+		l.onSecondRead()
+	}
+	return l.Store.Read(from)
+}
+
+func TestMemorySuspendBindsSnapshotToValidatedHead(t *testing.T) {
+	ctl := newSuspendControl()
+	p, _ := newSuspendPlacer(t, ctl, true)
+	store := newSuspendStore(t)
+	log := store.Session("session")
+	ref := substrate.ActorRef{Atespace: "space", Name: "session"}
+	ctl.actors[ref] = &suspendActor{status: substrate.StatusRunning, worker: true, uid: ctl.newUID()}
+	peer := store.Session("session")
+	wrapped := &suspendRaceLog{Store: log}
+	wrapped.onSecondRead = func() {
+		fence, err := peer.NewFence()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := peer.Append(0, fence, api.Event{ExecutionID: "peer", Kind: api.EventExecutionStart,
+			ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(0)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := p.Suspend(t.Context(), wrapped, "session")
+	if !errors.Is(err, eventlog.ErrConflict) || got != (api.SnapshotRef{}) {
+		t.Fatalf("Suspend = %+v, %v, want pre-snapshot conflict", got, err)
+	}
+	if len(ctl.calls) != 0 {
+		t.Fatalf("conflicted Suspend reached runtime: %v", ctl.calls)
+	}
+	records := suspendRecords(t, log)
+	if len(records) != 1 || records[0].Event.Kind != api.EventExecutionStart {
+		t.Fatalf("conflicted Suspend records=%v", records)
+	}
+}
+
+func TestMemorySuspendDoesNotPublishCaptureAfterPeerTurnStarts(t *testing.T) {
+	ctl := newSuspendControl()
+	p, _ := newSuspendPlacer(t, ctl, true)
+	store := newSuspendStore(t)
+	log, peer := store.Session("session"), store.Session("session")
+	actorRef := substrate.ActorRef{Atespace: "space", Name: "session"}
+	actor := &suspendActor{status: substrate.StatusRunning, worker: true, uid: ctl.newUID()}
+	ctl.actors[actorRef] = actor
+	ctl.beforeSuspend = func() {
+		fence, err := peer.NewFence()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := peer.Append(0, fence, api.Event{ExecutionID: "peer", Kind: api.EventExecutionStart,
+			ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(0)}}); err != nil {
+			t.Fatal(err)
+		}
+		actor.turns++ // The peer changed RAM after journaling its start but before the capture.
+	}
+
+	got, err := p.Suspend(t.Context(), log, "session")
+	if (!errors.Is(err, eventlog.ErrConflict) && !errors.Is(err, eventlog.ErrFenced)) || got != (api.SnapshotRef{}) {
+		t.Fatalf("Suspend = %+v, %v, want the peer writer to invalidate publication", got, err)
+	}
+	records := suspendRecords(t, log)
+	if len(records) != 1 || records[0].Event.Kind != api.EventExecutionStart {
+		t.Fatalf("failed publication records=%v", records)
+	}
+	if actor.status != substrate.StatusSuspended || actor.snapshot.Name == "" || ctl.snapshots[actor.snapshot].turns != 1 {
+		t.Fatalf("premise failed: peer mutation was not captured: actor=%+v snapshots=%v", actor, ctl.snapshots)
+	}
+	if err := p.Resume(t.Context(), log, "session"); !errors.Is(err, api.ErrMemoryStateLost) {
+		t.Fatalf("Resume of unrecorded capture = %v, want ErrMemoryStateLost", err)
+	}
+}
+
+type tamperedSuspendLog struct{ eventlog.Store }
+
+func (l tamperedSuspendLog) Read(from int64) ([]eventlog.Record, error) {
+	records, err := l.Store.Read(from)
+	if err == nil && len(records) > 0 {
+		records[0].Hash = "tampered"
+	}
+	return records, err
+}
+
+func TestMemorySuspendRefusesTamperedJournalBeforeSnapshot(t *testing.T) {
+	ctl := newSuspendControl()
+	p, _ := newSuspendPlacer(t, ctl, true)
+	store := newSuspendStore(t)
+	log := store.Session("session")
+	appendCompletedLegacyTurn(t, log, "hi")
+	ref := substrate.ActorRef{Atespace: "space", Name: "session"}
+	ctl.actors[ref] = &suspendActor{status: substrate.StatusRunning, worker: true, uid: ctl.newUID()}
+
+	if _, err := p.Suspend(t.Context(), tamperedSuspendLog{Store: log}, "session"); !errors.Is(err, controller.ErrJournalTampered) || !errors.Is(err, eventlog.ErrTampered) {
+		t.Fatalf("Suspend = %v, want ErrJournalTampered", err)
+	}
+	if len(ctl.calls) != 0 {
+		t.Fatalf("tampered Suspend reached runtime: %v", ctl.calls)
 	}
 }
 

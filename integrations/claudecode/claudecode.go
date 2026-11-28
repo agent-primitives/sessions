@@ -106,6 +106,29 @@
 // and CA variables (HTTPS_PROXY, NO_PROXY, NODE_EXTRA_CA_CERTS) and Bedrock or Vertex settings are
 // not defaults; a deployment that needs them adds them, knowing a proxy URL can carry credentials.
 //
+// Per-turn environment: when Config.TurnEnvAllowlist is set, a turn's Start.Config can set
+// variables for that turn's claude process only. Start.Config is then a JSON object, of which the
+// harness reads only the member "env", matched case-sensitively: an object that maps variable
+// names to string values. Other members are ignored, so a producer can add its own; an empty
+// Config, or one with no "env" member, sets nothing. With a duplicate member, or a duplicate name
+// in "env", the last one is used, but a duplicate name whose earlier value is a number, boolean,
+// array or object refuses the turn even when a later one is a string. Each name must match an
+// allowlist entry and must not be reserved: PATH, HOME, USER, SHELL, TMPDIR, LANG, LC_ALL,
+// LC_CTYPE, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDE_CONFIG_DIR, NODE_OPTIONS, BASH_ENV,
+// ENV, PS4, PROMPT_COMMAND, and every name starting with LD_, DYLD_, BASH_FUNC_ or
+// CLAUDE_CODE_OAUTH_. An allowlist entry that covers a reserved name is refused, ANTHROPIC_* and
+// CLAUDE_CODE_* included, so Claude Code settings are allowlisted by exact name. A turn's value
+// replaces the variable's base value for that turn; the next turn starts from the base environment
+// again. A retry or Resume of the same execution reads the same journaled Config, so it gets the
+// same environment. The turn is refused before claude starts when Config is not a JSON object,
+// "env" is not valid UTF-8 (an escaped unpaired surrogate included) or not an object of strings (a
+// null value included), a name is not allowed, a value holds a NUL, or "env" has more than 256
+// names, a name over 256 bytes, or over 64 KiB of names and values. The harness never logs a
+// value or puts one in an error; the first stderr line of a claude that exits before it starts a
+// session is logged as for any turn. Start.Config is journaled and returned by Replay, so a value
+// must not be a credential. With TurnEnvAllowlist empty, the default, Start.Config is not read at
+// all.
+//
 // Credentials: the harness configures no model key. It passes ANTHROPIC_API_KEY or
 // ANTHROPIC_AUTH_TOKEN through from its own environment, where it must be a placeholder that the
 // runtime's egress replaces with the provider credential (EXE-40): a tool can read it, and the
@@ -186,6 +209,17 @@ type Config struct {
 	// environment, in addition to the defaults listed in the package doc. Values are read once,
 	// when New runs; an unset variable is omitted.
 	EnvAllowlist []string
+	// TurnEnvAllowlist lets a turn's Start.Config set environment variables for that turn's claude
+	// process (see the package doc). Each entry is a variable name, or a nonempty name prefix
+	// followed by '*' that allows every name with that prefix. New refuses an entry that names or
+	// could match a reserved variable (see the package doc), such as ANTHROPIC_* or L*. Empty, the
+	// default, disables the feature: Start.Config is not read.
+	//
+	// A variable such as GIT_CONFIG_* or ANTHROPIC_BASE_URL can redirect where the process sends
+	// data or make git run commands (core.sshCommand, core.fsmonitor), whatever the permission
+	// mode: whoever can start a turn on the session gets that power. Allow only what the producer
+	// that builds Start.Config needs.
+	TurnEnvAllowlist []string
 	// MaxTurns, when positive, is passed as --max-turns.
 	MaxTurns int
 	// MaxBudgetUSD, when positive, is passed as --max-budget-usd. It caps one turn's spend.
@@ -201,9 +235,10 @@ type Config struct {
 // Harness is the Claude Code harness. Use New; the zero value is not usable. Its state lives only
 // in process memory, so it must be a single long-lived instance per process.
 type Harness struct {
-	cfg    Config
-	env    []string // the claude process's environment; never nil, read-only after New
-	logger *slog.Logger
+	cfg     Config
+	env     []string      // the claude process's base environment; never nil, read-only after New
+	turnEnv *envAllowlist // Config.TurnEnvAllowlist, validated; nil when the feature is off
+	logger  *slog.Logger
 
 	// postResultGrace bounds how long the process may run after its result event before the
 	// harness interrupts it. drainGrace bounds how long the harness waits for stdout to close
@@ -291,6 +326,10 @@ func New(cfg Config) (*Harness, error) {
 	if err != nil {
 		return nil, err
 	}
+	turnEnv, err := newEnvAllowlist(cfg.TurnEnvAllowlist)
+	if err != nil {
+		return nil, err
+	}
 	if cfg.Model != "" && !argValue(cfg.Model) {
 		return nil, fmt.Errorf("claudecode: invalid Model %q", cfg.Model)
 	}
@@ -315,6 +354,7 @@ func New(cfg Config) (*Harness, error) {
 	return &Harness{
 		cfg:             cfg,
 		env:             env,
+		turnEnv:         turnEnv,
 		logger:          slog.Default(),
 		postResultGrace: defaultPostResult,
 		drainGrace:      defaultDrainGrace,
@@ -382,7 +422,7 @@ func (h *Harness) Describe(context.Context) (api.Descriptor, error) {
 	}
 	return api.Descriptor{
 		ID:           "claudecode",
-		Version:      "1", // bump when execution behavior changes, not for host releases
+		Version:      "2", // bump when execution behavior changes, not for host releases
 		Models:       models,
 		HarnessClass: api.HarnessClassUnmediated,
 		Capabilities: api.Capabilities{
@@ -393,7 +433,9 @@ func (h *Harness) Describe(context.Context) (api.Descriptor, error) {
 	}, nil
 }
 
-// Errors returned by Run. Their text is fixed: the host journals a failed turn's error text.
+// Errors returned by Run. Their text is fixed: the host journals a failed turn's error text. A
+// per-turn environment refusal (turnEnvFor) wraps errTurnEnv and may add the variable's name,
+// quoted and at most maxTurnEnvName bytes, never its value.
 var (
 	errNoSession     = errors.New("claudecode: start has no session UID")
 	errRerun         = errors.New("claudecode: execution already started on this harness; an interrupted turn is not retried")
@@ -405,12 +447,13 @@ var (
 	errPromptSize    = errors.New("claudecode: inputs exceed the 10 MB prompt limit")
 	errModelMismatch = errors.New("claudecode: requested model is not the configured model")
 	errModelArg      = errors.New("claudecode: requested model is not a valid model argument")
+	errTurnEnv       = errors.New("claudecode: invalid per-turn environment in Start.Config")
 )
 
 // Run drives one turn: one claude -p process. It returns nil when Claude Code reports a successful
 // result, and an error when the result is an error, the process fails or exits without a result,
 // the stream is malformed, or ctx is cancelled (SIGINT, then a group kill after InterruptGrace).
-// Start.Config is ignored.
+// Start.Config is read only when Config.TurnEnvAllowlist is set (see the package doc).
 func (h *Harness) Run(ctx context.Context, s *api.Start, sink api.EventSink) error {
 	if s == nil || s.SessionUID == "" {
 		return errNoSession
@@ -430,6 +473,12 @@ func (h *Harness) Run(ctx context.Context, s *api.Start, sink api.EventSink) err
 	if err != nil {
 		return err
 	}
+	// Validated with the other inputs: after begin, so a refused first turn keeps the session's
+	// state, and before sessionArg uses up an attempt.
+	env, err := h.turnEnvFor(s.Config)
+	if err != nil {
+		return err
+	}
 	flag, id, forkFrom := h.sessionArg(s.SessionUID, forkFrom)
 	t := &turn{
 		h:          h,
@@ -439,6 +488,7 @@ func (h *Harness) Run(ctx context.Context, s *api.Start, sink api.EventSink) err
 		sessionID:  id,
 		forkFrom:   forkFrom,
 		model:      model,
+		env:        env,
 		receipts:   h.receiptMode(s),
 	}
 	err = t.run(ctx, h.args(flag, id, forkFrom, model), prompt)

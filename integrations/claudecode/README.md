@@ -67,9 +67,49 @@ Harness:
   receives from this process's environment. By default it gets only `PATH`, `HOME`, `USER`,
   `SHELL`, `TMPDIR`, `LANG`, `LC_ALL`, `LC_CTYPE`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
   `ANTHROPIC_BASE_URL` and `CLAUDE_CONFIG_DIR`.
+- `HARNESS_CLAUDE_TURN_ENV_ALLOWLIST`: optional comma-separated names, or name prefixes ending in
+  `*`, that a session may set for one turn through `Start.Config`; see
+  [per-turn environment](#per-turn-environment). Empty by default, which turns the feature off.
 - `HARNESS_MODEL`: optional; pins `--model` and the harness's declared model.
 - `HARNESS_CLAUDE_MAX_TURNS`, `HARNESS_CLAUDE_MAX_BUDGET_USD`: optional per-turn limits.
 
 No model credential is configured here. `claude` reads `ANTHROPIC_API_KEY` or
 `ANTHROPIC_AUTH_TOKEN` from the environment, which must hold only a placeholder that the runtime's
 egress replaces; see [security](../../docs/security.md#provider-credentials-and-harness-classes).
+
+## Per-turn environment
+
+When `HARNESS_CLAUDE_TURN_ENV_ALLOWLIST` is set, a session can set variables for one turn by
+sending a JSON object with an `env` member of string values as `Start.Config`:
+
+```json
+{"env": {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "bot"}}
+```
+
+- Each name must match the allowlist. The entries are added to the turn's `claude` process
+  environment, replacing a variable of the same name, and the next turn starts again from the
+  node's environment. Other members of `Start.Config` are ignored.
+- The node refuses the turn, without starting `claude`, if `Start.Config` is not a JSON object,
+  `env` is not valid UTF-8 (an escaped unpaired surrogate such as `\ud800` included) or not an
+  object of strings (a `null` value included), a name is invalid, reserved or not allowlisted, a
+  value holds NUL, or `env` has more than 256 variables, a name longer than 256 bytes, or more
+  than 64 KiB of names and values. The error names the variable when the refusal concerns one,
+  and never holds a value. The harness does not log `env` values; if `claude` exits before it
+  starts a session, its first stderr line is logged, as for any turn.
+- With a duplicate name in `env`, the last value is used, but a duplicate whose earlier value is a
+  number, boolean, array or object refuses the turn even when a later one is a string.
+- Reserved names cannot be allowlisted or set: `PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, `LANG`,
+  `LC_ALL`, `LC_CTYPE`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CONFIG_DIR`,
+  `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `PS4`, `PROMPT_COMMAND` and any name starting with `LD_`,
+  `DYLD_`, `BASH_FUNC_` or `CLAUDE_CODE_OAUTH_` (Claude Code's OAuth token, refresh token and
+  token file descriptor). An allowlist prefix that covers one of them, such as `ANTHROPIC_*` or
+  `CLAUDE_CODE_*`, is refused at startup, so allowlist Claude Code settings by exact name. The
+  reserved list covers the credentials known when this was written; checking that an exact name
+  is not a credential is the operator's responsibility.
+- Do not put credentials in `env`: `Start.Config` is durable journal content that `Replay` returns.
+- Allowlist only what the sessions you serve may control. `GIT_CONFIG_*` lets a session set any
+  git option, including ones that run commands (`core.sshCommand`, `core.fsmonitor`), and
+  `ANTHROPIC_BASE_URL` changes where prompts are sent. Send `GIT_CONFIG_COUNT` in the same `env`
+  as the `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n` entries it counts.
+- A node without the allowlist, or a release before this one, ignores `env` and runs the turn with
+  its own environment.

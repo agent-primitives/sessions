@@ -106,7 +106,8 @@ type turn struct {
 	sessionID  string
 	forkFrom   string // with --session-id: the session the turn forks into sessionID
 	model      string
-	receipts   bool // full receipts; false once the session or turn budget is spent
+	env        []string // the process's environment for this turn (Harness.turnEnvFor)
+	receipts   bool     // full receipts; false once the session or turn budget is spent
 
 	receiptBytes int
 	initSeen     bool
@@ -170,7 +171,10 @@ func (t *turn) run(ctx context.Context, args []string, prompt string) error {
 	defer func() { _ = er.Close() }()
 	cmd := exec.Command(t.h.cfg.Binary, args...)
 	cmd.Dir = t.h.cfg.WorkDir
-	cmd.Env = t.h.env
+	cmd.Env = t.env
+	if cmd.Env == nil {
+		cmd.Env = []string{} // exec.Cmd passes a nil Env as the harness's whole environment
+	}
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stdout = w
 	cmd.Stderr = ew

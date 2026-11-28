@@ -13,6 +13,11 @@
 //     receives from this process's environment. claude gets only PATH, HOME, USER, SHELL, TMPDIR,
 //     LANG, LC_ALL, LC_CTYPE, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL and
 //     CLAUDE_CONFIG_DIR by default; add proxy or CA variables here when the deployment needs them.
+//   - HARNESS_CLAUDE_TURN_ENV_ALLOWLIST: optional comma-separated entries, each a variable name or a
+//     name prefix followed by '*' (GIT_CONFIG_*), that a turn's Start.Config may set for that turn
+//     (claudecode.Config.TurnEnvAllowlist). Unset, Start.Config is not read. An entry that names or
+//     could match a reserved variable (PATH, HOME, the model credential, CLAUDE_CONFIG_DIR, loader
+//     variables) is refused.
 //   - HARNESS_MODEL: optional; pins --model and the harness's declared model.
 //   - HARNESS_CLAUDE_MAX_TURNS, HARNESS_CLAUDE_MAX_BUDGET_USD: optional per-turn limits.
 //
@@ -52,11 +57,8 @@ func newHarness(s harnessnode.Settings) (api.Harness, error) {
 		}
 		cfg.AllowBypassPermissions = b
 	}
-	for name := range strings.SplitSeq(os.Getenv("HARNESS_CLAUDE_ENV_ALLOWLIST"), ",") {
-		if name = strings.TrimSpace(name); name != "" {
-			cfg.EnvAllowlist = append(cfg.EnvAllowlist, name)
-		}
-	}
+	cfg.EnvAllowlist = list(os.Getenv("HARNESS_CLAUDE_ENV_ALLOWLIST"))
+	cfg.TurnEnvAllowlist = list(os.Getenv("HARNESS_CLAUDE_TURN_ENV_ALLOWLIST"))
 	if v := os.Getenv("HARNESS_CLAUDE_MAX_TURNS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
@@ -76,4 +78,15 @@ func newHarness(s harnessnode.Settings) (api.Harness, error) {
 		return nil, err
 	}
 	return h, nil
+}
+
+// list splits a comma-separated value, dropping blanks around and between entries.
+func list(v string) []string {
+	var out []string
+	for e := range strings.SplitSeq(v, ",") {
+		if e = strings.TrimSpace(e); e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
 }
